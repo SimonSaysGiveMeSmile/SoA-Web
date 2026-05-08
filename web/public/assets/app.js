@@ -1,0 +1,295 @@
+/**
+ * SoA-Web client entry.
+ *
+ * Boot flow:
+ *   1. Probe /api/me. If unauthed and mode=shared, show login.
+ *   2. Otherwise open /ws.
+ *   3. On HELLO, restore known tabs (or open one if empty).
+ *
+ * xterm.js is loaded from a CDN and attached to a per-tab DOM container. Each
+ * tab keeps its own xterm.Terminal + FitAddon instance so switching is
+ * instantaneous and output history survives.
+ */
+
+import { Bridge, INPUT_KIND } from '/assets/bridge.js';
+
+const WS_URL = (() => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${location.host}/ws`;
+})();
+
+const $  = sel => document.querySelector(sel);
+const el = (tag, props = {}, children = []) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = v;
+        else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
+        else if (v != null) n.setAttribute(k, v);
+    }
+    for (const c of [].concat(children)) if (c) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    return n;
+};
+
+const TRON_THEME = {
+    foreground: '#aacfd1',
+    background: '#05080d',
+    cursor:     '#aacfd1',
+    cursorAccent:'#aacfd1',
+    selectionBackground: 'rgba(170,207,209,0.3)',
+    black: '#000000', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
+    blue: '#6272a4', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
+    brightBlack: '#262828', brightRed: '#ff6e6e', brightGreen: '#69ff94',
+    brightYellow: '#ffffa5', brightBlue: '#7b93bd', brightMagenta: '#ff92df',
+    brightCyan: '#a4ffff', brightWhite: '#ffffff',
+};
+
+// ── Auth probe ────────────────────────────────────────────────────────────
+async function probeAuth() {
+    try {
+        const r = await fetch('/api/me', { credentials: 'same-origin' });
+        if (!r.ok) return { authed: false, auth: 'shared' };
+        return await r.json();
+    } catch (_) { return { authed: false, auth: 'shared' }; }
+}
+
+async function login(password) {
+    const r = await fetch('/api/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password }),
+    });
+    return r.ok;
+}
+
+async function logout() {
+    try { await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
+    location.reload();
+}
+
+// ── Tab UI ────────────────────────────────────────────────────────────────
+class TabRuntime {
+    constructor(id, title) {
+        this.id = id;
+        this.title = title || `tab ${id}`;
+        this.container = el('div', { class: 'term', 'data-tab': String(id) });
+        this.term = new Terminal({
+            fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
+            fontSize: 13,
+            theme: TRON_THEME,
+            cursorBlink: true,
+            scrollback: 5000,
+            convertEol: false,
+        });
+        this.fit = new FitAddon.FitAddon();
+        this.term.loadAddon(this.fit);
+        try { this.term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
+        this.term.open(this.container);
+        this._onData = null;
+        this._onResize = null;
+    }
+
+    attach(onData, onResize) {
+        this._onData = onData;
+        this._onResize = onResize;
+        this.term.onData(d => this._onData && this._onData(d));
+        this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
+    }
+
+    write(data) { this.term.write(data); }
+
+    fitNow() {
+        try {
+            this.fit.fit();
+            return { cols: this.term.cols, rows: this.term.rows };
+        } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
+    }
+
+    focus() { this.term.focus(); }
+
+    dispose() {
+        try { this.term.dispose(); } catch (_) {}
+        this.container.remove();
+    }
+}
+
+class Shell {
+    constructor(bridge) {
+        this.bridge = bridge;
+        this.tabs = new Map();
+        this.order = [];
+        this.activeId = null;
+        this.tabsEl = $('#tabs');
+        this.termsEl = $('#terms');
+
+        $('#new-tab').addEventListener('click', () => this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize()));
+        $('#logout').addEventListener('click', () => logout());
+
+        window.addEventListener('resize', () => this._fitActive());
+        window.addEventListener('keydown', e => this._hotkey(e));
+
+        bridge.addEventListener('hello',     e => this._onHello(e.detail));
+        bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
+        bridge.addEventListener('term-data', e => this._onTermData(e.detail));
+        bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
+        bridge.addEventListener('status',    e => this._onStatus(e.detail));
+        bridge.addEventListener('unauthorized', () => { location.reload(); });
+    }
+
+    _onStatus({ state }) {
+        const s = $('#status-conn');
+        s.className = state === 'open' ? 'ok' : state === 'connecting' ? 'warn' : 'err';
+        s.textContent = state;
+    }
+
+    _onHello({ tabs }) {
+        if (Array.isArray(tabs) && tabs.length) {
+            for (const t of tabs) this._ensureTab(t.id, t.title);
+            this._activate(tabs[0].id);
+            this._syncTabsUI(tabs);
+        } else {
+            this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
+        }
+    }
+
+    _onSnapshot({ tabs, activeId }) {
+        if (!Array.isArray(tabs)) return;
+        const known = new Set(tabs.map(t => t.id));
+        for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
+        for (const t of tabs) this._ensureTab(t.id, t.title);
+        this._syncTabsUI(tabs);
+        if (activeId && this.tabs.has(activeId)) this._activate(activeId);
+        else if (this.activeId == null && tabs[0]) this._activate(tabs[0].id);
+        $('#status-tabs').textContent = `${tabs.length} tab${tabs.length === 1 ? '' : 's'}`;
+    }
+
+    _onTermData({ id, data }) {
+        const t = this.tabs.get(id);
+        if (t) t.write(data);
+    }
+
+    _onTermExit({ id, code }) {
+        const t = this.tabs.get(id);
+        if (t) t.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
+    }
+
+    _ensureTab(id, title) {
+        if (this.tabs.has(id)) return this.tabs.get(id);
+        const rt = new TabRuntime(id, title);
+        this.termsEl.appendChild(rt.container);
+        rt.attach(
+            data => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: data }),
+            (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows }),
+        );
+        this.tabs.set(id, rt);
+        this.order.push(id);
+        return rt;
+    }
+
+    _removeTab(id) {
+        const t = this.tabs.get(id);
+        if (!t) return;
+        t.dispose();
+        this.tabs.delete(id);
+        this.order = this.order.filter(x => x !== id);
+        if (this.activeId === id) {
+            const next = this.order[0];
+            if (next) this._activate(next); else this.activeId = null;
+        }
+    }
+
+    _activate(id) {
+        this.activeId = id;
+        for (const [tid, rt] of this.tabs) {
+            rt.container.classList.toggle('active', tid === id);
+        }
+        const rt = this.tabs.get(id);
+        if (rt) {
+            const sz = rt.fitNow();
+            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols: sz.cols, rows: sz.rows });
+            rt.focus();
+        }
+        this._syncTabsUI();
+    }
+
+    _syncTabsUI(list) {
+        const tabs = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
+        this.tabsEl.replaceChildren(...tabs.map(t => {
+            const label = el('span', { text: t.title || `tab ${t.id}` });
+            const dot = el('span', { class: 'dot' });
+            const x = el('span', { class: 'x', text: '×', onclick: (e) => {
+                e.stopPropagation();
+                this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: t.id });
+            }});
+            const root = el('button', {
+                class: 'tab' + (t.id === this.activeId ? ' active' : ''),
+                onclick: () => this._activate(t.id),
+            }, [dot, label, x]);
+            return root;
+        }));
+    }
+
+    _fitActive() {
+        const rt = this.tabs.get(this.activeId);
+        if (!rt) return;
+        const sz = rt.fitNow();
+        this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: this.activeId, cols: sz.cols, rows: sz.rows });
+    }
+
+    _sendSize() {
+        const rt = this.tabs.get(this.activeId);
+        if (!rt) return { cols: 120, rows: 32 };
+        const sz = rt.fitNow();
+        return { cols: sz.cols, rows: sz.rows };
+    }
+
+    _hotkey(e) {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
+            e.preventDefault();
+            this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
+        }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'w') {
+            e.preventDefault();
+            if (this.activeId != null) this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: this.activeId });
+        }
+    }
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+async function boot() {
+    const cfg = window.__SOA_WEB__ || { auth: 'shared' };
+    $('#boot-status').textContent = 'probing session…';
+    const me = await probeAuth();
+
+    if (!me.authed && cfg.auth === 'shared') {
+        $('#boot').classList.add('hidden');
+        $('#login').classList.remove('hidden');
+        $('#login-form').addEventListener('submit', async ev => {
+            ev.preventDefault();
+            $('#login-err').classList.add('hidden');
+            const ok = await login($('#login-password').value);
+            if (!ok) { $('#login-err').classList.remove('hidden'); return; }
+            location.reload();
+        });
+        return;
+    }
+
+    if (!me.authed) await login('');
+
+    $('#boot-status').textContent = 'opening channel…';
+    const bridge = new Bridge({ url: WS_URL });
+    const shell = new Shell(bridge);
+    bridge.connect();
+    $('#status-session').textContent = `${cfg.auth} · ${location.host}`;
+    setTimeout(() => {
+        $('#boot').classList.add('hidden');
+        $('#shell').classList.remove('hidden');
+        shell._fitActive();
+    }, 250);
+}
+
+boot().catch(err => {
+    console.error(err);
+    $('#boot-status').textContent = 'boot failed: ' + (err && err.message || err);
+});

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>SON OF ANTON · WEB</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <script src="/_config.js"></script>
+</head>
+<body>
+  <div id="boot" class="boot">
+    <div class="boot-grid"></div>
+    <div class="boot-inner">
+      <h1 class="boot-title">SON OF ANTON</h1>
+      <p class="boot-sub">WEB TERMINAL · PROTOCOL v1</p>
+      <p class="boot-status" id="boot-status">negotiating session…</p>
+    </div>
+  </div>
+
+  <div id="login" class="login hidden">
+    <form id="login-form" class="login-card">
+      <h2>SON OF ANTON · WEB</h2>
+      <p class="login-sub">Shared-secret mode — enter the password set by the operator.</p>
+      <input id="login-password" type="password" autocomplete="current-password" placeholder="password" required>
+      <button type="submit">ENTER</button>
+      <p class="login-err hidden" id="login-err">wrong password</p>
+    </form>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <header class="topbar">
+      <div class="brand">SON OF ANTON · WEB</div>
+      <div class="tabs" id="tabs"></div>
+      <div class="topbar-actions">
+        <button id="new-tab" title="New tab (Ctrl+Shift+T)">＋ TAB</button>
+        <button id="logout" title="Log out">LOGOUT</button>
+      </div>
+    </header>
+    <main class="stage">
+      <div class="scanline"></div>
+      <div id="terms" class="terms"></div>
+      <div class="status-bar">
+        <span id="status-session">—</span>
+        <span id="status-tabs">0 tabs</span>
+        <span id="status-conn">disconnected</span>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

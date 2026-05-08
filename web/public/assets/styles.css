@@ -1,0 +1,173 @@
+/* SoA-Web — TRON palette lifted from desktop/src/assets/themes/tron.json */
+:root {
+  --soa-bg:        #05080d;
+  --soa-bg-deep:   #000000;
+  --soa-fg:        #aacfd1;
+  --soa-accent:    #aacfd1;
+  --soa-accent-dim:#4a6566;
+  --soa-green:     #50fa7b;
+  --soa-red:       #ff5555;
+  --soa-yellow:    #f1fa8c;
+  --soa-blue:      #6272a4;
+  --soa-line:      rgba(170, 207, 209, 0.25);
+  --soa-line-soft: rgba(170, 207, 209, 0.08);
+  --font-mono:     ui-monospace, "Fira Mono", Menlo, Consolas, monospace;
+  --font-display:  "United Sans Medium", ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--soa-bg-deep);
+  color: var(--soa-fg);
+  font-family: var(--font-display);
+  letter-spacing: 0.08em;
+  overflow: hidden;
+}
+
+.hidden { display: none !important; }
+
+/* ── Boot screen ──────────────────────────────────────────────────────── */
+.boot {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  background: radial-gradient(ellipse at center, #0a1318 0%, #000 70%);
+  z-index: 100;
+}
+.boot-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(var(--soa-line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--soa-line-soft) 1px, transparent 1px);
+  background-size: 40px 40px;
+  opacity: 0.7;
+  pointer-events: none;
+}
+.boot-inner { position: relative; text-align: center; }
+.boot-title {
+  font-size: 34px; margin: 0 0 8px;
+  color: var(--soa-accent);
+  letter-spacing: 0.36em;
+  text-shadow: 0 0 18px rgba(170,207,209,0.45);
+}
+.boot-sub { margin: 0 0 24px; font-size: 12px; opacity: 0.6; }
+.boot-status { margin: 0; font-family: var(--font-mono); font-size: 12px; opacity: 0.8; }
+
+/* ── Login ───────────────────────────────────────────────────────────── */
+.login { position: fixed; inset: 0; display: grid; place-items: center; z-index: 90; }
+.login-card {
+  background: var(--soa-bg); border: 1px solid var(--soa-line);
+  padding: 32px 28px; width: min(360px, 92vw);
+  display: grid; gap: 14px;
+  box-shadow: 0 0 40px rgba(170,207,209,0.08), inset 0 0 24px rgba(170,207,209,0.04);
+}
+.login-card h2 { margin: 0; font-size: 15px; letter-spacing: 0.3em; color: var(--soa-accent); }
+.login-sub    { margin: 0; font-size: 12px; opacity: 0.6; font-family: var(--font-mono); }
+.login-card input {
+  background: var(--soa-bg-deep); color: var(--soa-fg);
+  border: 1px solid var(--soa-line); padding: 10px 12px;
+  font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.1em;
+  outline: none;
+}
+.login-card input:focus { border-color: var(--soa-accent); box-shadow: 0 0 0 1px var(--soa-accent); }
+.login-card button {
+  background: transparent; color: var(--soa-accent);
+  border: 1px solid var(--soa-accent); padding: 10px 12px;
+  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.3em;
+  cursor: pointer;
+}
+.login-card button:hover { background: rgba(170,207,209,0.08); }
+.login-err { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--soa-red); }
+
+/* ── Shell layout ────────────────────────────────────────────────────── */
+.shell { display: grid; grid-template-rows: 44px 1fr; height: 100%; }
+
+.topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--soa-line);
+  background: linear-gradient(to bottom, #0a1318, var(--soa-bg));
+}
+.brand {
+  color: var(--soa-accent);
+  font-size: 12px; letter-spacing: 0.3em;
+  text-shadow: 0 0 10px rgba(170,207,209,0.4);
+  white-space: nowrap;
+}
+.tabs {
+  display: flex; gap: 6px; overflow-x: auto;
+  scrollbar-width: thin; scrollbar-color: var(--soa-accent-dim) transparent;
+}
+.tab {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border: 1px solid var(--soa-line);
+  font-family: var(--font-mono); font-size: 12px;
+  color: var(--soa-fg); background: transparent; cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover { border-color: var(--soa-accent); }
+.tab.active {
+  color: var(--soa-accent); border-color: var(--soa-accent);
+  box-shadow: 0 0 14px rgba(170,207,209,0.28), inset 0 0 10px rgba(170,207,209,0.06);
+}
+.tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--soa-accent-dim); }
+.tab.active .dot { background: var(--soa-accent); box-shadow: 0 0 6px var(--soa-accent); }
+.tab .x {
+  width: 14px; height: 14px; display: grid; place-items: center;
+  font-size: 12px; opacity: 0.55; margin-left: 2px;
+}
+.tab .x:hover { opacity: 1; color: var(--soa-red); }
+
+.topbar-actions { display: flex; gap: 8px; }
+.topbar-actions button {
+  background: transparent; color: var(--soa-accent);
+  border: 1px solid var(--soa-accent-dim); padding: 6px 10px;
+  font-family: var(--font-display); font-size: 11px; letter-spacing: 0.25em;
+  cursor: pointer;
+}
+.topbar-actions button:hover { border-color: var(--soa-accent); }
+
+.stage { position: relative; overflow: hidden; display: grid; grid-template-rows: 1fr 24px; }
+.scanline {
+  pointer-events: none;
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(170,207,209,0.02) 0px,
+    rgba(170,207,209,0.02) 1px,
+    transparent 2px,
+    transparent 4px
+  );
+  z-index: 2;
+}
+
+.terms { position: relative; background: var(--soa-bg); }
+.terms .term {
+  position: absolute; inset: 0;
+  display: none;
+  padding: 8px 10px;
+}
+.terms .term.active { display: block; }
+.terms .xterm { height: 100%; }
+.terms .term-empty {
+  display: grid; place-items: center; height: 100%;
+  font-family: var(--font-mono); font-size: 13px; opacity: 0.6;
+  text-align: center; padding: 24px;
+}
+
+.status-bar {
+  display: flex; align-items: center; gap: 18px;
+  padding: 0 14px;
+  border-top: 1px solid var(--soa-line);
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--soa-accent-dim);
+  background: var(--soa-bg-deep);
+}
+.status-bar span { white-space: nowrap; }
+#status-conn.ok   { color: var(--soa-green); }
+#status-conn.warn { color: var(--soa-yellow); }
+#status-conn.err  { color: var(--soa-red); }

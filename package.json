@@ -1,0 +1,24 @@
+{
+  "name": "soa-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Son of Anton, reimagined as a web app. Terminal sessions over WebSocket, TRON UI in the browser, zero desktop install.",
+  "license": "GPL-3.0",
+  "main": "server/src/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/src/index.js",
+    "dev": "SOA_WEB_DEV=1 node server/src/index.js",
+    "postinstall": "node scripts/fix-pty-perms.js",
+    "test": "node --test server/test/*.test.js"
+  },
+  "dependencies": {
+    "cookie": "^0.6.0",
+    "express": "^4.19.2",
+    "node-pty": "^1.1.0-beta34",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {}
+}
