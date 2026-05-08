@@ -1,17 +1,19 @@
 /**
  * SoA-Web server entry.
  *
- * HTTP serves the static browser bundle (web/public) + a tiny API (login,
- * logout, health). WebSocket at /ws owns the realtime channel: frames go
- * through the shared ./protocol.js schema, and every connected socket is
- * bound to one Session holding that browser's PTY pool.
+ * HTTP serves the static browser bundle (web/public) + a tiny health API.
+ * WebSocket at /ws owns the realtime channel: frames go through the shared
+ * ./protocol.js schema, and every connected socket is bound to one Session
+ * holding that browser's PTY pool.
+ *
+ * There is no login. Every visitor gets a fresh auto-provisioned session
+ * (same cookie on return visits). Intended for local runtimes and personal
+ * tunnels — anyone who can reach this URL can use the shell, by design.
  *
  * Configuration:
  *   SOA_WEB_HOST       bind host (default 127.0.0.1; set 0.0.0.0 for LAN/cloud)
  *   SOA_WEB_PORT       bind port (default 7332)
- *   SOA_WEB_AUTH       open | shared | none (see ./auth.js)
- *   SOA_WEB_PASSWORD   shared-secret password when SOA_WEB_AUTH=shared
- *   SOA_WEB_SIGN_KEY   HMAC key for the auth cookie (random per-process if unset)
+ *   SOA_WEB_SIGN_KEY   HMAC key for the session cookie (random per-process if unset)
  *   SOA_WEB_SHELL      shell binary; defaults to $SHELL or /bin/bash
  *   SOA_WEB_SESSION_TTL_MS  idle timeout for sessions (default 6h)
  *   SOA_WEB_DEV=1      dev mode — sends cache-control: no-store on static assets
@@ -37,8 +39,6 @@ const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
 const DEV  = process.env.SOA_WEB_DEV === '1';
 const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(1000 * 60 * 60 * 6), 10);
 
-const AUTH_MODE  = auth.resolveMode();
-const PASSWORD   = auth.resolvePassword();
 const SIGN_KEY   = auth.resolveSignKey();
 const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
 
@@ -50,21 +50,6 @@ const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
 const ALLOWED_ORIGINS = (process.env.SOA_WEB_ALLOWED_ORIGINS || '')
     .split(',').map(s => s.trim()).filter(Boolean);
 const CROSS_SITE = ALLOWED_ORIGINS.length > 0;
-
-function assertSafeConfig() {
-    const loopback = HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost';
-    if (AUTH_MODE === 'open' && !loopback) {
-        console.error('\nREFUSING TO START: SOA_WEB_AUTH=open binds a shell to', HOST);
-        console.error('Set SOA_WEB_PASSWORD (shared-secret mode) or SOA_WEB_AUTH=none if an upstream proxy handles auth.\n');
-        process.exit(2);
-    }
-    if (AUTH_MODE === 'shared' && !PASSWORD) {
-        console.error('\nREFUSING TO START: SOA_WEB_AUTH=shared requires SOA_WEB_PASSWORD.\n');
-        process.exit(2);
-    }
-}
-
-assertSafeConfig();
 
 const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
 const app = express();
@@ -91,7 +76,7 @@ app.use((req, res, next) => {
 });
 
 const PUBLIC_DIR = path.resolve(__dirname, '../../web/public');
-const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ auth: AUTH_MODE, protocol: 1, backend: '' })};`;
+const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ protocol: 1, backend: '' })};`;
 
 // ── Middleware: attach session ──────────────────────────────────────────
 function currentSession(req) {
@@ -106,59 +91,28 @@ function currentSession(req) {
     } catch (_) { return null; }
 }
 
+// Auto-provisions a session so the browser has a stable identity. No login —
+// every visitor gets a fresh session on first contact, then the signed cookie
+// keeps them on the same one across reloads.
 function requireAuthed(req, res, next) {
-    if (AUTH_MODE === 'open' || AUTH_MODE === 'none') {
-        // Auto-provision a session so the browser has a stable identity.
-        let s = currentSession(req);
-        if (!s) {
-            s = sessions.create();
-            const token = auth.issue(s.token, SIGN_KEY);
-            res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
-        }
-        req.session = s;
-        s.touch();
-        return next();
+    let s = currentSession(req);
+    if (!s) {
+        s = sessions.create();
+        const token = auth.issue(s.token, SIGN_KEY);
+        res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
     }
-
-    const s = currentSession(req);
-    if (!s) { res.status(401).json({ ok: false, error: 'unauthorized' }); return; }
     req.session = s;
     s.touch();
     next();
 }
 
 // ── API ─────────────────────────────────────────────────────────────────
-app.post('/api/login', (req, res) => {
-    if (AUTH_MODE === 'open' || AUTH_MODE === 'none') {
-        const s = sessions.create();
-        const token = auth.issue(s.token, SIGN_KEY);
-        res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
-        return res.json({ ok: true, mode: AUTH_MODE });
-    }
-    const supplied = (req.body && typeof req.body.password === 'string') ? req.body.password : '';
-    if (!auth.constantTimeEq(supplied, PASSWORD)) {
-        return res.status(401).json({ ok: false, error: 'bad-password' });
-    }
-    const s = sessions.create();
-    const token = auth.issue(s.token, SIGN_KEY);
-    res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
-    res.json({ ok: true, mode: AUTH_MODE });
-});
-
-app.post('/api/logout', (req, res) => {
-    const s = currentSession(req);
-    if (s) sessions.destroy(s);
-    res.setHeader('Set-Cookie', auth.clearCookie({ secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
-    res.json({ ok: true });
-});
-
 app.get('/api/ping', (req, res) => {
-    res.json({ ok: true, name: 'soa-web', protocol: 1, auth: AUTH_MODE });
+    res.json({ ok: true, name: 'soa-web', protocol: 1 });
 });
 
-app.get('/api/me', (req, res) => {
-    const s = currentSession(req);
-    res.json({ ok: true, authed: !!s, auth: AUTH_MODE });
+app.get('/api/me', requireAuthed, (req, res) => {
+    res.json({ ok: true, authed: true });
 });
 
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
@@ -220,7 +174,7 @@ server.on('upgrade', (req, socket, head) => {
         }
     }
 
-    const s = ((req) => {
+    const existing = ((req) => {
         const raw = auth.readCookie(req.headers.cookie || '', auth.COOKIE_NAME);
         if (!raw) return null;
         const decoded = auth.verify(raw, SIGN_KEY);
@@ -231,9 +185,11 @@ server.on('upgrade', (req, socket, head) => {
         } catch (_) { return null; }
     })(req);
 
-    if (!s) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
-
-    wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, s));
+    // No login. If the client arrived with a valid session cookie we reuse it;
+    // otherwise we mint a fresh session for this socket. The SPA always hits
+    // /api/me before /ws so the common path is "reuse".
+    const session = existing || sessions.create();
+    wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session));
 });
 
 function onWsConnect(ws, session) {
@@ -385,7 +341,7 @@ process.on('SIGINT',  () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 server.listen(PORT, HOST, () => {
-    console.log(`SoA-Web ready: http://${HOST}:${PORT}  (auth=${AUTH_MODE})`);
+    console.log(`SoA-Web ready: http://${HOST}:${PORT}`);
 
     // Bring up the Cloudflare Quick Tunnel by default. This is best-effort:
     // if cloudflared isn't installed the pairing manager falls back to ngrok

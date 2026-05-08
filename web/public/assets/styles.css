@@ -54,31 +54,7 @@ html, body {
 .boot-sub { margin: 0 0 24px; font-size: 12px; opacity: 0.6; }
 .boot-status { margin: 0; font-family: var(--font-mono); font-size: 12px; opacity: 0.8; }
 
-/* ── Login ───────────────────────────────────────────────────────────── */
-.login { position: fixed; inset: 0; display: grid; place-items: center; z-index: 90; }
-.login-card {
-  background: var(--soa-bg); border: 1px solid var(--soa-line);
-  padding: 32px 28px; width: min(360px, 92vw);
-  display: grid; gap: 14px;
-  box-shadow: 0 0 40px rgba(170,207,209,0.08), inset 0 0 24px rgba(170,207,209,0.04);
-}
-.login-card h2 { margin: 0; font-size: 15px; letter-spacing: 0.3em; color: var(--soa-accent); }
-.login-sub    { margin: 0; font-size: 12px; opacity: 0.6; font-family: var(--font-mono); }
-.login-card input {
-  background: var(--soa-bg-deep); color: var(--soa-fg);
-  border: 1px solid var(--soa-line); padding: 10px 12px;
-  font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.1em;
-  outline: none;
-}
-.login-card input:focus { border-color: var(--soa-accent); box-shadow: 0 0 0 1px var(--soa-accent); }
-.login-card button {
-  background: transparent; color: var(--soa-accent);
-  border: 1px solid var(--soa-accent); padding: 10px 12px;
-  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.3em;
-  cursor: pointer;
-}
-.login-card button:hover { background: rgba(170,207,209,0.08); }
-.login-err { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--soa-red); }
+/* ── Login (removed — no auth) ──────────────────────────────────────────── */
 
 /* ── Shell layout ────────────────────────────────────────────────────── */
 .shell { display: grid; grid-template-rows: 44px 1fr; height: 100%; }

@@ -25,19 +25,6 @@ test('auth: readCookie parses single + multi-value headers', () => {
     assert.equal(auth.readCookie(null, 'x'), null);
 });
 
-test('auth: resolveMode prefers explicit env', () => {
-    assert.equal(auth.resolveMode({ SOA_WEB_AUTH: 'shared' }), 'shared');
-    assert.equal(auth.resolveMode({ SOA_WEB_AUTH: 'NONE' }), 'none');
-    assert.equal(auth.resolveMode({ SOA_WEB_PASSWORD: 'x' }), 'shared');
-    assert.equal(auth.resolveMode({}), 'open');
-});
-
-test('auth: constantTimeEq', () => {
-    assert.equal(auth.constantTimeEq('abc', 'abc'), true);
-    assert.equal(auth.constantTimeEq('abc', 'abd'), false);
-    assert.equal(auth.constantTimeEq('abc', 'abcd'), false);
-});
-
 test('protocol: frame/parse round-trip', () => {
     const f = frame(MSG.HELLO, { x: 1 });
     const p = parse(f);

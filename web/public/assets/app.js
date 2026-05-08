@@ -1,10 +1,11 @@
 /**
  * SoA-Web client entry.
  *
- * Boot flow:
- *   1. Probe /api/me. If unauthed and mode=shared, show login.
- *   2. Otherwise open /ws.
- *   3. On HELLO, restore known tabs (or open one if empty).
+ * Two modes, chosen by _config.js at page load:
+ *   - 'webcontainer' — in-browser Node sandbox, no backend. boot() hands off
+ *                      to /assets/app-wc.js and the rest of this file never
+ *                      runs.
+ *   - 'server'       — classic path: /api/me, /ws, server-side PTYs.
  *
  * xterm.js is loaded from a CDN and attached to a per-tab DOM container. Each
  * tab keeps its own xterm.Terminal + FitAddon instance so switching is
@@ -61,30 +62,6 @@ const TRON_THEME = {
     brightYellow: '#ffffa5', brightBlue: '#7b93bd', brightMagenta: '#ff92df',
     brightCyan: '#a4ffff', brightWhite: '#ffffff',
 };
-
-// ── Auth probe ────────────────────────────────────────────────────────────
-async function probeAuth() {
-    try {
-        const r = await fetch(apiUrl('/api/me'), FETCH_INIT);
-        if (!r.ok) return { authed: false, auth: 'shared' };
-        return await r.json();
-    } catch (_) { return { authed: false, auth: 'shared' }; }
-}
-
-async function login(password) {
-    const r = await fetch(apiUrl('/api/login'), {
-        ...FETCH_INIT,
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
-    });
-    return r.ok;
-}
-
-async function logout() {
-    try { await fetch(apiUrl('/api/logout'), { ...FETCH_INIT, method: 'POST' }); } catch (_) {}
-    location.reload();
-}
 
 // ── Tab UI ────────────────────────────────────────────────────────────────
 class TabRuntime {
@@ -149,7 +126,6 @@ class Shell {
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         });
-        $('#logout').addEventListener('click', () => { this.audio.play('denied'); logout(); });
 
         const audioBtn = $('#toggle-audio');
         audioBtn.addEventListener('click', () => {
@@ -367,24 +343,15 @@ class Shell {
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 async function boot() {
-    const cfg = window.__SOA_WEB__ || { auth: 'shared' };
-    $('#boot-status').textContent = 'probing session…';
-    const me = await probeAuth();
-
-    if (!me.authed && cfg.auth === 'shared') {
-        $('#boot').classList.add('hidden');
-        $('#login').classList.remove('hidden');
-        $('#login-form').addEventListener('submit', async ev => {
-            ev.preventDefault();
-            $('#login-err').classList.add('hidden');
-            const ok = await login($('#login-password').value);
-            if (!ok) { $('#login-err').classList.remove('hidden'); return; }
-            location.reload();
-        });
+    // Mode-dispatch: webcontainer builds skip the server stack entirely.
+    if ((window.__SOA_WEB__ || {}).mode === 'webcontainer') {
+        await import('/assets/app-wc.js');
         return;
     }
 
-    if (!me.authed) await login('');
+    $('#boot-status').textContent = 'negotiating session…';
+    // /api/me auto-provisions a session cookie on first contact. No login UI.
+    try { await fetch(apiUrl('/api/me'), FETCH_INIT); } catch (_) {}
 
     $('#boot-status').textContent = 'opening channel…';
     const audio = new AudioFX({ enabled: true });
@@ -392,8 +359,8 @@ async function boot() {
     const shell = new Shell(bridge, { audio });
     bridge.connect();
     $('#status-session').textContent = BACKEND_IS_CROSS
-        ? `${cfg.auth} · ${new URL(BACKEND_ORIGIN).host}`
-        : `${cfg.auth} · ${location.host}`;
+        ? new URL(BACKEND_ORIGIN).host
+        : location.host;
 
     const sidebar = mountSidebar($('#sidebar'), { audio });
 

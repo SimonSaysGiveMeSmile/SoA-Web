@@ -1,18 +1,25 @@
 /**
  * Runtime client config — placeholder.
  *
- * When self-hosted, the Node server overwrites this at request time (see
- * `app.get('/_config.js')` in server/src/index.js) with the real auth mode.
+ * `mode`:
+ *   'server'       — classic mode: talk to a Node server over WebSocket (the
+ *                    self-hosted default; also what scripts/vercel-build.js
+ *                    emits when SOA_WEB_MODE is not set).
+ *   'webcontainer' — serverless mode: boot an in-browser Node sandbox via
+ *                    WebContainers and stream its PTY into xterm. No backend
+ *                    process required. Set SOA_WEB_MODE=webcontainer in the
+ *                    Vercel project env to ship this build.
  *
- * When deployed on Vercel as a static SPA, scripts/vercel-build.js rewrites
- * this file at build time with the contents of SOA_WEB_BACKEND and
- * SOA_WEB_AUTH from the project's environment.
+ * `backend` — only used in server mode. Empty → same-origin. Non-empty → that
+ *             origin (e.g. a Cloudflare Tunnel URL).
  *
- * `backend` empty → API + WS calls target the current origin. Non-empty →
- * calls target that origin instead (e.g. a Cloudflare Tunnel URL).
+ * `wcClientId` — WebContainers API key, required on non-stackblitz.io /
+ *                non-localhost origins. Get one free at webcontainers.io and
+ *                set SOA_WEB_WC_CLIENT_ID in Vercel env.
  */
 window.__SOA_WEB__ = {
-    auth: 'shared',
+    mode: 'server',
     protocol: 1,
-    backend: ''
+    backend: '',
+    wcClientId: ''
 };

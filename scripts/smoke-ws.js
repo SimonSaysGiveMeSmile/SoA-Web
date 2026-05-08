@@ -1,33 +1,32 @@
 /**
  * Smoke test: open a PTY over WS and verify we get a prompt back.
- * Run after starting the server with SOA_WEB_AUTH=open SOA_WEB_PORT=7411.
+ * Run after starting the server with SOA_WEB_PORT=7411.
  */
 const http = require('http');
 const WebSocket = require(require('path').resolve(__dirname, '../node_modules/ws'));
 
 const HOST = '127.0.0.1', PORT = 7411;
 
-function login() {
+// Hit /api/me to pick up the auto-provisioned session cookie.
+function provisionSession() {
     return new Promise((resolve, reject) => {
         const req = http.request({
-            host: HOST, port: PORT, method: 'POST',
-            path: '/api/login', headers: { 'content-type': 'application/json' },
+            host: HOST, port: PORT, method: 'GET', path: '/api/me',
         }, res => {
             const cookies = res.headers['set-cookie'] || [];
-            const body = [];
-            res.on('data', c => body.push(c));
+            res.on('data', () => {});
             res.on('end', () => {
                 const jar = cookies.map(c => c.split(';')[0]).join('; ');
                 resolve(jar);
             });
         });
         req.on('error', reject);
-        req.end('{}');
+        req.end();
     });
 }
 
 (async () => {
-    const jar = await login();
+    const jar = await provisionSession();
     console.log('cookie:', jar.slice(0, 40) + '…');
 
     const ws = new WebSocket(`ws://${HOST}:${PORT}/ws`, { headers: { cookie: jar } });

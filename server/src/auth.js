@@ -1,20 +1,9 @@
 /**
  * Auth
  *
- * Running a web terminal publicly with no auth hands the internet a shell.
- * Three modes, picked by `SOA_WEB_AUTH`:
- *
- *   - `open`    — no auth. Only valid when explicitly set AND the server is
- *                 bound to 127.0.0.1 (enforced at boot). Local dev only.
- *   - `shared`  — single shared secret in `SOA_WEB_PASSWORD`. Users POST it
- *                 to /login and get a signed cookie. Default when a password
- *                 is configured.
- *   - `none`    — same as `open` but allowed on any host. Use if an upstream
- *                 proxy (Cloudflare Access, Tailscale Funnel, an oauth2_proxy)
- *                 already handles auth.
- *
- * The server refuses to start in `open` mode on non-loopback hosts unless the
- * operator sets `SOA_WEB_AUTH=none` on purpose.
+ * There is no login. This module only provides the HMAC-signed session cookie
+ * plumbing used by index.js to keep each browser pinned to the same Session
+ * across reloads. No passwords, no modes.
  */
 
 const crypto = require('crypto');
@@ -22,23 +11,12 @@ const crypto = require('crypto');
 const COOKIE_NAME = 'soa_web_auth';
 const COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 7;  // 7 days
 
-function resolveMode(env = process.env) {
-    const raw = (env.SOA_WEB_AUTH || '').toLowerCase();
-    if (raw === 'open' || raw === 'shared' || raw === 'none') return raw;
-    if (env.SOA_WEB_PASSWORD) return 'shared';
-    return 'open';
-}
-
-function resolvePassword(env = process.env) {
-    return env.SOA_WEB_PASSWORD || '';
-}
-
 function resolveSignKey(env = process.env) {
     const k = env.SOA_WEB_SIGN_KEY;
     if (k && k.length >= 16) return k;
-    // Ephemeral key: cookies survive only as long as the process does. Fine for
-    // dev; ops should set SOA_WEB_SIGN_KEY in production so restarts don't log
-    // users out.
+    // Ephemeral key: cookies survive only as long as the process does. Fine
+    // for dev; set SOA_WEB_SIGN_KEY in production so restarts don't rotate
+    // every user's session.
     return crypto.randomBytes(32).toString('hex');
 }
 
@@ -115,8 +93,7 @@ function constantTimeEq(a, b) {
 
 module.exports = {
     COOKIE_NAME,
-    resolveMode, resolvePassword, resolveSignKey,
+    resolveSignKey,
     sign, verify, issue,
     readCookie, makeCookie, clearCookie,
-    constantTimeEq,
 };
