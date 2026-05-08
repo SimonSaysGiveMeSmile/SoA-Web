@@ -15,7 +15,10 @@
  */
 
 import { AudioFX } from '/assets/audiofx.js';
-import { WebContainer, auth } from 'https://esm.sh/@webcontainer/api@1.5.1';
+// The WebContainer API ships as ESM on esm.sh. We only depend on the named
+// WebContainer class; auth is optional (loaded below only if present + a
+// clientId is configured) so the rest of the app still works during dev.
+import * as WC from 'https://esm.sh/@webcontainer/api@1.5.1';
 
 const CFG = window.__SOA_WEB__ || {};
 
@@ -197,12 +200,14 @@ function setBootStatus(msg) {
 async function main() {
     setBootStatus('booting sandbox…');
     try {
-        if (CFG.wcClientId) {
-            try {
-                auth.init({ clientId: CFG.wcClientId, scope: '' });
-            } catch (_) { /* older API without auth.init — continue */ }
+        if (!WC || !WC.WebContainer) {
+            throw new Error('@webcontainer/api did not load (check COEP/COOP headers and network)');
         }
-        const wc = await WebContainer.boot({ coep: 'credentialless' });
+        if (CFG.wcClientId && WC.auth && typeof WC.auth.init === 'function') {
+            try { WC.auth.init({ clientId: CFG.wcClientId, scope: '' }); }
+            catch (e) { console.warn('[soa-web:wc] auth.init failed', e); }
+        }
+        const wc = await WC.WebContainer.boot({ coep: 'credentialless' });
         setBootStatus('opening shell…');
 
         const audio = new AudioFX({ enabled: true });
@@ -219,8 +224,9 @@ async function main() {
             shell._fitActive();
         }, 200);
     } catch (err) {
-        console.error(err);
-        setBootStatus(`boot failed: ${err && err.message ? err.message : err}`);
+        console.error('[soa-web:wc] boot failed', err);
+        const detail = err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : String(err);
+        setBootStatus(`boot failed: ${detail}`);
     }
 }
 
