@@ -94,7 +94,45 @@ node scripts/smoke-ws.js   # boot server first; verifies PTY round-trip
 
 On boot the server opens a [Cloudflare Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) and prints the public URL. The sidebar's **MOBILE LINK** widget renders a QR for the same URL — scan it and the phone lands on the web UI. Requires `cloudflared` on `PATH`; falls back to `ngrok` or `localtunnel` if not. Disable with `SOA_WEB_AUTOPAIR=0`.
 
-> **Not Vercel-deployable.** SoA-Web is a persistent Node process with long-lived WebSockets and native PTYs. Serverless platforms (Vercel, Netlify Functions) can't host it. Run it on a box you control (laptop + Cloudflare Tunnel, Fly.io, Render, a VPS) and point your DNS at that.
+> **Vercel deploys ship only the SPA.** The Node server (PTYs, WebSockets,
+> sessions) can't run on serverless. Point `SOA_WEB_BACKEND` at a tunneled
+> self-hosted backend instead — see below.
+
+## Vercel + tunneled backend
+
+Split-deploy setup: Vercel hosts the static SPA on your public domain,
+and the Node server keeps running on a box you control. The SPA talks
+to the backend over a Cloudflare Tunnel (or any public HTTPS URL).
+
+1. **Start the backend with an allowlist** for the Vercel origin so CORS
+   and the WebSocket upgrade accept the cross-site traffic, and so the
+   cookie flips to `SameSite=None; Secure`:
+
+   ```bash
+   SOA_WEB_PASSWORD=… \
+   SOA_WEB_ALLOWED_ORIGINS=https://your-app.vercel.app \
+   SOA_WEB_SECURE_COOKIE=1 \
+   npm start
+   ```
+
+   Autopair prints the public tunnel URL (e.g.
+   `https://foo-bar-baz.trycloudflare.com`). Note it.
+
+2. **Configure Vercel project environment variables**
+   (Settings → Environment Variables, Production + Preview):
+
+   | Key                | Example value                              |
+   | ------------------ | ------------------------------------------ |
+   | `SOA_WEB_BACKEND`  | `https://foo-bar-baz.trycloudflare.com`    |
+   | `SOA_WEB_AUTH`     | `shared` (match the backend)               |
+
+3. **Redeploy.** `scripts/vercel-build.js` runs automatically and rewrites
+   `web/public/_config.js` with the baked-in backend origin. The SPA then
+   points `fetch('/api/…')` and the `/ws` upgrade at that host.
+
+Quick-tunnel URLs change on every backend restart — either use a named
+Cloudflare Tunnel with a stable subdomain, or redeploy Vercel after each
+restart to refresh `SOA_WEB_BACKEND`.
 
 ## License
 

@@ -77,27 +77,33 @@ function readCookie(header, name) {
     return null;
 }
 
-function makeCookie(value, { secure }) {
+function makeCookie(value, { secure, crossSite }) {
+    // When the SPA is served from a different origin (e.g. Vercel fronting a
+    // Cloudflare-tunneled backend), the cookie has to travel on cross-site
+    // requests. Browsers require SameSite=None cookies to be marked Secure,
+    // which is fine — cross-site auth only makes sense over HTTPS anyway.
+    const sameSite = crossSite ? 'None' : 'Lax';
     const attrs = [
         `${COOKIE_NAME}=${encodeURIComponent(value)}`,
         'Path=/',
         'HttpOnly',
-        'SameSite=Lax',
+        `SameSite=${sameSite}`,
         `Max-Age=${COOKIE_MAX_AGE_SEC}`,
     ];
-    if (secure) attrs.push('Secure');
+    if (secure || crossSite) attrs.push('Secure');
     return attrs.join('; ');
 }
 
-function clearCookie({ secure }) {
+function clearCookie({ secure, crossSite }) {
+    const sameSite = crossSite ? 'None' : 'Lax';
     const attrs = [
         `${COOKIE_NAME}=`,
         'Path=/',
         'HttpOnly',
-        'SameSite=Lax',
+        `SameSite=${sameSite}`,
         'Max-Age=0',
     ];
-    if (secure) attrs.push('Secure');
+    if (secure || crossSite) attrs.push('Secure');
     return attrs.join('; ');
 }
 

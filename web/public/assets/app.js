@@ -15,10 +15,26 @@ import { Bridge, INPUT_KIND } from '/assets/bridge.js';
 import { AudioFX } from '/assets/audiofx.js';
 import { mountSidebar } from '/assets/widgets.js';
 
+// Resolve the backend origin. `window.__SOA_WEB__.backend` is set by
+// web/public/_config.js — empty means "same origin as this page" (self-hosted
+// default), non-empty means a cross-origin backend (e.g. a Cloudflare Tunnel
+// URL when the static SPA is served by Vercel).
+const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
+const BACKEND_ORIGIN = (CFG.backend || '').replace(/\/+$/, '') || location.origin;
+const BACKEND_IS_CROSS = BACKEND_ORIGIN !== location.origin;
+
 const WS_URL = (() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${location.host}/ws`;
+    const u = new URL(BACKEND_ORIGIN);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    u.pathname = '/ws';
+    return u.toString();
 })();
+
+function apiUrl(path) { return BACKEND_ORIGIN + path; }
+
+// Cross-site cookies over HTTPS only — browsers reject SameSite=None without
+// Secure, and the backend must also send SameSite=None;Secure on its cookie.
+const FETCH_INIT = { credentials: 'include' };
 
 const $  = sel => document.querySelector(sel);
 const el = (tag, props = {}, children = []) => {
@@ -49,16 +65,16 @@ const TRON_THEME = {
 // ── Auth probe ────────────────────────────────────────────────────────────
 async function probeAuth() {
     try {
-        const r = await fetch('/api/me', { credentials: 'same-origin' });
+        const r = await fetch(apiUrl('/api/me'), FETCH_INIT);
         if (!r.ok) return { authed: false, auth: 'shared' };
         return await r.json();
     } catch (_) { return { authed: false, auth: 'shared' }; }
 }
 
 async function login(password) {
-    const r = await fetch('/api/login', {
+    const r = await fetch(apiUrl('/api/login'), {
+        ...FETCH_INIT,
         method: 'POST',
-        credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ password }),
     });
@@ -66,7 +82,7 @@ async function login(password) {
 }
 
 async function logout() {
-    try { await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
+    try { await fetch(apiUrl('/api/logout'), { ...FETCH_INIT, method: 'POST' }); } catch (_) {}
     location.reload();
 }
 
@@ -363,7 +379,9 @@ async function boot() {
     const bridge = new Bridge({ url: WS_URL });
     const shell = new Shell(bridge, { audio });
     bridge.connect();
-    $('#status-session').textContent = `${cfg.auth} · ${location.host}`;
+    $('#status-session').textContent = BACKEND_IS_CROSS
+        ? `${cfg.auth} · ${new URL(BACKEND_ORIGIN).host}`
+        : `${cfg.auth} · ${location.host}`;
 
     const sidebar = mountSidebar($('#sidebar'), { audio });
 

@@ -42,6 +42,15 @@ const PASSWORD   = auth.resolvePassword();
 const SIGN_KEY   = auth.resolveSignKey();
 const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
 
+// When the static SPA is served from a different origin (e.g. Vercel) and
+// this backend sits behind a Cloudflare Quick Tunnel, the browser needs CORS
+// on /api/* and a SameSite=None cookie. Populate SOA_WEB_ALLOWED_ORIGINS
+// with a comma-separated list of origins (e.g.
+// "https://soa-web.vercel.app,https://soa-web-preview-*.vercel.app").
+const ALLOWED_ORIGINS = (process.env.SOA_WEB_ALLOWED_ORIGINS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+const CROSS_SITE = ALLOWED_ORIGINS.length > 0;
+
 function assertSafeConfig() {
     const loopback = HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost';
     if (AUTH_MODE === 'open' && !loopback) {
@@ -63,8 +72,26 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '16kb' }));
 
+// CORS: only reply with the exact Origin header if it's in the allowlist. No
+// wildcard because the browser refuses credentialed requests with `*`.
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'content-type');
+        res.setHeader('Access-Control-Max-Age', '600');
+    }
+    if (req.method === 'OPTIONS' && origin) {
+        return res.status(origin && ALLOWED_ORIGINS.includes(origin) ? 204 : 403).end();
+    }
+    next();
+});
+
 const PUBLIC_DIR = path.resolve(__dirname, '../../web/public');
-const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ auth: AUTH_MODE, protocol: 1 })};`;
+const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ auth: AUTH_MODE, protocol: 1, backend: '' })};`;
 
 // ── Middleware: attach session ──────────────────────────────────────────
 function currentSession(req) {
@@ -86,7 +113,7 @@ function requireAuthed(req, res, next) {
         if (!s) {
             s = sessions.create();
             const token = auth.issue(s.token, SIGN_KEY);
-            res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE }));
+            res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
         }
         req.session = s;
         s.touch();
@@ -105,7 +132,7 @@ app.post('/api/login', (req, res) => {
     if (AUTH_MODE === 'open' || AUTH_MODE === 'none') {
         const s = sessions.create();
         const token = auth.issue(s.token, SIGN_KEY);
-        res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE }));
+        res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
         return res.json({ ok: true, mode: AUTH_MODE });
     }
     const supplied = (req.body && typeof req.body.password === 'string') ? req.body.password : '';
@@ -114,14 +141,14 @@ app.post('/api/login', (req, res) => {
     }
     const s = sessions.create();
     const token = auth.issue(s.token, SIGN_KEY);
-    res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE }));
+    res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
     res.json({ ok: true, mode: AUTH_MODE });
 });
 
 app.post('/api/logout', (req, res) => {
     const s = currentSession(req);
     if (s) sessions.destroy(s);
-    res.setHeader('Set-Cookie', auth.clearCookie({ secure: SECURE_COOKIE }));
+    res.setHeader('Set-Cookie', auth.clearCookie({ secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
     res.json({ ok: true });
 });
 
@@ -180,6 +207,18 @@ const wss = new WebSocket.Server({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/ws') { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
+
+    // When the allowlist is configured, enforce it on WS upgrades too so a
+    // random page can't open an authenticated shell against this backend.
+    if (CROSS_SITE) {
+        const origin = req.headers.origin;
+        const sameOrigin = !origin; // curl / non-browser clients
+        if (!sameOrigin && !ALLOWED_ORIGINS.includes(origin)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+    }
 
     const s = ((req) => {
         const raw = auth.readCookie(req.headers.cookie || '', auth.COOKIE_NAME);

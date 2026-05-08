@@ -37,14 +37,23 @@ const fmtUptime = s => {
     return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m`;
 };
 
+// Route API URLs through the configured backend (same-origin by default,
+// cross-origin when Vercel serves the static SPA and the backend is a
+// Cloudflare Tunnel / separate host).
+const _cfg = window.__SOA_WEB__ || {};
+const BACKEND_ORIGIN = (_cfg.backend || '').replace(/\/+$/, '') || location.origin;
+function api(path) {
+    return path.startsWith('http') ? path : BACKEND_ORIGIN + path;
+}
+
 async function jget(url) {
-    const r = await fetch(url, { credentials: 'same-origin' });
+    const r = await fetch(api(url), { credentials: 'include' });
     if (!r.ok) throw new Error(`${r.status} ${url}`);
     return r.json();
 }
 async function jpost(url, body) {
-    const r = await fetch(url, {
-        method: 'POST', credentials: 'same-origin',
+    const r = await fetch(api(url), {
+        method: 'POST', credentials: 'include',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body || {}),
     });
@@ -227,7 +236,7 @@ class MobileQRWidget extends Widget {
                 $el('span', { text: state.toUpperCase() }),
             ]),
             $el('div', { class: 'mqr-qr' }, target
-                ? [$el('img', { class: 'mqr-img', src: `/api/pair/qr?text=${encodeURIComponent(target)}`, alt: 'pairing QR' })]
+                ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(target)}`), alt: 'pairing QR' })]
                 : [$el('div', { class: 'mqr-empty', text: 'tap PAIR to bring up a tunnel' })]),
             $el('div', { class: 'mqr-urls' },
                 lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
