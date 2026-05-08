@@ -145,13 +145,29 @@ class Shell {
         });
 
         const sideBtn = $('#toggle-sidebar');
+        const stageEl = $('.stage');
+        // On phone-sized viewports the sidebar is an overlay, not a
+        // permanent column — start it closed so the terminal owns the
+        // full width on first load. Desktop keeps its existing behavior.
+        if (window.matchMedia('(max-width: 768px)').matches) {
+            stageEl.classList.add('no-sidebar');
+        }
         sideBtn.addEventListener('click', () => {
-            $('.stage').classList.toggle('no-sidebar');
+            stageEl.classList.toggle('no-sidebar');
             this.audio.play('panels');
+            this._fitActive();
+        });
+        // Tapping the scrim behind the overlay sidebar closes it.
+        stageEl.addEventListener('click', e => {
+            if (e.target !== stageEl) return;
+            if (!window.matchMedia('(max-width: 768px)').matches) return;
+            if (stageEl.classList.contains('no-sidebar')) return;
+            stageEl.classList.add('no-sidebar');
             this._fitActive();
         });
 
         window.addEventListener('resize', () => this._fitActive());
+        window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
 
         bridge.addEventListener('hello',     e => this._onHello(e.detail));

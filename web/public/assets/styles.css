@@ -171,3 +171,30 @@ html, body {
 #status-conn.ok   { color: var(--soa-green); }
 #status-conn.warn { color: var(--soa-yellow); }
 #status-conn.err  { color: var(--soa-red); }
+
+/* ── Mobile topbar + terminal density ──────────────────────────────────
+   Tight layout so tabs + actions fit on one row without horizontal
+   scroll, and the terminal gets all the remaining height. */
+@media (max-width: 768px) {
+    .shell { grid-template-rows: 40px 1fr; }
+    .topbar {
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        padding: 0 8px;
+    }
+    .brand { display: none; }
+    .tabs { gap: 4px; }
+    .tab { padding: 5px 8px; font-size: 11px; letter-spacing: 0.05em; }
+    .topbar-actions { gap: 4px; }
+    .topbar-actions button {
+        padding: 5px 7px;
+        font-size: 10px;
+        letter-spacing: 0.15em;
+    }
+    .terms .term { padding: 4px 6px; }
+    .status-bar { gap: 10px; padding: 0 8px; font-size: 10px; }
+}
+
+@media (max-width: 420px) {
+    .topbar-actions #logout { display: none; }
+}

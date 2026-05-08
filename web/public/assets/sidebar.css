@@ -45,3 +45,45 @@
 /* ── Topbar toggle buttons visual state ─────────────────────────────── */
 #toggle-audio[data-state='off'] { color: var(--soa-accent-dim); text-decoration: line-through; }
 #toggle-sidebar.on, #toggle-audio.on { border-color: var(--soa-accent); }
+
+/* ── Mobile: sidebar becomes an overlay ────────────────────────────────
+   Under ~768px the stage collapses to a single column so the terminal
+   gets the full width. The sidebar stops being a grid column and floats
+   over the terminal only when the user explicitly toggles it on. A
+   scrim behind it gives a clear dismiss target. */
+@media (max-width: 768px) {
+    .stage,
+    .stage.no-sidebar {
+        grid-template-columns: 1fr;
+        grid-template-areas: 'terms' 'status';
+    }
+    .sidebar {
+        position: absolute;
+        top: 0; bottom: 24px; left: 0;
+        width: min(320px, 86vw);
+        z-index: 5;
+        border-right: 1px solid var(--soa-line);
+        box-shadow: 0 0 40px rgba(0,0,0,0.6);
+        transform: translateX(-100%);
+        transition: transform 180ms ease-out;
+    }
+    .stage:not(.no-sidebar) .sidebar {
+        transform: translateX(0);
+        display: flex;
+    }
+    .stage.no-sidebar .sidebar { display: flex; }
+    .stage::after {
+        content: '';
+        position: absolute;
+        inset: 0 0 24px 0;
+        background: rgba(0,0,0,0.55);
+        z-index: 4;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 180ms ease-out;
+    }
+    .stage:not(.no-sidebar)::after {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
