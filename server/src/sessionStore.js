@@ -30,26 +30,22 @@ class Session {
         this.lastSeen  = Date.now();
         this.tabs = [];              // array of Tab instances (see tabManager.js)
         this.activeTab = 0;
-        this.ws = null;              // single active browser socket
+        this.sockets = new Set();    // all live browser sockets for this session
     }
 
     touch() { this.lastSeen = Date.now(); }
 
-    attachSocket(ws) {
-        if (this.ws && this.ws !== ws) {
-            try { this.ws.close(1000, 'superseded'); } catch (_) { /* ignore */ }
-        }
-        this.ws = ws;
-    }
+    attachSocket(ws) { this.sockets.add(ws); }
 
-    detachSocket(ws) {
-        if (this.ws === ws) this.ws = null;
-    }
+    detachSocket(ws) { this.sockets.delete(ws); }
 
     send(frameStr) {
-        if (!this.ws) return false;
-        if (this.ws.readyState !== 1 /* OPEN */) return false;
-        try { this.ws.send(frameStr); return true; } catch (_) { return false; }
+        let delivered = 0;
+        for (const ws of this.sockets) {
+            if (!ws || ws.readyState !== 1 /* OPEN */) continue;
+            try { ws.send(frameStr); delivered++; } catch (_) { /* drop */ }
+        }
+        return delivered > 0;
     }
 }
 
@@ -75,10 +71,16 @@ class SessionStore {
 
     destroy(session) {
         if (!session) return;
+        if (session.tabMgr && typeof session.tabMgr.killAll === 'function') {
+            try { session.tabMgr.killAll(); } catch (_) {}
+        }
         for (const tab of session.tabs) { try { tab.kill(); } catch (_) {} }
         this.sessions.delete(session.id);
         this.byToken.delete(session.token);
-        if (session.ws) { try { session.ws.close(1000, 'session-destroyed'); } catch (_) {} }
+        for (const ws of session.sockets) {
+            try { ws.close(1000, 'session-destroyed'); } catch (_) {}
+        }
+        session.sockets.clear();
     }
 
     gc(now = Date.now()) {

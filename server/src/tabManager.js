@@ -181,6 +181,16 @@ class TabManager {
         tab.kill();
     }
 
+    rename(id, title) {
+        const tab = this.tabs.get(id);
+        if (!tab) return false;
+        const next = (title || '').trim() || `tab ${id}`;
+        if (tab.title === next) return false;
+        tab.title = next;
+        this.onTabsChange(this.list());
+        return true;
+    }
+
     move(id, beforeId) {
         if (!this.tabs.has(id)) return;
         this.order = this.order.filter(x => x !== id);

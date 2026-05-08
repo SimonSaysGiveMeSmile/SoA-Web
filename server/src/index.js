@@ -313,7 +313,10 @@ function handleInput(session, d) {
             break;
         }
         case INPUT_KIND.SWITCH_TAB: {
-            if (mgr.get(d.id)) session.activeTab = d.id;
+            if (mgr.get(d.id) && session.activeTab !== d.id) {
+                session.activeTab = d.id;
+                session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: d.id }));
+            }
             break;
         }
         case INPUT_KIND.CLOSE_TAB:
@@ -322,6 +325,13 @@ function handleInput(session, d) {
         case INPUT_KIND.MOVE_TAB:
             mgr.move(d.id, d.before);
             break;
+        case INPUT_KIND.RENAME_TAB: {
+            const title = typeof d.title === 'string' ? d.title.slice(0, 64) : '';
+            if (mgr.rename(d.id, title)) {
+                session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: session.activeTab || 0 }));
+            }
+            break;
+        }
         case INPUT_KIND.TERM_KEYS: {
             const tab = mgr.get(d.id);
             if (tab) tab.write(d.text || '');

@@ -304,7 +304,11 @@ class Shell {
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         this.tabsEl.replaceChildren(...tabs.map(t => {
-            const label = el('span', { text: t.title || `tab ${t.id}` });
+            const label = el('span', {
+                class: 'tab-label',
+                text: t.title || `tab ${t.id}`,
+                ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
+            });
             const dot = el('span', { class: 'dot' });
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
@@ -317,6 +321,14 @@ class Shell {
             }, [dot, label, x]);
             return root;
         }));
+    }
+
+    _promptRename(id, current) {
+        const next = window.prompt('Rename tab', current || `tab ${id}`);
+        if (next == null) return;
+        const title = next.trim().slice(0, 64);
+        if (!title || title === current) return;
+        this.bridge.input(INPUT_KIND.RENAME_TAB, { id, title });
     }
 
     _fitActive() {
