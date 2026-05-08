@@ -327,9 +327,7 @@ function handleInput(session, d) {
             break;
         case INPUT_KIND.RENAME_TAB: {
             const title = typeof d.title === 'string' ? d.title.slice(0, 64) : '';
-            if (mgr.rename(d.id, title)) {
-                session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: session.activeTab || 0 }));
-            }
+            mgr.rename(d.id, title);
             break;
         }
         case INPUT_KIND.TERM_KEYS: {
