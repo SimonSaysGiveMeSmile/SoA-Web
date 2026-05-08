@@ -32,7 +32,7 @@ const DEFAULT_SCROLLBACK_BYTES = parseInt(
 
 class RingBuffer {
     constructor(cap) {
-        this.cap = Math.max(1024, cap | 0);
+        this.cap = Math.max(1, cap | 0);
         this.chunks = [];
         this.size = 0;
     }
@@ -95,13 +95,18 @@ class Tab {
         } catch (err) {
             this.exited = true;
             this.exitCode = -1;
+            const msg = `\x1b[31mfailed to spawn shell (${DEFAULT_SHELL}): ${err && err.message || err}\x1b[0m\r\n`;
+            this.scrollback.push(msg);
             queueMicrotask(() => {
-                this.onData(`\x1b[31mfailed to spawn shell (${DEFAULT_SHELL}): ${err && err.message || err}\x1b[0m\r\n`);
+                this.onData(msg);
                 this.onExit(-1);
             });
             return this;
         }
-        this.pty.onData(data => this.onData(data));
+        this.pty.onData(data => {
+            this.scrollback.push(data);
+            this.onData(data);
+        });
         this.pty.onExit(({ exitCode }) => {
             this.exited = true;
             this.exitCode = exitCode;
@@ -145,6 +150,11 @@ class TabManager {
     }
 
     get(id) { return this.tabs.get(id) || null; }
+
+    scrollback(id) {
+        const t = this.tabs.get(id);
+        return t ? t.scrollback.snapshot() : '';
+    }
 
     open({ title, cwd, cols, rows } = {}) {
         const id = this.next++;
@@ -194,4 +204,4 @@ class TabManager {
     }
 }
 
-module.exports = { TabManager, Tab, DEFAULT_SHELL };
+module.exports = { TabManager, Tab, RingBuffer, DEFAULT_SHELL };

@@ -173,10 +173,21 @@ class Shell {
         this._prevConnState = state;
     }
 
-    _onHello({ tabs }) {
+    _onHello({ tabs, activeId, replay }) {
         if (Array.isArray(tabs) && tabs.length) {
             for (const t of tabs) this._ensureTab(t.id, t.title);
-            this._activate(tabs[0].id);
+            // Replay server-side scrollback into each xterm BEFORE any live
+            // output arrives. A browser reload should land the user exactly
+            // where they left off — same tabs, same history, same active
+            // tab — with no flash of emptiness and no lost context.
+            if (Array.isArray(replay)) {
+                for (const r of replay) {
+                    const rt = this.tabs.get(r.id);
+                    if (rt && r.data) rt.write(r.data);
+                }
+            }
+            const target = (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
+            this._activate(target);
             this._syncTabsUI(tabs);
         } else {
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
@@ -189,8 +200,9 @@ class Shell {
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
         for (const t of tabs) this._ensureTab(t.id, t.title);
         this._syncTabsUI(tabs);
-        if (activeId && this.tabs.has(activeId)) this._activate(activeId);
-        else if (this.activeId == null && tabs[0]) this._activate(tabs[0].id);
+        const nextActive = (activeId && this.tabs.has(activeId)) ? activeId
+            : (this.activeId == null && tabs[0]) ? tabs[0].id : null;
+        if (nextActive && nextActive !== this.activeId) this._activate(nextActive);
         $('#status-tabs').textContent = `${tabs.length} tab${tabs.length === 1 ? '' : 's'}`;
     }
 
@@ -248,6 +260,7 @@ class Shell {
             this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols: sz.cols, rows: sz.rows });
             rt.focus();
         }
+        this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
         this._syncTabsUI();
         if (switching) this.audio.play('panels');
     }

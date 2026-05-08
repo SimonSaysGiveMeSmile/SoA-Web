@@ -1,10 +1,10 @@
 /* ── Sidebar layout ─────────────────────────────────────────────────────
    The stage is a two-column grid when the sidebar is visible, collapsing
    to a single-column terminal when toggled off. */
-.stage { grid-template-columns: 1fr 320px; grid-template-areas: 'terms sidebar' 'status status'; }
+.stage { grid-template-columns: 320px 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
 .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 .terms { grid-area: terms; }
-.sidebar { grid-area: sidebar; border-left: 1px solid var(--soa-line); background: linear-gradient(to right, #060a0f, var(--soa-bg)); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.sidebar { grid-area: sidebar; border-right: 1px solid var(--soa-line); border-left: none; background: linear-gradient(to right, #060a0f, var(--soa-bg)); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .stage.no-sidebar .sidebar { display: none; }
 .status-bar { grid-area: status; }
 

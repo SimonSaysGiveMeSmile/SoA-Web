@@ -206,16 +206,36 @@ function onWsConnect(ws, session) {
     if (!session.tabMgr) {
         session.tabMgr = new TabManager({
             onData: (tabId, data) => session.send(frame(MSG.TERM_DATA, { id: tabId, data })),
-            onTabsChange: list => session.send(frame(MSG.SNAPSHOT, { tabs: list })),
+            onTabsChange: list => {
+                // If the active tab just went away, pick the next available
+                // one so HELLO after a reload doesn't point at a dead id.
+                if (session.activeTab && !list.some(t => t.id === session.activeTab)) {
+                    session.activeTab = (list[0] && list[0].id) || 0;
+                }
+                session.send(frame(MSG.SNAPSHOT, { tabs: list, activeId: session.activeTab || 0 }));
+            },
             onExit: (tabId, code) => session.send(frame(MSG.TERM_EXIT, { id: tabId, code })),
         });
     }
 
     try {
+        const tabList = session.tabMgr.list();
+        // Replay scrollback right after the tab list so a reloading browser
+        // catches up on everything it missed — tabs, which one was active,
+        // and the accumulated output for each — before any new term-data
+        // frames arrive. This is what makes a page refresh non-destructive.
+        const replay = tabList
+            .map(t => ({ id: t.id, data: session.tabMgr.scrollback(t.id) }))
+            .filter(r => r.data && r.data.length);
+        const activeId = (session.activeTab && tabList.some(t => t.id === session.activeTab))
+            ? session.activeTab
+            : (tabList[0] && tabList[0].id) || 0;
         ws.send(frame(MSG.HELLO, {
             serverVersion: 1,
             serverTime: Date.now(),
-            tabs: session.tabMgr.list(),
+            tabs: tabList,
+            activeId,
+            replay,
         }));
     } catch (_) { /* ignore */ }
 
@@ -248,7 +268,12 @@ function handleInput(session, d) {
     switch (d.kind) {
         case INPUT_KIND.NEW_TAB: {
             const t = mgr.open({ cols: d.cols, rows: d.rows });
+            session.activeTab = t.id;
             session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: t.id }));
+            break;
+        }
+        case INPUT_KIND.SWITCH_TAB: {
+            if (mgr.get(d.id)) session.activeTab = d.id;
             break;
         }
         case INPUT_KIND.CLOSE_TAB:
