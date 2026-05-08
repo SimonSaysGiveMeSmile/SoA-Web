@@ -156,7 +156,7 @@ class TabManager {
         return t ? t.scrollback.snapshot() : '';
     }
 
-    open({ title, cwd, cols, rows } = {}) {
+    open({ title, cwd, cols, rows, silent } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
@@ -171,7 +171,7 @@ class TabManager {
         }).spawn();
         this.tabs.set(id, tab);
         this.order.push(id);
-        this.onTabsChange(this.list());
+        if (!silent) this.onTabsChange(this.list());
         return tab;
     }
 

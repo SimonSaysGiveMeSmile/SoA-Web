@@ -16,7 +16,7 @@ Derived from [SoA-Prod](https://github.com/SimonSaysGiveMeSmile) (the desktop So
 | `shell.openExternal`         | Standard anchor / `window.open`                    |
 | Caps-Lock wake word / SFSpeech / local Whisper | Gone — Web Speech API is the planned path |
 | Auto-updater, DMG, notarize  | Gone                                                |
-| Mobile pairing, QR, LAN-bridge | Gone — the phone opens the same URL                |
+| Mobile pairing, QR, LAN-bridge | Cloudflare Quick Tunnel — auto-started on boot; sidebar shows the QR |
 
 ## Feasibility note
 
@@ -48,6 +48,8 @@ Open http://127.0.0.1:7332. The default shell is `$SHELL` (override with `SOA_WE
 | `SOA_WEB_SESSION_TTL_MS`  | `6h`                 | Idle session expiry.                                         |
 | `SOA_WEB_SECURE_COOKIE`   | `0`                  | Set `1` behind HTTPS so cookies are `Secure`.                |
 | `SOA_WEB_DEV`             | unset                | Dev mode — disables static caching.                         |
+| `SOA_WEB_AUTOPAIR`        | `1`                  | Auto-start the Cloudflare tunnel on boot. Set `0` to skip. |
+| `SOA_WEB_SCROLLBACK_BYTES`| `262144`             | Per-tab replay buffer. Restores scrollback on reconnect.   |
 
 The server **refuses to start** with `SOA_WEB_AUTH=open` on any non-loopback host. That's by design — a web terminal with no auth on a public IP is a root shell for everyone on the internet.
 
@@ -87,7 +89,12 @@ node scripts/smoke-ws.js   # boot server first; verifies PTY round-trip
 - **Voice input.** The desktop's Picovoice wake-word and local Whisper don't port. Plan for a web build: Web Speech API on click, or a server-side Whisper endpoint.
 - **Native menus, tray, global hotkeys, file-icon generator.** All Electron-only — dropped.
 - **Auto-updater, notarization, DMGs.** Irrelevant for a web deploy.
-- **Mobile pairing dance.** The phone just opens the same URL now.
+
+## Phone access
+
+On boot the server opens a [Cloudflare Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) and prints the public URL. The sidebar's **MOBILE LINK** widget renders a QR for the same URL — scan it and the phone lands on the web UI. Requires `cloudflared` on `PATH`; falls back to `ngrok` or `localtunnel` if not. Disable with `SOA_WEB_AUTOPAIR=0`.
+
+> **Not Vercel-deployable.** SoA-Web is a persistent Node process with long-lived WebSockets and native PTYs. Serverless platforms (Vercel, Netlify Functions) can't host it. Run it on a box you control (laptop + Cloudflare Tunnel, Fly.io, Render, a VPS) and point your DNS at that.
 
 ## License
 

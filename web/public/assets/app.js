@@ -266,6 +266,7 @@ class Shell {
 
     _activate(id) {
         const switching = this.activeId !== id && this.activeId != null;
+        const sameTab = this.activeId === id;
         this.activeId = id;
         for (const [tid, rt] of this.tabs) {
             rt.container.classList.toggle('active', tid === id);
@@ -276,13 +277,16 @@ class Shell {
             this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols: sz.cols, rows: sz.rows });
             rt.focus();
         }
-        this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
+        if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
         this._syncTabsUI();
         if (switching) this.audio.play('panels');
     }
 
     _syncTabsUI(list) {
         const tabs = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0);
+        if (signature === this._tabsUISig) return;
+        this._tabsUISig = signature;
         this.tabsEl.replaceChildren(...tabs.map(t => {
             const label = el('span', { text: t.title || `tab ${t.id}` });
             const dot = el('span', { class: 'dot' });

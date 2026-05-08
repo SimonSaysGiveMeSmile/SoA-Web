@@ -209,7 +209,9 @@ class GitCommitsWidget extends Widget {
 // ── MOBILE QR ────────────────────────────────────────────────────────────
 class MobileQRWidget extends Widget {
     constructor({ parent, audio }) {
-        super({ title: 'MOBILE LINK', parent, intervalMs: 0 });
+        // Poll every 6s so when the server brings up the Cloudflare tunnel
+        // automatically (SOA_WEB_AUTOPAIR), the QR fills in without any click.
+        super({ title: 'MOBILE LINK', parent, intervalMs: 6000 });
         this.audio = audio;
         this._render('idle', null);
     }
@@ -265,7 +267,6 @@ class MobileQRWidget extends Widget {
             this._render(data.state, data);
             if (data.state === 'online' && this.audio) this.audio.play('granted');
             if (data.state === 'error' && this.audio) this.audio.play('denied');
-            if (!this._timer) this._timer = setInterval(() => this.tick(), 6000);
         } catch (e) {
             this._render('error', { error: e.message });
         }
@@ -276,7 +277,6 @@ class MobileQRWidget extends Widget {
             const { data } = await jpost('/api/pair/stop', {});
             this._render(data.state, data);
             if (this.audio) this.audio.play('panels');
-            this.stop();
         } catch (e) { /* ignore */ }
     }
 }

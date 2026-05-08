@@ -2,7 +2,7 @@
 
 ## One-paragraph summary
 
-SoA-Web is the server half of the SoA-Prod desktop app, pulled out and made into a standalone Node process. Browsers connect to `/`, get a static SPA, and open a WebSocket to `/ws`. The server owns one PTY per tab per session, tracks sessions by signed HttpOnly cookie, and ignores everything Electron-specific that used to live in the desktop (native menus, auto-updater, Picovoice, local Whisper, macOS SFSpeech, file-icon generation, DMG build, notarization, LAN mobile-pairing).
+SoA-Web is the server half of the SoA-Prod desktop app, pulled out and made into a standalone Node process. Browsers connect to `/`, get a static SPA, and open a WebSocket to `/ws`. The server owns one PTY per tab per session, tracks sessions by signed HttpOnly cookie, and brings up a Cloudflare Quick Tunnel on boot so the URL is reachable from a phone via QR. Everything Electron-specific that used to live in the desktop (native menus, auto-updater, Picovoice, local Whisper, macOS SFSpeech, file-icon generation, DMG build, notarization) is dropped.
 
 ```
   Browser (xterm.js)                    Node server
@@ -20,7 +20,7 @@ SoA-Web is the server half of the SoA-Prod desktop app, pulled out and made into
 1. **HTTP boot.** Browser loads `/` (static SPA). First byte fetches `/_config.js` (injects the auth mode) and `/_protocol.js` (rewrites the server's CommonJS `protocol.js` into an ESM shim so the client imports the *same* schema the server uses).
 2. **Auth.** If `SOA_WEB_AUTH=shared`, the SPA shows a password form; on success it POSTs `/api/login`, the server returns a signed cookie (`soa_web_auth`). In `open`/`none`, the server auto-provisions a session on any authed request.
 3. **WebSocket upgrade.** `/ws` reads the cookie, verifies the HMAC, looks up the session in `SessionStore`. No session = 401.
-4. **HELLO.** Server sends `{t:'hello', d:{tabs:[…]}}` describing any tabs that already exist (for a page refresh).
+4. **HELLO.** Server sends `{t:'hello', d:{tabs, activeId, replay}}` — the tab list, which tab was active, and a per-tab scrollback snapshot (bounded ring buffer kept server-side). A browser reload is non-destructive: xterm receives the replay bytes before any live `term-data` arrives, so the user lands exactly where they left off.
 5. **Tab creation.** Client sends `{t:'input', d:{kind:'new-tab', cols, rows}}`. Server spawns a PTY via `TabManager.open`, streams `{t:'term-data', d:{id, data}}` frames back as the shell produces output.
 6. **Typing.** Key events → `{kind:'term-keys', id, text}` frames → `tab.write(text)`.
 7. **Resize.** xterm fit-addon computes new cols/rows on every window resize and when switching tabs. Server calls `pty.resize`.
@@ -67,7 +67,13 @@ End-to-end (`scripts/smoke-ws.js`) covers the full HTTP → WS → PTY round-tri
 
 ## Open issues / next steps
 
-- **TLS.** Terminate in front with nginx/Caddy/Cloudflare. The app intentionally speaks plain HTTP; there's no good reason to handle certs in-process.
+- **TLS.** Terminate in front with Cloudflare Tunnel (the default autopair path), nginx/Caddy, or a managed host. The app intentionally speaks plain HTTP; there's no good reason to handle certs in-process.
+
+## Cloudflare Quick Tunnel (default)
+
+On boot, `PairingManager.start()` runs `cloudflared tunnel --url http://localhost:$PORT`, parses the `trycloudflare.com` URL out of the child process's stdout, and exposes it via `/api/pair/status`. The sidebar QR widget polls that endpoint and renders a QR over the server-generated SVG route (`/api/pair/qr?text=…`). Falls back to ngrok, then localtunnel, if cloudflared is missing. Disable the auto-start with `SOA_WEB_AUTOPAIR=0`. The tunnel is not suitable for production workloads (random subdomain, no SLA) — for a stable URL, run a named Cloudflare Tunnel or put the service behind your own domain.
+
+Vercel (or any serverless host) can't run this server: WebSockets to long-lived PTYs need a persistent process, not invocation-scoped functions.
 - **CSRF on `/api/login`.** Current cookie is `SameSite=Lax`, which handles the common cases. A public deploy should add an explicit CSRF token.
 - **WS origin check.** Currently accepts any origin with a valid cookie — fine for self-hosted, tighten for public deploys via an `Origin` allowlist in the upgrade handler.
 - **Voice.** Pluggable transcription endpoint (browser sends audio → server returns text) would restore the desktop's dictation flow without a local Whisper.

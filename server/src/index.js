@@ -15,6 +15,7 @@
  *   SOA_WEB_SHELL      shell binary; defaults to $SHELL or /bin/bash
  *   SOA_WEB_SESSION_TTL_MS  idle timeout for sessions (default 6h)
  *   SOA_WEB_DEV=1      dev mode — sends cache-control: no-store on static assets
+ *   SOA_WEB_AUTOPAIR   '0' disables auto-starting the Cloudflare tunnel on boot
  */
 
 const http = require('http');
@@ -267,7 +268,7 @@ function handleInput(session, d) {
     const mgr = session.tabMgr;
     switch (d.kind) {
         case INPUT_KIND.NEW_TAB: {
-            const t = mgr.open({ cols: d.cols, rows: d.rows });
+            const t = mgr.open({ cols: d.cols, rows: d.rows, silent: true });
             session.activeTab = t.id;
             session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: t.id }));
             break;
@@ -338,6 +339,22 @@ process.on('SIGTERM', () => shutdown(0));
 
 server.listen(PORT, HOST, () => {
     console.log(`SoA-Web ready: http://${HOST}:${PORT}  (auth=${AUTH_MODE})`);
+
+    // Bring up the Cloudflare Quick Tunnel by default. This is best-effort:
+    // if cloudflared isn't installed the pairing manager falls back to ngrok
+    // / localtunnel, and if all providers fail the local server keeps running
+    // — the user can still reach it on the loopback URL. We kick this off
+    // after listen() so the local port is already bound when the tunnel
+    // tries to dial out.
+    if (process.env.SOA_WEB_AUTOPAIR !== '0') {
+        pair.start().then(snap => {
+            if (snap.state === 'online' && snap.publicUrl) {
+                console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (QR in the sidebar)`);
+            } else if (snap.state === 'error') {
+                console.log(`SoA-Web tunnel:  unavailable — ${snap.error}`);
+            }
+        }).catch(() => { /* swallow; pair.snapshot() will reflect the error */ });
+    }
 });
 
 module.exports = { app, server };
