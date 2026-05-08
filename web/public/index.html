@@ -7,6 +7,7 @@
   <title>SON OF ANTON · WEB</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/sidebar.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
 </head>
@@ -35,6 +36,8 @@
       <div class="brand">SON OF ANTON · WEB</div>
       <div class="tabs" id="tabs"></div>
       <div class="topbar-actions">
+        <button id="toggle-sidebar" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
+        <button id="toggle-audio" title="Mute / unmute sound FX" data-state="on">♪ FX</button>
         <button id="new-tab" title="New tab (Ctrl+Shift+T)">＋ TAB</button>
         <button id="logout" title="Log out">LOGOUT</button>
       </div>
@@ -42,6 +45,7 @@
     <main class="stage">
       <div class="scanline"></div>
       <div id="terms" class="terms"></div>
+      <aside id="sidebar" class="sidebar"></aside>
       <div class="status-bar">
         <span id="status-session">—</span>
         <span id="status-tabs">0 tabs</span>

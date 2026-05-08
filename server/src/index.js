@@ -28,6 +28,8 @@ const { MSG, INPUT_KIND, frame, parse } = require('./protocol');
 const { SessionStore } = require('./sessionStore');
 const { TabManager }   = require('./tabManager');
 const auth             = require('./auth');
+const sysinfo          = require('./sysinfo');
+const pairing          = require('./pairing');
 
 const HOST = process.env.SOA_WEB_HOST || '127.0.0.1';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
@@ -130,6 +132,11 @@ app.get('/api/me', (req, res) => {
     const s = currentSession(req);
     res.json({ ok: true, authed: !!s, auth: AUTH_MODE });
 });
+
+// ── Sidebar + mobile-pairing routes ─────────────────────────────────────
+sysinfo.mount(app, requireAuthed);
+const pair = new pairing.PairingManager({ port: PORT });
+pairing.mount(app, requireAuthed, pair);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -295,6 +302,7 @@ if (heartbeat.unref) heartbeat.unref();
 function shutdown(code = 0) {
     console.log('\nshutting down…');
     clearInterval(heartbeat);
+    try { pair.stop(); } catch (_) {}
     try { wss.close(); } catch (_) {}
     try { sessions.shutdown(); } catch (_) {}
     server.close(() => process.exit(code));

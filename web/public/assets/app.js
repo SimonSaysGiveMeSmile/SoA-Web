@@ -12,6 +12,8 @@
  */
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js';
+import { AudioFX } from '/assets/audiofx.js';
+import { mountSidebar } from '/assets/widgets.js';
 
 const WS_URL = (() => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -115,16 +117,39 @@ class TabRuntime {
 }
 
 class Shell {
-    constructor(bridge) {
+    constructor(bridge, { audio } = {}) {
         this.bridge = bridge;
+        this.audio = audio || { play: () => {}, setEnabled: () => {} };
         this.tabs = new Map();
         this.order = [];
         this.activeId = null;
         this.tabsEl = $('#tabs');
         this.termsEl = $('#terms');
+        this.sidebarEl = $('#sidebar');
+        this._lastStdoutCue = 0;
+        this._prevConnState = null;
 
-        $('#new-tab').addEventListener('click', () => this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize()));
-        $('#logout').addEventListener('click', () => logout());
+        $('#new-tab').addEventListener('click', () => {
+            this.audio.play('granted');
+            this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
+        });
+        $('#logout').addEventListener('click', () => { this.audio.play('denied'); logout(); });
+
+        const audioBtn = $('#toggle-audio');
+        audioBtn.addEventListener('click', () => {
+            const on = audioBtn.dataset.state !== 'off';
+            this.audio.setEnabled(!on);
+            audioBtn.dataset.state = on ? 'off' : 'on';
+            audioBtn.textContent = on ? '♪ OFF' : '♪ FX';
+            if (!on) this.audio.play('info');
+        });
+
+        const sideBtn = $('#toggle-sidebar');
+        sideBtn.addEventListener('click', () => {
+            $('.stage').classList.toggle('no-sidebar');
+            this.audio.play('panels');
+            this._fitActive();
+        });
 
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('keydown', e => this._hotkey(e));
@@ -141,6 +166,11 @@ class Shell {
         const s = $('#status-conn');
         s.className = state === 'open' ? 'ok' : state === 'connecting' ? 'warn' : 'err';
         s.textContent = state;
+        if (this._prevConnState && this._prevConnState !== state) {
+            if (state === 'closed') this.audio.play('error');
+            if (state === 'open')   this.audio.play('granted');
+        }
+        this._prevConnState = state;
     }
 
     _onHello({ tabs }) {
@@ -167,11 +197,18 @@ class Shell {
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
         if (t) t.write(data);
+        // Throttle stdout cue to avoid a machine-gun of clicks on heavy output.
+        const now = performance.now();
+        if (now - this._lastStdoutCue > 180) {
+            this._lastStdoutCue = now;
+            this.audio.play('stdout');
+        }
     }
 
     _onTermExit({ id, code }) {
         const t = this.tabs.get(id);
         if (t) t.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
+        this.audio.play(code === 0 ? 'info' : 'alarm');
     }
 
     _ensureTab(id, title) {
@@ -200,6 +237,7 @@ class Shell {
     }
 
     _activate(id) {
+        const switching = this.activeId !== id && this.activeId != null;
         this.activeId = id;
         for (const [tid, rt] of this.tabs) {
             rt.container.classList.toggle('active', tid === id);
@@ -211,6 +249,7 @@ class Shell {
             rt.focus();
         }
         this._syncTabsUI();
+        if (switching) this.audio.play('panels');
     }
 
     _syncTabsUI(list) {
@@ -220,6 +259,7 @@ class Shell {
             const dot = el('span', { class: 'dot' });
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
+                this.audio.play('denied');
                 this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: t.id });
             }});
             const root = el('button', {
@@ -247,11 +287,19 @@ class Shell {
     _hotkey(e) {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
+            this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'w') {
             e.preventDefault();
-            if (this.activeId != null) this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: this.activeId });
+            if (this.activeId != null) {
+                this.audio.play('denied');
+                this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: this.activeId });
+            }
+        }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
+            e.preventDefault();
+            $('#toggle-sidebar').click();
         }
     }
 }
@@ -278,14 +326,19 @@ async function boot() {
     if (!me.authed) await login('');
 
     $('#boot-status').textContent = 'opening channel…';
+    const audio = new AudioFX({ enabled: true });
     const bridge = new Bridge({ url: WS_URL });
-    const shell = new Shell(bridge);
+    const shell = new Shell(bridge, { audio });
     bridge.connect();
     $('#status-session').textContent = `${cfg.auth} · ${location.host}`;
+
+    const sidebar = mountSidebar($('#sidebar'), { audio });
+
     setTimeout(() => {
         $('#boot').classList.add('hidden');
         $('#shell').classList.remove('hidden');
         shell._fitActive();
+        audio.play('theme');
     }, 250);
 }
 

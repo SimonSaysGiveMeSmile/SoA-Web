@@ -1,0 +1,47 @@
+/* ── Sidebar layout ─────────────────────────────────────────────────────
+   The stage is a two-column grid when the sidebar is visible, collapsing
+   to a single-column terminal when toggled off. */
+.stage { grid-template-columns: 1fr 320px; grid-template-areas: 'terms sidebar' 'status status'; }
+.stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+.terms { grid-area: terms; }
+.sidebar { grid-area: sidebar; border-left: 1px solid var(--soa-line); background: linear-gradient(to right, #060a0f, var(--soa-bg)); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.stage.no-sidebar .sidebar { display: none; }
+.status-bar { grid-area: status; }
+
+/* ── Widget shell ───────────────────────────────────────────────────── */
+.widget { border: 1px solid var(--soa-line); background: rgba(10, 19, 24, 0.6); display: flex; flex-direction: column; box-shadow: inset 0 0 14px rgba(170,207,209,0.03); }
+.widget-h { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--soa-line-soft); }
+.widget-title { font-size: 10px; letter-spacing: 0.3em; color: var(--soa-accent); text-shadow: 0 0 6px rgba(170,207,209,0.3); }
+.widget-pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--soa-accent); box-shadow: 0 0 6px var(--soa-accent); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.widget-body { padding: 8px 10px; font-family: var(--font-mono); font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
+.kv { display: flex; justify-content: space-between; gap: 10px; }
+.kv .k { color: var(--soa-accent-dim); letter-spacing: 0.15em; }
+.kv .v { color: var(--soa-fg); }
+.kv.warn .v { color: var(--soa-yellow); }
+.bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--soa-accent), var(--soa-green)); transition: width 0.5s ease; }
+
+/* ── Mobile QR widget ───────────────────────────────────────────────── */
+.mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }
+.mqr-status .mqr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--soa-accent-dim); }
+.mqr-online  .mqr-dot { background: var(--soa-green); box-shadow: 0 0 8px var(--soa-green); }
+.mqr-starting .mqr-dot { background: var(--soa-yellow); animation: pulse 1s infinite; }
+.mqr-error   .mqr-dot { background: var(--soa-red); }
+.mqr-qr { display: grid; place-items: center; padding: 4px 0 8px; }
+.mqr-img { width: 180px; height: 180px; display: block; }
+.mqr-empty { font-size: 10px; opacity: 0.55; text-align: center; padding: 30px 10px; border: 1px dashed var(--soa-line-soft); }
+.mqr-urls { display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono); font-size: 10px; }
+.mqr-url { display: grid; grid-template-columns: 28px 1fr auto; gap: 6px; align-items: center; }
+.mqr-tag { color: var(--soa-accent); letter-spacing: 0.15em; }
+.mqr-u   { color: var(--soa-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mqr-copy { background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line-soft); padding: 2px 6px; font-size: 9px; cursor: pointer; }
+.mqr-copy:hover { color: var(--soa-accent); border-color: var(--soa-accent); }
+.mqr-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
+.mqr-toggle { background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-accent); padding: 4px 14px; font-family: var(--font-display); font-size: 10px; letter-spacing: 0.3em; cursor: pointer; }
+.mqr-toggle:hover { background: rgba(170,207,209,0.08); }
+.mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
+
+/* ── Topbar toggle buttons visual state ─────────────────────────────── */
+#toggle-audio[data-state='off'] { color: var(--soa-accent-dim); text-decoration: line-through; }
+#toggle-sidebar.on, #toggle-audio.on { border-color: var(--soa-accent); }

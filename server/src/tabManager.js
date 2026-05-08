@@ -22,6 +22,38 @@ const DEFAULT_SHELL = (() => {
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
 
+// Bounded per-tab replay buffer. A browser reload (or a WS drop) must be able
+// to catch up on output that arrived while nothing was listening, so every tab
+// keeps the last N bytes of raw PTY output. 256 KiB is enough to cover many
+// screens of scrollback without letting a runaway process balloon memory.
+const DEFAULT_SCROLLBACK_BYTES = parseInt(
+    process.env.SOA_WEB_SCROLLBACK_BYTES || String(256 * 1024), 10,
+);
+
+class RingBuffer {
+    constructor(cap) {
+        this.cap = Math.max(1024, cap | 0);
+        this.chunks = [];
+        this.size = 0;
+    }
+    push(str) {
+        if (typeof str !== 'string' || str.length === 0) return;
+        this.chunks.push(str);
+        this.size += str.length;
+        while (this.size > this.cap && this.chunks.length > 1) {
+            this.size -= this.chunks.shift().length;
+        }
+        if (this.size > this.cap && this.chunks.length === 1) {
+            const only = this.chunks[0];
+            const trimmed = only.slice(only.length - this.cap);
+            this.chunks[0] = trimmed;
+            this.size = trimmed.length;
+        }
+    }
+    snapshot() { return this.chunks.join(''); }
+    clear() { this.chunks.length = 0; this.size = 0; }
+}
+
 let _pty = null;
 function requirePty() {
     if (_pty) return _pty;
@@ -35,7 +67,7 @@ function requirePty() {
 }
 
 class Tab {
-    constructor({ id, title, cwd, env, cols, rows, onData, onExit }) {
+    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit }) {
         this.id = id;
         this.title = title || 'terminal';
         this.cwd = cwd || os.homedir();
@@ -47,6 +79,7 @@ class Tab {
         this.pty = null;
         this.exited = false;
         this.exitCode = null;
+        this.scrollback = new RingBuffer(scrollbackBytes || DEFAULT_SCROLLBACK_BYTES);
     }
 
     spawn() {
