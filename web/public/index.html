@@ -38,6 +38,13 @@
 <body>
   <div id="welcome" class="welcome" aria-hidden="true">
     <div class="welcome-inner">
+      <nav class="welcome-lang" id="welcome-lang" role="tablist" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+        <button type="button" data-lang="zh" aria-pressed="false">中文</button>
+        <button type="button" data-lang="fr" aria-pressed="false">FR</button>
+        <button type="button" data-lang="de" aria-pressed="false">DE</button>
+        <button type="button" data-lang="es" aria-pressed="false">ES</button>
+      </nav>
       <header class="welcome-head">
         <h1 class="welcome-title"><a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a></h1>
         <p class="welcome-sub">WEB TERMINAL · PROTOCOL v1</p>
@@ -172,9 +179,38 @@
 
         var lang = pickLang();
         var strings = DICT[lang] || DICT.en;
-        document.querySelectorAll('#welcome [data-w]').forEach(function (node) {
-            var key = node.getAttribute('data-w');
-            if (strings[key] != null) node.textContent = strings[key];
+        var enter = document.getElementById('welcome-enter');
+
+        function apply() {
+            strings = DICT[lang] || DICT.en;
+            document.documentElement.lang = lang;
+            document.querySelectorAll('#welcome [data-w]').forEach(function (node) {
+                var key = node.getAttribute('data-w');
+                if (strings[key] != null) node.textContent = strings[key];
+            });
+            // Enter-button label depends on lang AND device class; refresh
+            // whenever either changes (language picker calls apply() again).
+            if (enter) enter.textContent = isMobile ? strings.continue_anyway : strings.enter;
+            // Keep the language-bar pressed state in sync with the active
+            // choice so the active button reads accent-underlined.
+            document.querySelectorAll('#welcome-lang button').forEach(function (btn) {
+                var active = btn.dataset.lang === lang;
+                btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+        }
+        apply();
+
+        // Wire the language picker. Persist to the same localStorage key the
+        // main app (assets/i18n.js) reads, so choosing here also applies to
+        // the terminal UI once the visitor enters — no reload needed.
+        document.querySelectorAll('#welcome-lang button').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var next = btn.dataset.lang;
+                if (!DICT[next] || next === lang) return;
+                lang = next;
+                try { localStorage.setItem('soa-web:lang', next); } catch (_) {}
+                apply();
+            });
         });
 
         var copyBtn = document.getElementById('welcome-copy');
@@ -192,9 +228,7 @@
                 copyBtn.textContent = strings.select_copy;
             }
         });
-        var enter = document.getElementById('welcome-enter');
         if (enter) {
-            if (isMobile) enter.textContent = strings.continue_anyway;
             enter.addEventListener('click', function () {
                 try {
                     if (isMobile) localStorage.setItem('soa_web_mobile_bypass', '1');
