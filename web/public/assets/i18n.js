@@ -126,6 +126,8 @@ const DICTS = {
         'mqr.state.starting': 'STARTING',
         'mqr.state.online': 'ONLINE',
         'mqr.state.error': 'ERROR',
+        'mobile.not_supported_title': 'Use a Mac or Windows PC',
+        'mobile.not_supported_body': 'Terminals are not supported on phones. Please open this site on a Mac or Windows PC.',
     },
     zh: {
         'brand.sub': '网页终端 · 协议 v1',
@@ -226,6 +228,8 @@ const DICTS = {
         'mqr.state.starting': '启动中',
         'mqr.state.online': '在线',
         'mqr.state.error': '错误',
+        'mobile.not_supported_title': '请使用 Mac 或 Windows 电脑',
+        'mobile.not_supported_body': '手机不支持终端。请在 Mac 或 Windows 电脑上打开此网站。',
     },
     fr: {
         'brand.sub': 'TERMINAL WEB · PROTOCOLE v1',
@@ -326,6 +330,8 @@ const DICTS = {
         'mqr.state.starting': 'DÉMARRAGE',
         'mqr.state.online': 'EN LIGNE',
         'mqr.state.error': 'ERREUR',
+        'mobile.not_supported_title': 'Utilisez un Mac ou un PC Windows',
+        'mobile.not_supported_body': "Les terminaux ne sont pas pris en charge sur téléphone. Ouvrez ce site sur un Mac ou un PC Windows.",
     },
     de: {
         'brand.sub': 'WEB-TERMINAL · PROTOKOLL v1',
@@ -426,6 +432,8 @@ const DICTS = {
         'mqr.state.starting': 'STARTET',
         'mqr.state.online': 'ONLINE',
         'mqr.state.error': 'FEHLER',
+        'mobile.not_supported_title': 'Mac oder Windows-PC verwenden',
+        'mobile.not_supported_body': 'Terminals werden auf dem Telefon nicht unterstützt. Bitte öffne diese Seite auf einem Mac oder Windows-PC.',
     },
     es: {
         'brand.sub': 'TERMINAL WEB · PROTOCOLO v1',
@@ -526,6 +534,8 @@ const DICTS = {
         'mqr.state.starting': 'INICIANDO',
         'mqr.state.online': 'EN LÍNEA',
         'mqr.state.error': 'ERROR',
+        'mobile.not_supported_title': 'Usa un Mac o PC con Windows',
+        'mobile.not_supported_body': 'Los terminales no son compatibles con teléfonos. Abre este sitio en un Mac o PC con Windows.',
     },
 };
 

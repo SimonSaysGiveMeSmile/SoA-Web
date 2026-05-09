@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=11';
-import { AudioFX } from '/assets/audiofx.js?v=11';
-import { mountSidebar } from '/assets/widgets.js?v=11';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=11';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=11';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=12';
+import { AudioFX } from '/assets/audiofx.js?v=12';
+import { mountSidebar } from '/assets/widgets.js?v=12';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=12';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=12';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -129,6 +129,52 @@ const el = (tag, props = {}, children = []) => {
     return n;
 };
 
+// Narrow + touch viewport heuristic. Mirrors the welcome-gate check in
+// index.html so both layers agree on who counts as "mobile."
+function isMobileViewport() {
+    try {
+        const q = window.matchMedia && window.matchMedia('(max-width: 820px) and (pointer: coarse)');
+        return !!(q && q.matches);
+    } catch (_) { return false; }
+}
+
+// iOS/Android-style notification banner. Used when a mobile visitor tries to
+// spawn a terminal: xterm can render on the small screen but a real shell is
+// not wired for touch, so we refuse the action and surface why in a single
+// concise toast.
+let _toastTimer = null;
+function showMobileUnsupportedToast() {
+    const existing = document.getElementById('soa-mobile-toast');
+    if (existing) existing.remove();
+    if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
+
+    const title = tr('mobile.not_supported_title') || 'Use a Mac or Windows';
+    const body  = tr('mobile.not_supported_body')
+        || 'Terminals are not supported on phones. Open this site on a Mac or Windows PC.';
+
+    const toast = el('div', {
+        id: 'soa-mobile-toast',
+        class: 'soa-toast',
+        role: 'alert',
+        'aria-live': 'assertive',
+    }, [
+        el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '!' }),
+        el('div', { class: 'soa-toast-body' }, [
+            el('p', { class: 'soa-toast-title', text: title }),
+            el('p', { class: 'soa-toast-text',  text: body  }),
+        ]),
+    ]);
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => toast.setAttribute('data-show', '1'));
+
+    const dismiss = () => {
+        toast.removeAttribute('data-show');
+        setTimeout(() => toast.remove(), 320);
+    };
+    toast.addEventListener('click', dismiss);
+    _toastTimer = setTimeout(dismiss, 3800);
+}
+
 const TRON_THEME = {
     foreground: '#aacfd1',
     background: '#05080d',
@@ -226,6 +272,11 @@ class Shell {
         this._prevConnState = null;
 
         $('#new-tab').addEventListener('click', () => {
+            if (isMobileViewport()) {
+                this.audio.play('denied');
+                showMobileUnsupportedToast();
+                return;
+            }
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         });
@@ -466,6 +517,11 @@ class Shell {
     _hotkey(e) {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
+            if (isMobileViewport()) {
+                this.audio.play('denied');
+                showMobileUnsupportedToast();
+                return;
+            }
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
@@ -582,7 +638,7 @@ async function _doBoot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=11');
+    await import('/assets/app-wc.js?v=12');
 }
 
 async function boot() {

@@ -543,6 +543,12 @@ html[data-welcome="1"] body { overflow: hidden; }
     align-items: center;
     gap: 14px;
 }
+.welcome-foot-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+}
 .welcome-link {
     font-size: 11px;
     letter-spacing: 0.14em;
@@ -585,6 +591,86 @@ html[data-welcome="1"] body { overflow: hidden; }
     .welcome-cmdwrap { flex-direction: column; gap: 6px; }
     .welcome-copy { padding: 7px 0; }
     .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 10px; padding-top: 10px; }
+    .welcome-foot-right { align-items: stretch; }
     .welcome-enter { width: 100%; padding: 11px; }
     .welcome-link { text-align: center; }
+}
+
+/* Inline warning shown above the "continue anyway" button on mobile. Only
+   rendered when the welcome gate is in mobile mode — the .welcome-warn node
+   lives in the DOM year-round but stays hidden on desktop. */
+.welcome-warn { display: none; }
+html[data-welcome-mobile="1"] .welcome-warn {
+    display: block;
+    margin: 0 0 10px;
+    padding: 9px 12px;
+    border: 1px solid rgba(255, 85, 85, 0.5);
+    background: rgba(255, 85, 85, 0.08);
+    color: #ffb3b3;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    line-height: 1.45;
+    text-align: center;
+}
+
+/* ── Mobile "not supported" toast ───────────────────────────────────── */
+/* OS-native-style notification banner: pill-shaped card, blurred backdrop,
+   slides down from the top. Fires when a mobile visitor tries to open a new
+   tab after bypassing the welcome gate. */
+.soa-toast {
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top, 12px));
+    left: 50%;
+    transform: translate(-50%, -120%);
+    z-index: 20000;
+    width: min(92vw, 380px);
+    padding: 12px 14px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    background: rgba(28, 28, 30, 0.92);
+    color: #f5f5f7;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.2);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    opacity: 0;
+    pointer-events: auto;
+    transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1), opacity 220ms ease-out;
+}
+.soa-toast[data-show="1"] {
+    transform: translate(-50%, 0);
+    opacity: 1;
+}
+.soa-toast-icon {
+    flex: 0 0 auto;
+    width: 28px; height: 28px;
+    border-radius: 7px;
+    background: linear-gradient(135deg, #ff5e62, #ff3b30);
+    color: #fff;
+    font-size: 17px;
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    line-height: 1;
+    letter-spacing: 0;
+}
+.soa-toast-body { flex: 1; min-width: 0; }
+.soa-toast-title {
+    margin: 0 0 2px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #ffffff;
+}
+.soa-toast-text {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.82);
+    letter-spacing: -0.005em;
+}
+@media (prefers-reduced-motion: reduce) {
+    .soa-toast { transition: opacity 120ms linear; transform: translate(-50%, 0); }
 }

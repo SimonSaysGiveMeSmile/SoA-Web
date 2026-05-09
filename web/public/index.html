@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>SON OF ANTON · WEB</title>
-  <link rel="icon" href="/assets/favicon.svg?v=11" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=11">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=11">
+  <link rel="icon" href="/assets/favicon.svg?v=12" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=12">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=12">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -79,7 +79,10 @@
 
       <footer class="welcome-foot">
         <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">source · github</a>
-        <button class="welcome-enter" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
+        <div class="welcome-foot-right">
+          <p class="welcome-warn" id="welcome-warn" data-w="mobile_warn">Terminals are not supported and will not work on your phone.</p>
+          <button class="welcome-enter" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
+        </div>
       </footer>
     </div>
   </div>
@@ -108,6 +111,7 @@
                 copy: 'COPY', copied: 'COPIED', select_copy: 'select + copy',
                 github: 'source · github',
                 enter: 'ENTER TERMINAL →', continue_anyway: 'continue anyway →',
+                mobile_warn: 'Terminals are not supported and will not work on your phone.',
             },
             zh: {
                 col_web_title: '网页', col_web_sub: '本页面',
@@ -122,6 +126,7 @@
                 copy: '复制', copied: '已复制', select_copy: '选中 + 复制',
                 github: '源代码 · GitHub',
                 enter: '进入终端 →', continue_anyway: '仍然继续 →',
+                mobile_warn: '手机不支持终端,在此设备上无法使用。',
             },
             fr: {
                 col_web_title: 'Web', col_web_sub: 'cette page',
@@ -136,6 +141,7 @@
                 copy: 'COPIER', copied: 'COPIÉ', select_copy: 'sélectionner + copier',
                 github: 'source · github',
                 enter: 'ENTRER DANS LE TERMINAL →', continue_anyway: 'continuer quand même →',
+                mobile_warn: "Les terminaux ne sont pas pris en charge et ne fonctionneront pas sur votre téléphone.",
             },
             de: {
                 col_web_title: 'Web', col_web_sub: 'diese Seite',
@@ -150,6 +156,7 @@
                 copy: 'KOPIEREN', copied: 'KOPIERT', select_copy: 'auswählen + kopieren',
                 github: 'Quelle · GitHub',
                 enter: 'TERMINAL BETRETEN →', continue_anyway: 'trotzdem fortfahren →',
+                mobile_warn: 'Terminals werden auf dem Telefon nicht unterstützt und funktionieren dort nicht.',
             },
             es: {
                 col_web_title: 'Web', col_web_sub: 'esta página',
@@ -164,6 +171,7 @@
                 copy: 'COPIAR', copied: 'COPIADO', select_copy: 'seleccionar + copiar',
                 github: 'fuente · github',
                 enter: 'ENTRAR AL TERMINAL →', continue_anyway: 'continuar de todos modos →',
+                mobile_warn: 'Los terminales no son compatibles y no funcionarán en tu teléfono.',
             },
         };
 
@@ -281,6 +289,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=11"></script>
+  <script type="module" src="/assets/app.js?v=12"></script>
 </body>
 </html>
