@@ -11,6 +11,7 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=6';
+import { getSettings } from '/assets/settings.js?v=6';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -139,7 +140,10 @@ class ClockWidget extends Widget {
     }
     tick() {
         const now = new Date();
-        const time = now.toTimeString().slice(0, 8);
+        const hours12 = getSettings().clockHours === 12;
+        const time = hours12
+            ? now.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' })
+            : now.toTimeString().slice(0, 8);
         const date = now.toISOString().slice(0, 10);
         const utc = now.toUTCString().slice(17, 25);
         this.setRows([
@@ -345,8 +349,10 @@ async function _loadGlobeAssets() {
         // three.js first (encom expects window.THREE). Pinned to r77 — the
         // last version whose API surface encom-globe targets (the fork predates
         // three's ES-modules transition and expects the globals namespace).
+        // Hosted locally under /assets/vendor/ so COEP: credentialless doesn't
+        // need a CORP header from a CDN — one less failure mode in production.
         if (!window.THREE) {
-            await _loadScript('https://cdn.jsdelivr.net/npm/three@0.77.1/three.min.js');
+            await _loadScript('/assets/vendor/three.min.js?v=6');
         }
         if (!window.ENCOM || !window.ENCOM.Globe) {
             await _loadScript('/assets/vendor/encom-globe.js?v=6');
