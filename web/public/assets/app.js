@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=6';
-import { AudioFX } from '/assets/audiofx.js?v=6';
-import { mountSidebar } from '/assets/widgets.js?v=6';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=6';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=6';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=7';
+import { AudioFX } from '/assets/audiofx.js?v=7';
+import { mountSidebar } from '/assets/widgets.js?v=7';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=7';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=7';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -484,6 +484,21 @@ async function resolveBackend() {
         const probed = await probePing(same, '', 1500);
         if (probed && probed.ok) return { backend: same, token: '' };
     }
+    // Last-chance probe for a locally-installed backend (scripts/install.sh
+    // drops a launchd/systemd service that binds 127.0.0.1:4010). Runs in
+    // both server and webcontainer modes so a visitor who runs the install
+    // gets auto-upgraded to real-shell mode on their next reload — no deep
+    // link, no pasting. Skipped on http pages when talking to https (mixed
+    // content) and vice-versa; and on localhost itself it's a no-op (the
+    // same-origin probe above already covered it).
+    if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') {
+        // Browsers allow https → http://localhost since Chrome 94 / Safari 18
+        // (treated as a "potentially trustworthy" origin). If a browser still
+        // blocks it the fetch just fails and we fall through to sandbox.
+        const local = 'http://127.0.0.1:4010';
+        const probed = await probePing(local, '', 1000);
+        if (probed && probed.ok) return { backend: local, token: '' };
+    }
     return null;
 }
 
@@ -522,7 +537,7 @@ async function boot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=6');
+    await import('/assets/app-wc.js?v=7');
 }
 
 boot().catch(err => {

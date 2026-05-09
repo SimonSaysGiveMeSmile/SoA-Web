@@ -10,8 +10,8 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=6';
-import { getSettings } from '/assets/settings.js?v=6';
+import { t as tr } from '/assets/i18n.js?v=7';
+import { getSettings } from '/assets/settings.js?v=7';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -57,6 +57,11 @@ function api(path) {
     if (t) u.searchParams.set('t', t);
     return u.toString();
 }
+// Widgets call this to decide which data path to use. mountSandboxSidebar
+// sets _sandbox=true before starting widgets; mountSidebar leaves it false.
+// Keeping the decision in a flag (rather than inspecting the network on
+// every tick) means widgets stay synchronous and don't spam 404s.
+function isSandbox() { return !!(window.__SOA_WEB__ && window.__SOA_WEB__._sandbox); }
 
 async function jget(url) {
     const r = await fetch(api(url), { credentials: 'include' });
@@ -158,8 +163,10 @@ class ClockWidget extends Widget {
 class SysInfoWidget extends Widget {
     constructor({ parent }) {
         super({ titleKey: 'widget.system', parent, intervalMs: 5000 });
+        this._bootAt = Date.now();
     }
     async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
         try {
             const { data } = await jget('/api/sys');
             this.setRows([
@@ -170,6 +177,20 @@ class SysInfoWidget extends Widget {
             ]);
         } catch (e) { this.setRows([['ERR', e.message]]); }
     }
+    _renderSandbox() {
+        const nav = navigator || {};
+        const ua = nav.userAgent || '';
+        const browser = /(Firefox|Edg|Chrome|Safari)\/[\d.]+/.exec(ua.replace(/Chrome\S+ Safari/, 'Chrome'));
+        const platform = nav.platform || tr('widget.sandbox.unknown');
+        const sessS = Math.floor((Date.now() - this._bootAt) / 1000);
+        this.setRows([
+            ['HOST', location.host || '—'],
+            ['ENGINE', 'browser'],
+            ['PLATFORM', platform],
+            ['AGENT', browser ? browser[0] : '—'],
+            ['SESSION', fmtUptime(sessS)],
+        ]);
+    }
 }
 
 // ── CPU ──────────────────────────────────────────────────────────────────
@@ -178,6 +199,7 @@ class CpuInfoWidget extends Widget {
         super({ titleKey: 'widget.cpu', parent, intervalMs: 4000 });
     }
     async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
         try {
             const { data } = await jget('/api/cpu');
             this.setRows([
@@ -187,6 +209,14 @@ class CpuInfoWidget extends Widget {
                 ['LOAD-5m', data.loadavg[1].toFixed(2)],
             ]);
         } catch (e) { this.setRows([['ERR', e.message]]); }
+    }
+    _renderSandbox() {
+        const cores = (navigator && navigator.hardwareConcurrency) || null;
+        this.setRows([
+            ['CORES', cores == null ? '—' : cores],
+            ['MODEL', tr('widget.sandbox.locked')],
+            ['LOAD', tr('widget.sandbox.locked')],
+        ]);
     }
 }
 
@@ -198,6 +228,7 @@ class RamWatcherWidget extends Widget {
         this.body.appendChild(this._bar);
     }
     async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
         try {
             const { data } = await jget('/api/ram');
             this._bar.querySelector('.bar-fill').style.width = `${data.usedPct}%`;
@@ -210,6 +241,25 @@ class RamWatcherWidget extends Widget {
             this.body.appendChild(this._bar);
         } catch (e) { this.setRows([['ERR', e.message]]); }
     }
+    _renderSandbox() {
+        // performance.memory is Chromium-only but gives a real JS-heap size;
+        // navigator.deviceMemory is a coarse GB-bucket, also Chromium/Edge.
+        // When neither exists (Safari/Firefox) we just show the device tier.
+        const dm = (navigator && navigator.deviceMemory) ? navigator.deviceMemory * 1024 * 1024 * 1024 : null;
+        const pm = performance && performance.memory ? performance.memory : null;
+        const used = pm ? pm.usedJSHeapSize : null;
+        const total = pm ? pm.jsHeapSizeLimit : (dm || null);
+        const pct = (used && total) ? (used / total) * 100 : null;
+        if (pct != null) this._bar.querySelector('.bar-fill').style.width = `${Math.min(100, pct)}%`;
+        else this._bar.querySelector('.bar-fill').style.width = '0%';
+        this.setRows([
+            ['HEAP', used == null ? '—' : fmtBytes(used)],
+            ['LIMIT', total == null ? '—' : fmtBytes(total)],
+            ['DEVICE', dm == null ? '—' : fmtBytes(dm)],
+            ['LOAD', pct == null ? '—' : `${pct.toFixed(1)}%`, pct > 85 ? 'warn' : ''],
+        ]);
+        this.body.appendChild(this._bar);
+    }
 }
 
 // ── NETSTAT ──────────────────────────────────────────────────────────────
@@ -218,12 +268,29 @@ class NetStatWidget extends Widget {
         super({ titleKey: 'widget.network', parent, intervalMs: 8000 });
     }
     async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
         try {
             const { data } = await jget('/api/net');
             const ipv4 = data.filter(a => a.family === 'IPv4' || a.family === 4).slice(0, 4);
             if (!ipv4.length) { this.setRows([['NET', tr('widget.net.empty')]]); return; }
             this.setRows(ipv4.map(a => [a.name.toUpperCase().slice(0, 6), a.address]));
         } catch (e) { this.setRows([['ERR', e.message]]); }
+    }
+    _renderSandbox() {
+        const conn = (navigator && (navigator.connection || navigator.mozConnection || navigator.webkitConnection)) || null;
+        const online = typeof navigator.onLine === 'boolean' ? navigator.onLine : null;
+        const rows = [
+            ['STATE', online == null ? '—' : (online ? 'online' : 'offline'), online === false ? 'warn' : ''],
+        ];
+        if (conn) {
+            if (conn.effectiveType) rows.push(['TYPE', conn.effectiveType.toUpperCase()]);
+            if (typeof conn.downlink === 'number') rows.push(['DOWN', `${conn.downlink.toFixed(1)} Mbps`]);
+            if (typeof conn.rtt === 'number') rows.push(['RTT', `${conn.rtt} ms`]);
+            if (typeof conn.saveData === 'boolean') rows.push(['SAVER', conn.saveData ? 'on' : 'off']);
+        } else {
+            rows.push(['INFO', tr('widget.sandbox.locked')]);
+        }
+        this.setRows(rows);
     }
 }
 
@@ -233,6 +300,7 @@ class GitCommitsWidget extends Widget {
         super({ titleKey: 'widget.commits', parent, intervalMs: 30_000 });
     }
     async tick() {
+        if (isSandbox()) { this.setRows([['GIT', tr('widget.sandbox.backend_needed')]]); return; }
         try {
             const { data } = await jget('/api/git?limit=6');
             if (!data.ok) { this.setRows([['GIT', data.error || tr('widget.git.unavailable')]]); return; }
@@ -296,10 +364,17 @@ class MobileQRWidget extends Widget {
     }
 
     async tick() {
+        if (isSandbox()) { this._renderBackendNeeded(); return; }
         try {
             const { data } = await jget('/api/pair/status');
             this._render(data.state, data);
         } catch (e) { /* ignore polling failures */ }
+    }
+
+    _renderBackendNeeded() {
+        this.body.replaceChildren(
+            $el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') }),
+        );
     }
 
     async _start() {
@@ -352,12 +427,12 @@ async function _loadGlobeAssets() {
         // Hosted locally under /assets/vendor/ so COEP: credentialless doesn't
         // need a CORP header from a CDN — one less failure mode in production.
         if (!window.THREE) {
-            await _loadScript('/assets/vendor/three.min.js?v=6');
+            await _loadScript('/assets/vendor/three.min.js?v=7');
         }
         if (!window.ENCOM || !window.ENCOM.Globe) {
-            await _loadScript('/assets/vendor/encom-globe.js?v=6');
+            await _loadScript('/assets/vendor/encom-globe.js?v=7');
         }
-        const gridResp = await fetch('/assets/vendor/grid.json?v=6', { credentials: 'same-origin' });
+        const gridResp = await fetch('/assets/vendor/grid.json?v=7', { credentials: 'same-origin' });
         if (!gridResp.ok) throw new Error('grid.json ' + gridResp.status);
         const grid = await gridResp.json();
         return { grid };
@@ -436,6 +511,7 @@ class LocationGlobeWidget extends Widget {
     }
 
     async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
         try {
             const { data } = await jget('/api/geo');
             this._lastGeo = data;
@@ -444,6 +520,40 @@ class LocationGlobeWidget extends Widget {
         } catch (e) {
             this._meta.textContent = tr('widget.globe.unavailable');
         }
+    }
+
+    _renderSandbox() {
+        // Browser geolocation is user-gated. Don't prompt silently — render
+        // a "show my location" button once, and on click request a single
+        // position, then pin it. The globe keeps spinning meanwhile so the
+        // widget looks alive even if the user never grants permission.
+        if (this._geoAttempted) return;
+        if (!navigator.geolocation) { this._meta.textContent = tr('widget.globe.geo_unsupported'); return; }
+        if (this._lastGeo) { this._refreshMeta(this._lastGeo); return; }
+        this._meta.replaceChildren(
+            $el('span', { class: 'globe-meta-note', text: tr('widget.globe.geo_hint') + ' ' }),
+            $el('button', {
+                class: 'globe-meta-btn', text: tr('widget.globe.geo_btn'),
+                onclick: () => this._requestBrowserGeo(),
+            }),
+        );
+    }
+
+    _requestBrowserGeo() {
+        if (this._geoAttempted) return;
+        this._geoAttempted = true;
+        this._meta.textContent = tr('widget.globe.geo_pending');
+        navigator.geolocation.getCurrentPosition(pos => {
+            const geo = {
+                ip: null, city: null, region: null, country: null, org: null,
+                lat: pos.coords.latitude, lon: pos.coords.longitude,
+            };
+            this._lastGeo = geo;
+            this._placePin(geo);
+            this._refreshMeta(geo);
+        }, err => {
+            this._meta.textContent = tr('widget.globe.geo_denied');
+        }, { timeout: 10_000, maximumAge: 10 * 60_000 });
     }
 
     _placePin(geo) {
@@ -494,8 +604,11 @@ class NetChartWidget extends Widget {
     async tick() {
         const started = performance.now();
         let ok = false;
+        const probeUrl = isSandbox()
+            ? ('/assets/favicon.svg?probe=' + Math.floor(Date.now() / 1000))
+            : api('/api/ping');
         try {
-            const r = await fetch(api('/api/ping'), { credentials: 'include' });
+            const r = await fetch(probeUrl, { credentials: 'include', cache: 'no-store' });
             ok = r.ok;
         } catch (_) { ok = false; }
         const rtt = performance.now() - started;
@@ -594,6 +707,15 @@ class LocalSetupWidget extends Widget {
 }
 
 export function mountSandboxSidebar(parent, ctx = {}) {
+    // Flag the page as sandbox so every widget's tick() takes its
+    // browser-only path and never pokes /api/*. Flipping this to false
+    // after an install would re-animate the sidebar against localhost,
+    // but today we simply reload into server mode instead (see app.js).
+    (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
+    // Same widget roster as server mode so the sidebar looks consistent
+    // before and after the user installs a local backend. Each widget
+    // detects isSandbox() and renders either browser-native data or a
+    // helpful "install the backend to see X" empty state.
     const widgets = [
         new ClockWidget({ parent }),
         new LocalSetupWidget({
@@ -601,6 +723,13 @@ export function mountSandboxSidebar(parent, ctx = {}) {
             onInstall: ctx.onInstall,
             onConnect: ctx.onConnect,
         }),
+        new LocationGlobeWidget({ parent }),
+        new MobileQRWidget({ parent, audio: ctx.audio }),
+        new SysInfoWidget({ parent }),
+        new CpuInfoWidget({ parent }),
+        new RamWatcherWidget({ parent }),
+        new NetStatWidget({ parent }),
+        new NetChartWidget({ parent }),
         new SandboxInfoWidget({ parent }),
     ];
     widgets.forEach(w => w.start());

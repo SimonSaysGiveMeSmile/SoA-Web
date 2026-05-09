@@ -26,6 +26,10 @@ BRANCH="${SOA_WEB_BRANCH:-main}"
 PORT="${SOA_WEB_PORT:-4010}"
 INSTALL_DIR="${SOA_WEB_DIR:-$HOME/.soa-web}"
 SERVICE_LABEL="app.s0a.web.local"
+# Deployed frontend origin. The installer adds this to the backend's CORS
+# allowlist so visiting the hosted site auto-upgrades into server mode
+# (the frontend probes http://127.0.0.1:4010/api/ping on every load).
+FRONTEND_ORIGIN="${SOA_WEB_FRONTEND:-https://www.s0a.app}"
 
 log() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!! \033[0m %s\n' "$*"; }
@@ -118,6 +122,8 @@ if [ "$PLATFORM" = "darwin" ]; then
         <key>SOA_WEB_PORT</key><string>$PORT</string>
         <key>SOA_WEB_HOST</key><string>127.0.0.1</string>
         <key>SOA_WEB_AUTOPAIR</key><string>0</string>
+        <key>SOA_WEB_ALLOWED_ORIGINS</key><string>$FRONTEND_ORIGIN,http://127.0.0.1:$PORT,http://localhost:$PORT</string>
+        <key>SOA_WEB_SECURE_COOKIE</key><string>1</string>
         <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>
     <key>RunAtLoad</key><true/>
@@ -146,6 +152,8 @@ WorkingDirectory=$INSTALL_DIR
 Environment=SOA_WEB_PORT=$PORT
 Environment=SOA_WEB_HOST=127.0.0.1
 Environment=SOA_WEB_AUTOPAIR=0
+Environment=SOA_WEB_ALLOWED_ORIGINS=$FRONTEND_ORIGIN,http://127.0.0.1:$PORT,http://localhost:$PORT
+Environment=SOA_WEB_SECURE_COOKIE=1
 ExecStart=$NODE_BIN $INSTALL_DIR/server/src/index.js
 Restart=on-failure
 RestartSec=2
