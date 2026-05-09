@@ -161,14 +161,15 @@ html, body {
   z-index: 2;
 }
 
-.terms { position: relative; background: var(--soa-bg); }
+.terms { position: relative; background: var(--soa-bg); overflow: hidden; }
 .terms .term {
   position: absolute; inset: 0;
   display: none;
-  padding: 8px 10px;
+  padding: 4px 6px;
 }
 .terms .term.active { display: block; }
 .terms .xterm { height: 100%; }
+.terms .xterm-viewport { background: transparent !important; }
 .terms .term-empty {
   display: grid; place-items: center; height: 100%;
   font-family: var(--font-mono); font-size: 13px; opacity: 0.6;
@@ -187,6 +188,21 @@ html, body {
 #status-conn.ok   { color: var(--soa-green); }
 #status-conn.warn { color: var(--soa-yellow); }
 #status-conn.err  { color: var(--soa-red); }
+
+/* The brand name wraps an anchor pointing at the video explaining the
+   origin of the name. Visually indistinguishable from plain text — same
+   color, same letter-spacing, same glow — so it doesn't read as a link
+   unless hovered. */
+.soa-name-link,
+.soa-name-link:visited,
+.soa-name-link:hover,
+.soa-name-link:active {
+    color: inherit;
+    text-decoration: none;
+    letter-spacing: inherit;
+    text-shadow: inherit;
+    cursor: pointer;
+}
 
 /* ── Mobile topbar + terminal density ──────────────────────────────────
    Tight layout so tabs + actions fit on one row without horizontal
@@ -208,7 +224,6 @@ html, body {
         font-size: 10px;
         letter-spacing: 0.15em;
     }
-    .terms .term { padding: 4px 6px; }
     .status-bar { gap: 10px; padding: 0 8px; font-size: 10px; }
 }
 
@@ -364,17 +379,11 @@ body.nocursor, body.nocursor * { cursor: none !important; }
 }
 
 /* ── Welcome gate ───────────────────────────────────────────────────── */
-/* Shown to every first-visit visitor (flag: html[data-welcome]) plus
-   every visit from mobile (html[data-welcome-mobile]). Typography uses
-   size + letter-spacing + opacity to create hierarchy since Fira Mono
-   ships a single weight. Scale (desktop):
-     H1 title   28px / 0.14em / white
-     H2 label   12px / 0.22em / dim caps
-     H3 col     14px / 0.12em
-     lead       15px / 1.6  / 0.85 opacity
-     body       13px / 1.6  / 0.82 opacity
-     caption    11px / 1.5  / 0.6 opacity
-   Mobile scales everything down ~2px so the card fits on a 375px phone. */
+/* Shown on first visit (html[data-welcome]) and on every mobile visit
+   (html[data-welcome-mobile]). Kept intentionally short — a 2-column
+   compare card plus one install command — so it fits on a 667px-tall
+   iPhone viewport without scrolling. Typography hierarchy from size +
+   letter-spacing + opacity since Fira Mono has one weight only. */
 #welcome { display: none; }
 html[data-welcome="1"] #welcome { display: flex; }
 html[data-welcome="1"] #boot,
@@ -383,20 +392,20 @@ html[data-welcome="1"] body { overflow: hidden; }
 
 .welcome {
     position: fixed; inset: 0;
-    align-items: flex-start; justify-content: center;
-    padding: 40px 24px 48px;
+    align-items: center; justify-content: center;
+    padding: 32px 24px;
     overflow-y: auto;
     background: #05080d;
     color: #aacfd1;
     font-family: 'Fira Mono', ui-monospace, Menlo, Consolas, monospace;
     z-index: 10000;
 }
-.welcome-inner { width: 100%; max-width: 680px; }
+.welcome-inner { width: 100%; max-width: 640px; }
 
-.welcome-head { text-align: center; margin-bottom: 28px; }
+.welcome-head { text-align: center; margin-bottom: 22px; }
 .welcome-title {
     margin: 0;
-    font-size: 28px;
+    font-size: 26px;
     letter-spacing: 0.14em;
     font-weight: 400;
     color: #e6f4f6;
@@ -404,112 +413,88 @@ html[data-welcome="1"] body { overflow: hidden; }
 .welcome-sub {
     margin: 6px 0 0;
     font-size: 10px;
-    letter-spacing: 0.28em;
+    letter-spacing: 0.26em;
     color: rgba(170, 207, 209, 0.5);
-}
-
-.welcome-section { margin-bottom: 22px; }
-
-.welcome-h2 {
-    margin: 0 0 10px;
-    font-size: 12px;
-    font-weight: 400;
-    letter-spacing: 0.22em;
-    color: rgba(170, 207, 209, 0.55);
-    text-transform: uppercase;
-}
-.welcome-h2::before {
-    content: '// ';
-    color: rgba(170, 207, 209, 0.3);
-}
-
-.welcome-lead {
-    margin: 0;
-    font-size: 15px;
-    line-height: 1.6;
-    color: rgba(170, 207, 209, 0.88);
 }
 
 .welcome-compare {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 14px;
+    gap: 12px;
+    margin-bottom: 18px;
 }
 .welcome-col {
     border: 1px solid rgba(170, 207, 209, 0.2);
     background: rgba(170, 207, 209, 0.03);
-    padding: 16px 16px 14px;
+    padding: 14px 14px 12px;
 }
 .welcome-col--accent {
     border-color: rgba(170, 207, 209, 0.35);
     background: rgba(170, 207, 209, 0.055);
 }
 .welcome-h3 {
-    margin: 0 0 10px;
-    font-size: 14px;
+    margin: 0 0 8px;
+    font-size: 13px;
     font-weight: 400;
     letter-spacing: 0.12em;
     color: #e6f4f6;
 }
 .welcome-tag {
     font-size: 10px;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.16em;
     color: rgba(170, 207, 209, 0.5);
-    padding-left: 8px;
+    padding-left: 6px;
 }
 .welcome-list {
     margin: 0;
     padding: 0;
     list-style: none;
-    font-size: 13px;
-    line-height: 1.55;
+    font-size: 12px;
+    line-height: 1.45;
     color: rgba(170, 207, 209, 0.82);
 }
 .welcome-list li {
-    padding: 3px 0;
+    padding: 4px 0;
     border-top: 1px dashed rgba(170, 207, 209, 0.12);
 }
 .welcome-list li:first-child { border-top: none; }
-.welcome-list em {
-    font-style: normal;
-    letter-spacing: 0.08em;
-    padding-right: 6px;
-    font-size: 11px;
-    color: rgba(170, 207, 209, 0.55);
+.welcome-list li.no { color: rgba(170, 207, 209, 0.5); }
+.welcome-list li.no::before {
+    content: '× ';
+    color: rgba(255, 110, 110, 0.7);
+    margin-right: 2px;
 }
-.welcome-list li:has(em:only-child),
-.welcome-list em { text-transform: uppercase; }
 
-.welcome-steps {
-    margin: 0;
-    padding-left: 22px;
-    font-size: 13px;
-    line-height: 1.7;
-    color: rgba(170, 207, 209, 0.85);
+.welcome-cta { margin-bottom: 18px; }
+.welcome-cta-caption {
+    margin: 0 0 8px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: rgba(170, 207, 209, 0.7);
 }
-.welcome-steps li { margin-bottom: 10px; }
-.welcome-steps strong {
-    font-weight: 400;
-    color: #e6f4f6;
-    letter-spacing: 0.02em;
+.welcome-cmdwrap {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
 }
 .welcome-cmd {
-    display: block;
-    margin: 8px 0 6px;
-    padding: 11px 13px;
+    flex: 1;
+    margin: 0;
+    padding: 10px 12px;
     background: rgba(170, 207, 209, 0.07);
     border: 1px solid rgba(170, 207, 209, 0.2);
     color: #d8eef0;
     font-size: 12px;
-    line-height: 1.4;
-    white-space: pre-wrap; word-break: break-all;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow-x: auto;
     user-select: all;
 }
 .welcome-copy {
     background: transparent;
     color: #aacfd1;
     border: 1px solid rgba(170, 207, 209, 0.28);
-    padding: 6px 14px;
+    padding: 0 14px;
     font-family: inherit;
     font-size: 10px;
     letter-spacing: 0.14em;
@@ -519,8 +504,7 @@ html[data-welcome="1"] body { overflow: hidden; }
 .welcome-copy:active { background: rgba(170, 207, 209, 0.12); }
 
 .welcome-foot {
-    margin-top: 28px;
-    padding-top: 16px;
+    padding-top: 14px;
     border-top: 1px dashed rgba(170, 207, 209, 0.18);
     display: flex;
     justify-content: space-between;
@@ -540,27 +524,33 @@ html[data-welcome="1"] body { overflow: hidden; }
     background: #aacfd1;
     color: #05080d;
     border: 1px solid #aacfd1;
-    padding: 10px 20px;
+    padding: 9px 18px;
     font-family: inherit;
-    font-size: 12px;
+    font-size: 11px;
     letter-spacing: 0.18em;
     cursor: pointer;
 }
 .welcome-enter:hover { background: #c8dfe1; border-color: #c8dfe1; }
 .welcome-enter:active { transform: translateY(1px); }
 
-/* Phone: collapse the compare to one column, drop sizes ~2px. */
+/* Phone: collapse the compare to one column, shrink type. Tight padding
+   + scaled sizes keep the whole welcome above the fold on 375×667. */
 @media (max-width: 640px) {
-    .welcome { padding: 24px 16px 32px; }
-    .welcome-title { font-size: 22px; }
-    .welcome-sub { font-size: 9px; letter-spacing: 0.22em; }
-    .welcome-head { margin-bottom: 20px; }
-    .welcome-compare { grid-template-columns: 1fr; }
-    .welcome-lead { font-size: 13px; }
-    .welcome-list, .welcome-steps { font-size: 12px; }
-    .welcome-cmd { font-size: 11px; padding: 10px 11px; }
-    .welcome-h3 { font-size: 13px; }
-    .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 12px; }
-    .welcome-enter { width: 100%; padding: 12px; }
+    .welcome { padding: 16px 14px; align-items: flex-start; }
+    .welcome-title { font-size: 20px; letter-spacing: 0.12em; }
+    .welcome-sub { font-size: 9px; letter-spacing: 0.2em; }
+    .welcome-head { margin-bottom: 14px; }
+    .welcome-compare { grid-template-columns: 1fr; gap: 8px; margin-bottom: 14px; }
+    .welcome-col { padding: 10px 12px; }
+    .welcome-h3 { font-size: 12px; margin-bottom: 6px; }
+    .welcome-list { font-size: 11.5px; line-height: 1.4; }
+    .welcome-list li { padding: 3px 0; }
+    .welcome-cta { margin-bottom: 14px; }
+    .welcome-cta-caption { font-size: 10.5px; }
+    .welcome-cmd { font-size: 10.5px; padding: 9px 10px; }
+    .welcome-cmdwrap { flex-direction: column; gap: 6px; }
+    .welcome-copy { padding: 7px 0; }
+    .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 10px; padding-top: 10px; }
+    .welcome-enter { width: 100%; padding: 11px; }
     .welcome-link { text-align: center; }
 }

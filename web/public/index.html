@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>SON OF ANTON · WEB</title>
-  <link rel="icon" href="/assets/favicon.svg?v=9" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=9">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=9">
+  <link rel="icon" href="/assets/favicon.svg?v=10" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=10">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=10">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -39,92 +39,167 @@
   <div id="welcome" class="welcome" aria-hidden="true">
     <div class="welcome-inner">
       <header class="welcome-head">
-        <h1 class="welcome-title">SON OF ANTON</h1>
+        <h1 class="welcome-title"><a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a></h1>
         <p class="welcome-sub">WEB TERMINAL · PROTOCOL v1</p>
       </header>
 
-      <section class="welcome-section">
-        <h2 class="welcome-h2">What this is</h2>
-        <p class="welcome-lead">
-          A TRON-styled terminal emulator. Two ways to run it — each with a
-          different scope.
-        </p>
-      </section>
-
-      <section class="welcome-section welcome-compare">
+      <section class="welcome-compare">
         <article class="welcome-col">
-          <h3 class="welcome-h3">Web <span class="welcome-tag">this page</span></h3>
+          <h3 class="welcome-h3" data-w="col_web_title">Web <span class="welcome-tag" data-w="col_web_sub">this page</span></h3>
           <ul class="welcome-list">
-            <li><em>Can</em> — in-browser sandbox shell (no install)</li>
-            <li><em>Can</em> — connect to your own backend once installed</li>
-            <li><em>Can't</em> — touch your computer without the installer</li>
-            <li><em>Can't</em> — work on a phone (needs real keyboard)</li>
+            <li data-w="web_b1">In-browser sandbox shell — no install</li>
+            <li data-w="web_b2">Auto-connects to a local backend once installed</li>
+            <li class="no" data-w="web_b3">Can't touch your OS on its own</li>
           </ul>
         </article>
         <article class="welcome-col welcome-col--accent">
-          <h3 class="welcome-h3">Desktop app <span class="welcome-tag">full</span></h3>
+          <h3 class="welcome-h3" data-w="col_desk_title">Desktop <span class="welcome-tag" data-w="col_desk_sub">installed</span></h3>
           <ul class="welcome-list">
-            <li><em>Can</em> — spawn real shells on your OS</li>
-            <li><em>Can</em> — pair your phone via QR + tunnel</li>
-            <li><em>Can</em> — live system widgets (CPU, memory, net, geo)</li>
-            <li><em>Can't</em> — run without download + install</li>
+            <li data-w="desk_b1">Real shells on your OS</li>
+            <li data-w="desk_b2">Phone pairing via QR + tunnel</li>
+            <li data-w="desk_b3">Live CPU / memory / network / geo</li>
           </ul>
         </article>
       </section>
 
-      <section class="welcome-section">
-        <h2 class="welcome-h2">Get started</h2>
-        <ol class="welcome-steps">
-          <li><strong>Just try it</strong> — close this and you land in the browser sandbox. No install.</li>
-          <li><strong>Want real shells?</strong> Paste this into Terminal on your Mac or Linux machine:
-            <pre class="welcome-cmd" id="welcome-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
-            <button class="welcome-copy" id="welcome-copy">COPY</button>
-          </li>
-          <li><strong>Reload.</strong> The site auto-detects your local backend and unlocks full mode.</li>
-        </ol>
+      <section class="welcome-cta">
+        <p class="welcome-cta-caption" data-w="cmd_caption">Want real shells? Paste this in Terminal:</p>
+        <div class="welcome-cmdwrap">
+          <pre class="welcome-cmd" id="welcome-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
+          <button class="welcome-copy" id="welcome-copy" data-w="copy">COPY</button>
+        </div>
       </section>
 
       <footer class="welcome-foot">
-        <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener">source · github</a>
-        <button class="welcome-enter" id="welcome-enter">ENTER TERMINAL →</button>
+        <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">source · github</a>
+        <button class="welcome-enter" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
       </footer>
     </div>
   </div>
   <script>
-    // Wire the welcome's interactive bits. Inline so they work even when the
-    // module app.js below fails (ad blockers, parse errors, flaky CDNs).
+    // Wire the welcome's interactive bits + localize. Inline so they work
+    // even when the module app.js below fails (ad blockers, parse errors,
+    // flaky CDNs). The inline dict intentionally duplicates a handful of
+    // strings already translated in /assets/i18n.js — the welcome runs
+    // before any module can load, so it has to be self-contained.
     (function wireWelcome() {
         var html = document.documentElement;
         if (html.dataset.welcome !== '1') return;
         var isMobile = html.dataset.welcomeMobile === '1';
+
+        var DICT = {
+            en: {
+                col_web_title: 'Web', col_web_sub: 'this page',
+                col_desk_title: 'Desktop', col_desk_sub: 'installed',
+                web_b1: 'In-browser sandbox shell — no install',
+                web_b2: 'Auto-connects to a local backend once installed',
+                web_b3: "Can't touch your OS on its own",
+                desk_b1: 'Real shells on your OS',
+                desk_b2: 'Phone pairing via QR + tunnel',
+                desk_b3: 'Live CPU / memory / network / geo',
+                cmd_caption: 'Want real shells? Paste this in Terminal:',
+                copy: 'COPY', copied: 'COPIED', select_copy: 'select + copy',
+                github: 'source · github',
+                enter: 'ENTER TERMINAL →', continue_anyway: 'continue anyway →',
+            },
+            zh: {
+                col_web_title: '网页', col_web_sub: '本页面',
+                col_desk_title: '桌面', col_desk_sub: '已安装',
+                web_b1: '浏览器内沙盒 shell —— 无需安装',
+                web_b2: '安装本地后端后自动连接',
+                web_b3: '无法独立访问你的操作系统',
+                desk_b1: '在你的操作系统上运行真实 shell',
+                desk_b2: '通过二维码 + 隧道配对手机',
+                desk_b3: '实时 CPU / 内存 / 网络 / 位置',
+                cmd_caption: '想要真实 shell?在终端粘贴:',
+                copy: '复制', copied: '已复制', select_copy: '选中 + 复制',
+                github: '源代码 · GitHub',
+                enter: '进入终端 →', continue_anyway: '仍然继续 →',
+            },
+            fr: {
+                col_web_title: 'Web', col_web_sub: 'cette page',
+                col_desk_title: 'Bureau', col_desk_sub: 'installé',
+                web_b1: 'Shell bac-à-sable dans le navigateur — sans install',
+                web_b2: 'Se connecte auto à un backend local après install',
+                web_b3: "Ne peut pas accéder à votre OS seul",
+                desk_b1: 'Vrais shells sur votre OS',
+                desk_b2: 'Appairage téléphone via QR + tunnel',
+                desk_b3: 'CPU / mémoire / réseau / géo en direct',
+                cmd_caption: 'De vrais shells ? Collez ceci dans le Terminal :',
+                copy: 'COPIER', copied: 'COPIÉ', select_copy: 'sélectionner + copier',
+                github: 'source · github',
+                enter: 'ENTRER DANS LE TERMINAL →', continue_anyway: 'continuer quand même →',
+            },
+            de: {
+                col_web_title: 'Web', col_web_sub: 'diese Seite',
+                col_desk_title: 'Desktop', col_desk_sub: 'installiert',
+                web_b1: 'Sandbox-Shell im Browser — keine Installation',
+                web_b2: 'Verbindet sich nach Installation auto. mit dem lokalen Backend',
+                web_b3: 'Kann Ihr OS nicht allein erreichen',
+                desk_b1: 'Echte Shells auf Ihrem OS',
+                desk_b2: 'Telefon-Kopplung via QR + Tunnel',
+                desk_b3: 'Live CPU / Speicher / Netz / Geo',
+                cmd_caption: 'Echte Shells? Das im Terminal einfügen:',
+                copy: 'KOPIEREN', copied: 'KOPIERT', select_copy: 'auswählen + kopieren',
+                github: 'Quelle · GitHub',
+                enter: 'TERMINAL BETRETEN →', continue_anyway: 'trotzdem fortfahren →',
+            },
+            es: {
+                col_web_title: 'Web', col_web_sub: 'esta página',
+                col_desk_title: 'Escritorio', col_desk_sub: 'instalado',
+                web_b1: 'Shell sandbox en el navegador — sin instalación',
+                web_b2: 'Se conecta auto a un backend local tras instalar',
+                web_b3: 'No puede tocar tu SO por sí solo',
+                desk_b1: 'Shells reales en tu SO',
+                desk_b2: 'Vinculación de móvil vía QR + túnel',
+                desk_b3: 'CPU / memoria / red / geo en vivo',
+                cmd_caption: '¿Shells reales? Pega esto en Terminal:',
+                copy: 'COPIAR', copied: 'COPIADO', select_copy: 'seleccionar + copiar',
+                github: 'fuente · github',
+                enter: 'ENTRAR AL TERMINAL →', continue_anyway: 'continuar de todos modos →',
+            },
+        };
+
+        function pickLang() {
+            var supported = ['en', 'zh', 'fr', 'de', 'es'];
+            try {
+                var stored = localStorage.getItem('soa-web:lang');
+                if (stored && supported.indexOf(stored) !== -1) return stored;
+            } catch (_) {}
+            var nav = (navigator.language || 'en').slice(0, 2).toLowerCase();
+            return supported.indexOf(nav) !== -1 ? nav : 'en';
+        }
+
+        var lang = pickLang();
+        var strings = DICT[lang] || DICT.en;
+        document.querySelectorAll('#welcome [data-w]').forEach(function (node) {
+            var key = node.getAttribute('data-w');
+            if (strings[key] != null) node.textContent = strings[key];
+        });
+
         var copyBtn = document.getElementById('welcome-copy');
         var cmd = document.getElementById('welcome-cmd');
         if (copyBtn && cmd) copyBtn.addEventListener('click', function () {
             var text = cmd.textContent;
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(text).then(function () {
-                    copyBtn.textContent = 'COPIED';
-                    setTimeout(function () { copyBtn.textContent = 'COPY'; }, 1400);
-                }, function () { copyBtn.textContent = 'select + copy'; });
+                    copyBtn.textContent = strings.copied;
+                    setTimeout(function () { copyBtn.textContent = strings.copy; }, 1400);
+                }, function () { copyBtn.textContent = strings.select_copy; });
             } else {
                 var r = document.createRange(); r.selectNode(cmd);
                 var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-                copyBtn.textContent = 'select + copy';
+                copyBtn.textContent = strings.select_copy;
             }
         });
         var enter = document.getElementById('welcome-enter');
         if (enter) {
-            // Label flips based on whether the terminal is usable here. On
-            // mobile the button carries a bypass flag — only meant for
-            // demos/devs — so we make the copy clearer.
-            if (isMobile) enter.textContent = 'continue anyway →';
+            if (isMobile) enter.textContent = strings.continue_anyway;
             enter.addEventListener('click', function () {
                 try {
                     if (isMobile) localStorage.setItem('soa_web_mobile_bypass', '1');
                     localStorage.setItem('soa_web_welcomed', '1');
                 } catch (_) {}
-                // On desktop we just hide the gate and boot inline — no
-                // reload needed since the module already loaded.
                 if (!isMobile && window.__soaBootNow) {
                     html.removeAttribute('data-welcome');
                     window.__soaBootNow();
@@ -138,7 +213,7 @@
   <div id="boot" class="boot">
     <div class="boot-grid"></div>
     <div class="boot-inner">
-      <h1 class="boot-title">SON OF ANTON</h1>
+      <h1 class="boot-title"><a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a></h1>
       <p class="boot-sub" data-i18n="brand.sub">WEB TERMINAL · PROTOCOL v1</p>
       <p class="boot-status" id="boot-status" data-i18n="boot.negotiating">negotiating session…</p>
     </div>
@@ -146,7 +221,7 @@
 
   <div id="shell" class="shell hidden">
     <header class="topbar">
-      <div class="brand">SON OF ANTON · WEB</div>
+      <div class="brand"><a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a> · WEB</div>
       <div class="tabs" id="tabs"></div>
       <div class="topbar-actions">
         <select id="lang" class="lang-select" aria-label="Language"></select>
@@ -172,6 +247,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=9"></script>
+  <script type="module" src="/assets/app.js?v=10"></script>
 </body>
 </html>

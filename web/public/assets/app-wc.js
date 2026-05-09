@@ -14,10 +14,10 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js?v=9';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=9';
-import { mountSandboxSidebar } from '/assets/widgets.js?v=9';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=9';
+import { AudioFX } from '/assets/audiofx.js?v=10';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=10';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=10';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=10';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
@@ -234,6 +234,16 @@ class WCShell {
                 openSettingsModal();
             }
         });
+        // The #shell container boots hidden, so xterm sees 0×0 on first fit.
+        // Observe the terms box so we re-fit as soon as it actually gains
+        // size (shell unhide, sidebar toggle, viewport resize, font load).
+        if (typeof ResizeObserver !== 'undefined' && this.termsEl) {
+            this._ro = new ResizeObserver(() => this._fitActive());
+            this._ro.observe(this.termsEl);
+        }
+        if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(() => this._fitActive()).catch(() => {});
+        }
     }
 
     _applySettings(s) {

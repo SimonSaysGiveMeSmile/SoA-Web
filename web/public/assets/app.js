@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=9';
-import { AudioFX } from '/assets/audiofx.js?v=9';
-import { mountSidebar } from '/assets/widgets.js?v=9';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=9';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=9';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=10';
+import { AudioFX } from '/assets/audiofx.js?v=10';
+import { mountSidebar } from '/assets/widgets.js?v=10';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=10';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=10';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -258,6 +258,19 @@ class Shell {
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
+
+        // The #shell container boots hidden so xterm measures 0×0 on init.
+        // Once the shell unhides (app.js boot flow) or the sidebar toggles,
+        // the terms box gets its real size — refit whenever that happens so
+        // the terminal grows into every available pixel. Also refit after
+        // web fonts load, since Fira Mono metrics differ from the fallback.
+        if (typeof ResizeObserver !== 'undefined') {
+            this._ro = new ResizeObserver(() => this._fitActive());
+            this._ro.observe(this.termsEl);
+        }
+        if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(() => this._fitActive()).catch(() => {});
+        }
 
         bridge.addEventListener('hello',     e => this._onHello(e.detail));
         bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
@@ -543,7 +556,7 @@ async function _doBoot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=9');
+    await import('/assets/app-wc.js?v=10');
 }
 
 async function boot() {
