@@ -42,6 +42,8 @@ const DICTS = {
         'topbar.new_tab': '＋ TAB',
         'topbar.new_tab_title': 'New tab (Ctrl+Shift+T)',
         'topbar.lang_title': 'Language',
+        'topbar.release': '⬇ GET',
+        'topbar.release_title': 'Download the latest release on GitHub',
         'tab.default': 'tab {id}',
         'tab.rename_prompt': 'Rename tab',
         'tab.exited': '[process exited with code {code}]',
@@ -88,6 +90,8 @@ const DICTS = {
         'topbar.new_tab': '＋ 标签',
         'topbar.new_tab_title': '新建标签 (Ctrl+Shift+T)',
         'topbar.lang_title': '语言',
+        'topbar.release': '⬇ 下载',
+        'topbar.release_title': '在 GitHub 下载最新版本',
         'tab.default': '标签 {id}',
         'tab.rename_prompt': '重命名标签',
         'tab.exited': '[进程已退出,代码 {code}]',
@@ -134,6 +138,8 @@ const DICTS = {
         'topbar.new_tab': '＋ ONGLET',
         'topbar.new_tab_title': 'Nouvel onglet (Ctrl+Maj+T)',
         'topbar.lang_title': 'Langue',
+        'topbar.release': '⬇ TÉLÉCHARGER',
+        'topbar.release_title': 'Télécharger la dernière version sur GitHub',
         'tab.default': 'onglet {id}',
         'tab.rename_prompt': "Renommer l'onglet",
         'tab.exited': '[processus terminé avec le code {code}]',
@@ -180,6 +186,8 @@ const DICTS = {
         'topbar.new_tab': '＋ TAB',
         'topbar.new_tab_title': 'Neuer Tab (Strg+Umschalt+T)',
         'topbar.lang_title': 'Sprache',
+        'topbar.release': '⬇ DOWNLOAD',
+        'topbar.release_title': 'Neueste Version auf GitHub herunterladen',
         'tab.default': 'Tab {id}',
         'tab.rename_prompt': 'Tab umbenennen',
         'tab.exited': '[Prozess beendet mit Code {code}]',
@@ -226,6 +234,8 @@ const DICTS = {
         'topbar.new_tab': '＋ PESTAÑA',
         'topbar.new_tab_title': 'Nueva pestaña (Ctrl+Mayús+T)',
         'topbar.lang_title': 'Idioma',
+        'topbar.release': '⬇ DESCARGAR',
+        'topbar.release_title': 'Descargar la última versión en GitHub',
         'tab.default': 'pestaña {id}',
         'tab.rename_prompt': 'Renombrar pestaña',
         'tab.exited': '[proceso terminado con código {code}]',
@@ -303,7 +313,13 @@ export function applyStatic(root = document) {
     try { root.documentElement && (root.documentElement.lang = current); } catch (_) {}
     root.querySelectorAll('[data-i18n]').forEach(n => {
         const key = n.getAttribute('data-i18n');
-        if (key) n.textContent = t(key);
+        if (!key) return;
+        let vars = null;
+        const rawVars = n.getAttribute('data-i18n-vars');
+        if (rawVars) {
+            try { vars = JSON.parse(rawVars); } catch (_) {}
+        }
+        n.textContent = t(key, vars);
     });
     root.querySelectorAll('[data-i18n-title]').forEach(n => {
         const key = n.getAttribute('data-i18n-title');
@@ -312,3 +328,11 @@ export function applyStatic(root = document) {
 }
 
 window.addEventListener('soa:lang', () => applyStatic(document));
+
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => applyStatic(document), { once: true });
+    } else {
+        applyStatic(document);
+    }
+}

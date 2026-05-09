@@ -15,6 +15,7 @@
  */
 
 import { AudioFX } from '/assets/audiofx.js?v=4';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=4';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
@@ -49,7 +50,7 @@ const TRON_THEME = {
 class WCTab {
     constructor(id, title, { container, proc }) {
         this.id = id;
-        this.title = title || `tab ${id}`;
+        this.title = title || tr('tab.default', { id });
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
         container.appendChild(this.container);
 
@@ -69,7 +70,7 @@ class WCTab {
         this.term.onResize(({ cols, rows }) => { try { this.proc.resize({ cols, rows }); } catch (_) {} });
         proc.output.pipeTo(new WritableStream({ write: chunk => this.term.write(chunk) })).catch(() => {});
         proc.exit.then(code => {
-            this.term.write(`\r\n\x1b[2m[process exited: ${code}]\x1b[0m\r\n`);
+            this.term.write(`\r\n\x1b[2m${tr('tab.exited_short', { code })}\x1b[0m\r\n`);
         });
     }
 
@@ -104,7 +105,7 @@ class WCShell {
             const on = audioBtn.dataset.state !== 'off';
             this.audio.setEnabled(!on);
             audioBtn.dataset.state = on ? 'off' : 'on';
-            audioBtn.textContent = on ? '♪ OFF' : '♪ FX';
+            audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
         });
 
         // In WC mode the sidebar's backend data sources (sysinfo, pairing)
@@ -259,7 +260,12 @@ class WCShell {
                 }),
             ]);
         }));
-        $('#status-tabs').textContent = `${this.tabs.size} tab${this.tabs.size === 1 ? '' : 's'}`;
+        const n = this.tabs.size;
+        const tabsEl = $('#status-tabs');
+        const tabsKey = n === 1 ? 'status.tabs_one' : 'status.tabs_other';
+        tabsEl.textContent = tr(tabsKey, { n });
+        tabsEl.setAttribute('data-i18n', tabsKey);
+        tabsEl.setAttribute('data-i18n-vars', JSON.stringify({ n }));
     }
 
     _fitActive() {
@@ -274,8 +280,32 @@ function setBootStatus(msg) {
     if (node) node.textContent = msg;
 }
 
+function wireWcLangSelector() {
+    const sel = document.querySelector('#lang');
+    if (!sel || sel.dataset.wired === '1') return;
+    sel.dataset.wired = '1';
+    sel.replaceChildren(...LANGS.map(l => {
+        const opt = document.createElement('option');
+        opt.value = l.code;
+        opt.textContent = l.label;
+        if (l.code === getLang()) opt.selected = true;
+        return opt;
+    }));
+    sel.addEventListener('change', () => setLang(sel.value));
+}
+
+function wireWcReleaseLink() {
+    const a = document.querySelector('#release-link');
+    if (!a) return;
+    const url = (window.__SOA_WEB__ || {}).releaseUrl;
+    if (url) a.href = url;
+}
+
 async function main() {
-    setBootStatus('booting sandbox…');
+    wireWcLangSelector();
+    wireWcReleaseLink();
+    applyStatic();
+    setBootStatus(tr('boot.booting_sandbox'));
     try {
         if (!WC || !WC.WebContainer) {
             throw new Error('@webcontainer/api did not load (check COEP/COOP headers and network)');
@@ -285,15 +315,17 @@ async function main() {
             catch (e) { console.warn('[soa-web:wc] auth.init failed', e); }
         }
         const wc = await WC.WebContainer.boot({ coep: 'credentialless' });
-        setBootStatus('opening shell…');
+        setBootStatus(tr('boot.opening_shell'));
 
         const audio = new AudioFX({ enabled: true });
         const shell = new WCShell(wc, { audio });
         await shell.newTab();
 
-        $('#status-session').textContent = 'sandbox · ' + location.host;
-        $('#status-conn').className = 'ok';
-        $('#status-conn').textContent = 'ready';
+        $('#status-session').textContent = tr('status.sandbox', { host: location.host });
+        const conn = $('#status-conn');
+        conn.className = 'ok';
+        conn.textContent = tr('status.ready');
+        conn.setAttribute('data-i18n', 'status.ready');
 
         setTimeout(() => {
             $('#boot').classList.add('hidden');
@@ -303,7 +335,7 @@ async function main() {
     } catch (err) {
         console.error('[soa-web:wc] boot failed', err);
         const detail = err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : String(err);
-        setBootStatus(`boot failed: ${detail}`);
+        setBootStatus(tr('boot.failed', { detail }));
     }
 }
 

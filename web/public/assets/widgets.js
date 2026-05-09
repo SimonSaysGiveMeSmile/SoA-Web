@@ -10,6 +10,8 @@
  * without coordinating an extra channel.
  */
 
+import { t as tr } from '/assets/i18n.js?v=4';
+
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(props)) {
@@ -71,12 +73,14 @@ async function jpost(url, body) {
 }
 
 class Widget {
-    constructor({ title, parent, intervalMs }) {
-        this.title = title;
+    constructor({ title, titleKey, parent, intervalMs }) {
+        this.titleKey = titleKey || null;
+        this.title = titleKey ? tr(titleKey) : title;
         this.intervalMs = intervalMs || 0;
+        this._titleEl = $el('span', { class: 'widget-title', text: `// ${this.title}` });
         this.root = $el('section', { class: 'widget' }, [
             $el('header', { class: 'widget-h' }, [
-                $el('span', { class: 'widget-title', text: `// ${title}` }),
+                this._titleEl,
                 $el('span', { class: 'widget-pulse' }),
             ]),
             $el('div', { class: 'widget-body' }),
@@ -85,6 +89,16 @@ class Widget {
         parent.appendChild(this.root);
         this._timer = null;
         this._destroyed = false;
+        this._langOff = null;
+        if (this.titleKey) {
+            const retitle = () => {
+                this.title = tr(this.titleKey);
+                this._titleEl.textContent = `// ${this.title}`;
+                if (typeof this.onLangChange === 'function') this.onLangChange();
+            };
+            window.addEventListener('soa:lang', retitle);
+            this._langOff = () => window.removeEventListener('soa:lang', retitle);
+        }
     }
 
     start() {
@@ -101,6 +115,7 @@ class Widget {
     destroy() {
         this._destroyed = true;
         this.stop();
+        if (this._langOff) { this._langOff(); this._langOff = null; }
         this.root.remove();
     }
 
@@ -120,7 +135,7 @@ class Widget {
 // ── CLOCK ────────────────────────────────────────────────────────────────
 class ClockWidget extends Widget {
     constructor({ parent }) {
-        super({ title: 'CLOCK', parent, intervalMs: 1000 });
+        super({ titleKey: 'widget.clock', parent, intervalMs: 1000 });
     }
     tick() {
         const now = new Date();
@@ -138,7 +153,7 @@ class ClockWidget extends Widget {
 // ── SYSINFO ──────────────────────────────────────────────────────────────
 class SysInfoWidget extends Widget {
     constructor({ parent }) {
-        super({ title: 'SYSTEM', parent, intervalMs: 5000 });
+        super({ titleKey: 'widget.system', parent, intervalMs: 5000 });
     }
     async tick() {
         try {
@@ -156,7 +171,7 @@ class SysInfoWidget extends Widget {
 // ── CPU ──────────────────────────────────────────────────────────────────
 class CpuInfoWidget extends Widget {
     constructor({ parent }) {
-        super({ title: 'CPU', parent, intervalMs: 4000 });
+        super({ titleKey: 'widget.cpu', parent, intervalMs: 4000 });
     }
     async tick() {
         try {
@@ -174,7 +189,7 @@ class CpuInfoWidget extends Widget {
 // ── RAM ──────────────────────────────────────────────────────────────────
 class RamWatcherWidget extends Widget {
     constructor({ parent }) {
-        super({ title: 'MEMORY', parent, intervalMs: 2500 });
+        super({ titleKey: 'widget.memory', parent, intervalMs: 2500 });
         this._bar = $el('div', { class: 'bar' }, [$el('span', { class: 'bar-fill' })]);
         this.body.appendChild(this._bar);
     }
@@ -196,13 +211,13 @@ class RamWatcherWidget extends Widget {
 // ── NETSTAT ──────────────────────────────────────────────────────────────
 class NetStatWidget extends Widget {
     constructor({ parent }) {
-        super({ title: 'NETWORK', parent, intervalMs: 8000 });
+        super({ titleKey: 'widget.network', parent, intervalMs: 8000 });
     }
     async tick() {
         try {
             const { data } = await jget('/api/net');
             const ipv4 = data.filter(a => a.family === 'IPv4' || a.family === 4).slice(0, 4);
-            if (!ipv4.length) { this.setRows([['NET', 'no interfaces']]); return; }
+            if (!ipv4.length) { this.setRows([['NET', tr('widget.net.empty')]]); return; }
             this.setRows(ipv4.map(a => [a.name.toUpperCase().slice(0, 6), a.address]));
         } catch (e) { this.setRows([['ERR', e.message]]); }
     }
@@ -211,14 +226,14 @@ class NetStatWidget extends Widget {
 // ── GIT COMMITS ──────────────────────────────────────────────────────────
 class GitCommitsWidget extends Widget {
     constructor({ parent }) {
-        super({ title: 'COMMITS', parent, intervalMs: 30_000 });
+        super({ titleKey: 'widget.commits', parent, intervalMs: 30_000 });
     }
     async tick() {
         try {
             const { data } = await jget('/api/git?limit=6');
-            if (!data.ok) { this.setRows([['GIT', data.error || 'unavailable']]); return; }
+            if (!data.ok) { this.setRows([['GIT', data.error || tr('widget.git.unavailable')]]); return; }
             const rows = data.commits.map(c => [c.hash, c.subject.slice(0, 36)]);
-            if (!rows.length) rows.push(['GIT', 'no commits']);
+            if (!rows.length) rows.push(['GIT', tr('widget.git.empty')]);
             this.setRows(rows);
         } catch (e) { this.setRows([['ERR', e.message]]); }
     }
@@ -229,12 +244,18 @@ class MobileQRWidget extends Widget {
     constructor({ parent, audio }) {
         // Poll every 6s so when the server brings up the Cloudflare tunnel
         // automatically (SOA_WEB_AUTOPAIR), the QR fills in without any click.
-        super({ title: 'MOBILE LINK', parent, intervalMs: 6000 });
+        super({ titleKey: 'widget.mobile_link', parent, intervalMs: 6000 });
         this.audio = audio;
+        this._lastState = 'idle';
+        this._lastSnap = null;
         this._render('idle', null);
     }
 
+    onLangChange() { this._render(this._lastState, this._lastSnap); }
+
     _render(state, snap) {
+        this._lastState = state;
+        this._lastSnap = snap;
         const lanList = (snap && snap.lan) || [];
         const pubUrl  = snap && snap.publicUrl;
         const target  = pubUrl || lanList[0] || null;
@@ -242,18 +263,18 @@ class MobileQRWidget extends Widget {
         this.body.replaceChildren(
             $el('div', { class: `mqr-status mqr-${state}` }, [
                 $el('span', { class: 'mqr-dot' }),
-                $el('span', { text: state.toUpperCase() }),
+                $el('span', { text: tr(`mqr.state.${state}`) }),
             ]),
             $el('div', { class: 'mqr-qr' }, target
                 ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(target)}`), alt: 'pairing QR' })]
-                : [$el('div', { class: 'mqr-empty', text: 'tap PAIR to bring up a tunnel' })]),
+                : [$el('div', { class: 'mqr-empty', text: tr('mqr.empty') })]),
             $el('div', { class: 'mqr-urls' },
                 lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
                     $el('div', { class: 'mqr-url' }, [
                         $el('span', { class: 'mqr-tag', text: i === 0 && lanList.length ? 'LAN' : 'PUB' }),
                         $el('span', { class: 'mqr-u',   text: u }),
                         $el('button', {
-                            class: 'mqr-copy', text: 'copy',
+                            class: 'mqr-copy', text: tr('mqr.copy'),
                             onclick: () => navigator.clipboard && navigator.clipboard.writeText(u),
                         }),
                     ]),
@@ -262,7 +283,7 @@ class MobileQRWidget extends Widget {
             $el('div', { class: 'mqr-actions' }, [
                 $el('button', {
                     class: 'mqr-toggle',
-                    text: state === 'online' ? 'STOP' : (state === 'starting' ? '…' : 'PAIR'),
+                    text: state === 'online' ? tr('mqr.stop') : (state === 'starting' ? '…' : tr('mqr.pair')),
                     onclick: () => state === 'online' ? this._stop() : this._start(),
                 }),
             ]),

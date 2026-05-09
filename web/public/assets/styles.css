@@ -99,13 +99,17 @@ html, body {
 .tab .x:hover { opacity: 1; color: var(--soa-red); }
 
 .topbar-actions { display: flex; gap: 8px; }
-.topbar-actions button {
+.topbar-actions button,
+.topbar-actions .release-btn {
   background: transparent; color: var(--soa-accent);
   border: 1px solid var(--soa-accent-dim); padding: 6px 10px;
   font-family: var(--font-display); font-size: 11px; letter-spacing: 0.25em;
   cursor: pointer;
+  text-decoration: none;
+  display: inline-flex; align-items: center;
 }
-.topbar-actions button:hover { border-color: var(--soa-accent); }
+.topbar-actions button:hover,
+.topbar-actions .release-btn:hover { border-color: var(--soa-accent); }
 .lang-select {
   background: transparent; color: var(--soa-accent);
   border: 1px solid var(--soa-accent-dim);
@@ -172,7 +176,8 @@ html, body {
     .tabs { gap: 4px; }
     .tab { padding: 5px 8px; font-size: 11px; letter-spacing: 0.05em; }
     .topbar-actions { gap: 4px; }
-    .topbar-actions button {
+    .topbar-actions button,
+    .topbar-actions .release-btn {
         padding: 5px 7px;
         font-size: 10px;
         letter-spacing: 0.15em;

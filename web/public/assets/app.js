@@ -19,7 +19,7 @@
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=4';
 import { AudioFX } from '/assets/audiofx.js?v=4';
 import { mountSidebar } from '/assets/widgets.js?v=4';
-import { t as tr, getLang, setLang, LANGS } from '/assets/i18n.js?v=4';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=4';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -87,6 +87,27 @@ function wsUrl(backend, token) {
 }
 
 const FETCH_INIT = { credentials: 'include' };
+
+function wireLangSelector() {
+    const sel = document.querySelector('#lang');
+    if (!sel || sel.dataset.wired === '1') return;
+    sel.dataset.wired = '1';
+    sel.replaceChildren(...LANGS.map(l => {
+        const opt = document.createElement('option');
+        opt.value = l.code;
+        opt.textContent = l.label;
+        if (l.code === getLang()) opt.selected = true;
+        return opt;
+    }));
+    sel.addEventListener('change', () => setLang(sel.value));
+}
+
+function wireReleaseLink() {
+    const a = document.querySelector('#release-link');
+    if (!a) return;
+    const url = (window.__SOA_WEB__ || {}).releaseUrl;
+    if (url) a.href = url;
+}
 
 const $  = sel => document.querySelector(sel);
 const el = (tag, props = {}, children = []) => {
@@ -432,10 +453,10 @@ async function bootServerMode({ backend, token }) {
     const crossOrigin = backend !== location.origin.replace(/\/+$/, '');
     CFG._resolvedBackend = backend;
     CFG._resolvedToken = token || '';
-    $('#boot-status').textContent = 'negotiating session…';
+    $('#boot-status').textContent = tr('boot.negotiating');
     try { await fetch(apiUrl(backend, token, '/api/me'), FETCH_INIT); } catch (_) {}
 
-    $('#boot-status').textContent = 'opening channel…';
+    $('#boot-status').textContent = tr('boot.opening');
     const audio = new AudioFX({ enabled: true });
     const bridge = new Bridge({ url: wsUrl(backend, token) });
     const shell = new Shell(bridge, { audio, backend, token });
@@ -453,6 +474,9 @@ async function bootServerMode({ backend, token }) {
 }
 
 async function boot() {
+    wireLangSelector();
+    wireReleaseLink();
+    applyStatic();
     const backend = await resolveBackend();
     if (backend) {
         await bootServerMode(backend);
@@ -468,5 +492,5 @@ boot().catch(err => {
         ? err.stack.split('\n').slice(0, 3).join(' | ')
         : String(err);
     const node = $('#boot-status');
-    if (node) node.textContent = `boot failed: ${detail}`;
+    if (node) node.textContent = tr('boot.failed', { detail });
 });

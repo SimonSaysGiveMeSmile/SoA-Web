@@ -21,5 +21,6 @@ window.__SOA_WEB__ = {
     mode: 'server',
     protocol: 1,
     backend: '',
-    wcClientId: ''
+    wcClientId: '',
+    releaseUrl: 'https://github.com/SimonSaysGiveMeSmile/SoA-Web/releases'
 };
