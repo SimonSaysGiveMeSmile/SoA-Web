@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=10';
-import { AudioFX } from '/assets/audiofx.js?v=10';
-import { mountSidebar } from '/assets/widgets.js?v=10';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=10';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=10';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=11';
+import { AudioFX } from '/assets/audiofx.js?v=11';
+import { mountSidebar } from '/assets/widgets.js?v=11';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=11';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=11';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -160,33 +160,50 @@ class TabRuntime {
         this.fit = new FitAddon.FitAddon();
         this.term.loadAddon(this.fit);
         try { this.term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
-        this.term.open(this.container);
+        // Don't open xterm yet — see _ensureOpen. Opening against a hidden /
+        // zero-sized container makes xterm cache cellWidth=0, and every later
+        // fit() then silently becomes a no-op, stranding the grid at 80×24.
+        this._opened = false;
         this._onData = null;
         this._onResize = null;
+    }
+
+    _ensureOpen() {
+        if (this._opened) return true;
+        const rect = this.container.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+        this.term.open(this.container);
+        this._opened = true;
+        if (this._onData) this.term.onData(d => this._onData && this._onData(d));
+        if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
+        return true;
     }
 
     attach(onData, onResize) {
         this._onData = onData;
         this._onResize = onResize;
-        this.term.onData(d => this._onData && this._onData(d));
-        this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
+        if (this._opened) {
+            this.term.onData(d => this._onData && this._onData(d));
+            this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
+        }
     }
 
     write(data) { this.term.write(data); }
 
     fitNow() {
+        if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
             this.fit.fit();
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
     }
 
-    focus() { this.term.focus(); }
+    focus() { if (this._opened) this.term.focus(); }
 
     applySettings(s) {
         try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
         try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
-        try { this.fit.fit(); } catch (_) {}
+        if (this._ensureOpen()) { try { this.fit.fit(); } catch (_) {} }
     }
 
     dispose() {
@@ -426,8 +443,17 @@ class Shell {
     _fitActive() {
         const rt = this.tabs.get(this.activeId);
         if (!rt) return;
-        const sz = rt.fitNow();
-        this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: this.activeId, cols: sz.cols, rows: sz.rows });
+        // xterm's renderer finalizes cell metrics over a couple of frames —
+        // especially the first time the container becomes visible. One fit
+        // catches the initial 80×24, the next frame catches the real size
+        // after layout settles. Cheap and eliminates the "terminal stays
+        // small" bug entirely.
+        const push = () => {
+            const sz = rt.fitNow();
+            if (this.bridge) this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: this.activeId, cols: sz.cols, rows: sz.rows });
+        };
+        push();
+        requestAnimationFrame(() => { push(); requestAnimationFrame(push); });
     }
 
     _sendSize() {
@@ -556,7 +582,7 @@ async function _doBoot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=10');
+    await import('/assets/app-wc.js?v=11');
 }
 
 async function boot() {

@@ -402,6 +402,38 @@ html[data-welcome="1"] body { overflow: hidden; }
 }
 .welcome-inner { width: 100%; max-width: 640px; }
 
+/* Language picker sits above the title on the welcome page. Five tiny
+   buttons; the current choice wears an accent underline. Clicking
+   re-renders copy in place (no reload) and writes to the same
+   soa-web:lang key that the main app reads, so the picked language
+   carries into the terminal UI automatically. */
+.welcome-lang {
+    display: flex;
+    justify-content: center;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+.welcome-lang button {
+    background: transparent;
+    color: rgba(170, 207, 209, 0.55);
+    border: 1px solid transparent;
+    border-bottom: 1px solid rgba(170, 207, 209, 0.14);
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    cursor: pointer;
+    transition: color 80ms, border-color 80ms;
+}
+.welcome-lang button:hover {
+    color: #aacfd1;
+    border-bottom-color: rgba(170, 207, 209, 0.4);
+}
+.welcome-lang button[aria-pressed="true"] {
+    color: #e6f4f6;
+    border-bottom-color: #aacfd1;
+}
+
 .welcome-head { text-align: center; margin-bottom: 22px; }
 .welcome-title {
     margin: 0;
@@ -540,6 +572,8 @@ html[data-welcome="1"] body { overflow: hidden; }
     .welcome-title { font-size: 20px; letter-spacing: 0.12em; }
     .welcome-sub { font-size: 9px; letter-spacing: 0.2em; }
     .welcome-head { margin-bottom: 14px; }
+    .welcome-lang { gap: 2px; margin-bottom: 10px; }
+    .welcome-lang button { padding: 3px 7px; font-size: 10.5px; letter-spacing: 0.1em; }
     .welcome-compare { grid-template-columns: 1fr; gap: 8px; margin-bottom: 14px; }
     .welcome-col { padding: 10px 12px; }
     .welcome-h3 { font-size: 12px; margin-bottom: 6px; }

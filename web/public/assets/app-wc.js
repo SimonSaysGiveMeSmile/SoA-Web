@@ -14,10 +14,10 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js?v=10';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=10';
-import { mountSandboxSidebar } from '/assets/widgets.js?v=10';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=10';
+import { AudioFX } from '/assets/audiofx.js?v=11';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=11';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=11';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=11';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
@@ -65,24 +65,40 @@ class WCTab {
         this.fit = new FitAddon.FitAddon();
         this.term.loadAddon(this.fit);
         try { this.term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
-        this.term.open(this.container);
+        // Defer term.open — see _ensureOpen. Opening against a hidden/empty
+        // container makes xterm cache cellWidth=0 and every later fit() is
+        // silently ignored, leaving the grid locked at 80×24.
+        this._opened = false;
 
         this.proc = proc;
         this.writer = proc.input.getWriter();
-        this.term.onData(d => { try { this.writer.write(d); } catch (_) {} });
-        this.term.onResize(({ cols, rows }) => { try { this.proc.resize({ cols, rows }); } catch (_) {} });
         proc.output.pipeTo(new WritableStream({ write: chunk => this.term.write(chunk) })).catch(() => {});
         proc.exit.then(code => {
             this.term.write(`\r\n\x1b[2m${tr('tab.exited_short', { code })}\x1b[0m\r\n`);
         });
     }
 
-    fitNow() { try { this.fit.fit(); } catch (_) {} return { cols: this.term.cols, rows: this.term.rows }; }
-    focus()  { this.term.focus(); }
+    _ensureOpen() {
+        if (this._opened) return true;
+        const rect = this.container.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+        this.term.open(this.container);
+        this._opened = true;
+        this.term.onData(d => { try { this.writer.write(d); } catch (_) {} });
+        this.term.onResize(({ cols, rows }) => { try { this.proc.resize({ cols, rows }); } catch (_) {} });
+        return true;
+    }
+
+    fitNow() {
+        if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
+        try { this.fit.fit(); } catch (_) {}
+        return { cols: this.term.cols, rows: this.term.rows };
+    }
+    focus()  { if (this._opened) this.term.focus(); }
     applySettings(s) {
         try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
         try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
-        try { this.fit.fit(); } catch (_) {}
+        if (this._ensureOpen()) { try { this.fit.fit(); } catch (_) {} }
     }
     dispose() {
         try { this.writer.releaseLock(); } catch (_) {}
@@ -363,7 +379,11 @@ class WCShell {
     _fitActive() {
         const tab = this.tabs.get(this.activeId);
         if (!tab) return;
+        // First call fits against the current layout; the two follow-up
+        // frames catch the case where xterm needed a tick to finalize cell
+        // metrics (the first open on a freshly-visible container).
         tab.fitNow();
+        requestAnimationFrame(() => { tab.fitNow(); requestAnimationFrame(() => tab.fitNow()); });
     }
 }
 
