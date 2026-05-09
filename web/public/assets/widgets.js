@@ -10,8 +10,8 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=8';
-import { getSettings } from '/assets/settings.js?v=8';
+import { t as tr } from '/assets/i18n.js?v=9';
+import { getSettings } from '/assets/settings.js?v=9';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -427,12 +427,12 @@ async function _loadGlobeAssets() {
         // Hosted locally under /assets/vendor/ so COEP: credentialless doesn't
         // need a CORP header from a CDN — one less failure mode in production.
         if (!window.THREE) {
-            await _loadScript('/assets/vendor/three.min.js?v=8');
+            await _loadScript('/assets/vendor/three.min.js?v=9');
         }
         if (!window.ENCOM || !window.ENCOM.Globe) {
-            await _loadScript('/assets/vendor/encom-globe.js?v=8');
+            await _loadScript('/assets/vendor/encom-globe.js?v=9');
         }
-        const gridResp = await fetch('/assets/vendor/grid.json?v=8', { credentials: 'same-origin' });
+        const gridResp = await fetch('/assets/vendor/grid.json?v=9', { credentials: 'same-origin' });
         if (!gridResp.ok) throw new Error('grid.json ' + gridResp.status);
         const grid = await gridResp.json();
         return { grid };

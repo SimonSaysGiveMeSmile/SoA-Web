@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=8';
-import { AudioFX } from '/assets/audiofx.js?v=8';
-import { mountSidebar } from '/assets/widgets.js?v=8';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=8';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=8';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=9';
+import { AudioFX } from '/assets/audiofx.js?v=9';
+import { mountSidebar } from '/assets/widgets.js?v=9';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=9';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=9';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -527,11 +527,7 @@ async function bootServerMode({ backend, token }) {
     }, s0.nointro ? 0 : 250);
 }
 
-async function boot() {
-    // If the mobile gate is active, index.html's inline script has already
-    // shown the gate and CSS is hiding #boot / #shell. Don't probe the
-    // network or load xterm runtime — the user can't use any of it.
-    if (document.documentElement.dataset.mobileGate === '1') return;
+async function _doBoot() {
     wireLangSelector();
     wireReleaseLink();
     applyStatic();
@@ -541,7 +537,21 @@ async function boot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=8');
+    await import('/assets/app-wc.js?v=9');
+}
+
+async function boot() {
+    const html = document.documentElement;
+    // Welcome gate: mobile always stops here (can't use the terminal).
+    // Desktop first-visit also stops here, but we expose __soaBootNow so
+    // the "ENTER TERMINAL" button can drop the gate and finish boot
+    // without a full reload.
+    if (html.dataset.welcomeMobile === '1') return;
+    if (html.dataset.welcome === '1') {
+        window.__soaBootNow = () => _doBoot();
+        return;
+    }
+    await _doBoot();
 }
 
 boot().catch(err => {

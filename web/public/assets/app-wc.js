@@ -14,10 +14,10 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js?v=8';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=8';
-import { mountSandboxSidebar } from '/assets/widgets.js?v=8';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=8';
+import { AudioFX } from '/assets/audiofx.js?v=9';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=9';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=9';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=9';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
