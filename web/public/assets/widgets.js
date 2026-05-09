@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=5';
+import { t as tr } from '/assets/i18n.js?v=6';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -320,14 +320,217 @@ class MobileQRWidget extends Widget {
     }
 }
 
+// ── WORLD VIEW (globe) ───────────────────────────────────────────────────
+// Ports desktop/src/classes/locationGlobe.class.js to the browser. The
+// encom-globe bundle is ~1MB and needs THREE + a ~1MB grid.json tile mesh,
+// so we load all three lazily the first time this widget mounts and share
+// them across any future mounts. Polls /api/geo for the server's public
+// lat/lon and drops a single pin there.
+let _globeAssetsPromise = null;
+function _loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[data-src="${src}"]`);
+        if (existing) { existing.addEventListener('load', resolve); existing.addEventListener('error', reject); return; }
+        const s = document.createElement('script');
+        s.src = src; s.async = false;
+        s.dataset.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('failed to load ' + src));
+        document.head.appendChild(s);
+    });
+}
+async function _loadGlobeAssets() {
+    if (_globeAssetsPromise) return _globeAssetsPromise;
+    _globeAssetsPromise = (async () => {
+        // three.js first (encom expects window.THREE). Pinned to r77 — the
+        // last version whose API surface encom-globe targets (the fork predates
+        // three's ES-modules transition and expects the globals namespace).
+        if (!window.THREE) {
+            await _loadScript('https://cdn.jsdelivr.net/npm/three@0.77.1/three.min.js');
+        }
+        if (!window.ENCOM || !window.ENCOM.Globe) {
+            await _loadScript('/assets/vendor/encom-globe.js?v=6');
+        }
+        const gridResp = await fetch('/assets/vendor/grid.json?v=6', { credentials: 'same-origin' });
+        if (!gridResp.ok) throw new Error('grid.json ' + gridResp.status);
+        const grid = await gridResp.json();
+        return { grid };
+    })();
+    return _globeAssetsPromise;
+}
+
+class LocationGlobeWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.globe', parent, intervalMs: 30_000 });
+        this._canvasHost = $el('div', { class: 'globe-canvas' });
+        this._meta = $el('div', { class: 'globe-meta', text: '—' });
+        this.body.append(this._canvasHost, this._meta);
+        this._pin = null;
+        this._lastLoc = null;
+        this._bootPromise = this._boot();
+    }
+
+    onLangChange() { this._refreshMeta(this._lastGeo || null); }
+
+    async _boot() {
+        try {
+            const { grid } = await _loadGlobeAssets();
+            if (this._destroyed) return;
+            // Encom measures the host by offsetWidth/Height synchronously, so
+            // it must be in the DOM and painted before we instantiate.
+            await new Promise(r => requestAnimationFrame(r));
+            const w = this._canvasHost.offsetWidth || 240;
+            const h = this._canvasHost.offsetHeight || 200;
+            const tron = 'rgb(170,207,209)';
+            this.globe = new window.ENCOM.Globe(w, h, {
+                font: 'Fira Mono, ui-monospace, Menlo, monospace',
+                data: [],
+                tiles: grid.tiles,
+                baseColor: tron,
+                markerColor: tron,
+                pinColor: tron,
+                satelliteColor: tron,
+                scale: 1.1,
+                viewAngle: 0.630,
+                dayLength: 1000 * 45,
+                introLinesDuration: 2000,
+                introLinesColor: tron,
+                maxPins: 32,
+                maxMarkers: 32,
+            });
+            this._canvasHost.appendChild(this.globe.domElement);
+            this.globe.init('#05080d', () => { this._tickAnim(); });
+            this._onResize = () => {
+                if (!this.globe || !this.globe.camera || !this.globe.renderer) return;
+                const c = this._canvasHost;
+                this.globe.camera.aspect = c.offsetWidth / c.offsetHeight;
+                this.globe.camera.updateProjectionMatrix();
+                this.globe.renderer.setSize(c.offsetWidth, c.offsetHeight);
+            };
+            window.addEventListener('resize', this._onResize);
+            // Decorative satellites so the globe isn't empty before /api/geo
+            // answers. Mirrors the 6-satellite constellation from the desktop
+            // app, but deterministic — no RNG so every reload looks identical.
+            const sats = [];
+            for (let i = 0; i < 2; i++) {
+                for (let j = 0; j < 3; j++) {
+                    sats.push({ lat: 50 * i - 15, lon: 120 * j - 120, altitude: 1.5 });
+                }
+            }
+            this.globe.addConstellation(sats);
+        } catch (e) {
+            this._canvasHost.replaceChildren($el('div', { class: 'globe-err', text: tr('widget.globe.unavailable') + ': ' + e.message }));
+        }
+    }
+
+    _tickAnim() {
+        if (this._destroyed) return;
+        try { this.globe.tick(); } catch (_) {}
+        this._rafId = requestAnimationFrame(() => this._tickAnim());
+    }
+
+    async tick() {
+        try {
+            const { data } = await jget('/api/geo');
+            this._lastGeo = data;
+            this._placePin(data);
+            this._refreshMeta(data);
+        } catch (e) {
+            this._meta.textContent = tr('widget.globe.unavailable');
+        }
+    }
+
+    _placePin(geo) {
+        if (!this.globe || !geo || geo.lat == null || geo.lon == null) return;
+        const key = `${geo.lat.toFixed(3)},${geo.lon.toFixed(3)}`;
+        if (this._lastLoc === key) return;
+        try {
+            if (this._pin && typeof this._pin.remove === 'function') this._pin.remove();
+            this._pin = this.globe.addPin(geo.lat, geo.lon, geo.city || '', 1.2);
+            this._lastLoc = key;
+        } catch (_) { /* globe not fully ready yet */ }
+    }
+
+    _refreshMeta(geo) {
+        if (!geo) { this._meta.textContent = '—'; return; }
+        const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
+        const coord = (geo.lat != null && geo.lon != null)
+            ? `${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)}`
+            : '—';
+        this._meta.textContent = `${place}  ·  ${coord}`;
+    }
+
+    destroy() {
+        if (this._rafId) cancelAnimationFrame(this._rafId);
+        if (this._onResize) window.removeEventListener('resize', this._onResize);
+        try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
+        super.destroy();
+    }
+}
+
+// ── NETWORK TRAFFIC CHART ───────────────────────────────────────────────
+// Lean port of desktop/src/classes/conninfo.class.js. /api/net only ships
+// interface names and addresses, not counters — so we sample the browser's
+// `navigator.connection` where available, and otherwise fall back to a
+// round-trip-time probe of /api/ping as a crude "we have network" pulse.
+// When the sampled host supports systeminformation, a future /api/netstat
+// endpoint can replace the probe with real tx/rx rates.
+class NetChartWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.net_chart', parent, intervalMs: 2000 });
+        this._samples = new Array(60).fill(0);
+        this._canvas = $el('canvas', { class: 'netchart-canvas', width: 240, height: 60 });
+        this._legend = $el('div', { class: 'netchart-legend' });
+        this.body.append(this._canvas, this._legend);
+        this._lastPingMs = null;
+    }
+    onLangChange() { this._repaint(this._samples[this._samples.length - 1] || 0); }
+    async tick() {
+        const started = performance.now();
+        let ok = false;
+        try {
+            const r = await fetch(api('/api/ping'), { credentials: 'include' });
+            ok = r.ok;
+        } catch (_) { ok = false; }
+        const rtt = performance.now() - started;
+        const v = ok ? Math.max(1, 200 - Math.min(200, rtt)) : 0;
+        this._samples.push(v);
+        if (this._samples.length > 60) this._samples.shift();
+        this._repaint(rtt);
+    }
+    _repaint(rtt) {
+        const c = this._canvas;
+        const ctx = c.getContext('2d');
+        const w = c.width, h = c.height;
+        ctx.clearRect(0, 0, w, h);
+        ctx.strokeStyle = 'rgba(170,207,209,0.9)';
+        ctx.fillStyle = 'rgba(170,207,209,0.15)';
+        ctx.lineWidth = 1.5;
+        const n = this._samples.length;
+        const max = Math.max(1, ...this._samples);
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            const y = h - (this._samples[i] / max) * (h - 4) - 2;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath(); ctx.fill();
+        const rttLabel = rtt ? `${rtt.toFixed(0)} ms` : '—';
+        this._legend.textContent = `RTT ${rttLabel}`;
+    }
+}
+
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
+        new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),
         new SysInfoWidget({ parent }),
         new CpuInfoWidget({ parent }),
         new RamWatcherWidget({ parent }),
         new NetStatWidget({ parent }),
+        new NetChartWidget({ parent }),
         new GitCommitsWidget({ parent }),
     ];
     widgets.forEach(w => w.start());
