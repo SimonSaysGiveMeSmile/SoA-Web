@@ -63,7 +63,13 @@ async function probePing(backend, token, timeoutMs = 2500) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
         const u = new URL(backend + '/api/ping');
-        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'include' });
+        if (token) u.searchParams.set('t', token);
+        // Probe without credentials. /api/ping is unauthenticated and omitting
+        // cookies sidesteps browsers that suppress third-party cookies on
+        // cross-site fetches — we only want to know whether the backend is
+        // reachable. Credentials get added back once we switch to the chosen
+        // backend in bootServerMode.
+        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'omit', cache: 'no-store' });
         if (!res.ok) return null;
         const body = await res.json().catch(() => null);
         if (!body || !body.ok) return null;

@@ -67,12 +67,21 @@ function extractPresentedToken(req) {
 
 // When the static SPA is served from a different origin (e.g. Vercel) and
 // this backend sits behind a Cloudflare Quick Tunnel, the browser needs CORS
-// on /api/* and a SameSite=None cookie. Populate SOA_WEB_ALLOWED_ORIGINS
-// with a comma-separated list of origins (e.g.
-// "https://soa-web.vercel.app,https://soa-web-preview-*.vercel.app").
-const ALLOWED_ORIGINS = (process.env.SOA_WEB_ALLOWED_ORIGINS || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
-const CROSS_SITE = ALLOWED_ORIGINS.length > 0;
+// on /api/* and a SameSite=None cookie. A default allowlist covers the
+// common case: the deployed frontend at www.s0a.app auto-upgrading to a
+// freshly installed 127.0.0.1:4010 backend. Extend via SOA_WEB_ALLOWED_ORIGINS.
+const DEFAULT_ALLOWED_ORIGINS = [
+    'https://www.s0a.app',
+    'https://s0a.app',
+    'http://localhost:' + PORT,
+    'http://127.0.0.1:' + PORT,
+];
+const ALLOWED_ORIGINS = Array.from(new Set([
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...(process.env.SOA_WEB_ALLOWED_ORIGINS || '')
+        .split(',').map(s => s.trim()).filter(Boolean),
+]));
+const CROSS_SITE = ALLOWED_ORIGINS.some(o => !/^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(o));
 
 const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
 const app = express();
@@ -82,18 +91,27 @@ app.use(express.json({ limit: '16kb' }));
 
 // CORS: only reply with the exact Origin header if it's in the allowlist. No
 // wildcard because the browser refuses credentialed requests with `*`.
+//
+// Private Network Access: Chrome blocks public→private fetches unless the
+// preflight also confirms `Access-Control-Allow-Private-Network: true`. We
+// echo the request header on allowed preflights; without this, the deployed
+// SPA can't auto-detect a freshly installed localhost backend.
 app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    const allowed = origin && ALLOWED_ORIGINS.includes(origin);
+    if (allowed) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Vary', 'Origin');
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'content-type');
         res.setHeader('Access-Control-Max-Age', '600');
+        if (req.headers['access-control-request-private-network'] === 'true') {
+            res.setHeader('Access-Control-Allow-Private-Network', 'true');
+        }
     }
     if (req.method === 'OPTIONS' && origin) {
-        return res.status(origin && ALLOWED_ORIGINS.includes(origin) ? 204 : 403).end();
+        return res.status(allowed ? 204 : 403).end();
     }
     next();
 });
