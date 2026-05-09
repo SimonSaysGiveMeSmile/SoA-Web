@@ -257,3 +257,82 @@ html, body {
     .soa-modal-cmdwrap { flex-direction: column; }
     .soa-modal-copy { padding: 8px 0; }
 }
+
+/* ── Settings modal ──────────────────────────────────────────── */
+body.nocursor, body.nocursor * { cursor: none !important; }
+
+.soa-modal.soa-settings { width: min(720px, calc(100vw - 32px)); }
+.settings-tabbed {
+    display: grid;
+    grid-template-columns: 150px 1fr;
+    gap: 14px;
+    margin-top: 6px;
+    min-height: 280px;
+}
+.settings-sidebar {
+    display: flex; flex-direction: column; gap: 4px;
+    border-right: 1px dashed rgba(170,207,209,0.16);
+    padding-right: 10px;
+}
+.settings-tab {
+    padding: 6px 10px; font-size: 11px; letter-spacing: 0.14em;
+    color: rgba(170,207,209,0.7); cursor: pointer;
+    border: 1px solid transparent;
+}
+.settings-tab:hover { color: #aacfd1; border-color: rgba(170,207,209,0.18); }
+.settings-tab--active {
+    color: #aacfd1; border-color: rgba(170,207,209,0.4);
+    background: rgba(170,207,209,0.06);
+}
+.settings-content { min-width: 0; }
+.settings-pane { display: none; }
+.settings-pane--active { display: block; }
+.settings-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.settings-table th {
+    text-align: left; font-weight: 500; font-size: 10px;
+    letter-spacing: 0.12em; color: rgba(170,207,209,0.55);
+    border-bottom: 1px dashed rgba(170,207,209,0.18);
+    padding: 6px 8px;
+}
+.settings-table td {
+    padding: 6px 8px; vertical-align: top;
+    border-bottom: 1px dashed rgba(170,207,209,0.08);
+}
+.settings-table td.k code {
+    font-family: 'Fira Mono', ui-monospace, monospace;
+    color: #d8eef0; font-size: 11px;
+}
+.settings-table td.d { color: rgba(170,207,209,0.7); }
+.settings-table td.v input,
+.settings-table td.v select {
+    background: rgba(170,207,209,0.06);
+    border: 1px solid rgba(170,207,209,0.22);
+    color: #d8eef0;
+    font-family: 'Fira Mono', ui-monospace, monospace;
+    font-size: 11px; padding: 4px 8px; min-width: 120px;
+}
+.settings-pane-body .kv {
+    display: flex; justify-content: space-between; gap: 16px;
+    padding: 6px 0;
+    border-bottom: 1px dashed rgba(170,207,209,0.08);
+    font-size: 12px;
+}
+.settings-pane-body .kv .k { color: rgba(170,207,209,0.55); letter-spacing: 0.1em; font-size: 11px; }
+.settings-pane-body .kv .v { color: #d8eef0; font-family: 'Fira Mono', ui-monospace, monospace; }
+.settings-row-actions { margin: 14px 0 8px; }
+.settings-hint { font-size: 11px; color: rgba(170,207,209,0.55); margin: 4px 0 0; }
+.settings-status {
+    margin: 12px 0 0; font-size: 11px; color: rgba(170,207,209,0.55);
+    font-family: 'Fira Mono', ui-monospace, monospace;
+}
+.settings-actions {
+    display: flex; gap: 8px; justify-content: flex-end;
+    margin-top: 8px;
+}
+@media (max-width: 560px) {
+    .settings-tabbed { grid-template-columns: 1fr; }
+    .settings-sidebar { flex-direction: row; flex-wrap: wrap; border-right: 0; padding-right: 0; border-bottom: 1px dashed rgba(170,207,209,0.16); padding-bottom: 8px; }
+    .settings-table td.d { display: none; }
+}

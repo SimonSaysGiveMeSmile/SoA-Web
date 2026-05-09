@@ -20,6 +20,7 @@ import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=6';
 import { AudioFX } from '/assets/audiofx.js?v=6';
 import { mountSidebar } from '/assets/widgets.js?v=6';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=6';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=6';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -141,11 +142,12 @@ class TabRuntime {
         this.id = id;
         this.title = title || tr('tab.default', { id });
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
+        const s = getSettings();
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
-            fontSize: 13,
+            fontSize: s.termFontSize,
             theme: TRON_THEME,
-            cursorBlink: true,
+            cursorBlink: s.cursorBlink,
             scrollback: 5000,
             convertEol: false,
         });
@@ -175,6 +177,12 @@ class TabRuntime {
 
     focus() { this.term.focus(); }
 
+    applySettings(s) {
+        try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
+        try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
+        try { this.fit.fit(); } catch (_) {}
+    }
+
     dispose() {
         try { this.term.dispose(); } catch (_) {}
         this.container.remove();
@@ -200,6 +208,9 @@ class Shell {
         });
 
         const audioBtn = $('#toggle-audio');
+        const initialAudio = getSettings().audio;
+        audioBtn.dataset.state = initialAudio ? 'on' : 'off';
+        audioBtn.textContent = initialAudio ? tr('topbar.audio_on') : tr('topbar.audio_off');
         audioBtn.addEventListener('click', () => {
             const on = audioBtn.dataset.state !== 'off';
             this.audio.setEnabled(!on);
@@ -207,6 +218,14 @@ class Shell {
             audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
             if (!on) this.audio.play('info');
         });
+
+        const settingsBtn = $('#open-settings');
+        if (settingsBtn) settingsBtn.addEventListener('click', () => {
+            this.audio.play('panels');
+            openSettingsModal();
+        });
+
+        onSettings(s => this._applySettings(s));
 
         const sideBtn = $('#toggle-sidebar');
         const stageEl = $('.stage');
@@ -416,6 +435,25 @@ class Shell {
             e.preventDefault();
             $('#toggle-sidebar').click();
         }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+            e.preventDefault();
+            openSettingsModal();
+        }
+    }
+
+    _applySettings(s) {
+        for (const rt of this.tabs.values()) rt.applySettings(s);
+        this._fitActive();
+        if (this.audio) {
+            if (typeof this.audio.setEnabled === 'function') this.audio.setEnabled(!!s.audio);
+            if (typeof this.audio.setVolume === 'function')  this.audio.setVolume(s.audioVolume);
+            if (typeof this.audio.setFeedbackEnabled === 'function') this.audio.setFeedbackEnabled(!s.disableFeedbackAudio);
+        }
+        const audioBtn = $('#toggle-audio');
+        if (audioBtn) {
+            audioBtn.dataset.state = s.audio ? 'on' : 'off';
+            audioBtn.textContent = s.audio ? tr('topbar.audio_on') : tr('topbar.audio_off');
+        }
     }
 }
 
@@ -457,7 +495,8 @@ async function bootServerMode({ backend, token }) {
     try { await fetch(apiUrl(backend, token, '/api/me'), FETCH_INIT); } catch (_) {}
 
     $('#boot-status').textContent = tr('boot.opening');
-    const audio = new AudioFX({ enabled: true });
+    const s0 = getSettings();
+    const audio = new AudioFX({ enabled: s0.audio, volume: s0.audioVolume, feedbackEnabled: !s0.disableFeedbackAudio });
     const bridge = new Bridge({ url: wsUrl(backend, token) });
     const shell = new Shell(bridge, { audio, backend, token });
     bridge.connect();
@@ -470,7 +509,7 @@ async function bootServerMode({ backend, token }) {
         $('#shell').classList.remove('hidden');
         shell._fitActive();
         audio.play('theme');
-    }, 250);
+    }, s0.nointro ? 0 : 250);
 }
 
 async function boot() {

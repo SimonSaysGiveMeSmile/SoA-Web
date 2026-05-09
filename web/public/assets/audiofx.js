@@ -9,11 +9,11 @@
  */
 
 const CUES = {
-    stdout:   { file: 'stdout.wav',   volume: 0.35, pool: 4 },
-    stdin:    { file: 'stdin.wav',    volume: 0.35, pool: 3 },
+    stdout:   { file: 'stdout.wav',   volume: 0.35, pool: 4, feedback: true },
+    stdin:    { file: 'stdin.wav',    volume: 0.35, pool: 3, feedback: true },
     folder:   { file: 'folder.wav',   volume: 0.8,  pool: 2 },
     granted:  { file: 'granted.wav',  volume: 0.8,  pool: 2 },
-    keyboard: { file: 'keyboard.wav', volume: 0.6,  pool: 3 },
+    keyboard: { file: 'keyboard.wav', volume: 0.6,  pool: 3, feedback: true },
     theme:    { file: 'theme.wav',    volume: 0.8,  pool: 1 },
     expand:   { file: 'expand.wav',   volume: 0.7,  pool: 2 },
     panels:   { file: 'panels.wav',   volume: 0.7,  pool: 3 },
@@ -25,13 +25,16 @@ const CUES = {
 };
 
 export class AudioFX {
-    constructor({ enabled = true, volume = 1.0, base = '/assets/audio/' } = {}) {
+    constructor({ enabled = true, volume = 1.0, feedbackEnabled = true, base = '/assets/audio/' } = {}) {
         this.enabled = enabled;
+        this.feedbackEnabled = feedbackEnabled;
         this.masterVolume = volume;
         this.base = base;
         this._pools = {};
+        this._feedback = {};
         this._armed = false;
         for (const [name, cfg] of Object.entries(CUES)) {
+            this._feedback[name] = !!cfg.feedback;
             const pool = [];
             for (let i = 0; i < cfg.pool; i++) {
                 const a = new Audio(base + cfg.file);
@@ -51,6 +54,7 @@ export class AudioFX {
     }
 
     setEnabled(on) { this.enabled = !!on; }
+    setFeedbackEnabled(on) { this.feedbackEnabled = !!on; }
 
     setVolume(v) {
         this.masterVolume = Math.max(0, Math.min(1, v));
@@ -61,6 +65,7 @@ export class AudioFX {
 
     play(cue) {
         if (!this.enabled || !this._armed) return false;
+        if (this._feedback[cue] && !this.feedbackEnabled) return false;
         const slot = this._pools[cue];
         if (!slot) return false;
         const entry = slot.pool[slot.idx];

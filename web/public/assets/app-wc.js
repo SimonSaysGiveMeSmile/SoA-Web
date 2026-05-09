@@ -17,6 +17,7 @@
 import { AudioFX } from '/assets/audiofx.js?v=6';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=6';
 import { mountSandboxSidebar } from '/assets/widgets.js?v=6';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=6';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
@@ -55,9 +56,10 @@ class WCTab {
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
         container.appendChild(this.container);
 
+        const s = getSettings();
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
-            fontSize: 13, theme: TRON_THEME, cursorBlink: true,
+            fontSize: s.termFontSize, theme: TRON_THEME, cursorBlink: s.cursorBlink,
             scrollback: 5000, convertEol: false,
         });
         this.fit = new FitAddon.FitAddon();
@@ -77,6 +79,11 @@ class WCTab {
 
     fitNow() { try { this.fit.fit(); } catch (_) {} return { cols: this.term.cols, rows: this.term.rows }; }
     focus()  { this.term.focus(); }
+    applySettings(s) {
+        try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
+        try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
+        try { this.fit.fit(); } catch (_) {}
+    }
     dispose() {
         try { this.writer.releaseLock(); } catch (_) {}
         try { this.proc.kill(); } catch (_) {}
@@ -102,12 +109,22 @@ class WCShell {
     _wireTopbar() {
         $('#new-tab').addEventListener('click', () => { this.audio.play('granted'); this.newTab(); });
         const audioBtn = $('#toggle-audio');
+        const initialAudio = getSettings().audio;
+        audioBtn.dataset.state = initialAudio ? 'on' : 'off';
+        audioBtn.textContent = initialAudio ? tr('topbar.audio_on') : tr('topbar.audio_off');
         audioBtn.addEventListener('click', () => {
             const on = audioBtn.dataset.state !== 'off';
             this.audio.setEnabled(!on);
             audioBtn.dataset.state = on ? 'off' : 'on';
             audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
         });
+
+        const settingsBtn = $('#open-settings');
+        if (settingsBtn) settingsBtn.addEventListener('click', () => {
+            this.audio.play('panels');
+            openSettingsModal();
+        });
+        onSettings(s => this._applySettings(s));
 
         // Keep the sidebar in WC mode but swap its widgets for sandbox-safe
         // ones (see mountSandboxSidebar). The toggle keeps its real role.
@@ -212,7 +229,26 @@ class WCShell {
                 e.preventDefault();
                 if (this.activeId != null) this.closeTab(this.activeId);
             }
+            if (mod && e.shiftKey && (e.key === 'S' || e.key === 's')) {
+                e.preventDefault();
+                openSettingsModal();
+            }
         });
+    }
+
+    _applySettings(s) {
+        for (const tab of this.tabs.values()) tab.applySettings(s);
+        this._fitActive();
+        if (this.audio) {
+            if (typeof this.audio.setEnabled === 'function') this.audio.setEnabled(!!s.audio);
+            if (typeof this.audio.setVolume === 'function')  this.audio.setVolume(s.audioVolume);
+            if (typeof this.audio.setFeedbackEnabled === 'function') this.audio.setFeedbackEnabled(!s.disableFeedbackAudio);
+        }
+        const audioBtn = $('#toggle-audio');
+        if (audioBtn) {
+            audioBtn.dataset.state = s.audio ? 'on' : 'off';
+            audioBtn.textContent = s.audio ? tr('topbar.audio_on') : tr('topbar.audio_off');
+        }
     }
 
     async newTab() {
@@ -326,7 +362,8 @@ async function main() {
         const wc = await WC.WebContainer.boot({ coep: 'credentialless' });
         setBootStatus(tr('boot.opening_shell'));
 
-        const audio = new AudioFX({ enabled: true });
+        const s0 = getSettings();
+        const audio = new AudioFX({ enabled: s0.audio, volume: s0.audioVolume, feedbackEnabled: !s0.disableFeedbackAudio });
         const shell = new WCShell(wc, { audio });
         await shell.newTab();
 
@@ -349,7 +386,7 @@ async function main() {
             $('#boot').classList.add('hidden');
             $('#shell').classList.remove('hidden');
             shell._fitActive();
-        }, 200);
+        }, s0.nointro ? 0 : 200);
     } catch (err) {
         console.error('[soa-web:wc] boot failed', err);
         const detail = err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : String(err);
