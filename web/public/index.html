@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>SON OF ANTON · WEB</title>
-  <link rel="icon" href="/assets/favicon.svg?v=3" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=3">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=3">
+  <link rel="icon" href="/assets/favicon.svg?v=4" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=4">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=4">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
 </head>
@@ -16,8 +16,8 @@
     <div class="boot-grid"></div>
     <div class="boot-inner">
       <h1 class="boot-title">SON OF ANTON</h1>
-      <p class="boot-sub">WEB TERMINAL · PROTOCOL v1</p>
-      <p class="boot-status" id="boot-status">negotiating session…</p>
+      <p class="boot-sub" data-i18n="brand.sub">WEB TERMINAL · PROTOCOL v1</p>
+      <p class="boot-status" id="boot-status" data-i18n="boot.negotiating">negotiating session…</p>
     </div>
   </div>
 
@@ -26,9 +26,10 @@
       <div class="brand">SON OF ANTON · WEB</div>
       <div class="tabs" id="tabs"></div>
       <div class="topbar-actions">
-        <button id="toggle-sidebar" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
-        <button id="toggle-audio" title="Mute / unmute sound FX" data-state="on">♪ FX</button>
-        <button id="new-tab" title="New tab (Ctrl+Shift+T)">＋ TAB</button>
+        <select id="lang" class="lang-select" aria-label="Language"></select>
+        <button id="toggle-sidebar" data-i18n="topbar.sidebar" data-i18n-title="topbar.sidebar_title" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
+        <button id="toggle-audio" data-i18n="topbar.audio_on" data-i18n-title="topbar.audio_title" title="Mute / unmute sound FX" data-state="on">♪ FX</button>
+        <button id="new-tab" data-i18n="topbar.new_tab" data-i18n-title="topbar.new_tab_title" title="New tab (Ctrl+Shift+T)">＋ TAB</button>
       </div>
     </header>
     <main class="stage">
@@ -37,8 +38,8 @@
       <aside id="sidebar" class="sidebar"></aside>
       <div class="status-bar">
         <span id="status-session">—</span>
-        <span id="status-tabs">0 tabs</span>
-        <span id="status-conn">disconnected</span>
+        <span id="status-tabs" data-i18n="status.tabs_other" data-i18n-vars='{"n":0}'>0 tabs</span>
+        <span id="status-conn" data-i18n="status.disconnected">disconnected</span>
       </div>
     </main>
   </div>
@@ -46,6 +47,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=3"></script>
+  <script type="module" src="/assets/app.js?v=4"></script>
 </body>
 </html>

@@ -16,9 +16,10 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=3';
-import { AudioFX } from '/assets/audiofx.js?v=3';
-import { mountSidebar } from '/assets/widgets.js?v=3';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=4';
+import { AudioFX } from '/assets/audiofx.js?v=4';
+import { mountSidebar } from '/assets/widgets.js?v=4';
+import { t as tr, getLang, setLang, LANGS } from '/assets/i18n.js?v=4';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -117,7 +118,7 @@ const TRON_THEME = {
 class TabRuntime {
     constructor(id, title) {
         this.id = id;
-        this.title = title || `tab ${id}`;
+        this.title = title || tr('tab.default', { id });
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
@@ -182,7 +183,7 @@ class Shell {
             const on = audioBtn.dataset.state !== 'off';
             this.audio.setEnabled(!on);
             audioBtn.dataset.state = on ? 'off' : 'on';
-            audioBtn.textContent = on ? '♪ OFF' : '♪ FX';
+            audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
             if (!on) this.audio.play('info');
         });
 
@@ -223,7 +224,9 @@ class Shell {
     _onStatus({ state }) {
         const s = $('#status-conn');
         s.className = state === 'open' ? 'ok' : state === 'connecting' ? 'warn' : 'err';
-        s.textContent = state;
+        const key = `status.${state}`;
+        s.textContent = tr(key);
+        s.setAttribute('data-i18n', key);
         if (this._prevConnState && this._prevConnState !== state) {
             if (state === 'closed') this.audio.play('error');
             if (state === 'open')   this.audio.play('granted');
@@ -261,7 +264,11 @@ class Shell {
         const nextActive = (activeId && this.tabs.has(activeId)) ? activeId
             : (this.activeId == null && tabs[0]) ? tabs[0].id : null;
         if (nextActive && nextActive !== this.activeId) this._activate(nextActive);
-        $('#status-tabs').textContent = `${tabs.length} tab${tabs.length === 1 ? '' : 's'}`;
+        const tabsEl = $('#status-tabs');
+        const tabsKey = tabs.length === 1 ? 'status.tabs_one' : 'status.tabs_other';
+        tabsEl.textContent = tr(tabsKey, { n: tabs.length });
+        tabsEl.setAttribute('data-i18n', tabsKey);
+        tabsEl.setAttribute('data-i18n-vars', JSON.stringify({ n: tabs.length }));
     }
 
     _onTermData({ id, data }) {
@@ -277,7 +284,7 @@ class Shell {
 
     _onTermExit({ id, code }) {
         const t = this.tabs.get(id);
-        if (t) t.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
+        if (t) t.write(`\r\n\x1b[2m${tr('tab.exited', { code })}\x1b[0m\r\n`);
         this.audio.play(code === 0 ? 'info' : 'alarm');
     }
 
@@ -332,7 +339,7 @@ class Shell {
         this.tabsEl.replaceChildren(...tabs.map(t => {
             const label = el('span', {
                 class: 'tab-label',
-                text: t.title || `tab ${t.id}`,
+                text: t.title || tr('tab.default', { id: t.id }),
                 ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
             const dot = el('span', { class: 'dot' });
@@ -350,7 +357,7 @@ class Shell {
     }
 
     _promptRename(id, current) {
-        const next = window.prompt('Rename tab', current || `tab ${id}`);
+        const next = window.prompt(tr('tab.rename_prompt'), current || tr('tab.default', { id }));
         if (next == null) return;
         const title = next.trim().slice(0, 64);
         if (!title || title === current) return;
@@ -452,7 +459,7 @@ async function boot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=3');
+    await import('/assets/app-wc.js?v=4');
 }
 
 boot().catch(err => {

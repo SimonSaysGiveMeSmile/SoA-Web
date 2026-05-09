@@ -14,7 +14,7 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js?v=2';
+import { AudioFX } from '/assets/audiofx.js?v=4';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
@@ -107,16 +107,15 @@ class WCShell {
             audioBtn.textContent = on ? '♪ OFF' : '♪ FX';
         });
 
-        // In WC mode there's no server-side sidebar data source. Replace the
-        // sidebar toggle with a "connect backend" control that lets the user
-        // point the app at their own self-hosted server (see scripts/
-        // selfhost.js) and reload into server mode — which brings back the
-        // real sidebar (sysinfo, pairing, QR).
+        // In WC mode the sidebar's backend data sources (sysinfo, pairing)
+        // don't exist. Repurpose the toggle as "install local shell" — one
+        // paste gets the user a background service on their machine, after
+        // which this page auto-detects it and boots into full server mode.
         const sideBtn = $('#toggle-sidebar');
         if (sideBtn) {
-            sideBtn.textContent = '↯ CONNECT';
-            sideBtn.title = 'Connect your own backend (self-hosted shell)';
-            sideBtn.addEventListener('click', () => this._promptConnect());
+            sideBtn.textContent = '↯ LOCAL';
+            sideBtn.title = 'Run a real shell on this machine';
+            sideBtn.addEventListener('click', () => this._openInstallDialog());
         }
         const stage = $('.stage');
         stage.classList.add('no-sidebar');
@@ -124,15 +123,66 @@ class WCShell {
         if (sidebar) sidebar.remove();
     }
 
-    _promptConnect() {
+    _openInstallDialog() {
         this.audio.play('info');
+        if (this._dialog) { this._dialog.remove(); this._dialog = null; }
+
+        const installCmd = `curl -fsSL ${location.origin}/install.sh | sh`;
+
+        const backdrop = el('div', { class: 'soa-modal-backdrop' });
+        const card = el('div', { class: 'soa-modal' });
+        const close = () => { backdrop.remove(); this._dialog = null; };
+        backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
+        window.addEventListener('keydown', function esc(e) {
+            if (e.key === 'Escape') { close(); window.removeEventListener('keydown', esc); }
+        });
+
+        const cmd = el('code', { class: 'soa-modal-cmd', text: installCmd });
+        const copyBtn = el('button', {
+            class: 'soa-modal-copy', text: 'COPY',
+            onclick: async () => {
+                try { await navigator.clipboard.writeText(installCmd); copyBtn.textContent = 'COPIED'; }
+                catch (_) {
+                    const r = document.createRange();
+                    r.selectNode(cmd);
+                    const s = window.getSelection();
+                    s.removeAllRanges(); s.addRange(r);
+                    copyBtn.textContent = 'SELECTED — CMD+C';
+                }
+                setTimeout(() => { copyBtn.textContent = 'COPY'; }, 1500);
+            },
+        });
+
+        card.append(
+            el('div', { class: 'soa-modal-title', text: '↯ RUN A REAL SHELL ON THIS MACHINE' }),
+            el('div', { class: 'soa-modal-body', text:
+                "Paste this into your terminal. It installs a background service at " +
+                "~/.soa-web, binds it to 127.0.0.1:4010, and this page auto-detects it " +
+                "on the next reload. macOS + Linux, no sudo." }),
+            el('div', { class: 'soa-modal-cmdwrap' }, [cmd, copyBtn]),
+            el('div', { class: 'soa-modal-note', text:
+                "Uninstall anytime: ~/.soa-web/uninstall.sh" }),
+            el('div', { class: 'soa-modal-divider' }),
+            el('div', { class: 'soa-modal-body', text:
+                "Already have a backend running somewhere else?" }),
+            el('button', {
+                class: 'soa-modal-link', text: 'Connect a remote backend manually →',
+                onclick: () => { close(); this._promptConnect(); },
+            }),
+            el('button', { class: 'soa-modal-close', text: 'CLOSE', onclick: close }),
+        );
+        backdrop.appendChild(card);
+        document.body.appendChild(backdrop);
+        this._dialog = backdrop;
+    }
+
+    _promptConnect() {
         const backend = window.prompt(
             'Backend URL (from `npm run selfhost` on your machine):',
             'https://',
         );
         if (!backend) return;
-        const token = window.prompt('Session token:');
-        if (!token) return;
+        const token = window.prompt('Session token:') || '';
         try {
             localStorage.setItem('soa_web_backend', JSON.stringify({
                 backend: backend.replace(/\/+$/, ''),
