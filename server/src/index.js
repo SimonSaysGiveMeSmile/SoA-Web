@@ -18,6 +18,11 @@
  *   SOA_WEB_SESSION_TTL_MS  idle timeout for sessions (default 6h)
  *   SOA_WEB_DEV=1      dev mode — sends cache-control: no-store on static assets
  *   SOA_WEB_AUTOPAIR   '0' disables auto-starting the Cloudflare tunnel on boot
+ *   SOA_WEB_SESSION_TOKEN  when set, every /api/* and /ws request must carry
+ *                          ?t=<this-token> (or Authorization: Bearer <token>
+ *                          on /api/*). Used by scripts/selfhost.js to gate a
+ *                          tunneled backend so only the operator's browser can
+ *                          reach it.
  */
 
 const http = require('http');
@@ -41,6 +46,24 @@ const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(100
 
 const SIGN_KEY   = auth.resolveSignKey();
 const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
+const SESSION_TOKEN = process.env.SOA_WEB_SESSION_TOKEN || '';
+
+function constantTimeEq(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string') return false;
+    if (a.length !== b.length) return false;
+    try {
+        return require('crypto').timingSafeEqual(Buffer.from(a), Buffer.from(b));
+    } catch (_) { return false; }
+}
+
+function extractPresentedToken(req) {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const fromQuery = url.searchParams.get('t');
+    if (fromQuery) return fromQuery;
+    const authz = req.headers && req.headers.authorization;
+    if (authz && /^bearer /i.test(authz)) return authz.slice(7).trim();
+    return '';
+}
 
 // When the static SPA is served from a different origin (e.g. Vercel) and
 // this backend sits behind a Cloudflare Quick Tunnel, the browser needs CORS
@@ -71,6 +94,21 @@ app.use((req, res, next) => {
     }
     if (req.method === 'OPTIONS' && origin) {
         return res.status(origin && ALLOWED_ORIGINS.includes(origin) ? 204 : 403).end();
+    }
+    next();
+});
+
+// Optional session token gate. When SOA_WEB_SESSION_TOKEN is set, every
+// /api/* call (except the /api/ping discovery endpoint) must present the
+// token via ?t= or Authorization: Bearer. /api/ping stays open so the
+// client can probe for a reachable backend without yet knowing the token.
+app.use((req, res, next) => {
+    if (!SESSION_TOKEN) return next();
+    if (!req.path.startsWith('/api/')) return next();
+    if (req.path === '/api/ping') return next();
+    const presented = extractPresentedToken(req);
+    if (!constantTimeEq(presented, SESSION_TOKEN)) {
+        return res.status(401).json({ ok: false, error: 'invalid session token' });
     }
     next();
 });
@@ -108,7 +146,7 @@ function requireAuthed(req, res, next) {
 
 // ── API ─────────────────────────────────────────────────────────────────
 app.get('/api/ping', (req, res) => {
-    res.json({ ok: true, name: 'soa-web', protocol: 1 });
+    res.json({ ok: true, name: 'soa-web', protocol: 1, tokenRequired: !!SESSION_TOKEN });
 });
 
 app.get('/api/me', requireAuthed, (req, res) => {
@@ -161,6 +199,15 @@ const wss = new WebSocket.Server({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/ws') { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
+
+    if (SESSION_TOKEN) {
+        const presented = url.searchParams.get('t') || '';
+        if (!constantTimeEq(presented, SESSION_TOKEN)) {
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+    }
 
     // When the allowlist is configured, enforce it on WS upgrades too so a
     // random page can't open an authenticated shell against this backend.

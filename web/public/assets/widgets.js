@@ -37,13 +37,22 @@ const fmtUptime = s => {
     return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m`;
 };
 
-// Route API URLs through the configured backend (same-origin by default,
-// cross-origin when Vercel serves the static SPA and the backend is a
-// Cloudflare Tunnel / separate host).
-const _cfg = window.__SOA_WEB__ || {};
-const BACKEND_ORIGIN = (_cfg.backend || '').replace(/\/+$/, '') || location.origin;
+// Route API URLs through the configured backend. The active backend + token
+// are stored on window.__SOA_WEB__ by app.js before mountSidebar runs, so
+// widgets don't need to thread either through their constructors.
+function currentBackend() {
+    const c = window.__SOA_WEB__ || {};
+    return (c._resolvedBackend || c.backend || '').replace(/\/+$/, '') || location.origin;
+}
+function currentToken() {
+    return (window.__SOA_WEB__ || {})._resolvedToken || '';
+}
 function api(path) {
-    return path.startsWith('http') ? path : BACKEND_ORIGIN + path;
+    if (path.startsWith('http')) return path;
+    const u = new URL(currentBackend() + path);
+    const t = currentToken();
+    if (t) u.searchParams.set('t', t);
+    return u.toString();
 }
 
 async function jget(url) {

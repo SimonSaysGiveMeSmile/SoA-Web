@@ -106,13 +106,40 @@ class WCShell {
             audioBtn.dataset.state = on ? 'off' : 'on';
             audioBtn.textContent = on ? '♪ OFF' : '♪ FX';
         });
-        // Hide the sidebar button — no pairing/sysinfo in webcontainer mode.
+
+        // In WC mode there's no server-side sidebar data source. Replace the
+        // sidebar toggle with a "connect backend" control that lets the user
+        // point the app at their own self-hosted server (see scripts/
+        // selfhost.js) and reload into server mode — which brings back the
+        // real sidebar (sysinfo, pairing, QR).
         const sideBtn = $('#toggle-sidebar');
-        if (sideBtn) sideBtn.remove();
+        if (sideBtn) {
+            sideBtn.textContent = '↯ CONNECT';
+            sideBtn.title = 'Connect your own backend (self-hosted shell)';
+            sideBtn.addEventListener('click', () => this._promptConnect());
+        }
         const stage = $('.stage');
         stage.classList.add('no-sidebar');
         const sidebar = $('#sidebar');
         if (sidebar) sidebar.remove();
+    }
+
+    _promptConnect() {
+        this.audio.play('info');
+        const backend = window.prompt(
+            'Backend URL (from `npm run selfhost` on your machine):',
+            'https://',
+        );
+        if (!backend) return;
+        const token = window.prompt('Session token:');
+        if (!token) return;
+        try {
+            localStorage.setItem('soa_web_backend', JSON.stringify({
+                backend: backend.replace(/\/+$/, ''),
+                token: token.trim(),
+            }));
+        } catch (_) {}
+        location.reload();
     }
 
     _wireWindow() {

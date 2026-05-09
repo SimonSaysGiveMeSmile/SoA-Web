@@ -1,40 +1,90 @@
 /**
  * SoA-Web client entry.
  *
- * Two modes, chosen by _config.js at page load:
- *   - 'webcontainer' — in-browser Node sandbox, no backend. boot() hands off
- *                      to /assets/app-wc.js and the rest of this file never
- *                      runs.
- *   - 'server'       — classic path: /api/me, /ws, server-side PTYs.
+ * Three paths at page load:
+ *   1. URL has ?backend=&t= — visitor arrived via a scripts/selfhost.js deep
+ *      link. Stash both in localStorage, strip them from the URL, then boot
+ *      server mode against that backend.
+ *   2. A backend is saved in localStorage — probe /api/ping, and if it
+ *      answers boot server mode against it. Otherwise clear the saved
+ *      config and fall through.
+ *   3. Nothing configured — boot the in-browser WebContainer sandbox
+ *      (app-wc.js). Visitors get a shell with no setup.
  *
- * xterm.js is loaded from a CDN and attached to a per-tab DOM container. Each
- * tab keeps its own xterm.Terminal + FitAddon instance so switching is
- * instantaneous and output history survives.
+ * The dev-time config in web/public/_config.js can pre-select the mode
+ * ('server' or 'webcontainer') or pin a backend; the build step
+ * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=2';
-import { AudioFX } from '/assets/audiofx.js?v=2';
-import { mountSidebar } from '/assets/widgets.js?v=2';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=3';
+import { AudioFX } from '/assets/audiofx.js?v=3';
+import { mountSidebar } from '/assets/widgets.js?v=3';
 
-// Resolve the backend origin. `window.__SOA_WEB__.backend` is set by
-// web/public/_config.js — empty means "same origin as this page" (self-hosted
-// default), non-empty means a cross-origin backend (e.g. a Cloudflare Tunnel
-// URL when the static SPA is served by Vercel).
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
-const BACKEND_ORIGIN = (CFG.backend || '').replace(/\/+$/, '') || location.origin;
-const BACKEND_IS_CROSS = BACKEND_ORIGIN !== location.origin;
+const LS_KEY = 'soa_web_backend';
 
-const WS_URL = (() => {
-    const u = new URL(BACKEND_ORIGIN);
+function loadSaved() {
+    try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return null;
+        const j = JSON.parse(raw);
+        if (!j || typeof j.backend !== 'string') return null;
+        return { backend: j.backend.replace(/\/+$/, ''), token: j.token || '' };
+    } catch (_) { return null; }
+}
+
+function saveBackend(backend, token) {
+    try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+            backend: String(backend || '').replace(/\/+$/, ''),
+            token: String(token || ''),
+        }));
+    } catch (_) {}
+}
+
+function clearSaved() { try { localStorage.removeItem(LS_KEY); } catch (_) {} }
+
+function pickBackendFromURL() {
+    const q = new URLSearchParams(location.search);
+    const backend = q.get('backend');
+    const token = q.get('t') || '';
+    if (!backend) return null;
+    q.delete('backend'); q.delete('t');
+    const cleanQuery = q.toString();
+    const cleanUrl = location.pathname + (cleanQuery ? '?' + cleanQuery : '') + location.hash;
+    history.replaceState(null, '', cleanUrl);
+    return { backend: backend.replace(/\/+$/, ''), token };
+}
+
+async function probePing(backend, token, timeoutMs = 2500) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+        const u = new URL(backend + '/api/ping');
+        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'include' });
+        if (!res.ok) return null;
+        const body = await res.json().catch(() => null);
+        if (!body || !body.ok) return null;
+        if (body.tokenRequired && !token) return { needsToken: true };
+        return { ok: true, info: body };
+    } catch (_) { return null; }
+    finally { clearTimeout(timer); }
+}
+
+function apiUrl(backend, token, path) {
+    const u = new URL(backend + path);
+    if (token) u.searchParams.set('t', token);
+    return u.toString();
+}
+
+function wsUrl(backend, token) {
+    const u = new URL(backend);
     u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
     u.pathname = '/ws';
+    if (token) u.searchParams.set('t', token);
     return u.toString();
-})();
+}
 
-function apiUrl(path) { return BACKEND_ORIGIN + path; }
-
-// Cross-site cookies over HTTPS only — browsers reject SameSite=None without
-// Secure, and the backend must also send SameSite=None;Secure on its cookie.
 const FETCH_INIT = { credentials: 'include' };
 
 const $  = sel => document.querySelector(sel);
@@ -342,27 +392,50 @@ class Shell {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────
-async function boot() {
-    // Mode-dispatch: webcontainer builds skip the server stack entirely.
-    if ((window.__SOA_WEB__ || {}).mode === 'webcontainer') {
-        await import('/assets/app-wc.js?v=2');
-        return;
+async function resolveBackend() {
+    const fromURL = pickBackendFromURL();
+    if (fromURL) {
+        const probed = await probePing(fromURL.backend, fromURL.token, 3500);
+        if (probed && probed.ok) {
+            saveBackend(fromURL.backend, fromURL.token);
+            return fromURL;
+        }
+        return null;
     }
+    const saved = loadSaved();
+    if (saved) {
+        const probed = await probePing(saved.backend, saved.token, 2500);
+        if (probed && probed.ok) return saved;
+        clearSaved();
+    }
+    if (CFG.backend) {
+        const cfgBackend = String(CFG.backend).replace(/\/+$/, '');
+        const probed = await probePing(cfgBackend, '', 2000);
+        if (probed && probed.ok) return { backend: cfgBackend, token: '' };
+    }
+    if (CFG.mode !== 'webcontainer') {
+        const same = location.origin.replace(/\/+$/, '');
+        const probed = await probePing(same, '', 1500);
+        if (probed && probed.ok) return { backend: same, token: '' };
+    }
+    return null;
+}
 
+async function bootServerMode({ backend, token }) {
+    const crossOrigin = backend !== location.origin.replace(/\/+$/, '');
+    CFG._resolvedBackend = backend;
+    CFG._resolvedToken = token || '';
     $('#boot-status').textContent = 'negotiating session…';
-    // /api/me auto-provisions a session cookie on first contact. No login UI.
-    try { await fetch(apiUrl('/api/me'), FETCH_INIT); } catch (_) {}
+    try { await fetch(apiUrl(backend, token, '/api/me'), FETCH_INIT); } catch (_) {}
 
     $('#boot-status').textContent = 'opening channel…';
     const audio = new AudioFX({ enabled: true });
-    const bridge = new Bridge({ url: WS_URL });
-    const shell = new Shell(bridge, { audio });
+    const bridge = new Bridge({ url: wsUrl(backend, token) });
+    const shell = new Shell(bridge, { audio, backend, token });
     bridge.connect();
-    $('#status-session').textContent = BACKEND_IS_CROSS
-        ? new URL(BACKEND_ORIGIN).host
-        : location.host;
+    $('#status-session').textContent = crossOrigin ? new URL(backend).host : location.host;
 
-    const sidebar = mountSidebar($('#sidebar'), { audio });
+    mountSidebar($('#sidebar'), { audio, backend, token });
 
     setTimeout(() => {
         $('#boot').classList.add('hidden');
@@ -370,6 +443,16 @@ async function boot() {
         shell._fitActive();
         audio.play('theme');
     }, 250);
+}
+
+async function boot() {
+    const backend = await resolveBackend();
+    if (backend) {
+        await bootServerMode(backend);
+        return;
+    }
+    // No reachable backend — hand off to the in-browser sandbox.
+    await import('/assets/app-wc.js?v=3');
 }
 
 boot().catch(err => {
