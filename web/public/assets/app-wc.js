@@ -155,6 +155,20 @@ class WCShell {
         if (this._dialog) { this._dialog.remove(); this._dialog = null; }
 
         const installCmd = `curl -fsSL ${location.origin}/install.sh | sh`;
+        // macOS associates `.command` files with Terminal.app — double-clicking
+        // opens Terminal and runs the file. Browsers have no URL scheme for
+        // launching Terminal, so offering a download is the closest we can get
+        // to "open terminal + run command" in one click. Shebang + a final
+        // pause so Terminal doesn't close instantly if the install fails.
+        const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
+        const commandFile =
+            '#!/bin/bash\n' +
+            '# SoA-Web installer — double-click this file on macOS to open\n' +
+            '# Terminal and install the local backend.\n' +
+            'set -e\n' +
+            `${installCmd}\n` +
+            'echo; echo "Installed. Reload the website tab to pick up the backend."; echo;\n' +
+            'read -n 1 -s -r -p "Press any key to close…"\n';
 
         const backdrop = el('div', { class: 'soa-modal-backdrop' });
         const card = el('div', { class: 'soa-modal' });
@@ -164,29 +178,52 @@ class WCShell {
             if (e.key === 'Escape') { close(); window.removeEventListener('keydown', esc); }
         });
 
+        const triggerDownload = () => {
+            const blob = new Blob([commandFile], { type: 'application/x-shellscript' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'soa-web-install.command';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 4000);
+        };
+
         const cmd = el('code', { class: 'soa-modal-cmd', text: installCmd });
         const copyBtn = el('button', {
-            class: 'soa-modal-copy', text: 'COPY',
+            class: 'soa-modal-copy', text: isMac ? 'COPY + DOWNLOAD' : 'COPY',
             onclick: async () => {
-                try { await navigator.clipboard.writeText(installCmd); copyBtn.textContent = 'COPIED'; }
+                let copied = false;
+                try { await navigator.clipboard.writeText(installCmd); copied = true; }
                 catch (_) {
                     const r = document.createRange();
                     r.selectNode(cmd);
                     const s = window.getSelection();
                     s.removeAllRanges(); s.addRange(r);
-                    copyBtn.textContent = 'SELECTED — CMD+C';
                 }
-                setTimeout(() => { copyBtn.textContent = 'COPY'; }, 1500);
+                if (isMac) {
+                    try { triggerDownload(); } catch (_) {}
+                    copyBtn.textContent = copied ? 'COPIED · CHECK DOWNLOADS' : 'DOWNLOADED · CMD+C TO COPY';
+                } else {
+                    copyBtn.textContent = copied ? 'COPIED' : 'SELECTED — CMD+C';
+                }
+                setTimeout(() => { copyBtn.textContent = isMac ? 'COPY + DOWNLOAD' : 'COPY'; }, 2200);
             },
         });
+
+        const macHint = isMac
+            ? "Clicking COPY will also download soa-web-install.command. Double-click it from Downloads and Terminal will open and run the installer."
+            : "Paste the command into your terminal to install.";
 
         card.append(
             el('div', { class: 'soa-modal-title', text: '↯ RUN A REAL SHELL ON THIS MACHINE' }),
             el('div', { class: 'soa-modal-body', text:
-                "Paste this into your terminal. It installs a background service at " +
-                "~/.soa-web, binds it to 127.0.0.1:4010, and this page auto-detects it " +
-                "on the next reload. macOS + Linux, no sudo." }),
+                "Installs a background service at ~/.soa-web, binds it to " +
+                "127.0.0.1:4010. This page auto-detects it on the next reload. " +
+                "macOS + Linux, no sudo." }),
             el('div', { class: 'soa-modal-cmdwrap' }, [cmd, copyBtn]),
+            el('div', { class: 'soa-modal-note', text: macHint }),
             el('div', { class: 'soa-modal-note', text:
                 "Uninstall anytime: ~/.soa-web/uninstall.sh" }),
             el('div', { class: 'soa-modal-divider' }),
