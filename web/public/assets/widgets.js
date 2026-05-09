@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=4';
+import { t as tr } from '/assets/i18n.js?v=5';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -329,6 +329,70 @@ export function mountSidebar(parent, ctx = {}) {
         new RamWatcherWidget({ parent }),
         new NetStatWidget({ parent }),
         new GitCommitsWidget({ parent }),
+    ];
+    widgets.forEach(w => w.start());
+    return {
+        destroy: () => widgets.forEach(w => w.destroy()),
+        widgets,
+    };
+}
+
+// ── SANDBOX (WC mode) ────────────────────────────────────────────────────
+// Static info about the in-browser sandbox. No polling — the values don't
+// change during a session. Shown in place of SYSTEM/CPU/etc. when the app
+// is running without a backend.
+class SandboxInfoWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.sandbox', parent, intervalMs: 0 });
+    }
+    onLangChange() { this.tick(); }
+    tick() {
+        this.setRows([
+            ['ENGINE', 'WebContainer'],
+            ['SHELL', 'jsh'],
+            ['FS', tr('widget.sandbox.fs')],
+            ['HOST', location.host || '—'],
+        ]);
+    }
+}
+
+// ── LOCAL SETUP (WC mode) ───────────────────────────────────────────────
+// Card that explains how to get a real shell and exposes the install
+// command + a "connect remote" affordance. ctx.onInstall / ctx.onConnect
+// are wired by the WC shell to its modal flows.
+class LocalSetupWidget extends Widget {
+    constructor({ parent, onInstall, onConnect }) {
+        super({ titleKey: 'widget.local', parent, intervalMs: 0 });
+        this.onInstall = onInstall;
+        this.onConnect = onConnect;
+    }
+    onLangChange() { this.tick(); }
+    tick() {
+        this.body.replaceChildren(
+            $el('div', { class: 'widget-note', text: tr('widget.local.body') }),
+            $el('button', {
+                class: 'widget-btn',
+                text: tr('widget.local.install'),
+                onclick: () => this.onInstall && this.onInstall(),
+            }),
+            $el('button', {
+                class: 'widget-btn widget-btn-ghost',
+                text: tr('widget.local.connect'),
+                onclick: () => this.onConnect && this.onConnect(),
+            }),
+        );
+    }
+}
+
+export function mountSandboxSidebar(parent, ctx = {}) {
+    const widgets = [
+        new ClockWidget({ parent }),
+        new LocalSetupWidget({
+            parent,
+            onInstall: ctx.onInstall,
+            onConnect: ctx.onConnect,
+        }),
+        new SandboxInfoWidget({ parent }),
     ];
     widgets.forEach(w => w.start());
     return {

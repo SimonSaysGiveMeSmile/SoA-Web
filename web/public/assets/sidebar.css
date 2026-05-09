@@ -87,3 +87,36 @@
         pointer-events: auto;
     }
 }
+
+/* ── Sandbox-mode widget extras ──────────────────────────────────────── */
+.widget-note {
+    font-size: 11px;
+    line-height: 1.5;
+    color: rgba(170,207,209,0.72);
+    margin-bottom: 8px;
+}
+.widget-btn {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 7px 10px;
+    font-family: var(--font-mono, 'Fira Mono', ui-monospace, Menlo, monospace);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-align: left;
+    color: #aacfd1;
+    background: rgba(170,207,209,0.06);
+    border: 1px solid rgba(170,207,209,0.26);
+    cursor: pointer;
+    transition: background 80ms;
+}
+.widget-btn:hover { background: rgba(170,207,209,0.14); }
+.widget-btn-ghost {
+    background: transparent;
+    border-style: dashed;
+    color: rgba(170,207,209,0.72);
+}
+.widget-btn-ghost:hover {
+    color: #aacfd1;
+    background: rgba(170,207,209,0.05);
+}

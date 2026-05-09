@@ -14,8 +14,9 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js?v=4';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=4';
+import { AudioFX } from '/assets/audiofx.js?v=5';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=5';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=5';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.
@@ -108,20 +109,28 @@ class WCShell {
             audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
         });
 
-        // In WC mode the sidebar's backend data sources (sysinfo, pairing)
-        // don't exist. Repurpose the toggle as "install local shell" — one
-        // paste gets the user a background service on their machine, after
-        // which this page auto-detects it and boots into full server mode.
+        // Keep the sidebar in WC mode but swap its widgets for sandbox-safe
+        // ones (see mountSandboxSidebar). The toggle keeps its real role.
+        const stageEl = $('.stage');
+        if (window.matchMedia('(max-width: 768px)').matches) {
+            stageEl.classList.add('no-sidebar');
+        }
         const sideBtn = $('#toggle-sidebar');
         if (sideBtn) {
-            sideBtn.textContent = '↯ LOCAL';
-            sideBtn.title = 'Run a real shell on this machine';
-            sideBtn.addEventListener('click', () => this._openInstallDialog());
+            sideBtn.addEventListener('click', () => {
+                stageEl.classList.toggle('no-sidebar');
+                this.audio.play('panels');
+                this._fitActive();
+            });
         }
-        const stage = $('.stage');
-        stage.classList.add('no-sidebar');
-        const sidebar = $('#sidebar');
-        if (sidebar) sidebar.remove();
+        // Tapping the scrim behind the overlay sidebar closes it on mobile.
+        stageEl.addEventListener('click', e => {
+            if (e.target !== stageEl) return;
+            if (!window.matchMedia('(max-width: 768px)').matches) return;
+            if (stageEl.classList.contains('no-sidebar')) return;
+            stageEl.classList.add('no-sidebar');
+            this._fitActive();
+        });
     }
 
     _openInstallDialog() {
@@ -320,6 +329,15 @@ async function main() {
         const audio = new AudioFX({ enabled: true });
         const shell = new WCShell(wc, { audio });
         await shell.newTab();
+
+        const sidebarEl = $('#sidebar');
+        if (sidebarEl) {
+            mountSandboxSidebar(sidebarEl, {
+                audio,
+                onInstall: () => shell._openInstallDialog(),
+                onConnect: () => shell._promptConnect(),
+            });
+        }
 
         $('#status-session').textContent = tr('status.sandbox', { host: location.host });
         const conn = $('#status-conn');
