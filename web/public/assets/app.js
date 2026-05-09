@@ -373,6 +373,10 @@ async function boot() {
 }
 
 boot().catch(err => {
-    console.error(err);
-    $('#boot-status').textContent = 'boot failed: ' + (err && err.message || err);
+    console.error('[soa-web] boot failed', err);
+    const detail = err && err.stack
+        ? err.stack.split('\n').slice(0, 3).join(' | ')
+        : String(err);
+    const node = $('#boot-status');
+    if (node) node.textContent = `boot failed: ${detail}`;
 });
