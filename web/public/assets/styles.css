@@ -110,6 +110,32 @@ html, body {
 }
 .topbar-actions button:hover,
 .topbar-actions .release-btn:hover { border-color: var(--soa-accent); }
+
+/* Primary CTA: make the desktop-app download read as the promoted action
+   without drowning the rest of the topbar. Solid accent fill, subtle
+   breathing glow, icon nudge on hover. */
+.topbar-actions .release-btn--cta {
+    background: var(--soa-accent);
+    color: #05080d;
+    border-color: var(--soa-accent);
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    box-shadow: 0 0 0 1px rgba(170,207,209,0.18), 0 0 14px rgba(170,207,209,0.35);
+    animation: soaCtaPulse 3.2s ease-in-out infinite;
+}
+.topbar-actions .release-btn--cta:hover {
+    background: #c8e5e7;
+    border-color: #c8e5e7;
+    color: #000;
+    box-shadow: 0 0 0 1px rgba(170,207,209,0.3), 0 0 22px rgba(170,207,209,0.6);
+}
+@keyframes soaCtaPulse {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(170,207,209,0.18), 0 0 10px rgba(170,207,209,0.25); }
+    50%      { box-shadow: 0 0 0 1px rgba(170,207,209,0.28), 0 0 20px rgba(170,207,209,0.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .topbar-actions .release-btn--cta { animation: none; }
+}
 .lang-select {
   background: transparent; color: var(--soa-accent);
   border: 1px solid var(--soa-accent-dim);
@@ -336,3 +362,99 @@ body.nocursor, body.nocursor * { cursor: none !important; }
     .settings-sidebar { flex-direction: row; flex-wrap: wrap; border-right: 0; padding-right: 0; border-bottom: 1px dashed rgba(170,207,209,0.16); padding-bottom: 8px; }
     .settings-table td.d { display: none; }
 }
+
+/* ── Mobile gate ────────────────────────────────────────────────────── */
+/* When data-mobile-gate=1 is set on <html> (by the inline detector in
+   index.html), show the gate and hide every other top-level UI layer
+   so the terminal never paints on phones. */
+#mobile-gate { display: none; }
+html[data-mobile-gate="1"] #mobile-gate { display: flex; }
+html[data-mobile-gate="1"] #boot,
+html[data-mobile-gate="1"] #shell { display: none !important; }
+html[data-mobile-gate="1"] body { overflow: hidden; }
+
+.mobile-gate {
+    position: fixed; inset: 0;
+    align-items: flex-start; justify-content: center;
+    padding: 24px 18px 32px;
+    overflow-y: auto;
+    background: #05080d;
+    color: #aacfd1;
+    font-family: 'Fira Mono', ui-monospace, Menlo, Consolas, monospace;
+    z-index: 10000;
+}
+.mobile-gate-inner { width: 100%; max-width: 520px; }
+.mobile-gate-title {
+    margin: 0; font-size: 22px; letter-spacing: 0.14em; font-weight: 400;
+    text-align: center;
+}
+.mobile-gate-sub {
+    margin: 4px 0 20px;
+    text-align: center;
+    font-size: 10px; letter-spacing: 0.2em;
+    color: rgba(170,207,209,0.55);
+}
+.mobile-gate-card {
+    border: 1px solid rgba(170,207,209,0.22);
+    background: rgba(170,207,209,0.03);
+    padding: 18px 16px;
+}
+.mobile-gate-headline {
+    margin: 0 0 8px; font-size: 13px; letter-spacing: 0.1em;
+    color: #aacfd1;
+}
+.mobile-gate-body {
+    margin: 0 0 14px; font-size: 12px; line-height: 1.55;
+    color: rgba(170,207,209,0.82);
+}
+.mobile-gate-steps { margin: 14px 0 8px; }
+.mobile-gate-step-label {
+    margin: 0 0 6px; font-size: 11px; letter-spacing: 0.1em;
+    color: rgba(170,207,209,0.7);
+}
+.mobile-gate-steps ol {
+    margin: 0; padding-left: 18px;
+    font-size: 12px; line-height: 1.65;
+    color: rgba(170,207,209,0.85);
+}
+.mobile-gate-steps li { margin-bottom: 10px; }
+.mobile-gate-steps code {
+    font-size: 11px; padding: 1px 5px;
+    background: rgba(170,207,209,0.08);
+    border: 1px solid rgba(170,207,209,0.18);
+}
+.mobile-gate-cmd {
+    display: block;
+    margin: 8px 0 6px;
+    padding: 10px 12px;
+    background: rgba(170,207,209,0.06);
+    border: 1px solid rgba(170,207,209,0.18);
+    color: #d8eef0;
+    font-size: 11px;
+    white-space: pre-wrap; word-break: break-all;
+    user-select: all;
+}
+.mobile-gate-copy {
+    background: transparent; color: #aacfd1;
+    border: 1px solid rgba(170,207,209,0.28);
+    padding: 6px 12px;
+    font-family: inherit; font-size: 10px; letter-spacing: 0.12em;
+    cursor: pointer;
+}
+.mobile-gate-copy:active { background: rgba(170,207,209,0.1); }
+.mobile-gate-note {
+    margin: 16px 0 0; font-size: 11px; line-height: 1.55;
+    color: rgba(170,207,209,0.6);
+}
+.mobile-gate-footer {
+    margin-top: 18px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10px; letter-spacing: 0.12em;
+}
+.mobile-gate-link, .mobile-gate-bypass {
+    color: rgba(170,207,209,0.6);
+    text-decoration: none;
+    border-bottom: 1px dashed rgba(170,207,209,0.24);
+    padding-bottom: 1px;
+}
+.mobile-gate-link:active, .mobile-gate-bypass:active { color: #aacfd1; }

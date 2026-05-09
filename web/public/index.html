@@ -5,13 +5,91 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>SON OF ANTON · WEB</title>
-  <link rel="icon" href="/assets/favicon.svg?v=7" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=7">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=7">
+  <link rel="icon" href="/assets/favicon.svg?v=8" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=8">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=8">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
+  <script>
+    // Mobile gate. Runs before any app code so we never flash the terminal
+    // UI on phones. Criteria: narrow viewport AND touch primary pointer —
+    // that's iOS Safari / Android Chrome without catching desktops whose
+    // browser window happens to be narrow. A one-tap "continue anyway"
+    // link in the gate stashes a bypass flag in localStorage for rare
+    // cases (demos, debugging, devs on tablets with keyboards).
+    (function gateMobile() {
+        try {
+            if (localStorage.getItem('soa_web_mobile_bypass') === '1') return;
+        } catch (_) { /* private mode — treat as not bypassed */ }
+        var q = window.matchMedia && window.matchMedia('(max-width: 820px) and (pointer: coarse)');
+        if (q && q.matches) document.documentElement.dataset.mobileGate = '1';
+    })();
+  </script>
 </head>
 <body>
+  <div id="mobile-gate" class="mobile-gate" aria-hidden="true">
+    <div class="mobile-gate-inner">
+      <h1 class="mobile-gate-title">SON OF ANTON</h1>
+      <p class="mobile-gate-sub">WEB TERMINAL · PROTOCOL v1</p>
+      <div class="mobile-gate-card">
+        <p class="mobile-gate-headline">Desktop only.</p>
+        <p class="mobile-gate-body">
+          This is a full terminal emulator. It needs a real keyboard and the
+          layout doesn't collapse to a phone screen. Open on a laptop or
+          desktop browser to use it.
+        </p>
+        <div class="mobile-gate-steps">
+          <p class="mobile-gate-step-label">To set it up on your computer:</p>
+          <ol>
+            <li>Open <code>www.s0a.app</code> on your Mac or Linux machine.</li>
+            <li>Paste this into a terminal once:
+              <pre class="mobile-gate-cmd" id="mobile-gate-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
+              <button class="mobile-gate-copy" id="mobile-gate-copy">COPY</button>
+            </li>
+            <li>Reload the page — you'll land in a real shell.</li>
+          </ol>
+        </div>
+        <p class="mobile-gate-note">
+          Or pair your phone as a secondary view: install on your computer
+          first, then use the MOBILE LINK QR from the desktop sidebar.
+        </p>
+      </div>
+      <div class="mobile-gate-footer">
+        <a class="mobile-gate-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener">source · github</a>
+        <a class="mobile-gate-bypass" href="#" id="mobile-gate-bypass">continue anyway →</a>
+      </div>
+    </div>
+  </div>
+  <script>
+    // Wire the gate's two interactive bits. Kept inline so they work even
+    // if the module app.js below is blocked (ad blockers, script failures).
+    (function wireGate() {
+        if (document.documentElement.dataset.mobileGate !== '1') return;
+        var copyBtn = document.getElementById('mobile-gate-copy');
+        var cmd = document.getElementById('mobile-gate-cmd');
+        if (copyBtn && cmd) copyBtn.addEventListener('click', function () {
+            var text = cmd.textContent;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () {
+                    copyBtn.textContent = 'COPIED';
+                    setTimeout(function () { copyBtn.textContent = 'COPY'; }, 1400);
+                }, function () {
+                    copyBtn.textContent = 'select + copy';
+                });
+            } else {
+                var r = document.createRange(); r.selectNode(cmd);
+                var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+                copyBtn.textContent = 'select + copy';
+            }
+        });
+        var bypass = document.getElementById('mobile-gate-bypass');
+        if (bypass) bypass.addEventListener('click', function (e) {
+            e.preventDefault();
+            try { localStorage.setItem('soa_web_mobile_bypass', '1'); } catch (_) {}
+            location.reload();
+        });
+    })();
+  </script>
   <div id="boot" class="boot">
     <div class="boot-grid"></div>
     <div class="boot-inner">
@@ -27,7 +105,7 @@
       <div class="tabs" id="tabs"></div>
       <div class="topbar-actions">
         <select id="lang" class="lang-select" aria-label="Language"></select>
-        <a id="release-link" class="release-btn" href="https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases" target="_blank" rel="noopener" data-i18n="topbar.release" data-i18n-title="topbar.release_title" title="Download latest release">⬇ GET</a>
+        <a id="release-link" class="release-btn release-btn--cta" href="https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases" target="_blank" rel="noopener" data-i18n="topbar.release" data-i18n-title="topbar.release_title" title="Download the desktop app">⬇ DOWNLOAD APP</a>
         <button id="toggle-sidebar" data-i18n="topbar.sidebar" data-i18n-title="topbar.sidebar_title" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
         <button id="toggle-audio" data-i18n="topbar.audio_on" data-i18n-title="topbar.audio_title" title="Mute / unmute sound FX" data-state="on">♪ FX</button>
         <button id="open-settings" data-i18n="topbar.settings" data-i18n-title="topbar.settings_title" title="Settings (Ctrl+Shift+S)">⚙ SET</button>
@@ -49,6 +127,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=7"></script>
+  <script type="module" src="/assets/app.js?v=8"></script>
 </body>
 </html>

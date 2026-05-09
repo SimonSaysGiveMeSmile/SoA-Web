@@ -5,7 +5,7 @@
  * should survive laptop sleep and flaky wifi without the user having to refresh.
  */
 
-import { MSG, INPUT_KIND, frame, parse } from '/assets/protocol.js?v=7';
+import { MSG, INPUT_KIND, frame, parse } from '/assets/protocol.js?v=8';
 
 export class Bridge extends EventTarget {
     constructor({ url }) {
