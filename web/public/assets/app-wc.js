@@ -14,7 +14,7 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js';
+import { AudioFX } from '/assets/audiofx.js?v=2';
 // The WebContainer API ships as ESM on esm.sh. We only depend on the named
 // WebContainer class; auth is optional (loaded below only if present + a
 // clientId is configured) so the rest of the app still works during dev.

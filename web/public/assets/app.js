@@ -12,9 +12,9 @@
  * instantaneous and output history survives.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js';
-import { AudioFX } from '/assets/audiofx.js';
-import { mountSidebar } from '/assets/widgets.js';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=2';
+import { AudioFX } from '/assets/audiofx.js?v=2';
+import { mountSidebar } from '/assets/widgets.js?v=2';
 
 // Resolve the backend origin. `window.__SOA_WEB__.backend` is set by
 // web/public/_config.js — empty means "same origin as this page" (self-hosted
@@ -345,7 +345,7 @@ class Shell {
 async function boot() {
     // Mode-dispatch: webcontainer builds skip the server stack entirely.
     if ((window.__SOA_WEB__ || {}).mode === 'webcontainer') {
-        await import('/assets/app-wc.js');
+        await import('/assets/app-wc.js?v=2');
         return;
     }
 
