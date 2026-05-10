@@ -294,6 +294,46 @@ class NetStatWidget extends Widget {
     }
 }
 
+// ── DEVICE STATUS ────────────────────────────────────────────────────────
+class DeviceStatusWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.device', parent, intervalMs: 10_000 });
+    }
+    async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
+        try {
+            const { data } = await jget('/api/device');
+            const rows = [
+                ['ONLINE', data.online ? 'yes' : 'no', data.online ? '' : 'warn'],
+            ];
+            if (data.battery != null) {
+                const pct = `${data.battery}%`;
+                rows.push(['BATTERY', data.charging ? `${pct} ↑` : pct, data.battery < 20 ? 'warn' : '']);
+            }
+            if (data.cpuTemp != null) rows.push(['CPU TEMP', `${data.cpuTemp}°C`, data.cpuTemp > 90 ? 'warn' : '']);
+            this.setRows(rows);
+        } catch (e) { this.setRows([['ERR', e.message]]); }
+    }
+    _renderSandbox() {
+        const conn = navigator && (navigator.connection || navigator.mozConnection || navigator.webkitConnection);
+        const rows = [
+            ['ONLINE', navigator.onLine ? 'yes' : 'no', navigator.onLine ? '' : 'warn'],
+        ];
+        if (conn && conn.effectiveType) rows.push(['TYPE', conn.effectiveType.toUpperCase()]);
+        const bat = navigator.getBattery ? null : undefined;
+        if (bat === null) {
+            navigator.getBattery().then(b => {
+                this.setRows([
+                    ...rows,
+                    ['BATTERY', `${Math.round(b.level * 100)}%${b.charging ? ' ↑' : ''}`, b.level < 0.2 ? 'warn' : ''],
+                ]);
+            }).catch(() => this.setRows(rows));
+            return;
+        }
+        this.setRows(rows);
+    }
+}
+
 // ── GIT COMMITS ──────────────────────────────────────────────────────────
 class GitCommitsWidget extends Widget {
     constructor({ parent }) {
@@ -646,6 +686,7 @@ export function mountSidebar(parent, ctx = {}) {
         new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),
         new SysInfoWidget({ parent }),
+        new DeviceStatusWidget({ parent }),
         new CpuInfoWidget({ parent }),
         new RamWatcherWidget({ parent }),
         new NetStatWidget({ parent }),
@@ -726,6 +767,7 @@ export function mountSandboxSidebar(parent, ctx = {}) {
         new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),
         new SysInfoWidget({ parent }),
+        new DeviceStatusWidget({ parent }),
         new CpuInfoWidget({ parent }),
         new RamWatcherWidget({ parent }),
         new NetStatWidget({ parent }),

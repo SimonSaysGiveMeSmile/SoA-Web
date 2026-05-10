@@ -124,11 +124,67 @@ function gitCommits(cwd, limit = 8) {
     });
 }
 
+// Returns battery %, charging state, network online flag, and CPU temp.
+// Uses only built-in Node APIs + platform CLI tools (pmset on macOS,
+// /sys/class on Linux) — no extra npm deps.
+function deviceStatus() {
+    return new Promise(resolve => {
+        const platform = os.platform();
+        const result = { battery: null, charging: null, online: null, cpuTemp: null };
+
+        // Network: any non-internal IPv4 interface = online
+        const ifaces = os.networkInterfaces() || {};
+        result.online = Object.values(ifaces).some(addrs =>
+            (addrs || []).some(a => !a.internal && (a.family === 'IPv4' || a.family === 4))
+        );
+
+        const done = () => resolve(result);
+
+        if (platform === 'darwin') {
+            execFile('pmset', ['-g', 'batt'], { timeout: 3000 }, (err, stdout) => {
+                if (!err && stdout) {
+                    const pct = /(\d+)%/.exec(stdout);
+                    if (pct) result.battery = parseInt(pct[1], 10);
+                    result.charging = /charging|AC Power/.test(stdout) && !/discharging/.test(stdout);
+                }
+                // CPU temp via sysctl (AppleSilicon / Intel)
+                execFile('sysctl', ['-n', 'machdep.xcpm.cpu_thermal_level'], { timeout: 2000 }, (e2, out2) => {
+                    if (!e2 && out2) {
+                        const v = parseInt(out2.trim(), 10);
+                        if (!isNaN(v)) result.cpuTemp = v;
+                    }
+                    done();
+                });
+            });
+        } else if (platform === 'linux') {
+            // Battery via /sys/class/power_supply
+            const { readFile } = require('fs');
+            readFile('/sys/class/power_supply/BAT0/capacity', 'utf8', (e, cap) => {
+                if (!e && cap) result.battery = parseInt(cap.trim(), 10);
+                readFile('/sys/class/power_supply/BAT0/status', 'utf8', (e2, status) => {
+                    if (!e2 && status) result.charging = /charging/i.test(status) && !/discharging/i.test(status);
+                    // CPU temp via thermal zone
+                    readFile('/sys/class/thermal/thermal_zone0/temp', 'utf8', (e3, temp) => {
+                        if (!e3 && temp) result.cpuTemp = Math.round(parseInt(temp.trim(), 10) / 1000);
+                        done();
+                    });
+                });
+            });
+        } else {
+            done();
+        }
+    });
+}
+
 function mount(app, requireAuthed) {
     app.get('/api/sys', requireAuthed, (req, res) => res.json({ ok: true, data: sys() }));
     app.get('/api/cpu', requireAuthed, (req, res) => res.json({ ok: true, data: cpuInfo() }));
     app.get('/api/ram', requireAuthed, (req, res) => res.json({ ok: true, data: ramInfo() }));
     app.get('/api/net', requireAuthed, (req, res) => res.json({ ok: true, data: netInfo() }));
+    app.get('/api/device', requireAuthed, async (req, res) => {
+        try { res.json({ ok: true, data: await deviceStatus() }); }
+        catch (e) { res.status(500).json({ ok: false, error: String(e && e.message || e) }); }
+    });
     app.get('/api/geo', requireAuthed, async (req, res) => {
         try {
             const data = await geoInfo();
