@@ -86,31 +86,66 @@ html, body {
   white-space: nowrap;
 }
 .tab:hover { border-color: var(--soa-accent); }
+/* Active tab is filled with its edge color so the current selection reads
+   instantly across the tab row. Text and dot flip to the deep-bg tone for
+   contrast; the outer glow stays to signal focus without a second accent. */
 .tab.active {
-  color: var(--soa-accent); border-color: var(--soa-accent);
-  box-shadow: 0 0 14px rgba(170,207,209,0.28), inset 0 0 10px rgba(170,207,209,0.06);
+  color: #05080d; background: var(--soa-accent);
+  border-color: var(--soa-accent);
+  box-shadow: 0 0 14px rgba(170,207,209,0.35), inset 0 0 0 1px rgba(255,255,255,0.06);
 }
 .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--soa-accent-dim); }
-.tab.active .dot { background: var(--soa-accent); box-shadow: 0 0 6px var(--soa-accent); }
+.tab.active .dot { background: #05080d; box-shadow: none; }
 
 /* Agent status colors — all tabs (active and inactive) */
 .tab[data-agent="working"] .dot { background: var(--soa-green); box-shadow: 0 0 6px var(--soa-green); }
 .tab[data-agent="working"] { color: var(--soa-green); border-color: var(--soa-green); }
-.tab[data-agent="working"].active { box-shadow: 0 0 14px rgba(80,250,123,0.28), inset 0 0 10px rgba(80,250,123,0.06); }
+.tab[data-agent="working"].active {
+  color: #05080d; background: var(--soa-green); border-color: var(--soa-green);
+  box-shadow: 0 0 14px rgba(80,250,123,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
+}
+.tab[data-agent="working"].active .dot { background: #05080d; box-shadow: none; }
 .tab[data-agent="attention"] .dot { background: #ffb86c; box-shadow: 0 0 6px #ffb86c; }
 .tab[data-agent="attention"] { color: #ffb86c; border-color: #ffb86c; }
-.tab[data-agent="attention"].active { box-shadow: 0 0 14px rgba(255,184,108,0.28), inset 0 0 10px rgba(255,184,108,0.06); }
+.tab[data-agent="attention"].active {
+  color: #05080d; background: #ffb86c; border-color: #ffb86c;
+  box-shadow: 0 0 14px rgba(255,184,108,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
+}
+.tab[data-agent="attention"].active .dot { background: #05080d; box-shadow: none; }
 .tab[data-agent="stuck"] .dot { background: var(--soa-red); box-shadow: 0 0 6px var(--soa-red); }
 .tab[data-agent="stuck"] { color: var(--soa-red); border-color: var(--soa-red); }
-.tab[data-agent="stuck"].active { box-shadow: 0 0 14px rgba(255,85,85,0.28), inset 0 0 10px rgba(255,85,85,0.06); }
+.tab[data-agent="stuck"].active {
+  color: #05080d; background: var(--soa-red); border-color: var(--soa-red);
+  box-shadow: 0 0 14px rgba(255,85,85,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
+}
+.tab[data-agent="stuck"].active .dot { background: #05080d; box-shadow: none; }
 .tab[data-agent="none"] .dot { background: var(--soa-blue); box-shadow: 0 0 6px var(--soa-blue); }
 .tab[data-agent="none"] { color: var(--soa-blue); border-color: var(--soa-blue); }
-.tab[data-agent="none"].active { box-shadow: 0 0 14px rgba(98,114,164,0.28), inset 0 0 10px rgba(98,114,164,0.06); }
+.tab[data-agent="none"].active {
+  color: #05080d; background: var(--soa-blue); border-color: var(--soa-blue);
+  box-shadow: 0 0 14px rgba(98,114,164,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
+}
+.tab[data-agent="none"].active .dot { background: #05080d; box-shadow: none; }
 .tab .x {
   width: 14px; height: 14px; display: grid; place-items: center;
   font-size: 12px; opacity: 0.55; margin-left: 2px;
 }
 .tab .x:hover { opacity: 1; color: var(--soa-red); }
+
+/* Drag-to-reorder: the tab being dragged fades, and the drop target shows a
+   thin accent-colored bar on the edge where the dragged tab will land. */
+.tab { position: relative; }
+.tab[draggable="true"] { cursor: grab; }
+.tab.dragging { opacity: 0.45; cursor: grabbing; }
+.tab.drop-before::before,
+.tab.drop-after::after {
+  content: ""; position: absolute; top: 10%; bottom: 10%;
+  width: 2px; background: var(--soa-accent);
+  box-shadow: 0 0 6px var(--soa-accent);
+  pointer-events: none;
+}
+.tab.drop-before::before { left: -4px; }
+.tab.drop-after::after   { right: -4px; }
 
 .topbar-actions { display: flex; gap: 8px; }
 .topbar-actions button,
