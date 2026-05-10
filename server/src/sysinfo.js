@@ -147,13 +147,26 @@ function deviceStatus() {
                     if (pct) result.battery = parseInt(pct[1], 10);
                     result.charging = /charging|AC Power/.test(stdout) && !/discharging/.test(stdout);
                 }
-                // CPU temp via sysctl (AppleSilicon / Intel)
-                execFile('sysctl', ['-n', 'machdep.xcpm.cpu_thermal_level'], { timeout: 2000 }, (e2, out2) => {
-                    if (!e2 && out2) {
-                        const v = parseInt(out2.trim(), 10);
-                        if (!isNaN(v)) result.cpuTemp = v;
+                // Battery health via ioreg (AppleSmartBattery)
+                execFile('ioreg', ['-r', '-c', 'AppleSmartBattery'], { timeout: 3000 }, (e1, ioreg) => {
+                    if (!e1 && ioreg) {
+                        const maxCap  = /"AppleRawMaxCapacity"\s*=\s*(\d+)/.exec(ioreg);
+                        const desCap  = /"DesignCapacity"\s*=\s*(\d+)/.exec(ioreg);
+                        const cycles  = /"CycleCount"\s*=\s*(\d+)/.exec(ioreg);
+                        if (maxCap && desCap) {
+                            const max = parseInt(maxCap[1], 10), des = parseInt(desCap[1], 10);
+                            if (des > 0) result.batteryHealth = Math.round((max / des) * 100);
+                        }
+                        if (cycles) result.batteryCycles = parseInt(cycles[1], 10);
                     }
-                    done();
+                    // CPU temp via sysctl (AppleSilicon / Intel)
+                    execFile('sysctl', ['-n', 'machdep.xcpm.cpu_thermal_level'], { timeout: 2000 }, (e2, out2) => {
+                        if (!e2 && out2) {
+                            const v = parseInt(out2.trim(), 10);
+                            if (!isNaN(v)) result.cpuTemp = v;
+                        }
+                        done();
+                    });
                 });
             });
         } else if (platform === 'linux') {
@@ -163,10 +176,21 @@ function deviceStatus() {
                 if (!e && cap) result.battery = parseInt(cap.trim(), 10);
                 readFile('/sys/class/power_supply/BAT0/status', 'utf8', (e2, status) => {
                     if (!e2 && status) result.charging = /charging/i.test(status) && !/discharging/i.test(status);
-                    // CPU temp via thermal zone
-                    readFile('/sys/class/thermal/thermal_zone0/temp', 'utf8', (e3, temp) => {
-                        if (!e3 && temp) result.cpuTemp = Math.round(parseInt(temp.trim(), 10) / 1000);
-                        done();
+                    readFile('/sys/class/power_supply/BAT0/charge_full', 'utf8', (e3, full) => {
+                        readFile('/sys/class/power_supply/BAT0/charge_full_design', 'utf8', (e4, design) => {
+                            if (!e3 && !e4 && full && design) {
+                                const f = parseInt(full.trim(), 10), d = parseInt(design.trim(), 10);
+                                if (d > 0) result.batteryHealth = Math.round((f / d) * 100);
+                            }
+                            readFile('/sys/class/power_supply/BAT0/cycle_count', 'utf8', (e5, cyc) => {
+                                if (!e5 && cyc) result.batteryCycles = parseInt(cyc.trim(), 10);
+                                // CPU temp via thermal zone
+                                readFile('/sys/class/thermal/thermal_zone0/temp', 'utf8', (e6, temp) => {
+                                    if (!e6 && temp) result.cpuTemp = Math.round(parseInt(temp.trim(), 10) / 1000);
+                                    done();
+                                });
+                            });
+                        });
                     });
                 });
             });

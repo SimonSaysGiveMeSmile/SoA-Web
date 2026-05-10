@@ -310,6 +310,8 @@ class DeviceStatusWidget extends Widget {
                 const pct = `${data.battery}%`;
                 rows.push(['BATTERY', data.charging ? `${pct} ↑` : pct, data.battery < 20 ? 'warn' : '']);
             }
+            if (data.batteryHealth != null) rows.push(['BAT HEALTH', `${data.batteryHealth}%`, data.batteryHealth < 80 ? 'warn' : '']);
+            if (data.batteryCycles != null) rows.push(['CYCLES', data.batteryCycles]);
             if (data.cpuTemp != null) rows.push(['CPU TEMP', `${data.cpuTemp}°C`, data.cpuTemp > 90 ? 'warn' : '']);
             this.setRows(rows);
         } catch (e) { this.setRows([['ERR', e.message]]); }
