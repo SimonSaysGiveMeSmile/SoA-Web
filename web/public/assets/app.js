@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=12';
-import { AudioFX } from '/assets/audiofx.js?v=12';
-import { mountSidebar } from '/assets/widgets.js?v=12';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=12';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=12';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=13';
+import { AudioFX } from '/assets/audiofx.js?v=13';
+import { mountSidebar } from '/assets/widgets.js?v=13';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=13';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -638,7 +638,7 @@ async function _doBoot() {
         return;
     }
     // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=12');
+    await import('/assets/app-wc.js?v=13');
 }
 
 async function boot() {
