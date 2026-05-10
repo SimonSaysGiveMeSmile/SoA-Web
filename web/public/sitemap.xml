@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://s0a.app/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://s0a.app/"/>
+    <xhtml:link rel="alternate" hreflang="zh" href="https://s0a.app/?lang=zh"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://s0a.app/?lang=fr"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://s0a.app/?lang=de"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://s0a.app/?lang=es"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://s0a.app/"/>
+  </url>
+</urlset>

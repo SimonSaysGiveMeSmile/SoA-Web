@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /$
+Allow: /assets/
+Disallow: /api/
+Disallow: /ws
+Disallow: /install.sh
+Disallow: /_config.js
+
+Sitemap: https://s0a.app/sitemap.xml
