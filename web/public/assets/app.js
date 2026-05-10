@@ -17,7 +17,7 @@
  */
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=13';
-import { AudioFX } from '/assets/audiofx.js?v=13';
+import { AudioFX } from '/assets/audiofx.js?v=14';
 import { mountSidebar } from '/assets/widgets.js?v=13';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=13';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
