@@ -25,20 +25,29 @@ import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
 
+// On HTTPS pages, http://127.0.0.1 is blocked as mixed content but
+// http://localhost is allowed (browsers treat localhost as secure).
+function normalizeBackend(backend) {
+    if (location.protocol === 'https:') {
+        backend = backend.replace(/^http:\/\/127\.0\.0\.1/, 'http://localhost');
+    }
+    return backend.replace(/\/+$/, '');
+}
+
 function loadSaved() {
     try {
         const raw = localStorage.getItem(LS_KEY);
         if (!raw) return null;
         const j = JSON.parse(raw);
         if (!j || typeof j.backend !== 'string') return null;
-        return { backend: j.backend.replace(/\/+$/, ''), token: j.token || '' };
+        return { backend: normalizeBackend(j.backend), token: j.token || '' };
     } catch (_) { return null; }
 }
 
 function saveBackend(backend, token) {
     try {
         localStorage.setItem(LS_KEY, JSON.stringify({
-            backend: String(backend || '').replace(/\/+$/, ''),
+            backend: normalizeBackend(String(backend || '')),
             token: String(token || ''),
         }));
     } catch (_) {}
@@ -55,7 +64,7 @@ function pickBackendFromURL() {
     const cleanQuery = q.toString();
     const cleanUrl = location.pathname + (cleanQuery ? '?' + cleanQuery : '') + location.hash;
     history.replaceState(null, '', cleanUrl);
-    return { backend: backend.replace(/\/+$/, ''), token };
+    return { backend: normalizeBackend(backend), token };
 }
 
 async function probePing(backend, token, timeoutMs = 2500) {
@@ -271,7 +280,7 @@ class Shell {
         this._lastStdoutCue = 0;
         this._prevConnState = null;
         this._agentStatus = new Map(); // tabId → 'working'|'attention'|'stuck'|'none'
-        this._agentBuf = new Map();    // tabId → last ~2KB of stripped text
+        this._agentBuf = new Map();    // tabId → detector state { buf, thinking, attention, timers, timestamps }
 
         $('#new-tab').addEventListener('click', () => {
             if (isMobileViewport()) {
@@ -488,40 +497,77 @@ class Shell {
     }
 
     _updateAgentStatus(id, data) {
-        // Strip ANSI escape codes to get plain text
-        const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-        const prev = this._agentBuf.get(id) || '';
-        const buf = (prev + plain).slice(-2048);
-        this._agentBuf.set(id, buf);
+        // Per-tab detector state — mirrors desktop ThinkingDetector.
+        const DET = this._detector || (this._detector = {
+            ansi: /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|\(.|.)/g,
+            toolStart: [/⏺/, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, /(?:Read|Edit|Write|Bash|Glob|Grep|Task|WebFetch|WebSearch|TodoRead|TodoWrite)\s/, /(?:Read|Edit|Write|Bash|Glob|Grep|Task|WebFetch|WebSearch|TodoRead|TodoWrite)\(/],
+            toolEnd: [/\$\s*$/m, /❯\s*$/m, /\w+@\w+.*[\$#]\s*$/m, /%\s*$/m],
+            statusMsg: [/Thinking\.\.\./i, /Processing\.\.\./i, /Running\.\.\./i, /Executing\.\.\./i],
+            streaming: [/^│\s/m, /^│$/m],
+            attention: [/Allow\s+\w+/, /\(Y\)es\s*\/\s*\(N\)o/, /\[Y\/n\]/i, /\(y\/n\)/i, /Do you want to (proceed|continue)/i, /approve/i, /continue\?\s*$/m, /Press Enter to/i, /waiting for.*input/i],
+        });
+        const s = this._agentBuf.get(id) || { buf: '', thinking: false, attention: false, lastOutput: 0, lastNonEmpty: 0, lastEndTime: 0, debounce: null, stuckTimer: null, silenceTimer: null };
+        const clean = data.replace(DET.ansi, '');
+        s.buf = (s.buf + clean).slice(-4096);
+        s.lastOutput = Date.now();
+        if (clean.trim().length > 0) s.lastNonEmpty = Date.now();
+        this._agentBuf.set(id, s);
 
-        const last = buf.slice(-512);
-        let status;
-        // Stuck: error/failure patterns
-        if (/\b(error|failed|fatal|traceback|exception|abort|panic)\b/i.test(last) &&
-            !/\b(no error|0 error|without error)\b/i.test(last)) {
-            status = 'stuck';
-        // Attention: waiting for user input
-        } else if (/(\?|y\/n|\[yes\/no\]|press enter|waiting|paused|permission|allow|deny|approve)/i.test(last) ||
-                   />\s*$/.test(last.trimEnd()) && /claude|agent|kiro/i.test(buf)) {
-            status = 'attention';
-        // Working: agent actively running
-        } else if (/\b(running|thinking|processing|generating|writing|reading|executing|searching|analyzing|compiling)\b/i.test(last) ||
-                   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏▋▌▍▎▏]/.test(last)) {
-            status = 'working';
-        // No agent detected
-        } else if (/\$\s*$/.test(last.trimEnd()) || /[%#]\s*$/.test(last.trimEnd())) {
-            status = 'none';
-        } else {
-            return; // no change
+        // Attention detection
+        if (!s.attention && DET.attention.some(p => p.test(clean))) {
+            s.attention = true;
+            this._setStatus(id, 'attention');
+            return;
         }
 
-        const prev_status = this._agentStatus.get(id);
-        if (prev_status === status) return;
-        this._agentStatus.set(id, status);
-        this._tabsUISig = null; // force re-render
-        this._syncTabsUI();
+        // Thinking start — any tool use / spinner / status message
+        const startDetected = DET.toolStart.some(p => p.test(clean)) ||
+                              DET.statusMsg.some(p => p.test(clean)) ||
+                              DET.streaming.some(p => p.test(clean));
+        // Thinking end — shell prompt returned in buffer tail
+        const recent = s.buf.slice(-1024);
+        const endDetected = DET.toolEnd.some(p => p.test(recent));
 
-        if (status === 'attention' && prev_status && prev_status !== 'attention') {
+        if (startDetected && !s.thinking) {
+            clearTimeout(s.debounce);
+            s.debounce = setTimeout(() => {
+                s.thinking = true;
+                s.attention = false;
+                this._setStatus(id, 'working');
+                // Stuck detector: if no non-empty output for 30s while thinking → stuck
+                clearTimeout(s.stuckTimer);
+                s.stuckTimer = setTimeout(() => {
+                    if (s.thinking && (Date.now() - s.lastNonEmpty) > 30000) this._setStatus(id, 'stuck');
+                }, 30000);
+            }, 100);
+        } else if (s.thinking && endDetected) {
+            clearTimeout(s.debounce);
+            s.debounce = setTimeout(() => {
+                s.thinking = false;
+                s.attention = false;
+                s.lastEndTime = Date.now();
+                clearTimeout(s.stuckTimer);
+                this._setStatus(id, 'none');
+            }, 200);
+        } else if (s.thinking) {
+            // Reset stuck timer on any new output
+            clearTimeout(s.stuckTimer);
+            s.stuckTimer = setTimeout(() => {
+                if (s.thinking && (Date.now() - s.lastNonEmpty) > 30000) this._setStatus(id, 'stuck');
+            }, 30000);
+        } else if (!s.thinking && !s.attention && !this._agentStatus.has(id)) {
+            // Fresh shell with no agent activity
+            if (DET.toolEnd.some(p => p.test(recent))) this._setStatus(id, 'none');
+        }
+    }
+
+    _setStatus(id, status) {
+        const prev = this._agentStatus.get(id);
+        if (prev === status) return;
+        this._agentStatus.set(id, status);
+        this._tabsUISig = null;
+        this._syncTabsUI();
+        if (status === 'attention' && prev !== 'attention') {
             const tab = this.tabs.get(id);
             const title = (tab && tab.title) || tr('tab.default', { id });
             this._notifyAttention(title);
