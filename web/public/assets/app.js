@@ -270,6 +270,8 @@ class Shell {
         this.sidebarEl = $('#sidebar');
         this._lastStdoutCue = 0;
         this._prevConnState = null;
+        this._agentStatus = new Map(); // tabId → 'working'|'attention'|'stuck'|'none'
+        this._agentBuf = new Map();    // tabId → last ~2KB of stripped text
 
         $('#new-tab').addEventListener('click', () => {
             if (isMobileViewport()) {
@@ -407,6 +409,7 @@ class Shell {
             this._lastStdoutCue = now;
             this.audio.play('stdout');
         }
+        this._updateAgentStatus(id, data);
     }
 
     _onTermExit({ id, code }) {
@@ -460,7 +463,7 @@ class Shell {
 
     _syncTabsUI(list) {
         const tabs = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0);
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0) + '#' + tabs.map(t => this._agentStatus.get(t.id) || '').join('|');
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         this.tabsEl.replaceChildren(...tabs.map(t => {
@@ -477,10 +480,77 @@ class Shell {
             }});
             const root = el('button', {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
+                'data-agent': this._agentStatus.get(t.id) || '',
                 onclick: () => this._activate(t.id),
             }, [dot, label, x]);
             return root;
         }));
+    }
+
+    _updateAgentStatus(id, data) {
+        // Strip ANSI escape codes to get plain text
+        const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+        const prev = this._agentBuf.get(id) || '';
+        const buf = (prev + plain).slice(-2048);
+        this._agentBuf.set(id, buf);
+
+        const last = buf.slice(-512);
+        let status;
+        // Stuck: error/failure patterns
+        if (/\b(error|failed|fatal|traceback|exception|abort|panic)\b/i.test(last) &&
+            !/\b(no error|0 error|without error)\b/i.test(last)) {
+            status = 'stuck';
+        // Attention: waiting for user input
+        } else if (/(\?|y\/n|\[yes\/no\]|press enter|waiting|paused|permission|allow|deny|approve)/i.test(last) ||
+                   />\s*$/.test(last.trimEnd()) && /claude|agent|kiro/i.test(buf)) {
+            status = 'attention';
+        // Working: agent actively running
+        } else if (/\b(running|thinking|processing|generating|writing|reading|executing|searching|analyzing|compiling)\b/i.test(last) ||
+                   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏▋▌▍▎▏]/.test(last)) {
+            status = 'working';
+        // No agent detected
+        } else if (/\$\s*$/.test(last.trimEnd()) || /[%#]\s*$/.test(last.trimEnd())) {
+            status = 'none';
+        } else {
+            return; // no change
+        }
+
+        const prev_status = this._agentStatus.get(id);
+        if (prev_status === status) return;
+        this._agentStatus.set(id, status);
+        this._tabsUISig = null; // force re-render
+        this._syncTabsUI();
+
+        if (status === 'attention' && prev_status && prev_status !== 'attention') {
+            const tab = this.tabs.get(id);
+            const title = (tab && tab.title) || tr('tab.default', { id });
+            this._notifyAttention(title);
+        }
+    }
+
+    _notifyAttention(tabTitle) {
+        // Web Notification if permitted
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification(`Tab ${tabTitle} needs your attention.`, { silent: true });
+        } else if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+            Notification.requestPermission().then(p => {
+                if (p === 'granted') new Notification(`Tab ${tabTitle} needs your attention.`, { silent: true });
+            });
+        }
+        // In-app toast as fallback / supplement
+        const existing = document.getElementById('soa-agent-toast');
+        if (existing) existing.remove();
+        const toast = el('div', { id: 'soa-agent-toast', class: 'soa-toast soa-toast--agent', role: 'alert', 'aria-live': 'assertive' }, [
+            el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '!' }),
+            el('div', { class: 'soa-toast-body' }, [
+                el('p', { class: 'soa-toast-title', text: `Tab ${tabTitle} needs your attention.` }),
+            ]),
+        ]);
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => toast.setAttribute('data-show', '1'));
+        const dismiss = () => { toast.removeAttribute('data-show'); setTimeout(() => toast.remove(), 320); };
+        toast.addEventListener('click', dismiss);
+        setTimeout(dismiss, 4000);
     }
 
     _promptRename(id, current) {
