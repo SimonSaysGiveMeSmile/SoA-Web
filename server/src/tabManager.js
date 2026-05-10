@@ -69,8 +69,12 @@ function requirePty() {
 class Tab {
     constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit }) {
         this.id = id;
-        this.title = title || 'terminal';
         this.cwd = cwd || os.homedir();
+        // Default the tab label to the cwd's folder name so "Hireal" shows
+        // up as "Hireal" instead of "tab 1". A caller-supplied title wins,
+        // and so does any later user rename (tracked via userRenamed).
+        this.title = title || path.basename(this.cwd) || 'terminal';
+        this.userRenamed = !!title;
         this.env = { ...process.env, ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
         this.cols = cols || DEFAULT_COLS;
         this.rows = rows || DEFAULT_ROWS;
@@ -160,7 +164,7 @@ class TabManager {
         const id = this.next++;
         const tab = new Tab({
             id,
-            title: title || `tab ${id}`,
+            title: title || undefined,
             cwd, cols, rows,
             onData: data => this.onData(id, data),
             onExit: code => {
@@ -184,9 +188,10 @@ class TabManager {
     rename(id, title) {
         const tab = this.tabs.get(id);
         if (!tab) return false;
-        const next = (title || '').trim() || `tab ${id}`;
+        const next = (title || '').trim() || path.basename(tab.cwd) || `tab ${id}`;
         if (tab.title === next) return false;
         tab.title = next;
+        tab.userRenamed = true;
         this.onTabsChange(this.list());
         return true;
     }
