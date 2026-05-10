@@ -596,7 +596,9 @@ async function resolveBackend() {
         // Browsers allow https → http://localhost since Chrome 94 / Safari 18
         // (treated as a "potentially trustworthy" origin). If a browser still
         // blocks it the fetch just fails and we fall through to sandbox.
-        const local = 'http://127.0.0.1:4010';
+        // Use localhost (not 127.0.0.1) when on HTTPS — browsers treat localhost
+        // as a secure origin but block http://IP as mixed content.
+        const local = location.protocol === 'https:' ? 'http://localhost:4010' : 'http://127.0.0.1:4010';
         const probed = await probePing(local, '', 1000);
         if (probed && probed.ok) return { backend: local, token: '' };
     }
