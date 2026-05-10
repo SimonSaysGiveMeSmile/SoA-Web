@@ -179,11 +179,16 @@ html, body {
 .terms .term {
   position: absolute; inset: 0;
   display: none;
-  padding: 4px 6px;
+  padding: 4px 0 4px 6px;
 }
 .terms .term.active { display: block; }
 .terms .xterm { height: 100%; }
 .terms .xterm-viewport { background: transparent !important; }
+/* Reclaim the ~15px xterm reserves for its scrollbar — users scroll via
+   wheel or keyboard, and the reserved slot otherwise leaves a visible
+   empty gutter to the right of the last terminal column. */
+.terms .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
+.terms .xterm-viewport { scrollbar-width: none; }
 .terms .term-empty {
   display: grid; place-items: center; height: 100%;
   font-family: var(--font-mono); font-size: 13px; opacity: 0.6;
