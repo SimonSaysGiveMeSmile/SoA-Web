@@ -30,6 +30,7 @@ export const INPUT_KIND = Object.freeze({
     NEW_TAB:       'new-tab',
     CLOSE_TAB:     'close-tab',
     MOVE_TAB:      'move-tab',
+    RENAME_TAB:    'rename-tab',
     HOTKEY:        'hotkey',
     SHELL_COMMAND: 'shell-command',
 });

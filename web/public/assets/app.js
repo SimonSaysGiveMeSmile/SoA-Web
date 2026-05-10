@@ -476,6 +476,7 @@ class Shell {
         this.tabsEl.replaceChildren(...tabs.map(t => {
             const label = el('span', {
                 class: 'tab-label',
+                title: tr('tab.rename_hint') || 'Double-click to rename',
                 text: t.title || tr('tab.default', { id: t.id }),
                 ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
@@ -489,6 +490,7 @@ class Shell {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
                 'data-agent': this._agentStatus.get(t.id) || '',
                 onclick: () => this._activate(t.id),
+                oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
             }, [dot, label, x]);
             return root;
         }));
