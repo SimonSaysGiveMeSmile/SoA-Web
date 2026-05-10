@@ -204,9 +204,12 @@ class TabRuntime {
         this.title = title || tr('tab.default', { id });
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
         const s = getSettings();
+        // Phones: shrink the font so more cols fit and lines don't wrap
+        // after 30-something characters. User can override via settings.
+        const fontSize = isMobileViewport() ? Math.min(s.termFontSize, 11) : s.termFontSize;
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
-            fontSize: s.termFontSize,
+            fontSize,
             theme: TRON_THEME,
             cursorBlink: s.cursorBlink,
             scrollback: 5000,
@@ -283,11 +286,6 @@ class Shell {
         this._agentBuf = new Map();    // tabId → detector state { buf, thinking, attention, timers, timestamps }
 
         $('#new-tab').addEventListener('click', () => {
-            if (isMobileViewport()) {
-                this.audio.play('denied');
-                showMobileUnsupportedToast();
-                return;
-            }
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         });
@@ -633,11 +631,6 @@ class Shell {
     _hotkey(e) {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
-            if (isMobileViewport()) {
-                this.audio.play('denied');
-                showMobileUnsupportedToast();
-                return;
-            }
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }

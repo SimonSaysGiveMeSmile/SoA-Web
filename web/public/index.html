@@ -25,7 +25,17 @@
             var q = window.matchMedia && window.matchMedia('(max-width: 820px) and (pointer: coarse)');
             isMobile = !!(q && q.matches);
         } catch (_) {}
+        // Deep-link from a QR pair (?backend=&t=) means the user already
+        // chose this device for desktop control. Skip the welcome and let
+        // the terminal boot so mobile can monitor + type into the paired shell.
+        var hasPairLink = false;
         try {
+            var s = new URLSearchParams(location.search);
+            hasPairLink = !!s.get('backend');
+            if (hasPairLink && isMobile) localStorage.setItem('soa_web_mobile_bypass', '1');
+        } catch (_) {}
+        try {
+            if (hasPairLink) return;
             if (isMobile && localStorage.getItem('soa_web_mobile_bypass') === '1') return;
             if (!isMobile && localStorage.getItem('soa_web_welcomed') === '1') return;
         } catch (_) { /* private mode — treat as not yet welcomed */ }
