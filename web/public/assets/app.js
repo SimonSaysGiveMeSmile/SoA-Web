@@ -16,7 +16,7 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=13';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=14';
 import { AudioFX } from '/assets/audiofx.js?v=14';
 import { mountSidebar } from '/assets/widgets.js?v=13';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=13';
