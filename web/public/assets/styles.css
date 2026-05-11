@@ -217,13 +217,21 @@ html, body {
   padding: 4px 0 4px 6px;
 }
 .terms .term.active { display: block; }
-.terms .xterm { height: 100%; }
-.terms .xterm-viewport { background: transparent !important; }
-/* Reclaim the ~15px xterm reserves for its scrollbar — users scroll via
-   wheel or keyboard, and the reserved slot otherwise leaves a visible
-   empty gutter to the right of the last terminal column. */
+.terms .xterm { height: 100%; width: 100%; }
+.terms .xterm-viewport {
+  background: transparent !important;
+  /* FitAddon sizes the terminal by subtracting the viewport's scrollbar
+     width (offsetWidth − clientWidth) from the parent. If the viewport
+     still scrolls, Chromium on a trackpad-less machine reserves ~15px and
+     the grid stops one column short, leaving a dark gutter on the right.
+     Dropping overflow to hidden collapses that reservation to 0 — xterm
+     still receives wheel events from this element, so scrollback keeps
+     working. */
+  overflow: hidden !important;
+  scrollbar-width: none;
+}
 .terms .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
-.terms .xterm-viewport { scrollbar-width: none; }
+.terms .xterm-screen { width: 100% !important; }
 .terms .term-empty {
   display: grid; place-items: center; height: 100%;
   font-family: var(--font-mono); font-size: 13px; opacity: 0.6;
