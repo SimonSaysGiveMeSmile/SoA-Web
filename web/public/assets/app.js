@@ -224,6 +224,13 @@ class TabRuntime {
         this._opened = false;
         this._onData = null;
         this._onResize = null;
+        // Scrollback handed to us in HELLO before this tab's container is
+        // visible. Writing it into a hidden xterm means writing at the
+        // default 80×24, so any absolute cursor positioning in the stream
+        // lands at the wrong column and lines wrap wrong. We hold it here
+        // and flush it on the first successful fit — see flushPendingReplay.
+        this._pendingReplay = '';
+        this._everFit = false;
     }
 
     _ensureOpen() {
@@ -266,10 +273,35 @@ class TabRuntime {
 
     write(data) { this.term.write(data); }
 
+    // Queue replay bytes for later. If the container is already visible
+    // and sized, we can flush immediately; otherwise the caller will call
+    // flushPendingReplay() once the tab becomes active.
+    queueReplay(data) {
+        if (!data) return;
+        this._pendingReplay += data;
+    }
+
+    flushPendingReplay() {
+        if (!this._pendingReplay) return false;
+        // Only flush once xterm has actually been fit against a real-sized
+        // container — otherwise absolute-column escapes in the scrollback
+        // land at the wrong column.
+        if (!this._everFit) {
+            const rect = this.container.getBoundingClientRect();
+            if (rect.width < 2 || rect.height < 2) return false;
+            this.fitNow();
+        }
+        const data = this._pendingReplay;
+        this._pendingReplay = '';
+        this.term.write(data);
+        return true;
+    }
+
     fitNow() {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
             this.fit.fit();
+            this._everFit = true;
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
     }
@@ -391,18 +423,29 @@ class Shell {
     _onHello({ tabs, activeId, replay }) {
         if (Array.isArray(tabs) && tabs.length) {
             for (const t of tabs) this._ensureTab(t.id, t.title);
-            // Replay server-side scrollback into each xterm BEFORE any live
-            // output arrives. A browser reload should land the user exactly
-            // where they left off — same tabs, same history, same active
-            // tab — with no flash of emptiness and no lost context.
+            // Queue each tab's scrollback instead of writing it straight
+            // into xterm. Writing before fit means writing at the default
+            // 80×24 — any absolute-column ANSI in the stream lands at the
+            // wrong column and the reloaded view comes up visibly
+            // misaligned. _activate fits the target tab first and then
+            // flushes its queue; inactive tabs flush lazily on activation.
             if (Array.isArray(replay)) {
                 for (const r of replay) {
                     const rt = this.tabs.get(r.id);
-                    if (rt && r.data) rt.write(r.data);
+                    if (rt && r.data) rt.queueReplay(r.data);
                 }
             }
             const target = (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
             this._activate(target);
+            // Tell the PTY what width we actually ended up at. _activate's
+            // fitNow goes through the debounced _onResize (60ms) — good for
+            // drag bursts but too slow here: the first prompt the server
+            // paints after reload would be at its old cols. Send now so
+            // the user's next command lines up with the measured grid.
+            const rt = this.tabs.get(target);
+            if (rt && rt._opened) {
+                this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: target, cols: rt.term.cols, rows: rt.term.rows });
+            }
             this._syncTabsUI(tabs);
         } else {
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
@@ -493,6 +536,11 @@ class Shell {
             // send here; two in-flight resizes within a frame is exactly
             // the race that misaligns streaming output.
             rt.fitNow();
+            // Flush scrollback we queued during HELLO. If this is the
+            // first time the tab is visible, xterm just got fit to the
+            // real container size, so absolute-column escapes in the
+            // replay now address the right columns.
+            rt.flushPendingReplay();
             rt.focus();
         }
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
