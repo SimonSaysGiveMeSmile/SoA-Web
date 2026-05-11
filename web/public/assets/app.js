@@ -284,8 +284,8 @@ class Shell {
         this.sidebarEl = $('#sidebar');
         this._lastStdoutCue = new Map(); // tabId → performance.now() of last stdout cue
         this._prevConnState = null;
-        this._agentStatus = new Map(); // tabId → 'working'|'attention'|'stuck'|'none'
-        this._agentBuf = new Map();    // tabId → detector state { buf, thinking, attention, timers, timestamps }
+        this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
+        this._agentBuf = new Map();    // tabId → detector state (see _updateAgentStatus)
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -483,6 +483,13 @@ class Shell {
         t.dispose();
         this.tabs.delete(id);
         this.order = this.order.filter(x => x !== id);
+        // Drop per-tab detector state so a reused id starts fresh and any
+        // pending status transition timer doesn't fire against a dead tab.
+        const det = this._agentBuf.get(id);
+        if (det && det.pending) clearTimeout(det.pending);
+        this._agentBuf.delete(id);
+        this._agentStatus.delete(id);
+        this._lastStdoutCue.delete(id);
         if (this.activeId === id) {
             const next = this.order[0];
             if (next) this._activate(next); else this.activeId = null;
@@ -868,68 +875,109 @@ class Shell {
     }
 
     _updateAgentStatus(id, data) {
-        // Per-tab detector state — mirrors desktop ThinkingDetector.
+        // State model:
+        //   working   — agent is actively running (spinner / "esc to interrupt")
+        //   attention — waiting for explicit user decision (permission prompt,
+        //               Y/n, numbered choice menu)
+        //   done      — agent finished a turn and is waiting for the next
+        //               prompt in its input box (│ > …)
+        //   idle      — no agent in this tab; a plain shell prompt is showing
+        //
+        // The old detector tried to infer state from every incoming chunk and
+        // scanned a 4KB rolling buffer for generic patterns like `\w+@\w+.*\$`.
+        // That matched any line with a path, and a stale match 2KB back kept
+        // latching on every new chunk. The new version only looks at the tail
+        // (~640 bytes of the cleaned buffer) and evaluates a small set of
+        // Claude-Code-specific signals. Transitions are debounced so a half-
+        // painted frame doesn't flip the color.
         const DET = this._detector || (this._detector = {
-            ansi: /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|\(.|.)/g,
-            toolStart: [/⏺/, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, /(?:Read|Edit|Write|Bash|Glob|Grep|Task|WebFetch|WebSearch|TodoRead|TodoWrite)\s/, /(?:Read|Edit|Write|Bash|Glob|Grep|Task|WebFetch|WebSearch|TodoRead|TodoWrite)\(/],
-            toolEnd: [/\$\s*$/m, /❯\s*$/m, /\w+@\w+.*[\$#]\s*$/m, /%\s*$/m],
-            statusMsg: [/Thinking\.\.\./i, /Processing\.\.\./i, /Running\.\.\./i, /Executing\.\.\./i],
-            streaming: [/^│\s/m, /^│$/m],
-            attention: [/Allow\s+\w+/, /\(Y\)es\s*\/\s*\(N\)o/, /\[Y\/n\]/i, /\(y\/n\)/i, /Do you want to (proceed|continue)/i, /approve/i, /continue\?\s*$/m, /Press Enter to/i, /waiting for.*input/i],
+            // Strip ANSI: CSI sequences, OSC, and single-char escapes.
+            ansi: /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g,
+            // "esc to interrupt" is the most reliable "I'm working" signal —
+            // Claude Code only prints it while a turn is in flight. Variants
+            // cover different phrasings seen across versions.
+            working: [
+                /esc to interrupt/i,
+                /\(esc\s+to\s+cancel\)/i,
+                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b[.…]/i,
+            ],
+            // Claude Code's idle input box has a visible bottom border plus
+            // the prompt caret "│ >" on the line above it. Seeing both within
+            // the tail means "turn finished, awaiting next prompt". The caret
+            // alone can briefly appear mid-stream, so we require the border.
+            doneBox: /╰─+╯\s*$/,
+            donePrompt: /│\s*>\s/,
+            // Permission + confirm prompts need the user to decide now.
+            attention: [
+                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /\n\s*\d+\.\s+(?:Yes|No|Accept|Reject|Allow|Deny)\b/i, // numbered menu
+                /\(y\/n\)/i,
+                /\[Y\/n\]/i,
+                /\(Y\)es\s*\/\s*\(N\)o/i,
+                /Press\s+Enter\s+to/i,
+                /waiting\s+for\s+(?:your\s+)?input/i,
+            ],
+            // Plain shell prompt at end of tail = this tab is a shell, no
+            // agent running. Keep the anchor tight: PS1-style endings, not
+            // any `$`. Common prompts: "user@host path $ ", "➜ ~ ", "❯ ".
+            shellPrompt: /(?:^|\r|\n)[^\r\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\r\n]*[\$#%]\s*$)/m,
         });
-        const s = this._agentBuf.get(id) || { buf: '', thinking: false, attention: false, lastOutput: 0, lastNonEmpty: 0, lastEndTime: 0, debounce: null, stuckTimer: null, silenceTimer: null };
-        const clean = data.replace(DET.ansi, '');
-        s.buf = (s.buf + clean).slice(-4096);
-        s.lastOutput = Date.now();
-        if (clean.trim().length > 0) s.lastNonEmpty = Date.now();
-        this._agentBuf.set(id, s);
 
-        // Attention detection
-        if (!s.attention && DET.attention.some(p => p.test(clean))) {
-            s.attention = true;
-            this._setStatus(id, 'attention');
+        let s = this._agentBuf.get(id);
+        if (!s) {
+            s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0 };
+            this._agentBuf.set(id, s);
+        }
+
+        // Keep a 2KB rolling buffer of ANSI-stripped output. We only ever
+        // evaluate the tail, so longer context isn't useful and just lets
+        // older matches linger.
+        const clean = data.replace(DET.ansi, '');
+        s.buf = (s.buf + clean).slice(-2048);
+
+        // Tail is what drives the decision — both "done box" and "shell
+        // prompt" must currently be on screen, not have passed by earlier.
+        const tail = s.buf.slice(-640);
+
+        let next;
+        if (DET.attention.some(p => p.test(tail))) {
+            next = 'attention';
+        } else if (DET.working.some(p => p.test(tail))) {
+            next = 'working';
+        } else if (DET.doneBox.test(tail) && DET.donePrompt.test(tail)) {
+            next = 'done';
+        } else if (DET.shellPrompt.test(tail) && this._agentStatus.get(id) !== 'done') {
+            // Only fall back to idle from a non-agent state. A tab that was
+            // just in "done" stays done until the user types — otherwise the
+            // shell-prompt regex would pull it down to idle on every refresh.
+            next = 'idle';
+        } else {
+            next = null; // no confident signal — leave status alone
+        }
+
+        if (next == null) return;
+        const current = this._agentStatus.get(id) || 'idle';
+        if (next === current) {
+            // Still in the same state; cancel any pending transition.
+            if (s.pending) { clearTimeout(s.pending); s.pending = null; s.pendingStatus = null; }
             return;
         }
 
-        // Thinking start — any tool use / spinner / status message
-        const startDetected = DET.toolStart.some(p => p.test(clean)) ||
-                              DET.statusMsg.some(p => p.test(clean)) ||
-                              DET.streaming.some(p => p.test(clean));
-        // Thinking end — shell prompt returned in buffer tail
-        const recent = s.buf.slice(-1024);
-        const endDetected = DET.toolEnd.some(p => p.test(recent));
+        // Debounce transitions. Attention is urgent (200ms so Y/n doesn't
+        // blink); working fires quickly so the user sees it start; done/idle
+        // wait longer to avoid flapping mid-paint.
+        const delay = next === 'attention' ? 200
+                    : next === 'working'   ? 250
+                    : 600;
 
-        if (startDetected && !s.thinking) {
-            clearTimeout(s.debounce);
-            s.debounce = setTimeout(() => {
-                s.thinking = true;
-                s.attention = false;
-                this._setStatus(id, 'working');
-                // Stuck detector: if no non-empty output for 30s while thinking → stuck
-                clearTimeout(s.stuckTimer);
-                s.stuckTimer = setTimeout(() => {
-                    if (s.thinking && (Date.now() - s.lastNonEmpty) > 30000) this._setStatus(id, 'stuck');
-                }, 30000);
-            }, 100);
-        } else if (s.thinking && endDetected) {
-            clearTimeout(s.debounce);
-            s.debounce = setTimeout(() => {
-                s.thinking = false;
-                s.attention = false;
-                s.lastEndTime = Date.now();
-                clearTimeout(s.stuckTimer);
-                this._setStatus(id, 'none');
-            }, 200);
-        } else if (s.thinking) {
-            // Reset stuck timer on any new output
-            clearTimeout(s.stuckTimer);
-            s.stuckTimer = setTimeout(() => {
-                if (s.thinking && (Date.now() - s.lastNonEmpty) > 30000) this._setStatus(id, 'stuck');
-            }, 30000);
-        } else if (!s.thinking && !s.attention && !this._agentStatus.has(id)) {
-            // Fresh shell with no agent activity
-            if (DET.toolEnd.some(p => p.test(recent))) this._setStatus(id, 'none');
-        }
+        if (s.pendingStatus === next) return; // transition already scheduled
+        if (s.pending) clearTimeout(s.pending);
+        s.pendingStatus = next;
+        s.pending = setTimeout(() => {
+            s.pending = null;
+            s.pendingStatus = null;
+            this._setStatus(id, next);
+        }, delay);
     }
 
     _setStatus(id, status) {

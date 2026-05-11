@@ -98,7 +98,11 @@ html, body {
 .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--soa-accent-dim); }
 .tab.active .dot { background: #05080d; box-shadow: none; }
 
-/* Agent status colors — all tabs (active and inactive) */
+/* Agent status colors — all tabs (active and inactive).
+   working   green   — agent is running (esc to interrupt visible)
+   done      orange  — agent finished a turn, input box awaiting next prompt
+   attention red     — needs user decision (permission / Y-n / numbered menu)
+   idle      blue    — no agent detected; plain shell */
 .tab[data-agent="working"] .dot { background: var(--soa-green); box-shadow: 0 0 6px var(--soa-green); }
 .tab[data-agent="working"] { color: var(--soa-green); border-color: var(--soa-green); }
 .tab[data-agent="working"].active {
@@ -106,27 +110,35 @@ html, body {
   box-shadow: 0 0 14px rgba(80,250,123,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
 .tab[data-agent="working"].active .dot { background: #05080d; box-shadow: none; }
-.tab[data-agent="attention"] .dot { background: #ffb86c; box-shadow: 0 0 6px #ffb86c; }
-.tab[data-agent="attention"] { color: #ffb86c; border-color: #ffb86c; }
-.tab[data-agent="attention"].active {
+.tab[data-agent="done"] .dot { background: #ffb86c; box-shadow: 0 0 6px #ffb86c; }
+.tab[data-agent="done"] { color: #ffb86c; border-color: #ffb86c; }
+.tab[data-agent="done"].active {
   color: #05080d; background: #ffb86c; border-color: #ffb86c;
   box-shadow: 0 0 14px rgba(255,184,108,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
-.tab[data-agent="attention"].active .dot { background: #05080d; box-shadow: none; }
-.tab[data-agent="stuck"] .dot { background: var(--soa-red); box-shadow: 0 0 6px var(--soa-red); }
-.tab[data-agent="stuck"] { color: var(--soa-red); border-color: var(--soa-red); }
-.tab[data-agent="stuck"].active {
+.tab[data-agent="done"].active .dot { background: #05080d; box-shadow: none; }
+.tab[data-agent="attention"] .dot {
+  background: var(--soa-red);
+  box-shadow: 0 0 6px var(--soa-red);
+  animation: soa-agent-pulse 1.1s ease-in-out infinite;
+}
+.tab[data-agent="attention"] { color: var(--soa-red); border-color: var(--soa-red); }
+.tab[data-agent="attention"].active {
   color: #05080d; background: var(--soa-red); border-color: var(--soa-red);
   box-shadow: 0 0 14px rgba(255,85,85,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
-.tab[data-agent="stuck"].active .dot { background: #05080d; box-shadow: none; }
-.tab[data-agent="none"] .dot { background: var(--soa-blue); box-shadow: 0 0 6px var(--soa-blue); }
-.tab[data-agent="none"] { color: var(--soa-blue); border-color: var(--soa-blue); }
-.tab[data-agent="none"].active {
+.tab[data-agent="attention"].active .dot { background: #05080d; box-shadow: none; animation: none; }
+.tab[data-agent="idle"] .dot { background: var(--soa-blue); box-shadow: 0 0 6px var(--soa-blue); }
+.tab[data-agent="idle"] { color: var(--soa-blue); border-color: var(--soa-blue); }
+.tab[data-agent="idle"].active {
   color: #05080d; background: var(--soa-blue); border-color: var(--soa-blue);
   box-shadow: 0 0 14px rgba(98,114,164,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
-.tab[data-agent="none"].active .dot { background: #05080d; box-shadow: none; }
+.tab[data-agent="idle"].active .dot { background: #05080d; box-shadow: none; }
+@keyframes soa-agent-pulse {
+  0%, 100% { box-shadow: 0 0 6px var(--soa-red); opacity: 1; }
+  50%      { box-shadow: 0 0 12px var(--soa-red); opacity: 0.55; }
+}
 .tab .x {
   width: 14px; height: 14px; display: grid; place-items: center;
   font-size: 12px; opacity: 0.55; margin-left: 2px;
