@@ -258,6 +258,30 @@ class TabRuntime {
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
     }
 
+    // Pin the viewport to the bottom of the buffer. Used when activating a
+    // tab so the user lands on the newest output regardless of where xterm
+    // left the scroll position. xterm's own auto-scroll-on-write only kicks
+    // in when the cursor row is already in view, so a tab that was hidden
+    // while data streamed in can have the viewport stranded mid-scrollback.
+    // We also schedule a second scroll in the next frame because term.write()
+    // is async — bytes queued during flushPendingReplay() or fitNow()'s
+    // reflow don't land in the buffer until the parser drains on a later
+    // microtask, and a scrollToBottom() before that drain snaps back once
+    // the new lines appear. term.write accepts a callback, so we use it
+    // when available to scroll exactly after the flush settles.
+    scrollToBottom() {
+        if (!this._opened) return;
+        try { this.term.scrollToBottom(); } catch (_) {}
+        // xterm uses setTimeout(0) internally to flush the write buffer;
+        // two rAFs is enough to let the reflow + any queued writes land.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            try { this.term.scrollToBottom(); } catch (_) {}
+        }));
+        // Also flush any queued writes explicitly so we can scroll the
+        // moment the parser settles rather than waiting two frames.
+        try { this.term.write('', () => { try { this.term.scrollToBottom(); } catch (_) {} }); } catch (_) {}
+    }
+
     focus() { if (this._opened) this.term.focus(); }
 
     applySettings(s) {
@@ -514,6 +538,11 @@ class Shell {
             // real container size, so absolute-column escapes in the
             // replay now address the right columns.
             rt.flushPendingReplay();
+            // Always land on the newest output. xterm only auto-scrolls on
+            // write when the cursor is in view, so a tab that received
+            // data while hidden (or just finished replaying scrollback)
+            // can stay parked above the bottom.
+            rt.scrollToBottom();
             rt.focus();
         }
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
@@ -526,6 +555,11 @@ class Shell {
         const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0) + '#' + tabs.map(t => this._agentStatus.get(t.id) || '').join('|');
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
+        // replaceChildren destroys the old tab buttons, which resets the
+        // tab row's scrollLeft to 0. Snapshot + restore so that a status
+        // color change or a title update doesn't slam the row back to the
+        // first tab while the user is looking at the end of a long list.
+        const savedScrollLeft = this.tabsEl.scrollLeft;
         this.tabsEl.replaceChildren(...tabs.map(t => {
             const label = el('span', {
                 class: 'tab-label',
@@ -550,6 +584,19 @@ class Shell {
             this._attachTabLongPress(root, t.id);
             return root;
         }));
+        this.tabsEl.scrollLeft = savedScrollLeft;
+        // Only pull the active tab into view when the active *id* actually
+        // changed — scrolling on every status/title re-render is what was
+        // snapping the row left. We compare against the last id we scrolled
+        // for, not this.activeId, because activeId can stay the same across
+        // many _syncTabsUI calls.
+        if (this.activeId != null && this._lastScrolledActiveId !== this.activeId) {
+            this._lastScrolledActiveId = this.activeId;
+            const activeNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(this.activeId))}"]`);
+            if (activeNode && typeof activeNode.scrollIntoView === 'function') {
+                try { activeNode.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'auto' }); } catch (_) {}
+            }
+        }
         this._installTabsDrop();
     }
 
