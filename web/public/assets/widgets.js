@@ -376,7 +376,7 @@ class MobileQRWidget extends Widget {
 
         function pairUrl(backendUrl) {
             const token = currentToken();
-            const u = new URL('/', location.origin);
+            const u = new URL('/', backendUrl);
             u.searchParams.set('backend', backendUrl);
             if (token) u.searchParams.set('t', token);
             return u.toString();
@@ -397,7 +397,20 @@ class MobileQRWidget extends Widget {
                         $el('span', { class: 'mqr-u',   text: u }),
                         $el('button', {
                             class: 'mqr-copy', text: tr('mqr.copy'),
-                            onclick: () => navigator.clipboard && navigator.clipboard.writeText(pairUrl(u)),
+                            onclick: (e) => {
+                                const btn = e.currentTarget;
+                                const url = pairUrl(u);
+                                const done = () => { btn.textContent = '✓'; setTimeout(() => { btn.textContent = tr('mqr.copy'); }, 1400); };
+                                if (navigator.clipboard && navigator.clipboard.writeText) {
+                                    navigator.clipboard.writeText(url).then(done, () => { btn.textContent = tr('mqr.copy'); });
+                                } else {
+                                    const ta = document.createElement('textarea');
+                                    ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                                    document.body.appendChild(ta); ta.select();
+                                    try { document.execCommand('copy'); done(); } catch (_) {}
+                                    document.body.removeChild(ta);
+                                }
+                            },
                         }),
                     ]),
                 ),
