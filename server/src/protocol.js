@@ -35,6 +35,7 @@ const INPUT_KIND = Object.freeze({
     CLOSE_TAB:      'close-tab',
     MOVE_TAB:       'move-tab',
     RENAME_TAB:     'rename-tab',
+    RESTORE_TAB:    'restore-tab',
     HOTKEY:         'hotkey',
     SHELL_COMMAND:  'shell-command',
 });

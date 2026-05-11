@@ -182,13 +182,23 @@ class Tab {
 }
 
 class TabManager {
-    constructor({ onData, onTabsChange, onExit } = {}) {
+    constructor({ onData, onTabsChange, onExit, graveyardCap } = {}) {
         this.tabs = new Map();
         this.order = [];
         this.next = 1;
         this.onData = onData || (() => {});
         this.onTabsChange = onTabsChange || (() => {});
         this.onExit = onExit || (() => {});
+        // Graveyard holds a capped FIFO of recently-closed tabs so the client
+        // can offer "restore closed tab". We store everything we can replay:
+        // cwd, title (pre-auto-suffix), user-rename flag, and the final
+        // scrollback snapshot. PTY state (env, jobs, shell history) dies with
+        // the process — restore spawns a fresh shell at the saved cwd and
+        // seeds the new tab's scrollback with the archived bytes plus a
+        // visible divider, so the user can see what WAS there but knows the
+        // process itself is new.
+        this.graveyard = [];
+        this.graveyardCap = Math.max(1, graveyardCap || 10);
     }
 
     list() {
@@ -198,6 +208,15 @@ class TabManager {
         });
     }
 
+    // Compact view of the graveyard for snapshots — just id + title so the
+    // client can render a "restore this tab" affordance without carrying the
+    // full scrollback around on every redraw.
+    graveyardList() {
+        return this.graveyard.map(g => ({
+            id: g.id, title: g.displayTitle, closedAt: g.closedAt,
+        }));
+    }
+
     get(id) { return this.tabs.get(id) || null; }
 
     scrollback(id) {
@@ -205,7 +224,7 @@ class TabManager {
         return t ? t.scrollback.snapshot() : '';
     }
 
-    open({ title, cwd, cols, rows, silent } = {}) {
+    open({ title, cwd, cols, rows, silent, seedScrollback } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
@@ -213,6 +232,7 @@ class TabManager {
             cwd, cols, rows,
             onData: data => this.onData(id, data),
             onExit: code => {
+                this._archive(id);
                 this.onExit(id, code);
                 this._forget(id);
                 // A tab closing can un-collide its neighbors — e.g. the
@@ -221,6 +241,11 @@ class TabManager {
                 this.onTabsChange(this.list());
             },
         }).spawn();
+        // Seed scrollback BEFORE spawn writes anything so the client sees
+        // the seed then the fresh prompt in chronological order. node-pty
+        // won't emit until its onData listener runs (next tick), so this
+        // write lands cleanly at the start of the ring buffer.
+        if (seedScrollback) tab.scrollback.push(String(seedScrollback));
         this.tabs.set(id, tab);
         this.order.push(id);
         this._refreshAutoTitles();
@@ -232,6 +257,49 @@ class TabManager {
         const tab = this.tabs.get(id);
         if (!tab) return;
         tab.kill();
+    }
+
+    // Pop the most-recently-closed tab (or a specific id) from the graveyard,
+    // spawn a fresh shell at its saved cwd, seed the scrollback with the old
+    // output plus a divider so the user sees the continuity without being
+    // misled about the process. Returns the new tab or null.
+    restore({ id, cols, rows } = {}) {
+        let entry;
+        if (id != null) {
+            const idx = this.graveyard.findIndex(g => g.id === id);
+            if (idx === -1) return null;
+            entry = this.graveyard.splice(idx, 1)[0];
+        } else {
+            entry = this.graveyard.pop();
+        }
+        if (!entry) return null;
+        const divider = `\r\n\x1b[2m── ${entry.displayTitle} · restored from closed tab (fresh shell) ──\x1b[0m\r\n`;
+        const seed = (entry.scrollback || '') + divider;
+        const tab = this.open({
+            title: entry.userRenamed ? entry.displayTitle : undefined,
+            cwd: entry.cwd,
+            cols, rows,
+            silent: false,
+            seedScrollback: seed,
+        });
+        return tab;
+    }
+
+    // Snapshot a tab's restorable state into the graveyard. Called from the
+    // PTY exit path — by then the ring buffer is final and the cwd is the
+    // shell's last known one. Trims the graveyard to its cap.
+    _archive(id) {
+        const tab = this.tabs.get(id);
+        if (!tab) return;
+        this.graveyard.push({
+            id: tab.id,
+            displayTitle: tab.title,
+            userRenamed: tab.userRenamed,
+            cwd: tab.cwd,
+            closedAt: Date.now(),
+            scrollback: tab.scrollback.snapshot(),
+        });
+        while (this.graveyard.length > this.graveyardCap) this.graveyard.shift();
     }
 
     // title === '' or null clears the user-rename flag and reverts to the

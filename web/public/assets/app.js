@@ -16,10 +16,10 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=14';
-import { AudioFX } from '/assets/audiofx.js?v=14';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=15';
+import { AudioFX } from '/assets/audiofx.js?v=15';
 import { mountSidebar } from '/assets/widgets.js?v=14';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=13';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=14';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
@@ -282,10 +282,16 @@ class Shell {
         this.tabsEl = $('#tabs');
         this.termsEl = $('#terms');
         this.sidebarEl = $('#sidebar');
-        this._lastStdoutCue = 0;
+        this._lastStdoutCue = new Map(); // tabId → performance.now() of last stdout cue
         this._prevConnState = null;
         this._agentStatus = new Map(); // tabId → 'working'|'attention'|'stuck'|'none'
         this._agentBuf = new Map();    // tabId → detector state { buf, thinking, attention, timers, timestamps }
+        // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
+        // is at the end; an empty list means there's nothing to restore.
+        this.graveyard = [];
+        // Session-scoped "don't ask again" flag for the close-confirm modal.
+        // Reset on reload — we want the guard back each time the app boots.
+        this._skipCloseConfirm = false;
 
         $('#new-tab').addEventListener('click', () => {
             this.audio.play('granted');
@@ -372,7 +378,8 @@ class Shell {
         this._prevConnState = state;
     }
 
-    _onHello({ tabs, activeId, replay }) {
+    _onHello({ tabs, activeId, replay, graveyard }) {
+        this._updateGraveyard(graveyard);
         if (Array.isArray(tabs) && tabs.length) {
             for (const t of tabs) this._ensureTab(t.id, t.title);
             // Queue each tab's scrollback instead of writing it straight
@@ -404,7 +411,8 @@ class Shell {
         }
     }
 
-    _onSnapshot({ tabs, activeId }) {
+    _onSnapshot({ tabs, activeId, graveyard }) {
+        this._updateGraveyard(graveyard);
         if (!Array.isArray(tabs)) return;
         const known = new Set(tabs.map(t => t.id));
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
@@ -427,11 +435,17 @@ class Shell {
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
         if (t) t.write(data);
-        // Throttle stdout cue to avoid a machine-gun of clicks on heavy output.
+        // Throttle stdout cue per-tab so heavy output from one shell doesn't
+        // gun-machine the speakers, but two tabs streaming in parallel can
+        // still overlap into the Web Audio mixer like crossfire. The tab id
+        // is passed through to the engine so its own per-source throttle
+        // stays scoped too — a single scalar there would clip the second
+        // tab's voice even after our 180ms gate let it through.
         const now = performance.now();
-        if (now - this._lastStdoutCue > 180) {
-            this._lastStdoutCue = now;
-            this.audio.play('stdout');
+        const last = this._lastStdoutCue.get(id) || 0;
+        if (now - last > 180) {
+            this._lastStdoutCue.set(id, now);
+            this.audio.play('stdout', 'tab' + id);
         }
         this._updateAgentStatus(id, data);
     }
@@ -515,8 +529,7 @@ class Shell {
             const dot = el('span', { class: 'dot' });
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
-                this.audio.play('denied');
-                this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: t.id });
+                this._requestCloseTab(t.id);
             }});
             const root = el('button', {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
@@ -527,6 +540,7 @@ class Shell {
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
             }, [dot, label, x]);
             this._attachTabDrag(root, t.id);
+            this._attachTabLongPress(root, t.id);
             return root;
         }));
         this._installTabsDrop();
@@ -555,6 +569,228 @@ class Shell {
             this._clearDropIndicator();
             this._dragId = null;
         });
+    }
+
+    // Touch parity for the desktop dblclick/rightclick/drag combo. Long-press
+    // (550ms) on a tab opens a bottom sheet with the same actions phones
+    // otherwise can't reach: rename, reorder, close. The touch listener only
+    // arms on coarse-pointer devices so it doesn't interfere with mouse
+    // right-click → rename on desktop. Movement beyond a small threshold
+    // cancels the timer so the user can still scroll the tab row by dragging.
+    _attachTabLongPress(node, id) {
+        if (!window.matchMedia('(pointer: coarse)').matches) return;
+        let timer = null;
+        let startX = 0, startY = 0;
+        const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        node.addEventListener('touchstart', (e) => {
+            if (e.touches.length !== 1) { cancel(); return; }
+            const t = e.touches[0];
+            startX = t.clientX; startY = t.clientY;
+            cancel();
+            timer = setTimeout(() => {
+                timer = null;
+                try { if (navigator.vibrate) navigator.vibrate(12); } catch (_) {}
+                this._openTabMenu(id);
+            }, 550);
+        }, { passive: true });
+        node.addEventListener('touchmove', (e) => {
+            if (!timer) return;
+            const t = e.touches[0];
+            if (Math.abs(t.clientX - startX) > 8 || Math.abs(t.clientY - startY) > 8) cancel();
+        }, { passive: true });
+        node.addEventListener('touchend', cancel, { passive: true });
+        node.addEventListener('touchcancel', cancel, { passive: true });
+    }
+
+    // Bottom-sheet action menu for a tab. Built once, reused; re-binds to the
+    // current tab id each open. Sits above the terminal with a scrim — tap
+    // outside or the Cancel row to dismiss.
+    _openTabMenu(id) {
+        const idx = this.order.indexOf(id);
+        if (idx === -1) return;
+        const tab = this.tabs.get(id);
+        if (!tab) return;
+        const canMoveLeft  = idx > 0;
+        const canMoveRight = idx < this.order.length - 1;
+
+        const close = () => { sheet.remove(); };
+        const act = (fn) => () => { close(); fn(); };
+
+        const row = (label, onClick, opts = {}) => el('button', {
+            class: 'soa-tabmenu-row' + (opts.danger ? ' danger' : '') + (opts.disabled ? ' disabled' : ''),
+            disabled: opts.disabled ? 'disabled' : null,
+            onclick: opts.disabled ? null : onClick,
+            text: label,
+        });
+
+        const title = tab.title || tr('tab.default', { id });
+        const header = el('div', { class: 'soa-tabmenu-title', text: title });
+        const children = [
+            row(tr('tab.rename_prompt') || 'Rename', act(() => this._promptRename(id, tab.title))),
+            row('← ' + (tr('tab.move_left')  || 'Move left'),  act(() => this._moveRelative(id, -1)), { disabled: !canMoveLeft }),
+            row('→ ' + (tr('tab.move_right') || 'Move right'), act(() => this._moveRelative(id, +1)), { disabled: !canMoveRight }),
+            row('× ' + (tr('tab.close') || 'Close'),
+                act(() => this._requestCloseTab(id)),
+                { danger: true }),
+        ];
+        // Offer restore when the session has anything archived. Menu only
+        // surfaces the top-of-stack; toast + Cmd/Ctrl+Shift+Z cover the rest.
+        if (this.graveyard && this.graveyard.length) {
+            const top = this.graveyard[this.graveyard.length - 1];
+            children.push(row(
+                tr('tab.restore_specific', { title: top.title }) || '⟲ Restore',
+                act(() => this._restoreClosedTab(top.id)),
+            ));
+        }
+        children.push(row(tr('common.cancel') || 'Cancel', close));
+        const rows = el('div', { class: 'soa-tabmenu-rows' }, children);
+
+        const sheet = el('div', { class: 'soa-tabmenu', onclick: (e) => { if (e.target === sheet) close(); } },
+            [el('div', { class: 'soa-tabmenu-panel' }, [header, rows])]);
+        document.body.appendChild(sheet);
+        this.audio.play('panels');
+    }
+
+    // Move a tab one slot in `direction` (−1 left, +1 right). Reuses the
+    // same MOVE_TAB protocol the drag-drop path uses so the server stays
+    // authoritative on ordering.
+    _moveRelative(id, direction) {
+        const idx = this.order.indexOf(id);
+        if (idx === -1) return;
+        const targetIdx = idx + direction;
+        if (targetIdx < 0 || targetIdx >= this.order.length) return;
+        // beforeId is the neighbor the tab should sit in front of, or -1
+        // when moving to the end.
+        let beforeId;
+        if (direction < 0) {
+            beforeId = this.order[targetIdx]; // sit before the left neighbor
+        } else {
+            beforeId = targetIdx + 1 < this.order.length ? this.order[targetIdx + 1] : -1;
+        }
+        this._applyMove(id, { beforeId });
+    }
+
+    // Single close funnel. All three close paths (× button, tab-menu, hotkey)
+    // go through here so the confirm modal and restore toast behave the same
+    // everywhere. The modal can be skipped for the rest of the session via
+    // the "don't ask again" checkbox.
+    _requestCloseTab(id) {
+        const tab = this.tabs.get(id);
+        if (!tab) return;
+        const fire = () => {
+            this.audio.play('denied');
+            // Remember what we just asked to close so we can show a toast
+            // once the server confirms by dropping the tab from the snapshot.
+            this._pendingClose = { id, title: tab.title || tr('tab.default', { id }) };
+            this.bridge.input(INPUT_KIND.CLOSE_TAB, { id });
+        };
+        if (this._skipCloseConfirm) { fire(); return; }
+        this._confirmClose(tab, fire);
+    }
+
+    // Tiny non-blocking confirm dialog. Escape / backdrop click = cancel,
+    // Enter = confirm, checkbox = "don't ask again this session".
+    _confirmClose(tab, onOk) {
+        const title = tab.title || tr('tab.default', { id: tab.id });
+        const backdrop = el('div', { class: 'soa-confirm', role: 'dialog', 'aria-modal': 'true' });
+        const cb = el('input', { type: 'checkbox', id: 'soa-confirm-remember' });
+        const cbWrap = el('label', { class: 'soa-confirm-remember', for: 'soa-confirm-remember' },
+            [cb, el('span', { text: tr('tab.confirm_close.remember') || "Don't ask again this session" })]);
+        const ok = el('button', { class: 'soa-confirm-btn danger', type: 'button',
+            text: tr('tab.confirm_close.ok') || 'Close tab' });
+        const cancel = el('button', { class: 'soa-confirm-btn', type: 'button',
+            text: tr('tab.confirm_close.cancel') || 'Keep tab' });
+        const panel = el('div', { class: 'soa-confirm-panel' }, [
+            el('h3', { class: 'soa-confirm-title', text: tr('tab.confirm_close.title') || 'Close this tab?' }),
+            el('p', { class: 'soa-confirm-body',
+                text: tr('tab.confirm_close.body', { title }) || `Close "${title}"?` }),
+            cbWrap,
+            el('div', { class: 'soa-confirm-actions' }, [cancel, ok]),
+        ]);
+        backdrop.appendChild(panel);
+        const close = () => {
+            document.removeEventListener('keydown', onKey, true);
+            backdrop.remove();
+        };
+        const onKey = (e) => {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+            else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); accept(); }
+        };
+        const accept = () => {
+            if (cb.checked) this._skipCloseConfirm = true;
+            close();
+            onOk();
+        };
+        backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+        cancel.addEventListener('click', close);
+        ok.addEventListener('click', accept);
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(backdrop);
+        this.audio.play('panels');
+        // Focus the cancel action by default so a stray Enter doesn't close
+        // the tab. The user has to move to OK (Tab) or hit Enter twice — this
+        // matches browser tab-close conventions.
+        requestAnimationFrame(() => cancel.focus());
+    }
+
+    // Mirror the server graveyard locally. Called from HELLO and SNAPSHOT.
+    // When a new entry appears, surface the restore toast — that's the only
+    // moment we can tie it to an actual user-initiated close (versus, say,
+    // a reload where the graveyard is pre-populated from a prior session).
+    _updateGraveyard(list) {
+        if (!Array.isArray(list)) return;
+        const prev = this.graveyard || [];
+        this.graveyard = list.slice();
+        this._tabsUISig = null;
+        // Find the first id that's new relative to prev (newest is at end).
+        const prevIds = new Set(prev.map(g => g.id));
+        const added = this.graveyard.find(g => !prevIds.has(g.id));
+        if (added && this._pendingClose && added.id === this._pendingClose.id) {
+            this._showRestoreToast(added);
+            this._pendingClose = null;
+        }
+    }
+
+    // Non-blocking toast with an UNDO action. Auto-dismisses after 6s.
+    // Only one toast lives at a time — a newer close replaces the older one
+    // (the older tab is still recoverable via menu or Cmd/Ctrl+Shift+Z).
+    _showRestoreToast(entry) {
+        const existing = document.getElementById('soa-restore-toast');
+        if (existing) existing.remove();
+        const undo = el('button', { class: 'soa-toast-action', type: 'button',
+            text: tr('tab.undo') || 'UNDO' });
+        const msg = tr('tab.closed_toast', { title: entry.title }) || `Closed "${entry.title}"`;
+        const toast = el('div', {
+            id: 'soa-restore-toast',
+            class: 'soa-toast soa-toast--restore',
+            role: 'status', 'aria-live': 'polite',
+        }, [
+            el('div', { class: 'soa-toast-body' }, [el('p', { class: 'soa-toast-title', text: msg })]),
+            undo,
+        ]);
+        const dismiss = () => {
+            clearTimeout(timer);
+            toast.removeAttribute('data-show');
+            setTimeout(() => toast.remove(), 320);
+        };
+        undo.addEventListener('click', () => { dismiss(); this._restoreClosedTab(entry.id); });
+        const timer = setTimeout(dismiss, 6000);
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => toast.setAttribute('data-show', '1'));
+    }
+
+    // Ask the server to restore a graveyard entry. No id = most-recent.
+    // The server responds by spawning a fresh tab, SNAPSHOT drives the UI
+    // update, and the PTY delivers the seeded scrollback via TERM_DATA.
+    _restoreClosedTab(id) {
+        if (!this.graveyard || !this.graveyard.length) return;
+        const target = id != null
+            ? this.graveyard.find(g => g.id === id)
+            : this.graveyard[this.graveyard.length - 1];
+        if (!target) return;
+        const size = this._sendSize();
+        this.bridge.input(INPUT_KIND.RESTORE_TAB, { id: target.id, ...size });
+        this.audio.play('granted');
     }
 
     _installTabsDrop() {
@@ -798,10 +1034,11 @@ class Shell {
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'w') {
             e.preventDefault();
-            if (this.activeId != null) {
-                this.audio.play('denied');
-                this.bridge.input(INPUT_KIND.CLOSE_TAB, { id: this.activeId });
-            }
+            if (this.activeId != null) this._requestCloseTab(this.activeId);
+        }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            this._restoreClosedTab();
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
             e.preventDefault();

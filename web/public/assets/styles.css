@@ -302,8 +302,28 @@ html, body {
         padding: 0 8px;
     }
     .brand { display: none; }
-    .tabs { gap: 4px; min-width: 0; }
-    .tab { padding: 5px 8px; font-size: 11px; letter-spacing: 0.05em; }
+    .tabs {
+        gap: 4px; min-width: 0;
+        /* iOS momentum scrolling and a touch-native action (don't hijack
+           vertical gestures — we only need horizontal pan on this row). */
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-x;
+    }
+    .tab {
+        padding: 7px 10px; font-size: 11px; letter-spacing: 0.05em;
+        min-height: 32px;
+        -webkit-user-select: none; user-select: none;
+        /* Native HTML5 drag doesn't fire on touch, so we implement long-press
+           instead. Disabling the iOS callout keeps the system menu out of the
+           way during the hold. */
+        -webkit-touch-callout: none;
+    }
+    .tab .x {
+        /* 28×28 hit target — safe for a thumb without forcing the tab chip
+           itself to grow. Visual glyph stays 12px; padding expands the box. */
+        width: 28px; height: 28px; font-size: 16px; margin-left: 2px;
+        opacity: 0.7;
+    }
     .topbar-actions { gap: 4px; }
     .topbar-actions .lang-select { display: none; }
     .topbar-actions .release-btn--cta { animation: none; }
@@ -312,6 +332,54 @@ html, body {
 
 @media (max-width: 420px) {
     .topbar-actions #logout { display: none; }
+}
+
+/* ── Tab action menu (phone long-press) ─────────────────────────
+   Fixed bottom sheet with a scrim. Kept theme-consistent (dark bg,
+   accent outline) so it doesn't feel like a generic OS dialog. */
+.soa-tabmenu {
+    position: fixed; inset: 0;
+    background: rgba(5, 8, 13, 0.7);
+    backdrop-filter: blur(4px);
+    display: flex; align-items: flex-end; justify-content: center;
+    z-index: 9998;
+    animation: soaFade 120ms ease-out;
+}
+.soa-tabmenu-panel {
+    width: 100%;
+    max-width: 520px;
+    margin: 0 8px env(safe-area-inset-bottom, 12px);
+    background: #05080d;
+    border: 1px solid rgba(170, 207, 209, 0.35);
+    box-shadow: 0 0 0 1px rgba(170, 207, 209, 0.05), 0 -12px 40px rgba(0, 0, 0, 0.6);
+    color: #aacfd1;
+    font-family: 'Fira Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+.soa-tabmenu-title {
+    padding: 10px 14px 8px;
+    font-size: 11px; letter-spacing: 0.12em;
+    color: var(--soa-accent-dim);
+    border-bottom: 1px dashed rgba(170, 207, 209, 0.24);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.soa-tabmenu-rows { display: flex; flex-direction: column; }
+.soa-tabmenu-row {
+    appearance: none;
+    background: transparent;
+    color: inherit;
+    border: 0;
+    border-bottom: 1px solid rgba(170, 207, 209, 0.1);
+    padding: 14px 16px;
+    text-align: left;
+    font: inherit; font-size: 14px;
+    cursor: pointer;
+}
+.soa-tabmenu-row:last-child { border-bottom: 0; }
+.soa-tabmenu-row:active { background: rgba(170, 207, 209, 0.08); }
+.soa-tabmenu-row.danger { color: var(--soa-red); }
+.soa-tabmenu-row.disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
 }
 
 /* ── Install modal (WC mode ↯ LOCAL) ──────────────────────────── */
@@ -734,3 +802,124 @@ html[data-welcome="1"] body { overflow: hidden; }
     .soa-toast { transition: opacity 120ms linear; transform: translate(-50%, 0); }
 }
 .soa-toast--agent .soa-toast-icon { background: linear-gradient(135deg, #ffb86c, #ff9500); }
+
+/* Restore toast — surfaces right after a tab is closed, with an UNDO that
+   re-spawns the shell at the saved cwd and re-seeds the scrollback. Re-uses
+   .soa-toast for the container + slide-in animation. */
+.soa-toast--restore {
+    top: auto;
+    bottom: max(16px, env(safe-area-inset-bottom, 16px));
+    transform: translate(-50%, 120%);
+    align-items: center;
+    border-color: rgba(170, 207, 209, 0.18);
+}
+.soa-toast--restore[data-show="1"] { transform: translate(-50%, 0); }
+.soa-toast-action {
+    flex: 0 0 auto;
+    margin-left: 8px;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--soa-cyan, #aacfd1);
+    border: 1px solid rgba(170, 207, 209, 0.35);
+    border-radius: 10px;
+    font: 600 11px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.soa-toast-action:hover {
+    background: rgba(170, 207, 209, 0.12);
+    border-color: rgba(170, 207, 209, 0.6);
+    color: #eafafa;
+}
+.soa-toast-action:active { background: rgba(170, 207, 209, 0.22); }
+
+/* Close-confirm modal — blocking dialog anchored over the whole viewport.
+   Kept small on purpose: close is a one-line decision, not a form. */
+.soa-confirm {
+    position: fixed;
+    inset: 0;
+    z-index: 30000;
+    background: rgba(5, 8, 13, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    animation: soa-confirm-fade 140ms ease-out;
+}
+@keyframes soa-confirm-fade { from { opacity: 0; } to { opacity: 1; } }
+.soa-confirm-panel {
+    width: min(100%, 440px);
+    background: rgba(15, 19, 26, 0.98);
+    color: #eafafa;
+    border: 1px solid rgba(170, 207, 209, 0.18);
+    border-radius: 14px;
+    padding: 18px 20px 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.35);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+}
+.soa-confirm-title {
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: #ffffff;
+}
+.soa-confirm-body {
+    margin: 0 0 14px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: rgba(234, 250, 250, 0.78);
+}
+.soa-confirm-remember {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: rgba(234, 250, 250, 0.72);
+    margin: 0 0 14px;
+    cursor: pointer;
+    user-select: none;
+}
+.soa-confirm-remember input[type="checkbox"] {
+    width: 14px; height: 14px;
+    accent-color: var(--soa-cyan, #aacfd1);
+    cursor: pointer;
+}
+.soa-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+.soa-confirm-btn {
+    padding: 7px 14px;
+    background: rgba(170, 207, 209, 0.08);
+    color: #eafafa;
+    border: 1px solid rgba(170, 207, 209, 0.28);
+    border-radius: 10px;
+    font: 600 12px/1.1 inherit;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.soa-confirm-btn:hover {
+    background: rgba(170, 207, 209, 0.18);
+    border-color: rgba(170, 207, 209, 0.55);
+}
+.soa-confirm-btn:focus-visible {
+    outline: 2px solid var(--soa-cyan, #aacfd1);
+    outline-offset: 2px;
+}
+.soa-confirm-btn.danger {
+    background: rgba(229, 93, 104, 0.12);
+    border-color: rgba(229, 93, 104, 0.45);
+    color: #ffd8dc;
+}
+.soa-confirm-btn.danger:hover {
+    background: rgba(229, 93, 104, 0.25);
+    border-color: rgba(229, 93, 104, 0.75);
+    color: #ffffff;
+}

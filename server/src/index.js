@@ -273,7 +273,11 @@ function onWsConnect(ws, session) {
                 if (session.activeTab && !list.some(t => t.id === session.activeTab)) {
                     session.activeTab = (list[0] && list[0].id) || 0;
                 }
-                session.send(frame(MSG.SNAPSHOT, { tabs: list, activeId: session.activeTab || 0 }));
+                session.send(frame(MSG.SNAPSHOT, {
+                    tabs: list,
+                    activeId: session.activeTab || 0,
+                    graveyard: session.tabMgr.graveyardList(),
+                }));
             },
             onExit: (tabId, code) => session.send(frame(MSG.TERM_EXIT, { id: tabId, code })),
         });
@@ -297,6 +301,7 @@ function onWsConnect(ws, session) {
             tabs: tabList,
             activeId,
             replay,
+            graveyard: session.tabMgr.graveyardList(),
         }));
     } catch (_) { /* ignore */ }
 
@@ -310,7 +315,10 @@ function onWsConnect(ws, session) {
                 break;
             case MSG.REQUEST:
                 if (msg.d && msg.d.what === 'snapshot') {
-                    session.send(frame(MSG.SNAPSHOT, { tabs: session.tabMgr.list() }));
+                    session.send(frame(MSG.SNAPSHOT, {
+                        tabs: session.tabMgr.list(),
+                        graveyard: session.tabMgr.graveyardList(),
+                    }));
                 }
                 break;
             case MSG.INPUT:
@@ -360,6 +368,26 @@ function handleInput(session, d) {
         case INPUT_KIND.RENAME_TAB: {
             const title = typeof d.title === 'string' ? d.title.slice(0, 64) : '';
             mgr.rename(d.id, title);
+            break;
+        }
+        case INPUT_KIND.RESTORE_TAB: {
+            // Pop the chosen entry (or the most-recent one) from the graveyard
+            // and spawn a fresh shell at its saved cwd. The new tab's scrollback
+            // is pre-seeded with the archived bytes + a divider — the client
+            // will receive those bytes as normal TERM_DATA from onData once it
+            // switches in, via the next HELLO/reconnect, or via the new-tab
+            // SNAPSHOT below. Replay the seed now to the live socket so the
+            // user sees the context without needing a reload.
+            const t = mgr.restore({ id: d.id != null ? +d.id : null, cols: d.cols, rows: d.rows });
+            if (t) {
+                session.activeTab = t.id;
+                session.send(frame(MSG.TERM_DATA, { id: t.id, data: mgr.scrollback(t.id) }));
+                session.send(frame(MSG.SNAPSHOT, {
+                    tabs: mgr.list(),
+                    activeId: t.id,
+                    graveyard: mgr.graveyardList(),
+                }));
+            }
             break;
         }
         case INPUT_KIND.TERM_KEYS: {
