@@ -605,12 +605,6 @@ html[data-welcome="1"] body { overflow: hidden; }
     align-items: center;
     gap: 14px;
 }
-.welcome-foot-right {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 6px;
-}
 .welcome-link {
     font-size: 11px;
     letter-spacing: 0.14em;
@@ -653,26 +647,8 @@ html[data-welcome="1"] body { overflow: hidden; }
     .welcome-cmdwrap { flex-direction: column; gap: 6px; }
     .welcome-copy { padding: 7px 0; }
     .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 10px; padding-top: 10px; }
-    .welcome-foot-right { align-items: stretch; }
     .welcome-enter { width: 100%; padding: 11px; }
     .welcome-link { text-align: center; }
-}
-
-/* Inline warning shown above the "continue anyway" button on mobile. Only
-   rendered when the welcome gate is in mobile mode — the .welcome-warn node
-   lives in the DOM year-round but stays hidden on desktop. */
-.welcome-warn { display: none; }
-html[data-welcome-mobile="1"] .welcome-warn {
-    display: block;
-    margin: 0 0 10px;
-    padding: 9px 12px;
-    border: 1px solid rgba(255, 85, 85, 0.5);
-    background: rgba(255, 85, 85, 0.08);
-    color: #ffb3b3;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    line-height: 1.45;
-    text-align: center;
 }
 
 /* ── Mobile "not supported" toast ───────────────────────────────────── */

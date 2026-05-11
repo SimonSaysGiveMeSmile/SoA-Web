@@ -138,52 +138,6 @@ const el = (tag, props = {}, children = []) => {
     return n;
 };
 
-// Narrow + touch viewport heuristic. Mirrors the welcome-gate check in
-// index.html so both layers agree on who counts as "mobile."
-function isMobileViewport() {
-    try {
-        const q = window.matchMedia && window.matchMedia('(max-width: 820px) and (pointer: coarse)');
-        return !!(q && q.matches);
-    } catch (_) { return false; }
-}
-
-// iOS/Android-style notification banner. Used when a mobile visitor tries to
-// spawn a terminal: xterm can render on the small screen but a real shell is
-// not wired for touch, so we refuse the action and surface why in a single
-// concise toast.
-let _toastTimer = null;
-function showMobileUnsupportedToast() {
-    const existing = document.getElementById('soa-mobile-toast');
-    if (existing) existing.remove();
-    if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
-
-    const title = tr('mobile.not_supported_title') || 'Use a Mac or Windows';
-    const body  = tr('mobile.not_supported_body')
-        || 'Terminals are not supported on phones. Open this site on a Mac or Windows PC.';
-
-    const toast = el('div', {
-        id: 'soa-mobile-toast',
-        class: 'soa-toast',
-        role: 'alert',
-        'aria-live': 'assertive',
-    }, [
-        el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '!' }),
-        el('div', { class: 'soa-toast-body' }, [
-            el('p', { class: 'soa-toast-title', text: title }),
-            el('p', { class: 'soa-toast-text',  text: body  }),
-        ]),
-    ]);
-    document.body.appendChild(toast);
-    requestAnimationFrame(() => toast.setAttribute('data-show', '1'));
-
-    const dismiss = () => {
-        toast.removeAttribute('data-show');
-        setTimeout(() => toast.remove(), 320);
-    };
-    toast.addEventListener('click', dismiss);
-    _toastTimer = setTimeout(dismiss, 3800);
-}
-
 const TRON_THEME = {
     foreground: '#aacfd1',
     background: '#05080d',
@@ -204,9 +158,7 @@ class TabRuntime {
         this.title = title || tr('tab.default', { id });
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
         const s = getSettings();
-        // Phones: shrink the font so more cols fit and lines don't wrap
-        // after 30-something characters. User can override via settings.
-        const fontSize = isMobileViewport() ? Math.min(s.termFontSize, 11) : s.termFontSize;
+        const fontSize = s.termFontSize;
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
             fontSize,
@@ -938,11 +890,9 @@ async function _doBoot() {
 
 async function boot() {
     const html = document.documentElement;
-    // Welcome gate: mobile always stops here (can't use the terminal).
-    // Desktop first-visit also stops here, but we expose __soaBootNow so
+    // Welcome gate: first visit stops here, but we expose __soaBootNow so
     // the "ENTER TERMINAL" button can drop the gate and finish boot
     // without a full reload.
-    if (html.dataset.welcomeMobile === '1') return;
     if (html.dataset.welcome === '1') {
         window.__soaBootNow = () => _doBoot();
         return;

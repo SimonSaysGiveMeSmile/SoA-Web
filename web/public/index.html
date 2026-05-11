@@ -49,42 +49,30 @@
   }
   </script>
   <link rel="icon" href="/assets/favicon.svg?v=14" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=18">
+  <link rel="stylesheet" href="/assets/styles.css?v=19">
   <link rel="stylesheet" href="/assets/sidebar.css?v=13">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
-    // Welcome gate. Shown on every first visit so visitors understand the
-    // web/desktop split before they land in a terminal. Two different
-    // triggers:
-    //   * Mobile (narrow + touch): always gate (can't use the terminal),
-    //     bypass with localStorage.soa_web_mobile_bypass.
-    //   * Desktop: gate on first visit only, bypass with
-    //     localStorage.soa_web_welcomed.
+    // Welcome gate. Shown on first visit so visitors understand the
+    // web/desktop split before they land in a terminal. Bypass with
+    // localStorage.soa_web_welcomed. Phone and desktop follow the same
+    // path — the terminal streams identically on both.
     // Runs before any module loads so the terminal UI never flashes.
     (function gateWelcome() {
-        var isMobile = false;
-        try {
-            var q = window.matchMedia && window.matchMedia('(max-width: 820px) and (pointer: coarse)');
-            isMobile = !!(q && q.matches);
-        } catch (_) {}
         // Deep-link from a QR pair (?backend=&t=) means the user already
         // chose this device for desktop control. Skip the welcome and let
-        // the terminal boot so mobile can monitor + type into the paired shell.
+        // the terminal boot so it can monitor + type into the paired shell.
         var hasPairLink = false;
         try {
             var s = new URLSearchParams(location.search);
             hasPairLink = !!s.get('backend');
-            if (hasPairLink && isMobile) localStorage.setItem('soa_web_mobile_bypass', '1');
         } catch (_) {}
         try {
             if (hasPairLink) return;
-            if (isMobile && localStorage.getItem('soa_web_mobile_bypass') === '1') return;
-            if (!isMobile && localStorage.getItem('soa_web_welcomed') === '1') return;
+            if (localStorage.getItem('soa_web_welcomed') === '1') return;
         } catch (_) { /* private mode — treat as not yet welcomed */ }
-        var html = document.documentElement;
-        html.dataset.welcome = '1';
-        if (isMobile) html.dataset.welcomeMobile = '1';
+        document.documentElement.dataset.welcome = '1';
     })();
   </script>
 </head>
@@ -132,10 +120,7 @@
 
       <footer class="welcome-foot">
         <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">source · github</a>
-        <div class="welcome-foot-right">
-          <p class="welcome-warn" id="welcome-warn" data-w="mobile_warn">Your phone doesn't support terminal, please use a MacBook / Windows instead.</p>
-          <button class="welcome-enter" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
-        </div>
+        <button class="welcome-enter" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
       </footer>
     </div>
   </div>
@@ -148,7 +133,6 @@
     (function wireWelcome() {
         var html = document.documentElement;
         if (html.dataset.welcome !== '1') return;
-        var isMobile = html.dataset.welcomeMobile === '1';
 
         var DICT = {
             en: {
@@ -163,8 +147,6 @@
                 cmd_caption: 'Want real shells? Paste this in Terminal:',
                 copy: 'COPY', copied: 'COPIED', select_copy: 'select + copy',
                 github: 'source · github',
-                enter: 'ENTER TERMINAL →', continue_anyway: 'continue anyway →',
-                mobile_warn: "Your phone doesn't support terminal, please use a MacBook / Windows instead.",
             },
             zh: {
                 col_web_title: '网页', col_web_sub: '本页面',
@@ -178,8 +160,6 @@
                 cmd_caption: '想要真实 shell?在终端粘贴:',
                 copy: '复制', copied: '已复制', select_copy: '选中 + 复制',
                 github: '源代码 · GitHub',
-                enter: '进入终端 →', continue_anyway: '仍然继续 →',
-                mobile_warn: '您的手机不支持终端,请改用 MacBook / Windows。',
             },
             fr: {
                 col_web_title: 'Web', col_web_sub: 'cette page',
@@ -193,8 +173,6 @@
                 cmd_caption: 'De vrais shells ? Collez ceci dans le Terminal :',
                 copy: 'COPIER', copied: 'COPIÉ', select_copy: 'sélectionner + copier',
                 github: 'source · github',
-                enter: 'ENTRER DANS LE TERMINAL →', continue_anyway: 'continuer quand même →',
-                mobile_warn: "Votre téléphone ne prend pas en charge le terminal, veuillez utiliser un MacBook / Windows à la place.",
             },
             de: {
                 col_web_title: 'Web', col_web_sub: 'diese Seite',
@@ -208,8 +186,6 @@
                 cmd_caption: 'Echte Shells? Das im Terminal einfügen:',
                 copy: 'KOPIEREN', copied: 'KOPIERT', select_copy: 'auswählen + kopieren',
                 github: 'Quelle · GitHub',
-                enter: 'TERMINAL BETRETEN →', continue_anyway: 'trotzdem fortfahren →',
-                mobile_warn: 'Dein Telefon unterstützt kein Terminal, bitte verwende stattdessen ein MacBook / Windows.',
             },
             es: {
                 col_web_title: 'Web', col_web_sub: 'esta página',
@@ -223,8 +199,6 @@
                 cmd_caption: '¿Shells reales? Pega esto en Terminal:',
                 copy: 'COPIAR', copied: 'COPIADO', select_copy: 'seleccionar + copiar',
                 github: 'fuente · github',
-                enter: 'ENTRAR AL TERMINAL →', continue_anyway: 'continuar de todos modos →',
-                mobile_warn: 'Tu teléfono no admite terminal, usa un MacBook / Windows en su lugar.',
             },
         };
 
@@ -249,9 +223,7 @@
                 var key = node.getAttribute('data-w');
                 if (strings[key] != null) node.textContent = strings[key];
             });
-            // Enter-button label depends on lang AND device class; refresh
-            // whenever either changes (language picker calls apply() again).
-            if (enter) enter.textContent = isMobile ? strings.continue_anyway : strings.enter;
+            if (enter) enter.textContent = strings.enter;
             // Keep the language-bar pressed state in sync with the active
             // choice so the active button reads accent-underlined.
             document.querySelectorAll('#welcome-lang button').forEach(function (btn) {
@@ -291,11 +263,8 @@
         });
         if (enter) {
             enter.addEventListener('click', function () {
-                try {
-                    if (isMobile) localStorage.setItem('soa_web_mobile_bypass', '1');
-                    localStorage.setItem('soa_web_welcomed', '1');
-                } catch (_) {}
-                if (!isMobile && window.__soaBootNow) {
+                try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
+                if (window.__soaBootNow) {
                     html.removeAttribute('data-welcome');
                     window.__soaBootNow();
                     return;
@@ -342,6 +311,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=18"></script>
+  <script type="module" src="/assets/app.js?v=19"></script>
 </body>
 </html>
