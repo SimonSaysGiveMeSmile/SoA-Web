@@ -739,6 +739,11 @@ class Shell {
         if (next == null) return;
         const title = next.trim().slice(0, 64);
         if (!title || title === current) return;
+        // Optimistically update local cache so no-arg _syncTabsUI calls
+        // (agent status, tab switch) don't revert to the stale name while
+        // waiting for the server's confirmation snapshot.
+        const rt = this.tabs.get(id);
+        if (rt) { rt.title = title; this._tabsUISig = null; this._syncTabsUI(); }
         this.bridge.input(INPUT_KIND.RENAME_TAB, { id, title });
     }
 
@@ -765,6 +770,27 @@ class Shell {
     }
 
     _hotkey(e) {
+        const focused = document.activeElement;
+        const inInput = focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA' || focused.tagName === 'SELECT' || focused.isContentEditable);
+        const inTerm  = focused && focused.closest('.xterm');
+        if (!inInput && !inTerm && this.order.length > 1) {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                const idx = this.order.indexOf(this.activeId);
+                const next = e.key === 'ArrowLeft'
+                    ? this.order[(idx - 1 + this.order.length) % this.order.length]
+                    : this.order[(idx + 1) % this.order.length];
+                this._activate(next);
+                return;
+            }
+            const digit = e.key >= '1' && e.key <= '9' ? +e.key - 1
+                        : e.key === '0' ? 9 : -1;
+            if (digit !== -1 && digit < this.order.length && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                e.preventDefault();
+                this._activate(this.order[digit]);
+                return;
+            }
+        }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
             this.audio.play('granted');
