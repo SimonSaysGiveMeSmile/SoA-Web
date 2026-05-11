@@ -161,6 +161,28 @@ html, body {
 .topbar-actions button:hover,
 .topbar-actions .release-btn:hover { border-color: var(--soa-accent); }
 
+/* Icon-only controls. Any topbar action carrying data-icon renders as a
+   30×30 square — the glyph from data-icon is the only visible content.
+   The original label stays in the DOM (hidden with font-size:0) so i18n
+   textContent updates are invisible but screen readers still pick it up
+   via the node text and title attribute. */
+.topbar-actions button[data-icon],
+.topbar-actions .release-btn[data-icon] {
+    width: 30px; height: 30px;
+    padding: 0;
+    font-size: 0;
+    letter-spacing: 0;
+    justify-content: center;
+    box-sizing: border-box;
+}
+.topbar-actions button[data-icon]::before,
+.topbar-actions .release-btn[data-icon]::before {
+    content: attr(data-icon);
+    font-size: 14px;
+    letter-spacing: 0;
+    line-height: 1;
+}
+
 /* Primary CTA: make the desktop-app download read as the promoted action
    without drowning the rest of the topbar. Solid accent fill, subtle
    breathing glow, icon nudge on hover. */
@@ -283,26 +305,6 @@ html, body {
     .tabs { gap: 4px; min-width: 0; }
     .tab { padding: 5px 8px; font-size: 11px; letter-spacing: 0.05em; }
     .topbar-actions { gap: 4px; }
-
-    /* Collapse each action into an icon-only square. The glyph from
-       data-icon is the only visible content; the verbose label stays
-       in the DOM for screen readers via the title/aria. */
-    .topbar-actions button,
-    .topbar-actions .release-btn {
-        width: 30px; height: 30px;
-        padding: 0;
-        font-size: 0;
-        letter-spacing: 0;
-        justify-content: center;
-        box-sizing: border-box;
-    }
-    .topbar-actions button[data-icon]::before,
-    .topbar-actions .release-btn[data-icon]::before {
-        content: attr(data-icon);
-        font-size: 14px;
-        letter-spacing: 0;
-        line-height: 1;
-    }
     .topbar-actions .lang-select { display: none; }
     .topbar-actions .release-btn--cta { animation: none; }
     .status-bar { gap: 10px; padding: 0 8px; font-size: 10px; }
