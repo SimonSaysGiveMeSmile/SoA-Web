@@ -239,7 +239,25 @@ class TabRuntime {
 
     attach(onData, onResize) {
         this._onData = onData;
-        this._onResize = onResize;
+        // Debounce + dedupe the resize send. xterm's onResize already fires
+        // only on real cols/rows changes, but during a window drag we may
+        // churn through several intermediate sizes in a single frame. Each
+        // pty.resize() on the server causes SIGWINCH and repaints any
+        // currently-drawing full-screen UI (claude, vim, less, top) at the
+        // new width — output already queued at the OLD width then renders
+        // at the NEW cols, leaving the lines shifted. Coalesce to one
+        // TERM_RESIZE per ~60ms so only the settled size reaches the PTY.
+        let pending = null;
+        let lastSent = null;
+        this._onResize = (cols, rows) => {
+            if (lastSent && lastSent.cols === cols && lastSent.rows === rows) return;
+            if (pending) clearTimeout(pending);
+            pending = setTimeout(() => {
+                lastSent = { cols, rows };
+                pending = null;
+                onResize(cols, rows);
+            }, 60);
+        };
         if (this._opened) {
             this.term.onData(d => this._onData && this._onData(d));
             this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
@@ -463,8 +481,10 @@ class Shell {
         }
         const rt = this.tabs.get(id);
         if (rt) {
-            const sz = rt.fitNow();
-            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols: sz.cols, rows: sz.rows });
+            // fitNow() → xterm onResize → debounced TERM_RESIZE. No direct
+            // send here; two in-flight resizes within a frame is exactly
+            // the race that misaligns streaming output.
+            rt.fitNow();
             rt.focus();
         }
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
@@ -720,14 +740,13 @@ class Shell {
         // xterm's renderer finalizes cell metrics over a couple of frames —
         // especially the first time the container becomes visible. One fit
         // catches the initial 80×24, the next frame catches the real size
-        // after layout settles. Cheap and eliminates the "terminal stays
-        // small" bug entirely.
-        const push = () => {
-            const sz = rt.fitNow();
-            if (this.bridge) this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: this.activeId, cols: sz.cols, rows: sz.rows });
-        };
-        push();
-        requestAnimationFrame(() => { push(); requestAnimationFrame(push); });
+        // after layout settles. fitNow() triggers xterm's onResize, which
+        // the TabRuntime.attach debouncer forwards to the server — we
+        // intentionally do NOT send TERM_RESIZE here: a drag-grown window
+        // would otherwise fire 3 redundant resizes per frame and shift any
+        // in-flight output.
+        rt.fitNow();
+        requestAnimationFrame(() => { rt.fitNow(); requestAnimationFrame(() => rt.fitNow()); });
     }
 
     _sendSize() {
