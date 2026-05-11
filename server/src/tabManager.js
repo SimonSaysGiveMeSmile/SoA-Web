@@ -13,6 +13,8 @@
 
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
+const { execFileSync } = require('child_process');
 
 const DEFAULT_SHELL = (() => {
     if (process.platform === 'win32') return process.env.COMSPEC || 'cmd.exe';
@@ -54,6 +56,36 @@ class RingBuffer {
     clear() { this.chunks.length = 0; this.size = 0; }
 }
 
+// Resolve a process's current working directory by PID.
+//
+// The shell's cwd drifts as the user `cd`s around — we mirror the macOS
+// Terminal.app behavior of labeling each tab with the folder the shell is
+// sitting in right now, not the one it was spawned in. Platform options:
+//   Linux:  readlink /proc/<pid>/cwd — single syscall, authoritative.
+//   macOS:  `lsof -a -p <pid> -d cwd -Fn` — the `n` field holds the cwd.
+//           It's ~10ms so we only poll on Enter, not on every keystroke.
+//   Other:  return null and fall back to the spawn cwd.
+function resolveCwdByPid(pid) {
+    if (!pid || pid < 0) return null;
+    try {
+        if (process.platform === 'linux') {
+            return fs.readlinkSync(`/proc/${pid}/cwd`);
+        }
+        if (process.platform === 'darwin') {
+            const out = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+                encoding: 'utf8',
+                timeout: 500,
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            for (const line of out.split('\n')) {
+                if (line.startsWith('n')) return line.slice(1).trim() || null;
+            }
+            return null;
+        }
+    } catch (_) { /* process gone, permission denied, lsof missing */ }
+    return null;
+}
+
 let _pty = null;
 function requirePty() {
     if (_pty) return _pty;
@@ -73,7 +105,8 @@ class Tab {
         // Default the tab label to the cwd's folder name so "Hireal" shows
         // up as "Hireal" instead of "tab 1". A caller-supplied title wins,
         // and so does any later user rename (tracked via userRenamed).
-        this.title = title || path.basename(this.cwd) || 'terminal';
+        this.autoTitleBase = path.basename(this.cwd) || 'terminal';
+        this.title = title || this.autoTitleBase;
         this.userRenamed = !!title;
         this.env = { ...process.env, ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
         this.cols = cols || DEFAULT_COLS;
@@ -134,6 +167,18 @@ class Tab {
         if (!this.pty) return;
         try { this.pty.kill(); } catch (_) { /* ignore */ }
     }
+
+    // Poll the shell's live cwd. Returns true when it changed — the caller
+    // uses that to skip the label recompute + snapshot for keystrokes that
+    // didn't actually move the shell.
+    refreshCwd() {
+        if (this.exited || !this.pty) return false;
+        const next = resolveCwdByPid(this.pty.pid);
+        if (!next || next === this.cwd) return false;
+        this.cwd = next;
+        this.autoTitleBase = path.basename(next) || 'terminal';
+        return true;
+    }
 }
 
 class TabManager {
@@ -170,11 +215,15 @@ class TabManager {
             onExit: code => {
                 this.onExit(id, code);
                 this._forget(id);
+                // A tab closing can un-collide its neighbors — e.g. the
+                // only other "Hireal" left shouldn't keep a -N suffix.
+                this._refreshAutoTitles();
                 this.onTabsChange(this.list());
             },
         }).spawn();
         this.tabs.set(id, tab);
         this.order.push(id);
+        this._refreshAutoTitles();
         if (!silent) this.onTabsChange(this.list());
         return tab;
     }
@@ -185,13 +234,25 @@ class TabManager {
         tab.kill();
     }
 
+    // title === '' or null clears the user-rename flag and reverts to the
+    // auto name (cwd basename + -N suffix on collision). Passing a real
+    // string pins it — subsequent cd's won't touch it.
     rename(id, title) {
         const tab = this.tabs.get(id);
         if (!tab) return false;
-        const next = (title || '').trim() || path.basename(tab.cwd) || `tab ${id}`;
-        if (tab.title === next) return false;
-        tab.title = next;
-        tab.userRenamed = true;
+        const trimmed = (title || '').trim();
+        let next;
+        if (trimmed) {
+            tab.userRenamed = true;
+            next = trimmed;
+        } else {
+            tab.userRenamed = false;
+            // Fall back to the auto name; _refreshAutoTitles will assign
+            // the final string with any needed -N suffix.
+            next = tab.autoTitleBase || path.basename(tab.cwd) || `tab ${id}`;
+        }
+        if (tab.title !== next) tab.title = next;
+        this._refreshAutoTitles();
         this.onTabsChange(this.list());
         return true;
     }
@@ -209,6 +270,22 @@ class TabManager {
         this.onTabsChange(this.list());
     }
 
+    // Called after each Enter keypress: re-resolves the shell's cwd and,
+    // if it changed, recomputes the auto title for this tab and any other
+    // tab that might collide with it. Returns true when a snapshot should
+    // be emitted.
+    pokeCwd(id) {
+        const tab = this.tabs.get(id);
+        if (!tab) return false;
+        if (!tab.refreshCwd()) return false;
+        const changed = this._refreshAutoTitles();
+        // Always emit when the cwd changed for an auto-named tab — the
+        // title itself may be the same (same basename) but a sibling tab
+        // may have newly collided or un-collided.
+        if (changed || !tab.userRenamed) this.onTabsChange(this.list());
+        return true;
+    }
+
     killAll() {
         for (const tab of this.tabs.values()) tab.kill();
     }
@@ -217,6 +294,39 @@ class TabManager {
         this.tabs.delete(id);
         this.order = this.order.filter(x => x !== id);
     }
+
+    // Assign titles for every auto-named tab. Two auto tabs sharing a
+    // basename both get a -N suffix starting at -1, numbered by tab id so
+    // the oldest keeps -1 and newcomers stack on the end. Tabs the user
+    // renamed are skipped — their labels are sacred. Returns true when
+    // any title changed, so callers can skip a no-op snapshot emit.
+    _refreshAutoTitles() {
+        const buckets = new Map();
+        for (const id of this.order) {
+            const tab = this.tabs.get(id);
+            if (!tab || tab.userRenamed) continue;
+            const base = tab.autoTitleBase || path.basename(tab.cwd) || `tab ${id}`;
+            let list = buckets.get(base);
+            if (!list) { list = []; buckets.set(base, list); }
+            list.push(tab);
+        }
+        let changed = false;
+        for (const [base, list] of buckets) {
+            if (list.length === 1) {
+                const only = list[0];
+                if (only.title !== base) { only.title = base; changed = true; }
+                continue;
+            }
+            // Stable order: sort by id so older tabs keep their suffix
+            // across renames or cwd changes.
+            list.sort((a, b) => a.id - b.id);
+            list.forEach((tab, i) => {
+                const label = `${base}-${i + 1}`;
+                if (tab.title !== label) { tab.title = label; changed = true; }
+            });
+        }
+        return changed;
+    }
 }
 
-module.exports = { TabManager, Tab, RingBuffer, DEFAULT_SHELL };
+module.exports = { TabManager, Tab, RingBuffer, DEFAULT_SHELL, resolveCwdByPid };

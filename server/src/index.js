@@ -326,6 +326,17 @@ function onWsConnect(ws, session) {
 
 function handleInput(session, d) {
     const mgr = session.tabMgr;
+    // Debounce cwd polling per tab: a typed `cd /foo && cd /bar` bursts
+    // several CRs within a few ms, and we only want one lsof/readlink per
+    // burst. The timer is stored on the session so it's GC'd with it.
+    const schedulePokeCwd = (id) => {
+        const poll = session._cwdPoll || (session._cwdPoll = new Map());
+        clearTimeout(poll.get(id));
+        poll.set(id, setTimeout(() => {
+            poll.delete(id);
+            mgr.pokeCwd(id);
+        }, 120));
+    };
     switch (d.kind) {
         case INPUT_KIND.NEW_TAB: {
             const t = mgr.open({ cols: d.cols, rows: d.rows, silent: true });
@@ -353,7 +364,15 @@ function handleInput(session, d) {
         }
         case INPUT_KIND.TERM_KEYS: {
             const tab = mgr.get(d.id);
-            if (tab) tab.write(d.text || '');
+            if (tab) {
+                const text = d.text || '';
+                tab.write(text);
+                // Enter (CR/LF) is the only keystroke that plausibly ends
+                // a `cd` command — poll the shell's cwd on a short delay
+                // so node-pty has time to flush and the shell has time to
+                // chdir. Throttled per-tab to keep lsof off the hot path.
+                if (/[\r\n]/.test(text)) schedulePokeCwd(d.id);
+            }
             break;
         }
         case INPUT_KIND.TERM_RESIZE: {

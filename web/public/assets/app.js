@@ -448,7 +448,15 @@ class Shell {
     }
 
     _ensureTab(id, title) {
-        if (this.tabs.has(id)) return this.tabs.get(id);
+        const existing = this.tabs.get(id);
+        if (existing) {
+            // Server owns titles — it follows cwd changes and applies the
+            // -N disambiguation suffix. Adopt whatever the snapshot says so
+            // a later _syncTabsUI() call with no list argument doesn't fall
+            // back to a stale cached title.
+            if (title && existing.title !== title) existing.title = title;
+            return existing;
+        }
         const rt = new TabRuntime(id, title);
         this.termsEl.appendChild(rt.container);
         rt.attach(

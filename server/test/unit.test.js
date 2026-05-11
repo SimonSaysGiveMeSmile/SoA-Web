@@ -119,3 +119,77 @@ test('session: activeTab defaults to 0 and accepts updates', () => {
     assert.equal(store.get(s.id).activeTab, 7);
     store.shutdown();
 });
+
+// Helper: register a tab on a TabManager without actually spawning a PTY
+// (node-pty isn't loaded in this unit harness). Mirrors what `open` does
+// sans spawn so disambiguation / auto-title logic can be exercised.
+function fakeTab(mgr, { id, cwd, title } = {}) {
+    const tab = new Tab({ id, title: title || undefined, cwd, scrollbackBytes: 64 });
+    mgr.tabs.set(id, tab);
+    mgr.order.push(id);
+    if (id >= mgr.next) mgr.next = id + 1;
+    return tab;
+}
+
+test('tab: default title is cwd basename', () => {
+    const tab = new Tab({ id: 1, cwd: '/tmp/projects/Hireal' });
+    assert.equal(tab.title, 'Hireal');
+    assert.equal(tab.userRenamed, false);
+    assert.equal(tab.autoTitleBase, 'Hireal');
+});
+
+test('tabManager: auto-titled siblings on same folder get -1, -2', () => {
+    const mgr = new TabManager();
+    fakeTab(mgr, { id: 1, cwd: '/tmp/projects/Hireal' });
+    fakeTab(mgr, { id: 2, cwd: '/tmp/projects/Hireal' });
+    mgr._refreshAutoTitles();
+    assert.deepEqual(mgr.list().map(t => t.title), ['Hireal-1', 'Hireal-2']);
+});
+
+test('tabManager: lone auto-titled tab stays bare; adding a sibling suffixes both', () => {
+    const mgr = new TabManager();
+    fakeTab(mgr, { id: 1, cwd: '/work/Hireal' });
+    mgr._refreshAutoTitles();
+    assert.equal(mgr.get(1).title, 'Hireal');
+    fakeTab(mgr, { id: 2, cwd: '/work/Hireal' });
+    mgr._refreshAutoTitles();
+    assert.deepEqual(mgr.list().map(t => t.title), ['Hireal-1', 'Hireal-2']);
+});
+
+test('tabManager: user-renamed tab is excluded from auto-title pool', () => {
+    const mgr = new TabManager();
+    fakeTab(mgr, { id: 1, cwd: '/a/Hireal' });
+    fakeTab(mgr, { id: 2, cwd: '/b/Hireal' });
+    mgr._refreshAutoTitles();
+    // Pin id 1 as "Main"; id 2 is now the only auto "Hireal" left, so it
+    // should revert to bare.
+    mgr.rename(1, 'Main');
+    assert.equal(mgr.get(1).title, 'Main');
+    assert.equal(mgr.get(2).title, 'Hireal');
+    assert.equal(mgr.get(1).userRenamed, true);
+});
+
+test('tabManager: clearing a user rename re-joins the auto-title pool', () => {
+    const mgr = new TabManager();
+    fakeTab(mgr, { id: 1, cwd: '/a/Hireal' });
+    fakeTab(mgr, { id: 2, cwd: '/b/Hireal' });
+    mgr._refreshAutoTitles();
+    mgr.rename(1, 'Main');
+    assert.deepEqual(mgr.list().map(t => t.title), ['Main', 'Hireal']);
+    mgr.rename(1, '');
+    assert.deepEqual(mgr.list().map(t => t.title), ['Hireal-1', 'Hireal-2']);
+    assert.equal(mgr.get(1).userRenamed, false);
+});
+
+test('tabManager: cwd change rewrites auto title and re-runs disambiguation', () => {
+    const mgr = new TabManager();
+    const a = fakeTab(mgr, { id: 1, cwd: '/w/Hireal' });
+    const b = fakeTab(mgr, { id: 2, cwd: '/w/Hireal' });
+    mgr._refreshAutoTitles();
+    assert.deepEqual(mgr.list().map(t => t.title), ['Hireal-1', 'Hireal-2']);
+    // Simulate `cd ../other` on tab 2.
+    b.cwd = '/w/other';
+    b.autoTitleBase = 'other';
+    mgr._refreshAutoTitles();
+    assert.deepEqual(mgr.list().map(t => t.title), ['Hireal', 'other']);
+});
