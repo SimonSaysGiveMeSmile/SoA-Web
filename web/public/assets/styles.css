@@ -76,8 +76,9 @@ html, body {
 }
 .tabs {
   display: flex; gap: 6px; overflow-x: auto;
-  scrollbar-width: thin; scrollbar-color: var(--soa-accent-dim) transparent;
+  scrollbar-width: none; -ms-overflow-style: none;
 }
+.tabs::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .tab {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 6px 12px; border: 1px solid var(--soa-line);
@@ -268,24 +269,42 @@ html, body {
 
 /* ── Mobile topbar + terminal density ──────────────────────────────────
    Tight layout so tabs + actions fit on one row without horizontal
-   scroll, and the terminal gets all the remaining height. */
+   scroll, and the terminal gets all the remaining height. Right-side
+   controls collapse into 30px square icons so the tab row keeps room
+   to breathe and horizontally scroll. */
 @media (max-width: 768px) {
     .shell { grid-template-rows: 40px 1fr; }
     .topbar {
-        grid-template-columns: 1fr auto;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 8px;
         padding: 0 8px;
     }
     .brand { display: none; }
-    .tabs { gap: 4px; }
+    .tabs { gap: 4px; min-width: 0; }
     .tab { padding: 5px 8px; font-size: 11px; letter-spacing: 0.05em; }
     .topbar-actions { gap: 4px; }
+
+    /* Collapse each action into an icon-only square. The glyph from
+       data-icon is the only visible content; the verbose label stays
+       in the DOM for screen readers via the title/aria. */
     .topbar-actions button,
     .topbar-actions .release-btn {
-        padding: 5px 7px;
-        font-size: 10px;
-        letter-spacing: 0.15em;
+        width: 30px; height: 30px;
+        padding: 0;
+        font-size: 0;
+        letter-spacing: 0;
+        justify-content: center;
+        box-sizing: border-box;
     }
+    .topbar-actions button[data-icon]::before,
+    .topbar-actions .release-btn[data-icon]::before {
+        content: attr(data-icon);
+        font-size: 14px;
+        letter-spacing: 0;
+        line-height: 1;
+    }
+    .topbar-actions .lang-select { display: none; }
+    .topbar-actions .release-btn--cta { animation: none; }
     .status-bar { gap: 10px; padding: 0 8px; font-size: 10px; }
 }
 
