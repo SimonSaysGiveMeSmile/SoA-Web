@@ -374,13 +374,21 @@ class MobileQRWidget extends Widget {
         const pubUrl  = snap && snap.publicUrl;
         const target  = pubUrl || lanList[0] || null;
 
+        function pairUrl(backendUrl) {
+            const token = getToken();
+            const u = new URL('/', location.origin);
+            u.searchParams.set('backend', backendUrl);
+            if (token) u.searchParams.set('t', token);
+            return u.toString();
+        }
+
         this.body.replaceChildren(
             $el('div', { class: `mqr-status mqr-${state}` }, [
                 $el('span', { class: 'mqr-dot' }),
                 $el('span', { text: tr(`mqr.state.${state}`) }),
             ]),
             $el('div', { class: 'mqr-qr' }, target
-                ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(target)}`), alt: 'pairing QR' })]
+                ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(pairUrl(target))}`), alt: 'pairing QR' })]
                 : [$el('div', { class: 'mqr-empty', text: tr('mqr.empty') })]),
             $el('div', { class: 'mqr-urls' },
                 lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
@@ -389,7 +397,7 @@ class MobileQRWidget extends Widget {
                         $el('span', { class: 'mqr-u',   text: u }),
                         $el('button', {
                             class: 'mqr-copy', text: tr('mqr.copy'),
-                            onclick: () => navigator.clipboard && navigator.clipboard.writeText(u),
+                            onclick: () => navigator.clipboard && navigator.clipboard.writeText(pairUrl(u)),
                         }),
                     ]),
                 ),
