@@ -396,6 +396,10 @@ class Shell {
         const known = new Set(tabs.map(t => t.id));
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
         for (const t of tabs) this._ensureTab(t.id, t.title);
+        // Snapshot is the authoritative order: a MOVE_TAB from this client, or
+        // from another device sharing the session, must reorder the local tab
+        // bar. _ensureTab only appends new ids, so adopt the snapshot order.
+        this.order = tabs.map(t => t.id);
         this._syncTabsUI(tabs);
         const nextActive = (activeId && this.tabs.has(activeId)) ? activeId
             : (this.activeId == null && tabs[0]) ? tabs[0].id : null;
@@ -489,11 +493,114 @@ class Shell {
             const root = el('button', {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
                 'data-agent': this._agentStatus.get(t.id) || '',
+                'data-tab-id': String(t.id),
+                draggable: 'true',
                 onclick: () => this._activate(t.id),
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
             }, [dot, label, x]);
+            this._attachTabDrag(root, t.id);
             return root;
         }));
+        this._installTabsDrop();
+    }
+
+    // Browser-style tab drag and drop.
+    //
+    // Each .tab is a drag source. The tabs row is the single drop target;
+    // during dragover we locate the tab under the pointer and decide whether
+    // to insert before or after it based on the midpoint of its bounding box,
+    // drawing a thin indicator on that edge. On drop we optimistically reorder
+    // this.order + the DOM, then send MOVE_TAB — the server's SNAPSHOT is
+    // authoritative and will correct us if the move is rejected.
+    _attachTabDrag(node, id) {
+        node.addEventListener('dragstart', (e) => {
+            this._dragId = id;
+            node.classList.add('dragging');
+            try {
+                // Firefox requires dataTransfer to be populated for drag to start.
+                e.dataTransfer.setData('text/plain', String(id));
+                e.dataTransfer.effectAllowed = 'move';
+            } catch (_) {}
+        });
+        node.addEventListener('dragend', () => {
+            node.classList.remove('dragging');
+            this._clearDropIndicator();
+            this._dragId = null;
+        });
+    }
+
+    _installTabsDrop() {
+        if (this._tabsDropInstalled) return;
+        this._tabsDropInstalled = true;
+        const row = this.tabsEl;
+        row.addEventListener('dragover', (e) => {
+            if (this._dragId == null) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            const target = this._dropTarget(e.clientX);
+            this._paintDropIndicator(target);
+        });
+        row.addEventListener('dragleave', (e) => {
+            // Only clear when the pointer truly leaves the row, not when it
+            // crosses between child tabs (those fire dragleave too).
+            if (e.target === row) this._clearDropIndicator();
+        });
+        row.addEventListener('drop', (e) => {
+            if (this._dragId == null) return;
+            e.preventDefault();
+            const target = this._dropTarget(e.clientX);
+            this._clearDropIndicator();
+            const dragId = this._dragId;
+            this._dragId = null;
+            this._applyMove(dragId, target);
+        });
+    }
+
+    // Given a pointer X, return { beforeId } where beforeId is the id of the
+    // tab the dragged tab should be inserted before, or -1 to append.
+    _dropTarget(clientX) {
+        const nodes = Array.from(this.tabsEl.querySelectorAll('.tab'));
+        for (const n of nodes) {
+            const r = n.getBoundingClientRect();
+            if (clientX < r.left + r.width / 2) {
+                return { beforeId: Number(n.dataset.tabId), node: n, side: 'left' };
+            }
+        }
+        const last = nodes[nodes.length - 1];
+        return { beforeId: -1, node: last || null, side: 'right' };
+    }
+
+    _paintDropIndicator({ node, side }) {
+        this._clearDropIndicator();
+        if (!node) return;
+        node.classList.add(side === 'left' ? 'drop-before' : 'drop-after');
+        this._dropIndicatorNode = node;
+    }
+
+    _clearDropIndicator() {
+        const n = this._dropIndicatorNode;
+        if (n) { n.classList.remove('drop-before', 'drop-after'); }
+        this._dropIndicatorNode = null;
+    }
+
+    _applyMove(dragId, { beforeId }) {
+        // No-op when dropping onto self or onto the slot immediately after self.
+        const curIdx = this.order.indexOf(dragId);
+        if (curIdx === -1) return;
+        let targetIdx;
+        if (beforeId === -1) targetIdx = this.order.length;
+        else targetIdx = this.order.indexOf(beforeId);
+        if (targetIdx === -1) return;
+        if (targetIdx === curIdx || targetIdx === curIdx + 1) return;
+
+        const next = this.order.filter(x => x !== dragId);
+        const insertAt = beforeId === -1 ? next.length : next.indexOf(beforeId);
+        next.splice(insertAt === -1 ? next.length : insertAt, 0, dragId);
+        this.order = next;
+        this._tabsUISig = null;
+        this._syncTabsUI();
+        this.audio.play('panels');
+        this.bridge.input(INPUT_KIND.MOVE_TAB, { id: dragId, before: beforeId });
     }
 
     _updateAgentStatus(id, data) {
