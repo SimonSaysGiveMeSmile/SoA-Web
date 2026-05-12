@@ -310,6 +310,7 @@ class Shell {
         this._prevConnState = null;
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _updateAgentStatus)
+        this._ctxPct = new Map();      // tabId → 0-100 context usage %
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -514,6 +515,7 @@ class Shell {
         this._agentBuf.delete(id);
         this._agentStatus.delete(id);
         this._lastStdoutCue.delete(id);
+        this._ctxPct.delete(id);
         if (this.activeId === id) {
             const next = this.order[0];
             if (next) this._activate(next); else this.activeId = null;
@@ -567,7 +569,7 @@ class Shell {
                 text: t.title || tr('tab.default', { id: t.id }),
                 ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
-            const dot = el('span', { class: 'dot' });
+            const dot = this._makePie(this._ctxPct.get(t.id) || 0);
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
                 this._requestCloseTab(t.id);
@@ -598,6 +600,44 @@ class Shell {
             }
         }
         this._installTabsDrop();
+    }
+
+    _makePie(pct) {
+        const NS = 'http://www.w3.org/2000/svg';
+        const r = 5, cx = 6, cy = 6, size = 12;
+        const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : 'var(--soa-accent)';
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('class', 'ctx-pie');
+        svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+        svg.setAttribute('width', size); svg.setAttribute('height', size);
+        // Background circle
+        const bg = document.createElementNS(NS, 'circle');
+        bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', r);
+        bg.setAttribute('fill', 'rgba(255,255,255,0.12)');
+        svg.appendChild(bg);
+        if (pct > 0 && pct < 100) {
+            const a = (pct / 100) * Math.PI * 2 - Math.PI / 2;
+            const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a);
+            const large = pct > 50 ? 1 : 0;
+            const path = document.createElementNS(NS, 'path');
+            path.setAttribute('d', `M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 ${large},1 ${x},${y} Z`);
+            path.setAttribute('fill', color);
+            svg.appendChild(path);
+        } else if (pct >= 100) {
+            const full = document.createElementNS(NS, 'circle');
+            full.setAttribute('cx', cx); full.setAttribute('cy', cy); full.setAttribute('r', r);
+            full.setAttribute('fill', color);
+            svg.appendChild(full);
+        }
+        svg.setAttribute('title', pct > 0 ? `Context: ${pct}%` : 'Context: —');
+        return svg;
+    }
+
+    _updateCtxPie(id, pct) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-pie`);
+        if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
+        const fresh = this._makePie(pct);
+        node.replaceWith(fresh);
     }
 
     // Browser-style tab drag and drop.
@@ -981,6 +1021,17 @@ class Shell {
         // older matches linger.
         const clean = data.replace(DET.ansi, '');
         s.buf = (s.buf + clean).slice(-2048);
+
+        // Parse Claude Code's context usage lines, e.g.:
+        //   "Context is 45%"  /  "45% context used"  /  "Context low (45%"
+        const ctxMatch = clean.match(/(?:Context(?:\s+is|\s+low\s*\()?\s+(\d{1,3})%|(\d{1,3})%\s+context\s+used)/i);
+        if (ctxMatch) {
+            const pct = Math.min(100, Math.max(0, parseInt(ctxMatch[1] || ctxMatch[2], 10)));
+            if (pct !== this._ctxPct.get(id)) {
+                this._ctxPct.set(id, pct);
+                this._updateCtxPie(id, pct);
+            }
+        }
 
         // Tail is what drives the decision — both "done box" and "shell
         // prompt" must currently be on screen, not have passed by earlier.
