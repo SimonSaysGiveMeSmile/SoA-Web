@@ -311,6 +311,10 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _updateAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
+        // Poll the second-to-last visible terminal line every second — that's
+        // where Claude Code's Ink status bar always lives. More reliable than
+        // scanning the PTY stream because Ink re-renders in-place via cursor-up.
+        this._ctxPollTimer = setInterval(() => this._pollCtxLines(), 1000);
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -649,6 +653,33 @@ class Shell {
         const dismiss = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); } };
         pop.querySelector('.ctx-pop-close').onclick = () => { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); };
         setTimeout(() => document.addEventListener('pointerdown', dismiss, true), 0);
+    }
+
+    _pollCtxLines() {
+        for (const [id, rt] of this.tabs) {
+            if (!rt._opened) continue;
+            try {
+                const buf = rt.term.buffer.active;
+                // Claude Code's Ink status bar is always the second-to-last
+                // visible line. Read it directly from the rendered terminal.
+                const viewportEnd = buf.baseY + rt.term.rows - 1;
+                const line = buf.getLine(viewportEnd - 1);
+                if (!line) continue;
+                const text = line.translateToString(true);
+                let pct = null, m;
+                if ((m = text.match(/(\d{1,3})%\s+context\s+used/i)))             pct = +m[1];
+                else if ((m = text.match(/(\d{1,3})%\s+until\s+auto-compact/i)))  pct = 100 - +m[1];
+                else if ((m = text.match(/Context\s+low\s*\((\d{1,3})%/i)))       pct = 100 - +m[1];
+                else if ((m = text.match(/Context\s+is\s+(\d{1,3})%/i)))          pct = +m[1];
+                if (pct !== null) {
+                    pct = Math.min(100, Math.max(0, pct));
+                    if (pct !== this._ctxPct.get(id)) {
+                        this._ctxPct.set(id, pct);
+                        this._updateCtxPie(id, pct);
+                    }
+                }
+            } catch (_) {}
+        }
     }
 
     // Browser-style tab drag and drop.
@@ -1032,23 +1063,6 @@ class Shell {
         // older matches linger.
         const clean = data.replace(DET.ansi, '');
         s.buf = (s.buf + clean).slice(-2048);
-
-        // Parse Claude Code's context usage lines. Ink re-renders the status
-        // bar in-place via cursor-up, so the text is often split across PTY
-        // chunks — search the rolling buffer, not just the new chunk.
-        let ctxPct = null;
-        let m;
-        if ((m = s.buf.match(/(\d{1,3})%\s+context\s+used/i)))              ctxPct = +m[1];
-        else if ((m = s.buf.match(/(\d{1,3})%\s+until\s+auto-compact/i)))   ctxPct = 100 - +m[1];
-        else if ((m = s.buf.match(/Context\s+low\s*\((\d{1,3})%\s+remaining/i))) ctxPct = 100 - +m[1];
-        else if ((m = s.buf.match(/Context\s+is\s+(\d{1,3})%/i)))           ctxPct = +m[1];
-        if (ctxPct !== null) {
-            const pct = Math.min(100, Math.max(0, ctxPct));
-            if (pct !== this._ctxPct.get(id)) {
-                this._ctxPct.set(id, pct);
-                this._updateCtxPie(id, pct);
-            }
-        }
 
         // Tail is what drives the decision — both "done box" and "shell
         // prompt" must currently be on screen, not have passed by earlier.
