@@ -603,41 +603,18 @@ class Shell {
     }
 
     _makePie(pct) {
-        const NS = 'http://www.w3.org/2000/svg';
-        const r = 5, cx = 6, cy = 6, size = 12;
-        const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : 'var(--soa-accent)';
-        const svg = document.createElementNS(NS, 'svg');
-        svg.setAttribute('class', 'ctx-pie');
-        svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
-        svg.setAttribute('width', size); svg.setAttribute('height', size);
-        // Background circle
-        const bg = document.createElementNS(NS, 'circle');
-        bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', r);
-        bg.setAttribute('fill', 'rgba(255,255,255,0.12)');
-        svg.appendChild(bg);
-        if (pct > 0 && pct < 100) {
-            const a = (pct / 100) * Math.PI * 2 - Math.PI / 2;
-            const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a);
-            const large = pct > 50 ? 1 : 0;
-            const path = document.createElementNS(NS, 'path');
-            path.setAttribute('d', `M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 ${large},1 ${x},${y} Z`);
-            path.setAttribute('fill', color);
-            svg.appendChild(path);
-        } else if (pct >= 100) {
-            const full = document.createElementNS(NS, 'circle');
-            full.setAttribute('cx', cx); full.setAttribute('cy', cy); full.setAttribute('r', r);
-            full.setAttribute('fill', color);
-            svg.appendChild(full);
-        }
-        svg.setAttribute('title', pct > 0 ? `Context: ${pct}%` : 'Context: —');
-        return svg;
+        const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : '#aacfd1';
+        const span = el('span', { class: 'ctx-pie', title: pct > 0 ? `Context: ${pct}%` : 'Context: —' });
+        span.style.background = pct <= 0
+            ? 'rgba(255,255,255,0.15)'
+            : `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
+        return span;
     }
 
     _updateCtxPie(id, pct) {
         const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-pie`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
-        const fresh = this._makePie(pct);
-        node.replaceWith(fresh);
+        node.replaceWith(this._makePie(pct));
     }
 
     // Browser-style tab drag and drop.
@@ -1022,11 +999,19 @@ class Shell {
         const clean = data.replace(DET.ansi, '');
         s.buf = (s.buf + clean).slice(-2048);
 
-        // Parse Claude Code's context usage lines, e.g.:
-        //   "Context is 45%"  /  "45% context used"  /  "Context low (45%"
-        const ctxMatch = clean.match(/(?:Context(?:\s+is|\s+low\s*\()?\s+(\d{1,3})%|(\d{1,3})%\s+context\s+used)/i);
-        if (ctxMatch) {
-            const pct = Math.min(100, Math.max(0, parseInt(ctxMatch[1] || ctxMatch[2], 10)));
+        // Parse Claude Code's context usage lines. Actual formats observed:
+        //   "Context is 45% full"          → used = 45
+        //   "45% context used"             → used = 45
+        //   "Context low (12% remaining)"  → used = 100 - 12
+        //   "55% until auto-compact"       → used = 100 - 55
+        let ctxPct = null;
+        let m;
+        if ((m = clean.match(/Context\s+is\s+(\d{1,3})%/i)))          ctxPct = +m[1];
+        else if ((m = clean.match(/(\d{1,3})%\s+context\s+used/i)))   ctxPct = +m[1];
+        else if ((m = clean.match(/Context\s+low\s*\((\d{1,3})%\s+remaining/i))) ctxPct = 100 - +m[1];
+        else if ((m = clean.match(/(\d{1,3})%\s+until\s+auto-compact/i)))        ctxPct = 100 - +m[1];
+        if (ctxPct !== null) {
+            const pct = Math.min(100, Math.max(0, ctxPct));
             if (pct !== this._ctxPct.get(id)) {
                 this._ctxPct.set(id, pct);
                 this._updateCtxPie(id, pct);

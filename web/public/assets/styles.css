@@ -96,10 +96,11 @@ html, body {
   box-shadow: 0 0 14px rgba(170,207,209,0.35), inset 0 0 0 1px rgba(255,255,255,0.06);
 }
 /* Context pie chart — replaces the old .dot indicator */
-.tab .ctx-pie { flex-shrink: 0; opacity: 0.75; transition: opacity 0.2s; }
-.tab.active .ctx-pie { opacity: 1; filter: brightness(0) invert(1) opacity(0.85); }
-@keyframes soa-ctx-pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
-.tab[data-ctx-warn] .ctx-pie { animation: soa-ctx-pulse 1.4s ease-in-out infinite; }
+.tab .ctx-pie {
+  flex-shrink: 0; width: 10px; height: 10px; border-radius: 50%;
+  opacity: 0.8; transition: background 0.3s;
+}
+.tab.active .ctx-pie { opacity: 1; }
 
 /* Agent status colors — all tabs (active and inactive).
    working   green   — agent is running (esc to interrupt visible)
