@@ -98,9 +98,25 @@ html, body {
 /* Context pie chart — replaces the old .dot indicator */
 .tab .ctx-pie {
   flex-shrink: 0; width: 10px; height: 10px; border-radius: 50%;
-  opacity: 0.8; transition: background 0.3s;
+  opacity: 0.8; transition: background 0.3s; cursor: pointer;
 }
 .tab.active .ctx-pie { opacity: 1; }
+
+/* Context popover */
+.ctx-popover {
+  position: fixed; z-index: 9999;
+  background: #0d1117; border: 1px solid var(--soa-accent);
+  padding: 10px 12px; min-width: 200px; max-width: 280px;
+  font-family: var(--font-mono); font-size: 12px; color: var(--soa-fg);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+}
+.ctx-pop-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-weight: bold; }
+.ctx-pop-close { background: none; border: none; color: var(--soa-fg); cursor: pointer; font-size: 16px; opacity: 0.6; padding: 0; }
+.ctx-pop-close:hover { opacity: 1; }
+.ctx-pop-bar { height: 6px; background: rgba(255,255,255,0.1); margin-bottom: 8px; }
+.ctx-pop-fill { height: 100%; transition: width 0.3s; }
+.ctx-pop-note { margin: 0; opacity: 0.65; line-height: 1.5; }
+.ctx-pop-note code { color: var(--soa-accent); }
 
 /* Agent status colors — all tabs (active and inactive).
    working   green   — agent is running (esc to interrupt visible)

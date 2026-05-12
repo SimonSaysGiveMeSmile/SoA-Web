@@ -569,7 +569,7 @@ class Shell {
                 text: t.title || tr('tab.default', { id: t.id }),
                 ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
-            const dot = this._makePie(this._ctxPct.get(t.id) || 0);
+            const dot = this._makePie(this._ctxPct.get(t.id) || 0, t.id);
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
                 this._requestCloseTab(t.id);
@@ -602,9 +602,13 @@ class Shell {
         this._installTabsDrop();
     }
 
-    _makePie(pct) {
+    _makePie(pct, tabId) {
         const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : '#aacfd1';
-        const span = el('span', { class: 'ctx-pie', title: pct > 0 ? `Context: ${pct}%` : 'Context: —' });
+        const span = el('span', {
+            class: 'ctx-pie',
+            title: pct > 0 ? `Context: ${pct}%\nClick for details` : 'Context: —',
+            onclick: (e) => { e.stopPropagation(); this._showCtxModal(tabId, pct); }
+        });
         span.style.background = pct <= 0
             ? 'rgba(255,255,255,0.15)'
             : `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
@@ -614,7 +618,37 @@ class Shell {
     _updateCtxPie(id, pct) {
         const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-pie`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
-        node.replaceWith(this._makePie(pct));
+        node.replaceWith(this._makePie(pct, id));
+    }
+
+    _showCtxModal(tabId, pct) {
+        // Remove any existing popover
+        document.getElementById('ctx-popover')?.remove();
+
+        const pie = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(tabId))}"] .ctx-pie`);
+        if (!pie) return;
+
+        const bar = pct > 0
+            ? `<div class="ctx-pop-bar"><div class="ctx-pop-fill" style="width:${pct}%;background:${pct>=90?'#ff5555':pct>=75?'#ff9944':pct>=50?'#f1fa8c':'#aacfd1'}"></div></div>`
+            : '';
+        const note = pct > 0
+            ? `<p class="ctx-pop-note">Token counts &amp; cost are not exposed in terminal output. Run <code>/cost</code> inside Claude Code for a session summary.</p>`
+            : `<p class="ctx-pop-note">No data yet. Claude Code prints context % in its status bar once a session starts.</p>`;
+
+        const pop = document.createElement('div');
+        pop.id = 'ctx-popover';
+        pop.className = 'ctx-popover';
+        pop.innerHTML = `<div class="ctx-pop-head"><span>${pct > 0 ? `Context: ${pct}%` : 'Context: —'}</span><button class="ctx-pop-close">×</button></div>${bar}${note}`;
+        document.body.appendChild(pop);
+
+        // Position below the pie chip
+        const r = pie.getBoundingClientRect();
+        pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8) + 'px';
+        pop.style.top  = (r.bottom + 6) + 'px';
+
+        const dismiss = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); } };
+        pop.querySelector('.ctx-pop-close').onclick = () => { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); };
+        setTimeout(() => document.addEventListener('pointerdown', dismiss, true), 0);
     }
 
     // Browser-style tab drag and drop.
@@ -999,17 +1033,15 @@ class Shell {
         const clean = data.replace(DET.ansi, '');
         s.buf = (s.buf + clean).slice(-2048);
 
-        // Parse Claude Code's context usage lines. Actual formats observed:
-        //   "Context is 45% full"          → used = 45
-        //   "45% context used"             → used = 45
-        //   "Context low (12% remaining)"  → used = 100 - 12
-        //   "55% until auto-compact"       → used = 100 - 55
+        // Parse Claude Code's context usage lines. Ink re-renders the status
+        // bar in-place via cursor-up, so the text is often split across PTY
+        // chunks — search the rolling buffer, not just the new chunk.
         let ctxPct = null;
         let m;
-        if ((m = clean.match(/Context\s+is\s+(\d{1,3})%/i)))          ctxPct = +m[1];
-        else if ((m = clean.match(/(\d{1,3})%\s+context\s+used/i)))   ctxPct = +m[1];
-        else if ((m = clean.match(/Context\s+low\s*\((\d{1,3})%\s+remaining/i))) ctxPct = 100 - +m[1];
-        else if ((m = clean.match(/(\d{1,3})%\s+until\s+auto-compact/i)))        ctxPct = 100 - +m[1];
+        if ((m = s.buf.match(/(\d{1,3})%\s+context\s+used/i)))              ctxPct = +m[1];
+        else if ((m = s.buf.match(/(\d{1,3})%\s+until\s+auto-compact/i)))   ctxPct = 100 - +m[1];
+        else if ((m = s.buf.match(/Context\s+low\s*\((\d{1,3})%\s+remaining/i))) ctxPct = 100 - +m[1];
+        else if ((m = s.buf.match(/Context\s+is\s+(\d{1,3})%/i)))           ctxPct = +m[1];
         if (ctxPct !== null) {
             const pct = Math.min(100, Math.max(0, ctxPct));
             if (pct !== this._ctxPct.get(id)) {
