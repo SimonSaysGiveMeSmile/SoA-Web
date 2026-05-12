@@ -48,6 +48,89 @@
     ]
   }
   </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Son of Anton",
+    "alternateName": ["SoA", "SoA Web Terminal"],
+    "url": "https://s0a.app/",
+    "downloadUrl": "https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases",
+    "applicationCategory": "DeveloperApplication",
+    "applicationSubCategory": "Terminal",
+    "operatingSystem": "macOS, Linux, Windows, Web",
+    "description": "Open-source web terminal that streams real PTY shell sessions over WebSocket. Run Claude Code from any browser, pair your phone to your desktop via QR, and skip the Electron install.",
+    "softwareVersion": "1",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "SimonSaysGiveMeSmile", "url": "https://github.com/SimonSaysGiveMeSmile" },
+    "featureList": [
+      "Browser-native terminal (xterm.js over WebSocket)",
+      "Real PTY shells via node-pty",
+      "Phone-to-desktop pairing by QR code + tunnel",
+      "Claude Code state-aware tab indicators",
+      "Live CPU / memory / network / geo sidebar",
+      "Multi-tab with restore-closed-tab",
+      "5 UI languages: English, 中文, Français, Deutsch, Español",
+      "No Electron, no account, no cloud compute"
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "What is Son of Anton?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Son of Anton (SoA) is an open-source browser-native terminal. The page at s0a.app streams real PTY shell sessions over WebSocket into xterm.js. Visitors can try a sandbox shell without installing; installing the desktop app gives the same browser UI access to real shells on their own machine."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How is Son of Anton different from SSH or a cloud IDE?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "SoA runs on your own machine, not on a vendor's server. There is no hosted compute, no account, and no code leaves your box unless you explicitly pair a phone, in which case the tunnel still terminates at your local machine. It is closer to 'your terminal in a browser tab' than to a cloud IDE."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Why run Claude Code in a browser instead of in a native terminal?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "So you can hand control to your phone. Pair once, and you can check or steer a long-running Claude Code task from anywhere. The tab color indicator shows green when Claude is working, orange when it is waiting on you, red when it needs a permission decision, and blue when idle."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How does phone pairing work?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "The desktop app opens a tunnel — cloudflared first, ngrok and localtunnel as fallbacks — and renders a QR code containing a one-time pairing token. Scanning the QR on a phone opens the web UI pointed at your machine through the tunnel, with the token pre-filled. No accounts, no central server."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Is Son of Anton free?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. Son of Anton is free and open source. Source on GitHub at SimonSaysGiveMeSmile/SoA-Web (web app) and SimonSaysGiveMeSmile/SoA-Prod (desktop)."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How do I install Son of Anton?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Run curl -fsSL https://www.s0a.app/install.sh | sh in your terminal. The web sandbox at s0a.app needs no install."
+        }
+      }
+    ]
+  }
+  </script>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/assets/New-icon-transparent.png?v=2" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=2">

@@ -1,0 +1,51 @@
+# Son of Anton (SoA)
+
+> Browser-native terminal that streams real PTY shell sessions over WebSocket. Run Claude Code from any browser, pair your phone to your desktop by scanning a QR code, and skip the Electron install.
+
+Son of Anton (also spelled "SoA") is an open-source web terminal. The web app ships a sandboxed in-browser shell so visitors can try it without installing anything. Installing the desktop app (`curl -fsSL https://www.s0a.app/install.sh | sh`) lets the same web UI drive real shells on the user's own machine, pair a phone via QR + tunnel, and stream live CPU / memory / network / geo metrics into a sidebar.
+
+## Key facts
+
+- **Name:** Son of Anton (abbreviated SoA)
+- **Homepage:** https://s0a.app/
+- **Install:** `curl -fsSL https://www.s0a.app/install.sh | sh`
+- **Source (web):** https://github.com/SimonSaysGiveMeSmile/SoA-Web
+- **Source (desktop):** https://github.com/SimonSaysGiveMeSmile/SoA-Prod
+- **Author:** SimonSaysGiveMeSmile
+- **License:** Open source
+- **Price:** Free
+- **Platforms:** Any modern browser (web), macOS / Linux / Windows (desktop)
+- **Languages:** English, 中文, Français, Deutsch, Español
+
+## What makes it different
+
+- **No Electron.** The UI is a plain web app served from `index.html`; the terminal is xterm.js over WebSocket. The desktop install is a small local server, not a bundled Chromium.
+- **Real PTYs, not a fake shell.** The server spawns node-pty processes, so interactive tools (`vim`, `htop`, `claude`, `ssh`) just work.
+- **Phone pairing by QR.** The desktop app opens a tunnel (cloudflared, ngrok, or localtunnel) and renders a QR code. Scanning it from a phone drops the phone into the same shell session — type from the couch, watch from the desk.
+- **Claude Code first-class.** Tab color indicators detect Claude Code state: green (working), orange (awaiting next step), red (needs attention — permission prompt), blue (idle).
+- **Tab restore.** Closed tabs can be reopened from the session history.
+- **Audio FX mixer.** Overlapping UI cues via the Web Audio API.
+
+## Common questions
+
+### What is Son of Anton?
+A browser-native terminal. The page at s0a.app streams real PTY shell sessions over WebSocket into xterm.js. Visitors can try a sandbox shell without installing; installing the desktop app gives the same browser UI access to real shells on their own machine.
+
+### How is this different from SSH or a cloud IDE?
+SoA runs on your own machine, not on a vendor's server. There's no hosted compute, no account, no code leaves your box unless you pair a phone (and even then, the tunnel terminates at your local machine). It's closer to "your terminal in a browser tab" than to a cloud IDE.
+
+### Why would I run Claude Code in a browser instead of in my native terminal?
+Because you can hand control to your phone. Pair once, and you can check or steer a long-running Claude Code task from the couch, a meeting, or your bed. The tab color indicator tells you at a glance when Claude needs a decision.
+
+### How does phone pairing work?
+The desktop app opens a tunnel (cloudflared first, ngrok and localtunnel as fallbacks) and renders a QR code containing a one-time pairing token. Scanning the QR on a phone opens the web UI pointed at your machine through the tunnel, with the token pre-filled. No accounts, no central server.
+
+### Is it free?
+Yes. Free and open source on GitHub.
+
+### Does it work offline?
+The desktop app runs entirely locally, so yes for the terminal itself. Phone pairing needs a tunnel, which needs the internet.
+
+## Not affiliated with
+
+Son of Anton is a personal project by SimonSaysGiveMeSmile. It is not affiliated with Anthropic, Pied Piper, or any other company. The name references the character from HBO's Silicon Valley.

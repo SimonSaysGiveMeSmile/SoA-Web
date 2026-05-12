@@ -1,9 +1,53 @@
+# Son of Anton — robots policy.
+# Public product landing page. AI answer engines are explicitly allowed
+# so the product surfaces in ChatGPT, Claude, Perplexity, Gemini results.
+# API and WebSocket endpoints are off-limits to every bot.
+
 User-agent: *
 Allow: /$
 Allow: /assets/
+Allow: /llms.txt
+Allow: /sitemap.xml
 Disallow: /api/
 Disallow: /ws
 Disallow: /install.sh
 Disallow: /_config.js
+
+# Explicit allow for AI crawlers (opt-in to AEO).
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
 
 Sitemap: https://s0a.app/sitemap.xml
