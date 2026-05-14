@@ -322,6 +322,19 @@ class Shell {
         // Reset on reload — we want the guard back each time the app boots.
         this._skipCloseConfirm = false;
 
+        // View mode: 'tabs' (classic) or 'tiles' (dashboard grid).
+        this.viewMode = 'tabs';
+        try { this.viewMode = localStorage.getItem('soa_web_view_mode') || 'tabs'; } catch (_) {}
+        this._tileOverlayId = null; // id of the tab currently open in tile overlay
+        this._tilesGridEl = null;
+        this._tileOverlayEl = null;
+
+        const viewBtn = $('#toggle-view');
+        if (viewBtn) {
+            viewBtn.addEventListener('click', () => this._toggleViewMode());
+            this._updateViewBtn();
+        }
+
         $('#new-tab').addEventListener('click', () => {
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
@@ -530,30 +543,23 @@ class Shell {
         const switching = this.activeId !== id && this.activeId != null;
         const sameTab = this.activeId === id;
         this.activeId = id;
-        for (const [tid, rt] of this.tabs) {
-            rt.container.classList.toggle('active', tid === id);
-        }
-        const rt = this.tabs.get(id);
-        if (rt) {
-            // fitNow() → xterm onResize → debounced TERM_RESIZE. No direct
-            // send here; two in-flight resizes within a frame is exactly
-            // the race that misaligns streaming output.
-            rt.fitNow();
-            // Flush scrollback we queued during HELLO. If this is the
-            // first time the tab is visible, xterm just got fit to the
-            // real container size, so absolute-column escapes in the
-            // replay now address the right columns.
-            rt.flushPendingReplay();
-            // Always land on the newest output. xterm only auto-scrolls on
-            // write when the cursor is in view, so a tab that received
-            // data while hidden (or just finished replaying scrollback)
-            // can stay parked above the bottom.
-            rt.scrollToBottom();
-            rt.focus();
+        // In tiles mode, don't show the terminal container directly —
+        // the tile overlay handles visibility when the user clicks a tile.
+        if (this.viewMode !== 'tiles') {
+            for (const [tid, rt] of this.tabs) {
+                rt.container.classList.toggle('active', tid === id);
+            }
+            const rt = this.tabs.get(id);
+            if (rt) {
+                rt.fitNow();
+                rt.flushPendingReplay();
+                rt.scrollToBottom();
+                rt.focus();
+            }
         }
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
         this._syncTabsUI();
-        if (switching) this.audio.play('panels');
+        if (switching && this.viewMode !== 'tiles') this.audio.play('panels');
     }
 
     _syncTabsUI(list) {
@@ -604,6 +610,7 @@ class Shell {
             }
         }
         this._installTabsDrop();
+        if (this.viewMode === 'tiles') this._renderTiles();
     }
 
     _makePie(pct, tabId) {
@@ -1115,6 +1122,11 @@ class Shell {
         this._agentStatus.set(id, status);
         this._tabsUISig = null;
         this._syncTabsUI();
+        // Live-update the tile if in tiles mode without a full re-render.
+        if (this.viewMode === 'tiles' && this._tilesGridEl) {
+            const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);
+            if (node) this._updateTileNode(node, id);
+        }
         if (status === 'attention' && prev !== 'attention') {
             const tab = this.tabs.get(id);
             const title = (tab && tab.title) || tr('tab.default', { id });
@@ -1183,6 +1195,12 @@ class Shell {
     }
 
     _hotkey(e) {
+        // Escape in tiles overlay → back to grid
+        if (e.key === 'Escape' && this.viewMode === 'tiles' && this._tileOverlayId != null) {
+            e.preventDefault();
+            this._closeTileTerminal();
+            return;
+        }
         const focused = document.activeElement;
         const inInput = focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA' || focused.tagName === 'SELECT' || focused.isContentEditable);
         const inTerm  = focused && focused.closest('.xterm');
@@ -1225,6 +1243,10 @@ class Shell {
             e.preventDefault();
             openSettingsModal();
         }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
+            e.preventDefault();
+            this._toggleViewMode();
+        }
     }
 
     _applySettings(s) {
@@ -1240,6 +1262,203 @@ class Shell {
             audioBtn.dataset.state = s.audio ? 'on' : 'off';
             audioBtn.textContent = s.audio ? tr('topbar.audio_on') : tr('topbar.audio_off');
         }
+    }
+
+    // ── Tiles view ──────────────────────────────────────────────────────
+
+    _toggleViewMode() {
+        this.viewMode = this.viewMode === 'tiles' ? 'tabs' : 'tiles';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this.audio.play('panels');
+    }
+
+    _updateViewBtn() {
+        const btn = $('#toggle-view');
+        if (!btn) return;
+        if (this.viewMode === 'tiles') {
+            btn.setAttribute('data-icon', '☰');
+            btn.title = 'Switch to tabs view';
+        } else {
+            btn.setAttribute('data-icon', '⊞');
+            btn.title = 'Switch to tiles view';
+        }
+    }
+
+    _applyViewMode() {
+        const shell = $('#shell');
+        if (this.viewMode === 'tiles') {
+            shell.setAttribute('data-view', 'tiles');
+            this._closeTileTerminal();
+            this._renderTiles();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+        } else {
+            shell.removeAttribute('data-view');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            const rt = this.tabs.get(this.activeId);
+            if (rt) {
+                rt.container.classList.add('active');
+                rt.fitNow();
+                rt.scrollToBottom();
+                rt.focus();
+            }
+        }
+    }
+
+    _renderTiles() {
+        if (this.viewMode !== 'tiles') return;
+        if (!this._tilesGridEl) {
+            this._tilesGridEl = el('div', { class: 'tiles-grid' });
+            this.termsEl.appendChild(this._tilesGridEl);
+        }
+        this._tilesGridEl.style.display = '';
+        const existing = new Map();
+        for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
+            existing.set(Number(node.dataset.tileId), node);
+        }
+        const fragment = document.createDocumentFragment();
+        for (const id of this.order) {
+            let node = existing.get(id);
+            if (node) {
+                existing.delete(id);
+                this._updateTileNode(node, id);
+            } else {
+                node = this._createTileNode(id);
+            }
+            fragment.appendChild(node);
+        }
+        for (const old of existing.values()) old.remove();
+        this._tilesGridEl.replaceChildren(fragment);
+    }
+
+    _createTileNode(id) {
+        const rt = this.tabs.get(id);
+        const title = (rt && rt.title) || tr('tab.default', { id });
+        const status = this._agentStatus.get(id) || 'idle';
+        const pct = this._ctxPct.get(id) || 0;
+
+        const closeBtn = el('button', { class: 'tile-close', text: '×', onclick: (e) => {
+            e.stopPropagation();
+            this._requestCloseTab(id);
+        }});
+        const pie = el('span', { class: 'tile-pie' });
+        this._paintTilePie(pie, pct);
+
+        const node = el('div', {
+            class: 'tile',
+            'data-tile-id': String(id),
+            'data-agent': status,
+            onclick: () => this._openTileTerminal(id),
+        }, [
+            closeBtn,
+            pie,
+            el('span', { class: 'tile-title', text: title }),
+            el('span', { class: 'tile-status', text: status }),
+        ]);
+        return node;
+    }
+
+    _updateTileNode(node, id) {
+        const rt = this.tabs.get(id);
+        const title = (rt && rt.title) || tr('tab.default', { id });
+        const status = this._agentStatus.get(id) || 'idle';
+        const pct = this._ctxPct.get(id) || 0;
+        node.setAttribute('data-agent', status);
+        const titleEl = node.querySelector('.tile-title');
+        if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+        const statusEl = node.querySelector('.tile-status');
+        if (statusEl && statusEl.textContent !== status) statusEl.textContent = status;
+        const pie = node.querySelector('.tile-pie');
+        if (pie) this._paintTilePie(pie, pct);
+    }
+
+    _paintTilePie(pie, pct) {
+        if (pct <= 0) {
+            pie.style.background = 'rgba(255,255,255,0.15)';
+        } else {
+            const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : '#aacfd1';
+            pie.style.background = `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
+        }
+        pie.title = pct > 0 ? `Context: ${pct}%` : '';
+    }
+
+    _removeTilesGrid() {
+        if (this._tilesGridEl) { this._tilesGridEl.remove(); this._tilesGridEl = null; }
+    }
+
+    _openTileTerminal(id) {
+        if (this.viewMode !== 'tiles') return;
+        const rt = this.tabs.get(id);
+        if (!rt) return;
+
+        this._tileOverlayId = id;
+        this.activeId = id;
+        if (this._tilesGridEl) this._tilesGridEl.style.display = 'none';
+
+        if (!this._tileOverlayEl) {
+            this._tileOverlayEl = el('div', { class: 'tile-terminal-overlay' });
+            this.termsEl.appendChild(this._tileOverlayEl);
+        }
+
+        const title = rt.title || tr('tab.default', { id });
+        const closeBtn = el('button', { class: 'tile-terminal-close', text: '← BACK', onclick: () => this._closeTileTerminal() });
+        const bar = el('div', { class: 'tile-terminal-bar' }, [
+            el('span', { class: 'tile-terminal-title', text: title }),
+            closeBtn,
+        ]);
+        const body = el('div', { class: 'tile-terminal-body' });
+        body.appendChild(rt.container);
+        rt.container.classList.add('active');
+        rt.container.style.display = 'block';
+
+        this._tileOverlayEl.replaceChildren(bar, body);
+        this._tileOverlayEl.style.display = '';
+
+        requestAnimationFrame(() => {
+            rt.fitNow();
+            rt.flushPendingReplay();
+            rt.scrollToBottom();
+            rt.focus();
+        });
+
+        this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
+        this.audio.play('panels');
+    }
+
+    _closeTileTerminal() {
+        if (!this._tileOverlayEl) return;
+        const id = this._tileOverlayId;
+        this._tileOverlayId = null;
+
+        // Move the terminal container back to #terms
+        if (id != null) {
+            const rt = this.tabs.get(id);
+            if (rt) {
+                rt.container.classList.remove('active');
+                rt.container.style.display = '';
+                this.termsEl.appendChild(rt.container);
+            }
+        }
+
+        this._tileOverlayEl.replaceChildren();
+        this._tileOverlayEl.style.display = 'none';
+        if (this._tilesGridEl) this._tilesGridEl.style.display = '';
+        this._renderTiles();
+    }
+
+    _removeTileOverlay() {
+        if (this._tileOverlayId != null) {
+            const rt = this.tabs.get(this._tileOverlayId);
+            if (rt) {
+                rt.container.classList.remove('active');
+                rt.container.style.display = '';
+                this.termsEl.appendChild(rt.container);
+            }
+        }
+        this._tileOverlayId = null;
+        if (this._tileOverlayEl) { this._tileOverlayEl.remove(); this._tileOverlayEl = null; }
     }
 }
 
@@ -1311,6 +1530,7 @@ async function bootServerMode({ backend, token }) {
         $('#boot').classList.add('hidden');
         $('#shell').classList.remove('hidden');
         shell._fitActive();
+        if (shell.viewMode === 'tiles') shell._applyViewMode();
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 }
