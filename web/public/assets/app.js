@@ -309,7 +309,7 @@ class Shell {
         this._lastStdoutCue = new Map(); // tabId → performance.now() of last stdout cue
         this._prevConnState = null;
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
-        this._agentBuf = new Map();    // tabId → detector state (see _updateAgentStatus)
+        this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
         // Poll the second-to-last visible terminal line every second — that's
         // where Claude Code's Ink status bar always lives. More reliable than
@@ -490,7 +490,6 @@ class Shell {
             this._lastStdoutCue.set(id, now);
             this.audio.play('stdout', 'tab' + id);
         }
-        this._updateAgentStatus(id, data);
     }
 
     _onTermExit({ id, code }) {
@@ -668,8 +667,6 @@ class Shell {
             if (!rt._opened) continue;
             try {
                 const buf = rt.term.buffer.active;
-                // Claude Code's Ink status bar is always the second-to-last
-                // visible line. Read it directly from the rendered terminal.
                 const viewportEnd = buf.baseY + rt.term.rows - 1;
                 const line = buf.getLine(viewportEnd - 1);
                 if (!line) continue;
@@ -687,6 +684,115 @@ class Shell {
                     }
                 }
             } catch (_) {}
+        }
+        this._pollAgentStatus();
+    }
+
+    // Read the last N visible lines from the terminal buffer to detect agent
+    // state. This replaces the old stream-based approach which was unreliable
+    // because Ink re-renders in place via cursor-up, making the stripped stream
+    // buffer diverge from what's actually on screen.
+    _pollAgentStatus() {
+        const DET = this._detector || (this._detector = {
+            working: [
+                /esc to interrupt/i,
+                /\(esc\s+to\s+cancel\)/i,
+                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b[.…]/i,
+            ],
+            doneBox: /╰─+╯/,
+            donePrompt: /│\s*>/,
+            attention: [
+                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /\n?\s*\d+\.\s+(?:Yes|No|Accept|Reject|Allow|Deny)\b/i,
+                /\(y\/n\)/i,
+                /\[Y\/n\]/i,
+                /\(Y\)es\s*\/\s*\(N\)o/i,
+                /Press\s+Enter\s+to/i,
+                /waiting\s+for\s+(?:your\s+)?input/i,
+                /Allow\s+.*\s+tool/i,
+                /Allow\?/i,
+                /❯\s+(?:Yes|No|Allow|Deny|Accept|Reject)/i,
+                /\bPermission\s+(?:required|needed|denied)\b/i,
+                /\bAllow\s+once\b/i,
+                /\bAllow\s+always\b/i,
+            ],
+            shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
+        });
+
+        for (const [id, rt] of this.tabs) {
+            if (!rt._opened) continue;
+            try {
+                const buf = rt.term.buffer.active;
+                const totalRows = rt.term.rows;
+                // Read the last 12 visible lines — enough to capture Claude
+                // Code's UI chrome (status bar + input box + permission prompt).
+                const startRow = buf.baseY + Math.max(0, totalRows - 12);
+                const endRow = buf.baseY + totalRows;
+                let visible = '';
+                for (let r = startRow; r < endRow; r++) {
+                    const line = buf.getLine(r);
+                    if (line) visible += line.translateToString(true) + '\n';
+                }
+                if (!visible.trim()) continue;
+
+                let next;
+                let activity = '';
+                if (DET.attention.some(p => p.test(visible))) {
+                    next = 'attention';
+                    activity = 'Needs input';
+                    for (const p of DET.attention) {
+                        const m = visible.match(p);
+                        if (m) { activity = m[0].trim().slice(0, 40); break; }
+                    }
+                } else if (DET.working.some(p => p.test(visible))) {
+                    next = 'working';
+                    const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b/i);
+                    activity = vm ? vm[1] + '...' : 'Working...';
+                } else if (DET.doneBox.test(visible) && DET.donePrompt.test(visible)) {
+                    next = 'done';
+                    activity = 'Awaiting next prompt';
+                } else if (DET.shellPrompt.test(visible)) {
+                    next = 'idle';
+                    activity = 'Shell ready';
+                } else {
+                    next = null;
+                }
+
+                // Extract last meaningful line for tile summary
+                const lines = visible.split('\n').filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
+                const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
+
+                let s = this._agentBuf.get(id);
+                if (!s) {
+                    s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '' };
+                    this._agentBuf.set(id, s);
+                }
+                s.lastLine = lastLine;
+                if (activity) s.activity = activity;
+
+                if (next == null) continue;
+                const current = this._agentStatus.get(id) || 'idle';
+                if (next === current) {
+                    if (s.pending) { clearTimeout(s.pending); s.pending = null; s.pendingStatus = null; }
+                    continue;
+                }
+
+                // Debounce: attention is urgent, working is quick, done/idle wait
+                const delay = next === 'attention' ? 150
+                            : next === 'working'   ? 200
+                            : 500;
+
+                if (s.pendingStatus === next) continue;
+                if (s.pending) clearTimeout(s.pending);
+                s.pendingStatus = next;
+                s.pending = setTimeout(() => {
+                    s.pending = null;
+                    s.pendingStatus = null;
+                    this._setStatus(id, next);
+                }, delay);
+            } catch (_) {}
+        }
+    }
         }
     }
 
@@ -1009,134 +1115,6 @@ class Shell {
         this._syncTabsUI();
         this.audio.play('panels');
         this.bridge.input(INPUT_KIND.MOVE_TAB, { id: dragId, before: beforeId });
-    }
-
-    _updateAgentStatus(id, data) {
-        // State model:
-        //   working   — agent is actively running (spinner / "esc to interrupt")
-        //   attention — waiting for explicit user decision (permission prompt,
-        //               Y/n, numbered choice menu)
-        //   done      — agent finished a turn and is waiting for the next
-        //               prompt in its input box (│ > …)
-        //   idle      — no agent in this tab; a plain shell prompt is showing
-        //
-        // The old detector tried to infer state from every incoming chunk and
-        // scanned a 4KB rolling buffer for generic patterns like `\w+@\w+.*\$`.
-        // That matched any line with a path, and a stale match 2KB back kept
-        // latching on every new chunk. The new version only looks at the tail
-        // (~640 bytes of the cleaned buffer) and evaluates a small set of
-        // Claude-Code-specific signals. Transitions are debounced so a half-
-        // painted frame doesn't flip the color.
-        const DET = this._detector || (this._detector = {
-            // Strip ANSI: CSI sequences, OSC, and single-char escapes.
-            ansi: /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g,
-            // "esc to interrupt" is the most reliable "I'm working" signal —
-            // Claude Code only prints it while a turn is in flight. Variants
-            // cover different phrasings seen across versions.
-            working: [
-                /esc to interrupt/i,
-                /\(esc\s+to\s+cancel\)/i,
-                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b[.…]/i,
-            ],
-            // Claude Code's idle input box has a visible bottom border plus
-            // the prompt caret "│ >" on the line above it. Seeing both within
-            // the tail means "turn finished, awaiting next prompt". The caret
-            // alone can briefly appear mid-stream, so we require the border.
-            doneBox: /╰─+╯\s*$/,
-            donePrompt: /│\s*>\s/,
-            // Permission + confirm prompts need the user to decide now.
-            attention: [
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
-                /\n\s*\d+\.\s+(?:Yes|No|Accept|Reject|Allow|Deny)\b/i,
-                /\(y\/n\)/i,
-                /\[Y\/n\]/i,
-                /\(Y\)es\s*\/\s*\(N\)o/i,
-                /Press\s+Enter\s+to/i,
-                /waiting\s+for\s+(?:your\s+)?input/i,
-                /Allow\s+.*\s+tool/i,
-                /Allow\?/i,
-                /❯\s+(?:Yes|No|Allow|Deny|Accept|Reject)/i,
-                /\bPermission\s+(?:required|needed|denied)\b/i,
-            ],
-            // Plain shell prompt at end of tail = this tab is a shell, no
-            // agent running. Keep the anchor tight: PS1-style endings, not
-            // any `$`. Common prompts: "user@host path $ ", "➜ ~ ", "❯ ".
-            shellPrompt: /(?:^|\r|\n)[^\r\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\r\n]*[\$#%]\s*$)/m,
-        });
-
-        let s = this._agentBuf.get(id);
-        if (!s) {
-            s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '' };
-            this._agentBuf.set(id, s);
-        }
-
-        // Keep a 2KB rolling buffer of ANSI-stripped output. We only ever
-        // evaluate the tail, so longer context isn't useful and just lets
-        // older matches linger.
-        const clean = data.replace(DET.ansi, '');
-        s.buf = (s.buf + clean).slice(-2048);
-
-        // Tail is what drives the decision — both "done box" and "shell
-        // prompt" must currently be on screen, not have passed by earlier.
-        const tail = s.buf.slice(-640);
-        // For "working" signals, only check the very end — "esc to interrupt"
-        // is always the bottom-most line when active. Checking the full tail
-        // causes false positives when old "esc to interrupt" text lingers
-        // above a permission prompt.
-        const recentTail = s.buf.slice(-200);
-
-        let next;
-        let activity = s.activity || '';
-        if (DET.attention.some(p => p.test(tail))) {
-            next = 'attention';
-            activity = 'Needs input';
-            for (const p of DET.attention) {
-                const m = tail.match(p);
-                if (m) { activity = m[0].trim().slice(0, 40); break; }
-            }
-        } else if (DET.working.some(p => p.test(recentTail))) {
-            next = 'working';
-            const vm = recentTail.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b/i);
-            activity = vm ? vm[1] + '...' : 'Working...';
-        } else if (DET.doneBox.test(tail) && DET.donePrompt.test(tail)) {
-            next = 'done';
-            activity = 'Awaiting next prompt';
-        } else if (DET.shellPrompt.test(tail) && this._agentStatus.get(id) !== 'done') {
-            next = 'idle';
-            activity = 'Shell ready';
-        } else {
-            next = null;
-        }
-
-        // Extract last meaningful line for tile summary
-        const lines = tail.split(/[\r\n]+/).filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
-        const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
-        s.lastLine = lastLine;
-        if (next != null) s.activity = activity;
-
-        if (next == null) return;
-        const current = this._agentStatus.get(id) || 'idle';
-        if (next === current) {
-            // Still in the same state; cancel any pending transition.
-            if (s.pending) { clearTimeout(s.pending); s.pending = null; s.pendingStatus = null; }
-            return;
-        }
-
-        // Debounce transitions. Attention is urgent (200ms so Y/n doesn't
-        // blink); working fires quickly so the user sees it start; done/idle
-        // wait longer to avoid flapping mid-paint.
-        const delay = next === 'attention' ? 200
-                    : next === 'working'   ? 250
-                    : 600;
-
-        if (s.pendingStatus === next) return; // transition already scheduled
-        if (s.pending) clearTimeout(s.pending);
-        s.pendingStatus = next;
-        s.pending = setTimeout(() => {
-            s.pending = null;
-            s.pendingStatus = null;
-            this._setStatus(id, next);
-        }, delay);
     }
 
     _setStatus(id, status) {
