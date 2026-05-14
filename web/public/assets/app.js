@@ -793,8 +793,6 @@ class Shell {
             } catch (_) {}
         }
     }
-        }
-    }
 
     // Browser-style tab drag and drop.
     //
