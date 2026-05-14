@@ -202,6 +202,33 @@ app.use((req, res, next) => {
     next();
 });
 
+// install.sh hit logger. One JSON line per fetch — most reliable conversion
+// signal we have, since this is the command on the welcome gate. Writes to
+// SOA_WEB_INSTALL_LOG (default ~/.soa-web/install-log.jsonl). Best-effort:
+// any I/O error is swallowed so a broken disk can't take the page down.
+const INSTALL_LOG_PATH = process.env.SOA_WEB_INSTALL_LOG
+    || path.join(require('os').homedir(), '.soa-web', 'install-log.jsonl');
+function logInstallHit(req) {
+    try {
+        const dir = path.dirname(INSTALL_LOG_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const url = new URL(req.url || '/install.sh', 'http://localhost');
+        const entry = {
+            ts: new Date().toISOString(),
+            ip: (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim(),
+            country: req.headers['cf-ipcountry'] || '',
+            ua: (req.headers['user-agent'] || '').slice(0, 200),
+            ref: url.searchParams.get('ref') || (req.headers['referer'] || ''),
+        };
+        fs.appendFile(INSTALL_LOG_PATH, JSON.stringify(entry) + '\n', () => {});
+    } catch (_) { /* best-effort */ }
+}
+app.get('/install.sh', (req, res, next) => {
+    res.set('cache-control', 'no-store');
+    logInstallHit(req);
+    next();
+});
+
 app.use(express.static(PUBLIC_DIR, { index: 'index.html', extensions: ['html'] }));
 
 // SPA fallback — any unknown GET serves index.html so client-side routes work.

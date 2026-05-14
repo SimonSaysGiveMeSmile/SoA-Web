@@ -16,11 +16,18 @@
  * `wcClientId` — WebContainers API key, required on non-stackblitz.io /
  *                non-localhost origins. Get one free at webcontainers.io and
  *                set SOA_WEB_WC_CLIENT_ID in Vercel env.
+ *
+ * `cfAnalyticsToken` — Cloudflare Web Analytics token. When set, the
+ *                browser loads beacon.min.js from cloudflareinsights.com
+ *                so /pageviews land in the CF dashboard. Get one free at
+ *                dash.cloudflare.com → Analytics → Web Analytics, then set
+ *                SOA_WEB_CF_ANALYTICS_TOKEN in Vercel env.
  */
 window.__SOA_WEB__ = {
     mode: 'server',
     protocol: 1,
     backend: '',
     wcClientId: '',
+    cfAnalyticsToken: '',
     releaseUrl: 'https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases'
 };

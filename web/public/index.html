@@ -397,5 +397,19 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
   <script type="module" src="/assets/app.js?v=28"></script>
+  <script>
+    // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
+    // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost
+    // doesn't show up in the dashboard. Privacy-friendly, no cookies.
+    (function loadCfAnalytics() {
+        var t = (window.__SOA_WEB__ && window.__SOA_WEB__.cfAnalyticsToken) || '';
+        if (!t) return;
+        var s = document.createElement('script');
+        s.defer = true;
+        s.src = 'https://static.cloudflareinsights.com/beacon.min.js';
+        s.setAttribute('data-cf-beacon', JSON.stringify({ token: t }));
+        document.head.appendChild(s);
+    })();
+  </script>
 </body>
 </html>
