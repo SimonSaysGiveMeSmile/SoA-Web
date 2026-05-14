@@ -976,10 +976,21 @@ html[data-welcome="1"] body { overflow: hidden; }
   color: var(--soa-fg); letter-spacing: 0.04em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tile-status {
+.tile-activity {
   font-family: var(--font-display); font-size: 10px;
-  text-transform: uppercase; letter-spacing: 0.18em;
-  opacity: 0.7; margin-top: 6px;
+  text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--soa-accent); margin-top: 4px;
+}
+.tile-summary {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--soa-accent-dim); margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: 0.7;
+}
+.tile-elapsed {
+  font-family: var(--font-mono); font-size: 9px;
+  color: var(--soa-accent-dim); margin-top: auto; padding-top: 6px;
+  opacity: 0.5; text-align: right;
 }
 .tile-pie {
   position: absolute; top: 10px; right: 10px;
@@ -997,13 +1008,13 @@ html[data-welcome="1"] body { overflow: hidden; }
 
 /* Tile agent colors — mirror the tab colors */
 .tile[data-agent="working"] { border-color: var(--soa-green); box-shadow: inset 0 0 20px rgba(80,250,123,0.08); }
-.tile[data-agent="working"] .tile-status { color: var(--soa-green); opacity: 1; }
+.tile[data-agent="working"] .tile-activity { color: var(--soa-green); }
 .tile[data-agent="done"] { border-color: #ffb86c; box-shadow: inset 0 0 20px rgba(255,184,108,0.08); }
-.tile[data-agent="done"] .tile-status { color: #ffb86c; opacity: 1; }
+.tile[data-agent="done"] .tile-activity { color: #ffb86c; }
 .tile[data-agent="attention"] { border-color: var(--soa-red); box-shadow: inset 0 0 20px rgba(255,85,85,0.1); animation: soa-agent-pulse 1.1s ease-in-out infinite; }
-.tile[data-agent="attention"] .tile-status { color: var(--soa-red); opacity: 1; }
+.tile[data-agent="attention"] .tile-activity { color: var(--soa-red); }
 .tile[data-agent="idle"] { border-color: var(--soa-blue); box-shadow: inset 0 0 20px rgba(98,114,164,0.08); }
-.tile[data-agent="idle"] .tile-status { color: var(--soa-blue); opacity: 1; }
+.tile[data-agent="idle"] .tile-activity { color: var(--soa-blue); }
 
 /* Terminal overlay in tiles mode */
 .tile-terminal-overlay {

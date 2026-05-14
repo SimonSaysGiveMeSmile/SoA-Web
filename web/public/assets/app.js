@@ -315,6 +315,7 @@ class Shell {
         // where Claude Code's Ink status bar always lives. More reliable than
         // scanning the PTY stream because Ink re-renders in-place via cursor-up.
         this._ctxPollTimer = setInterval(() => this._pollCtxLines(), 1000);
+        this._tileElapsedTimer = setInterval(() => this._refreshTileElapsed(), 5000);
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -1046,12 +1047,16 @@ class Shell {
             // Permission + confirm prompts need the user to decide now.
             attention: [
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
-                /\n\s*\d+\.\s+(?:Yes|No|Accept|Reject|Allow|Deny)\b/i, // numbered menu
+                /\n\s*\d+\.\s+(?:Yes|No|Accept|Reject|Allow|Deny)\b/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Press\s+Enter\s+to/i,
                 /waiting\s+for\s+(?:your\s+)?input/i,
+                /Allow\s+.*\s+tool/i,
+                /Allow\?/i,
+                /❯\s+(?:Yes|No|Allow|Deny|Accept|Reject)/i,
+                /\bPermission\s+(?:required|needed|denied)\b/i,
             ],
             // Plain shell prompt at end of tail = this tab is a shell, no
             // agent running. Keep the anchor tight: PS1-style endings, not
@@ -1061,7 +1066,7 @@ class Shell {
 
         let s = this._agentBuf.get(id);
         if (!s) {
-            s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0 };
+            s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '' };
             this._agentBuf.set(id, s);
         }
 
@@ -1074,22 +1079,40 @@ class Shell {
         // Tail is what drives the decision — both "done box" and "shell
         // prompt" must currently be on screen, not have passed by earlier.
         const tail = s.buf.slice(-640);
+        // For "working" signals, only check the very end — "esc to interrupt"
+        // is always the bottom-most line when active. Checking the full tail
+        // causes false positives when old "esc to interrupt" text lingers
+        // above a permission prompt.
+        const recentTail = s.buf.slice(-200);
 
         let next;
+        let activity = s.activity || '';
         if (DET.attention.some(p => p.test(tail))) {
             next = 'attention';
-        } else if (DET.working.some(p => p.test(tail))) {
+            activity = 'Needs input';
+            for (const p of DET.attention) {
+                const m = tail.match(p);
+                if (m) { activity = m[0].trim().slice(0, 40); break; }
+            }
+        } else if (DET.working.some(p => p.test(recentTail))) {
             next = 'working';
+            const vm = recentTail.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b/i);
+            activity = vm ? vm[1] + '...' : 'Working...';
         } else if (DET.doneBox.test(tail) && DET.donePrompt.test(tail)) {
             next = 'done';
+            activity = 'Awaiting next prompt';
         } else if (DET.shellPrompt.test(tail) && this._agentStatus.get(id) !== 'done') {
-            // Only fall back to idle from a non-agent state. A tab that was
-            // just in "done" stays done until the user types — otherwise the
-            // shell-prompt regex would pull it down to idle on every refresh.
             next = 'idle';
+            activity = 'Shell ready';
         } else {
-            next = null; // no confident signal — leave status alone
+            next = null;
         }
+
+        // Extract last meaningful line for tile summary
+        const lines = tail.split(/[\r\n]+/).filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
+        const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
+        s.lastLine = lastLine;
+        if (next != null) s.activity = activity;
 
         if (next == null) return;
         const current = this._agentStatus.get(id) || 'idle';
@@ -1120,6 +1143,9 @@ class Shell {
         const prev = this._agentStatus.get(id);
         if (prev === status) return;
         this._agentStatus.set(id, status);
+        // Track when this status started for elapsed time display
+        const s = this._agentBuf.get(id);
+        if (s) s.lastChange = Date.now();
         this._tabsUISig = null;
         this._syncTabsUI();
         // Live-update the tile if in tiles mode without a full re-render.
@@ -1338,6 +1364,10 @@ class Shell {
         const title = (rt && rt.title) || tr('tab.default', { id });
         const status = this._agentStatus.get(id) || 'idle';
         const pct = this._ctxPct.get(id) || 0;
+        const s = this._agentBuf.get(id);
+        const activity = (s && s.activity) || this._statusLabel(status);
+        const lastLine = (s && s.lastLine) || '';
+        const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
 
         const closeBtn = el('button', { class: 'tile-close', text: '×', onclick: (e) => {
             e.stopPropagation();
@@ -1355,7 +1385,9 @@ class Shell {
             closeBtn,
             pie,
             el('span', { class: 'tile-title', text: title }),
-            el('span', { class: 'tile-status', text: status }),
+            el('span', { class: 'tile-activity', text: activity }),
+            el('span', { class: 'tile-summary', text: lastLine }),
+            el('span', { class: 'tile-elapsed', text: elapsed }),
         ]);
         return node;
     }
@@ -1365,13 +1397,51 @@ class Shell {
         const title = (rt && rt.title) || tr('tab.default', { id });
         const status = this._agentStatus.get(id) || 'idle';
         const pct = this._ctxPct.get(id) || 0;
+        const s = this._agentBuf.get(id);
+        const activity = (s && s.activity) || this._statusLabel(status);
+        const lastLine = (s && s.lastLine) || '';
+        const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
+
         node.setAttribute('data-agent', status);
         const titleEl = node.querySelector('.tile-title');
         if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
-        const statusEl = node.querySelector('.tile-status');
-        if (statusEl && statusEl.textContent !== status) statusEl.textContent = status;
+        const actEl = node.querySelector('.tile-activity');
+        if (actEl && actEl.textContent !== activity) actEl.textContent = activity;
+        const sumEl = node.querySelector('.tile-summary');
+        if (sumEl && sumEl.textContent !== lastLine) sumEl.textContent = lastLine;
+        const elapsedEl = node.querySelector('.tile-elapsed');
+        if (elapsedEl && elapsedEl.textContent !== elapsed) elapsedEl.textContent = elapsed;
         const pie = node.querySelector('.tile-pie');
         if (pie) this._paintTilePie(pie, pct);
+    }
+
+    _statusLabel(status) {
+        if (status === 'working') return 'Working...';
+        if (status === 'done') return 'Awaiting next prompt';
+        if (status === 'attention') return 'Needs input';
+        return 'Shell ready';
+    }
+
+    _formatElapsed(since) {
+        const ms = Date.now() - since;
+        if (ms < 5000) return 'just now';
+        const s = Math.floor(ms / 1000);
+        if (s < 60) return s + 's';
+        const m = Math.floor(s / 60);
+        if (m < 60) return m + 'm';
+        const h = Math.floor(m / 60);
+        return h + 'h ' + (m % 60) + 'm';
+    }
+
+    _refreshTileElapsed() {
+        if (this.viewMode !== 'tiles' || !this._tilesGridEl) return;
+        for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
+            const id = Number(node.dataset.tileId);
+            const s = this._agentBuf.get(id);
+            if (!s || !s.lastChange) continue;
+            const elapsedEl = node.querySelector('.tile-elapsed');
+            if (elapsedEl) elapsedEl.textContent = this._formatElapsed(s.lastChange);
+        }
     }
 
     _paintTilePie(pie, pct) {
