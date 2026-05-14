@@ -947,7 +947,6 @@ html[data-welcome="1"] body { overflow: hidden; }
 
 /* ── Tiles view ──────────────────────────────────────────────────────── */
 .shell[data-view="tiles"] .tabs { display: none; }
-.shell[data-view="tiles"] .topbar { grid-template-columns: auto auto 1fr auto; }
 
 .tiles-grid {
   display: grid;
