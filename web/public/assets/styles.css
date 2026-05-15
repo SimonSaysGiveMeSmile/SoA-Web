@@ -1025,7 +1025,7 @@ html[data-welcome="1"] body { overflow: hidden; }
   display: flex; flex-direction: column;
 }
 .tile-terminal-bar {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: 12px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--soa-line);
   background: linear-gradient(to bottom, #0a1318, var(--soa-bg));

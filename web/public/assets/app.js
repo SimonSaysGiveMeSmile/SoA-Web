@@ -1529,8 +1529,8 @@ class Shell {
         const title = rt.title || tr('tab.default', { id });
         const closeBtn = el('button', { class: 'tile-terminal-close', text: '← BACK', onclick: () => this._closeTileTerminal() });
         const bar = el('div', { class: 'tile-terminal-bar' }, [
-            el('span', { class: 'tile-terminal-title', text: title }),
             closeBtn,
+            el('span', { class: 'tile-terminal-title', text: title }),
         ]);
         const body = el('div', { class: 'tile-terminal-body' });
         body.appendChild(rt.container);
