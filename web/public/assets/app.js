@@ -735,6 +735,11 @@ class Shell {
                 }
                 if (!visible.trim()) continue;
 
+                // Debug: log buffer content for active tab (open DevTools console)
+                if (id === this.activeId && window.__SOA_DEBUG_AGENT) {
+                    console.log(`[agent-detect] tab=${id} visible=`, JSON.stringify(visible.split('\n').map((l,i) => `${i}: ${l}`)));
+                }
+
                 let next;
                 let activity = '';
                 if (DET.attention.some(p => p.test(visible))) {
