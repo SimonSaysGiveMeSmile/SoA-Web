@@ -770,12 +770,24 @@ class Shell {
                 const lines = visible.split('\n').filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
                 const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
 
+                // Extract Claude Code status line (e.g. "Thinking… (16s · ↑ 133 tokens)")
+                const statusLineMatch = visible.match(/\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving)\b[.…]*\s*\([^)]*\)/i);
+                const statusLine = statusLineMatch ? statusLineMatch[0].trim() : '';
+
+                // Extract current action line (starts with ⏺)
+                const actionMatch = visible.match(/⏺\s+(.+)/);
+                const actionLine = actionMatch ? actionMatch[1].trim().slice(0, 80) : '';
+
                 let s = this._agentBuf.get(id);
                 if (!s) {
-                    s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '' };
+                    s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '', statusLine: '', actionLine: '' };
                     this._agentBuf.set(id, s);
                 }
                 s.lastLine = lastLine;
+                if (statusLine) s.statusLine = statusLine;
+                if (actionLine) s.actionLine = actionLine;
+                // Clear stale action/status when idle or done
+                if (next === 'idle' || next === 'done') { s.statusLine = ''; s.actionLine = ''; }
                 // Update activity: use detected label, or fall back to last line as context
                 if (activity) {
                     s.activity = activity;
@@ -1356,7 +1368,8 @@ class Shell {
         const pct = this._ctxPct.get(id) || 0;
         const s = this._agentBuf.get(id);
         const activity = (s && s.activity) || this._statusLabel(status);
-        const lastLine = (s && s.lastLine) || '';
+        const statusLine = (s && s.statusLine) || '';
+        const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
 
         const closeBtn = el('button', { class: 'tile-close', text: '×', onclick: (e) => {
@@ -1379,8 +1392,9 @@ class Shell {
             closeBtn,
             pie,
             el('span', { class: 'tile-title', text: title }),
+            el('span', { class: 'tile-status-line', text: statusLine }),
+            el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
             el('span', { class: 'tile-activity', text: activity }),
-            el('span', { class: 'tile-summary', text: lastLine }),
             el('span', { class: 'tile-elapsed', text: elapsed }),
         ]);
 
@@ -1407,16 +1421,20 @@ class Shell {
         const pct = this._ctxPct.get(id) || 0;
         const s = this._agentBuf.get(id);
         const activity = (s && s.activity) || this._statusLabel(status);
-        const lastLine = (s && s.lastLine) || '';
+        const statusLine = (s && s.statusLine) || '';
+        const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
 
         node.setAttribute('data-agent', status);
         const titleEl = node.querySelector('.tile-title');
         if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+        const statusEl = node.querySelector('.tile-status-line');
+        if (statusEl && statusEl.textContent !== statusLine) statusEl.textContent = statusLine;
+        const actionEl = node.querySelector('.tile-action-line');
+        const actionText = actionLine ? '⏺ ' + actionLine : '';
+        if (actionEl && actionEl.textContent !== actionText) actionEl.textContent = actionText;
         const actEl = node.querySelector('.tile-activity');
         if (actEl && actEl.textContent !== activity) actEl.textContent = activity;
-        const sumEl = node.querySelector('.tile-summary');
-        if (sumEl && sumEl.textContent !== lastLine) sumEl.textContent = lastLine;
         const elapsedEl = node.querySelector('.tile-elapsed');
         if (elapsedEl && elapsedEl.textContent !== elapsed) elapsedEl.textContent = elapsed;
         const pie = node.querySelector('.tile-pie');
@@ -1534,19 +1552,20 @@ class Shell {
             this.termsEl.appendChild(this._tileOverlayEl);
         }
 
-        const title = rt.title || tr('tab.default', { id });
-        const closeBtn = el('button', { class: 'tile-terminal-close', text: '← BACK', onclick: () => this._closeTileTerminal() });
-        const bar = el('div', { class: 'tile-terminal-bar' }, [
-            closeBtn,
-            el('span', { class: 'tile-terminal-title', text: title }),
-        ]);
         const body = el('div', { class: 'tile-terminal-body' });
         body.appendChild(rt.container);
         rt.container.classList.add('active');
         rt.container.style.display = 'block';
 
-        this._tileOverlayEl.replaceChildren(bar, body);
+        this._tileOverlayEl.replaceChildren(body);
         this._tileOverlayEl.style.display = '';
+
+        // Show topbar BACK button
+        const backBtn = document.getElementById('tile-back');
+        if (backBtn) {
+            backBtn.style.display = '';
+            backBtn.onclick = () => this._closeTileTerminal();
+        }
 
         requestAnimationFrame(() => {
             rt.fitNow();
@@ -1563,6 +1582,10 @@ class Shell {
         if (!this._tileOverlayEl) return;
         const id = this._tileOverlayId;
         this._tileOverlayId = null;
+
+        // Hide topbar BACK button
+        const backBtn = document.getElementById('tile-back');
+        if (backBtn) backBtn.style.display = 'none';
 
         // Move the terminal container back to #terms
         if (id != null) {

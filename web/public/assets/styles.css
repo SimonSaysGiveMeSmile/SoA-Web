@@ -61,7 +61,7 @@ html, body {
 
 .topbar {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: center;
   gap: 16px;
   padding: 0 14px;
@@ -74,6 +74,13 @@ html, body {
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
   white-space: nowrap;
 }
+.tile-back-btn {
+  background: transparent; border: 1px solid var(--soa-accent-dim);
+  color: var(--soa-accent); padding: 4px 10px;
+  font-family: var(--font-display); font-size: 11px; letter-spacing: 0.2em;
+  cursor: pointer; white-space: nowrap;
+}
+.tile-back-btn:hover { border-color: var(--soa-accent); }
 .tabs {
   display: flex; gap: 6px; overflow-x: auto;
   scrollbar-width: none; -ms-overflow-style: none;
@@ -977,16 +984,21 @@ html[data-welcome="1"] body { overflow: hidden; }
   color: var(--soa-fg); letter-spacing: 0.04em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.tile-status-line {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--soa-accent); margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tile-action-line {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--soa-fg); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: 0.85;
+}
 .tile-activity {
   font-family: var(--font-display); font-size: 10px;
   text-transform: uppercase; letter-spacing: 0.14em;
   color: var(--soa-accent); margin-top: 4px;
-}
-.tile-summary {
-  font-family: var(--font-mono); font-size: 10px;
-  color: var(--soa-accent-dim); margin-top: 4px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  opacity: 0.7;
 }
 .tile-elapsed {
   font-family: var(--font-mono); font-size: 9px;
@@ -1023,24 +1035,6 @@ html[data-welcome="1"] body { overflow: hidden; }
   background: var(--soa-bg);
   display: flex; flex-direction: column;
 }
-.tile-terminal-bar {
-  display: flex; align-items: center; gap: 12px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--soa-line);
-  background: linear-gradient(to bottom, #0a1318, var(--soa-bg));
-  flex-shrink: 0;
-}
-.tile-terminal-title {
-  font-family: var(--font-mono); font-size: 12px;
-  color: var(--soa-accent); letter-spacing: 0.08em;
-}
-.tile-terminal-close {
-  background: transparent; border: 1px solid var(--soa-accent-dim);
-  color: var(--soa-accent); padding: 4px 10px;
-  font-family: var(--font-display); font-size: 11px; letter-spacing: 0.2em;
-  cursor: pointer;
-}
-.tile-terminal-close:hover { border-color: var(--soa-accent); }
 .tile-terminal-body {
   flex: 1; position: relative; overflow: hidden;
 }
