@@ -697,7 +697,8 @@ class Shell {
             working: [
                 /esc to interrupt/i,
                 /\(esc\s+to\s+cancel\)/i,
-                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b[.…]/i,
+                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving)\b[.…]/i,
+                /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,
             ],
             doneBox: /╰─+╯/,
             donePrompt: /│\s*>/,
@@ -715,6 +716,8 @@ class Shell {
                 /\bPermission\s+(?:required|needed|denied)\b/i,
                 /\bAllow\s+once\b/i,
                 /\bAllow\s+always\b/i,
+                /\bDo you want to\b/i,
+                /\bApprove\b.*\?/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
@@ -724,8 +727,6 @@ class Shell {
             try {
                 const buf = rt.term.buffer.active;
                 const totalRows = rt.term.rows;
-                // Read the last 12 visible lines — enough to capture Claude
-                // Code's UI chrome (status bar + input box + permission prompt).
                 const startRow = buf.baseY + Math.max(0, totalRows - 12);
                 const endRow = buf.baseY + totalRows;
                 let visible = '';
@@ -742,23 +743,25 @@ class Shell {
 
                 let next;
                 let activity = '';
-                if (DET.attention.some(p => p.test(visible))) {
+                // Priority: working > attention > done > idle
+                // "esc to interrupt" means the agent is actively running — highest priority.
+                if (DET.working.some(p => p.test(visible))) {
+                    next = 'working';
+                    const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving)\b/i);
+                    activity = vm ? vm[1] + '...' : 'Working...';
+                } else if (DET.attention.some(p => p.test(visible))) {
                     next = 'attention';
                     activity = 'Needs input';
                     for (const p of DET.attention) {
                         const m = visible.match(p);
                         if (m) { activity = m[0].trim().slice(0, 40); break; }
                     }
-                } else if (DET.working.some(p => p.test(visible))) {
-                    next = 'working';
-                    const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing)\b/i);
-                    activity = vm ? vm[1] + '...' : 'Working...';
                 } else if (DET.doneBox.test(visible) && DET.donePrompt.test(visible)) {
                     next = 'done';
                     activity = 'Awaiting next prompt';
                 } else if (DET.shellPrompt.test(visible)) {
                     next = 'idle';
-                    activity = 'Shell ready';
+                    activity = '';
                 } else {
                     next = null;
                 }
@@ -773,7 +776,12 @@ class Shell {
                     this._agentBuf.set(id, s);
                 }
                 s.lastLine = lastLine;
-                if (activity) s.activity = activity;
+                // Update activity: use detected label, or fall back to last line as context
+                if (activity) {
+                    s.activity = activity;
+                } else if (next === 'idle' && lastLine) {
+                    s.activity = lastLine.slice(0, 50);
+                }
 
                 if (next == null) continue;
                 const current = this._agentStatus.get(id) || 'idle';
