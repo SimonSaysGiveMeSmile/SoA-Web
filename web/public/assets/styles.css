@@ -169,7 +169,7 @@ html, body {
 .tab.drop-before::before { left: -4px; }
 .tab.drop-after::after   { right: -4px; }
 
-.topbar-actions { display: flex; gap: 8px; }
+.topbar-actions { display: flex; gap: 8px; justify-self: end; }
 .topbar-actions button,
 .topbar-actions .release-btn {
   background: transparent; color: var(--soa-accent);
