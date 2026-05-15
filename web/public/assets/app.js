@@ -543,9 +543,9 @@ class Shell {
         const switching = this.activeId !== id && this.activeId != null;
         const sameTab = this.activeId === id;
         this.activeId = id;
-        // In tiles mode, don't show the terminal container directly —
-        // the tile overlay handles visibility when the user clicks a tile.
-        if (this.viewMode !== 'tiles') {
+        if (this.viewMode === 'tiles') {
+            this._openTileTerminal(id);
+        } else {
             for (const [tid, rt] of this.tabs) {
                 rt.container.classList.toggle('active', tid === id);
             }
