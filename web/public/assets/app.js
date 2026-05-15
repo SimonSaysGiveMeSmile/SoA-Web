@@ -314,8 +314,8 @@ class Shell {
         // Poll the second-to-last visible terminal line every second — that's
         // where Claude Code's Ink status bar always lives. More reliable than
         // scanning the PTY stream because Ink re-renders in-place via cursor-up.
-        this._ctxPollTimer = setInterval(() => this._pollCtxLines(), 1000);
-        this._tileElapsedTimer = setInterval(() => this._refreshTileElapsed(), 5000);
+        this._ctxPollTimer = setInterval(() => this._pollCtxLines(), 500);
+        this._tileElapsedTimer = setInterval(() => this._refreshTileElapsed(), 1000);
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -697,8 +697,10 @@ class Shell {
             working: [
                 /esc to interrupt/i,
                 /\(esc\s+to\s+cancel\)/i,
-                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving)\b[.…]/i,
+                /[✳✻◆●◉⟡]\s*\S/,
+                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i,
                 /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,
+                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b.*[…⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/i,
             ],
             doneBox: /╰─+╯/,
             donePrompt: /│\s*>/,
@@ -747,7 +749,7 @@ class Shell {
                 // "esc to interrupt" means the agent is actively running — highest priority.
                 if (DET.working.some(p => p.test(visible))) {
                     next = 'working';
-                    const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving)\b/i);
+                    const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                     activity = vm ? vm[1] + '...' : 'Working...';
                 } else if (DET.attention.some(p => p.test(visible))) {
                     next = 'attention';
@@ -770,9 +772,10 @@ class Shell {
                 const lines = visible.split('\n').filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
                 const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
 
-                // Extract Claude Code status line (e.g. "Thinking… (16s · ↑ 133 tokens)")
-                const statusLineMatch = visible.match(/\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving)\b[.…]*\s*\([^)]*\)/i);
-                const statusLine = statusLineMatch ? statusLineMatch[0].trim() : '';
+                // Extract Claude Code status line (e.g. "Thinking… (16s · ↑ 133 tokens)" or "✳ Compacting conversation…")
+                const statusLineMatch = visible.match(/[✳✻◆●◉⟡]\s*[^\n]{3,60}/) ||
+                    visible.match(/\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]*(?:\s*\([^)]*\))?[^\n]*/i);
+                const statusLine = statusLineMatch ? statusLineMatch[0].trim().slice(0, 80) : '';
 
                 // Extract current action line (starts with ⏺)
                 const actionMatch = visible.match(/⏺\s+(.+)/);
@@ -803,9 +806,9 @@ class Shell {
                 }
 
                 // Debounce: attention is urgent, working is quick, done/idle wait
-                const delay = next === 'attention' ? 150
-                            : next === 'working'   ? 200
-                            : 500;
+                const delay = next === 'attention' ? 100
+                            : next === 'working'   ? 100
+                            : 400;
 
                 if (s.pendingStatus === next) continue;
                 if (s.pending) clearTimeout(s.pending);
@@ -1464,9 +1467,16 @@ class Shell {
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             const id = Number(node.dataset.tileId);
             const s = this._agentBuf.get(id);
-            if (!s || !s.lastChange) continue;
-            const elapsedEl = node.querySelector('.tile-elapsed');
-            if (elapsedEl) elapsedEl.textContent = this._formatElapsed(s.lastChange);
+            if (!s) continue;
+            if (s.lastChange) {
+                const elapsedEl = node.querySelector('.tile-elapsed');
+                if (elapsedEl) elapsedEl.textContent = this._formatElapsed(s.lastChange);
+            }
+            const statusEl = node.querySelector('.tile-status-line');
+            if (statusEl && statusEl.textContent !== (s.statusLine || '')) statusEl.textContent = s.statusLine || '';
+            const actionEl = node.querySelector('.tile-action-line');
+            const actionText = s.actionLine ? '⏺ ' + s.actionLine : '';
+            if (actionEl && actionEl.textContent !== actionText) actionEl.textContent = actionText;
         }
     }
 
