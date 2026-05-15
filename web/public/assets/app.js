@@ -1364,14 +1364,8 @@ class Shell {
             'data-agent': status,
             draggable: 'true',
             onclick: () => {
-                if (this._tileDragDidMove) return;
-                this.viewMode = 'tabs';
-                try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
-                this.activeId = id;
-                this._applyViewMode();
-                this._updateViewBtn();
-                this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
-                this.audio.play('panels');
+                if (this._tileDragDidMove) { this._tileDragDidMove = false; return; }
+                this._openTileTerminal(id);
             },
         }, [
             closeBtn,
@@ -1472,7 +1466,6 @@ class Shell {
             if (this._tileDragId == null) return;
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
-            this._tileDragDidMove = true;
             const beforeId = this._tileDropTarget(e);
             this._paintTileDropTarget(beforeId);
         });
@@ -1482,6 +1475,7 @@ class Shell {
         grid.addEventListener('drop', (e) => {
             if (this._tileDragId == null) return;
             e.preventDefault();
+            this._tileDragDidMove = true;
             const beforeId = this._tileDropTarget(e);
             this._clearTileDropTarget();
             const dragId = this._tileDragId;
