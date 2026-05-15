@@ -964,10 +964,13 @@ html[data-welcome="1"] body { overflow: hidden; }
   min-height: 110px; padding: 12px 14px;
   border: 1px solid var(--soa-line);
   background: rgba(5, 8, 13, 0.85);
-  cursor: pointer;
+  cursor: grab;
   transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;
   position: relative;
 }
+.tile:active { cursor: grabbing; }
+.tile.dragging { opacity: 0.4; }
+.tile.drop-target { border-color: var(--soa-accent); box-shadow: 0 0 16px rgba(170,207,209,0.3); }
 .tile:hover { border-color: var(--soa-accent); box-shadow: 0 0 12px rgba(170,207,209,0.2); }
 
 .tile-title {

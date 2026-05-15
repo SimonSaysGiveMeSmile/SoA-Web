@@ -1321,6 +1321,7 @@ class Shell {
             this.termsEl.appendChild(this._tilesGridEl);
         }
         this._tilesGridEl.style.display = '';
+        this._installTilesDrop();
         const existing = new Map();
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             existing.set(Number(node.dataset.tileId), node);
@@ -1361,7 +1362,17 @@ class Shell {
             class: 'tile',
             'data-tile-id': String(id),
             'data-agent': status,
-            onclick: () => this._openTileTerminal(id),
+            draggable: 'true',
+            onclick: () => {
+                if (this._tileDragDidMove) return;
+                this.viewMode = 'tabs';
+                try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
+                this.activeId = id;
+                this._applyViewMode();
+                this._updateViewBtn();
+                this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
+                this.audio.play('panels');
+            },
         }, [
             closeBtn,
             pie,
@@ -1370,6 +1381,20 @@ class Shell {
             el('span', { class: 'tile-summary', text: lastLine }),
             el('span', { class: 'tile-elapsed', text: elapsed }),
         ]);
+
+        node.addEventListener('dragstart', (e) => {
+            this._tileDragId = id;
+            this._tileDragDidMove = false;
+            node.classList.add('dragging');
+            e.dataTransfer.setData('text/plain', String(id));
+            e.dataTransfer.effectAllowed = 'move';
+        });
+        node.addEventListener('dragend', () => {
+            node.classList.remove('dragging');
+            this._tileDragId = null;
+            this._clearTileDropTarget();
+        });
+
         return node;
     }
 
@@ -1436,7 +1461,61 @@ class Shell {
     }
 
     _removeTilesGrid() {
-        if (this._tilesGridEl) { this._tilesGridEl.remove(); this._tilesGridEl = null; }
+        if (this._tilesGridEl) { this._tilesGridEl.remove(); this._tilesGridEl = null; this._tilesDropInstalled = false; }
+    }
+
+    _installTilesDrop() {
+        if (this._tilesDropInstalled || !this._tilesGridEl) return;
+        this._tilesDropInstalled = true;
+        const grid = this._tilesGridEl;
+        grid.addEventListener('dragover', (e) => {
+            if (this._tileDragId == null) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            this._tileDragDidMove = true;
+            const beforeId = this._tileDropTarget(e);
+            this._paintTileDropTarget(beforeId);
+        });
+        grid.addEventListener('dragleave', (e) => {
+            if (e.target === grid) this._clearTileDropTarget();
+        });
+        grid.addEventListener('drop', (e) => {
+            if (this._tileDragId == null) return;
+            e.preventDefault();
+            const beforeId = this._tileDropTarget(e);
+            this._clearTileDropTarget();
+            const dragId = this._tileDragId;
+            this._tileDragId = null;
+            this._applyMove(dragId, { beforeId });
+        });
+    }
+
+    _tileDropTarget(e) {
+        const tiles = Array.from(this._tilesGridEl.querySelectorAll('.tile'));
+        for (let i = 0; i < tiles.length; i++) {
+            const r = tiles[i].getBoundingClientRect();
+            if (e.clientY >= r.top && e.clientY <= r.bottom &&
+                e.clientX >= r.left && e.clientX <= r.right) {
+                const midX = r.left + r.width / 2;
+                if (e.clientX < midX) {
+                    return Number(tiles[i].dataset.tileId);
+                } else {
+                    return i + 1 < tiles.length ? Number(tiles[i + 1].dataset.tileId) : -1;
+                }
+            }
+        }
+        return -1;
+    }
+
+    _paintTileDropTarget(beforeId) {
+        this._clearTileDropTarget();
+        if (beforeId === -1) return;
+        const node = this._tilesGridEl.querySelector(`[data-tile-id="${beforeId}"]`);
+        if (node) { node.classList.add('drop-target'); this._tileDropNode = node; }
+    }
+
+    _clearTileDropTarget() {
+        if (this._tileDropNode) { this._tileDropNode.classList.remove('drop-target'); this._tileDropNode = null; }
     }
 
     _openTileTerminal(id) {
