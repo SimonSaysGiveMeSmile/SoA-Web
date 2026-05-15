@@ -61,7 +61,7 @@ html, body {
 
 .topbar {
   display: grid;
-  grid-template-columns: auto auto 1fr auto;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 16px;
   padding: 0 14px;
@@ -69,6 +69,7 @@ html, body {
   background: linear-gradient(to bottom, #0a1318, var(--soa-bg));
 }
 .brand {
+  display: flex; align-items: center; gap: 10px;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
@@ -977,7 +978,11 @@ html[data-welcome="1"] body { overflow: hidden; }
 .tile:active { cursor: grabbing; }
 .tile.dragging { opacity: 0.4; }
 .tile.drop-target { border-color: var(--soa-accent); box-shadow: 0 0 16px rgba(170,207,209,0.3); }
-.tile:hover { border-color: var(--soa-accent); box-shadow: 0 0 12px rgba(170,207,209,0.2); }
+.tile:hover {
+  border-color: var(--soa-accent);
+  box-shadow: 0 0 12px rgba(170,207,209,0.2);
+  background: linear-gradient(to top, rgba(170,207,209,0.08) 0%, rgba(170,207,209,0.03) 40%, transparent 70%);
+}
 
 .tile-title {
   font-family: var(--font-mono); font-size: 12px;
