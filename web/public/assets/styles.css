@@ -70,6 +70,7 @@ html, body {
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
+  width: 226px; min-width: 226px;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
