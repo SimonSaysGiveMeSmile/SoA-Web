@@ -715,28 +715,26 @@ class Shell {
             working: [
                 /esc to interrupt/i,
                 /\(esc\s+to\s+cancel\)/i,
-                /[✳✻◆●◉⟡]\s*\S/,
-                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i,
                 /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,
+                /✳\s*\S/,
+                /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i,
                 /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b.*[…⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/i,
             ],
-            doneBox: /╰─+╯/,
-            donePrompt: /│\s*>/,
+            done: [
+                /╭─+╮[\s\S]*│\s*>/,
+                /╰─+╯/,
+                /│\s*>\s*│/,
+                /│\s*>\s*$/m,
+            ],
             attention: [
+                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
-                /Press\s+Enter\s+to/i,
                 /waiting\s+for\s+(?:your\s+)?input/i,
                 /Allow\?/i,
-                /❯\s+(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /\bPermission\s+(?:required|needed)\b/i,
-            ],
-            attentionStrong: [
-                /(?:Allow\s+once|Allow\s+always|Deny)[\s\S]{0,20}(?:Allow\s+once|Allow\s+always|Deny)/i,
-                /\bDo you want to\b.*\?/i,
-                /\bApprove\b.*\?/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
@@ -749,7 +747,7 @@ class Shell {
         try {
             const buf = rt.term.buffer.active;
             const totalRows = rt.term.rows;
-            const startRow = buf.baseY + Math.max(0, totalRows - 12);
+            const startRow = buf.baseY + Math.max(0, totalRows - 20);
             const endRow = buf.baseY + totalRows;
             let visible = '';
             for (let r = startRow; r < endRow; r++) {
@@ -763,31 +761,29 @@ class Shell {
                 console.log(`[agent-detect] tab=${id} visible=`, JSON.stringify(visible.split('\n').map((l,i) => `${i}: ${l}`)));
             }
 
-            // Focus on the last 4 lines for attention detection — permission
-            // prompts always appear at the bottom. This prevents old "Allow"
-            // text higher in the buffer from causing false reds.
+            // Bottom 6 lines for attention/done detection — these UI elements
+            // always render at the bottom of the viewport.
             const visibleLines = visible.split('\n');
-            const bottomLines = visibleLines.slice(-5).join('\n');
+            const bottomLines = visibleLines.slice(-7).join('\n');
 
             let next;
             let activity = '';
             // Priority: working > attention > done > idle
-            // "esc to interrupt" means the agent is actively running — highest priority.
             if (DET.working.some(p => p.test(visible))) {
                 next = 'working';
                 const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                 activity = vm ? vm[1] + '...' : 'Working...';
-            } else if (DET.attentionStrong.some(p => p.test(bottomLines)) || DET.attention.some(p => p.test(bottomLines))) {
+            } else if (DET.attention.some(p => p.test(bottomLines))) {
                 next = 'attention';
                 activity = 'Needs input';
-                for (const p of [...DET.attentionStrong, ...DET.attention]) {
+                for (const p of DET.attention) {
                     const m = bottomLines.match(p);
                     if (m) { activity = m[0].trim().slice(0, 40); break; }
                 }
-            } else if (DET.doneBox.test(visible) && DET.donePrompt.test(visible)) {
+            } else if (DET.done.some(p => p.test(bottomLines))) {
                 next = 'done';
                 activity = 'Awaiting next prompt';
-            } else if (DET.shellPrompt.test(visible)) {
+            } else if (DET.shellPrompt.test(bottomLines)) {
                 next = 'idle';
                 activity = '';
             } else {
@@ -799,7 +795,7 @@ class Shell {
             const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
 
             // Extract Claude Code status line (e.g. "Thinking… (16s · ↑ 133 tokens)" or "✳ Compacting conversation…")
-            const statusLineMatch = visible.match(/[✳✻◆●◉⟡]\s*[^\n]{3,60}/) ||
+            const statusLineMatch = visible.match(/✳\s*[^\n]{3,60}/) ||
                 visible.match(/\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]*(?:\s*\([^)]*\))?[^\n]*/i);
             const statusLine = statusLineMatch ? statusLineMatch[0].trim().slice(0, 80) : '';
 
@@ -822,6 +818,16 @@ class Shell {
                 s.activity = activity;
             } else if (next === 'idle' && lastLine) {
                 s.activity = lastLine.slice(0, 50);
+            }
+
+            // Debug: log detected state and matching pattern
+            if (id === this.activeId && window.__SOA_DEBUG_AGENT) {
+                const current = this._agentStatus.get(id) || '(none)';
+                console.log(`[agent-detect] tab=${id} current=${current} next=${next} activity="${activity}"`);
+                if (next === 'working') {
+                    const matched = DET.working.find(p => p.test(visible));
+                    console.log(`[agent-detect]   matched working: ${matched}`);
+                }
             }
 
             if (next == null) return;
