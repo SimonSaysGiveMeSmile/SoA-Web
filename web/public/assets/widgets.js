@@ -376,7 +376,7 @@ class MobileQRWidget extends Widget {
 
         function pairUrl(backendUrl) {
             const token = currentToken();
-            const u = new URL('/', backendUrl);
+            const u = new URL('/m/', backendUrl);
             u.searchParams.set('backend', backendUrl);
             if (token) u.searchParams.set('t', token);
             return u.toString();

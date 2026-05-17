@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+    <meta name="theme-color" content="#05080d">
+    <meta name="color-scheme" content="dark">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Son of Anton">
+    <title>Son of Anton · Mobile</title>
+    <link rel="stylesheet" href="/m/styles.css">
+</head>
+<body>
+    <div id="app">
+        <header id="topbar">
+            <div class="brand">SON OF ANTON</div>
+            <div class="status" id="status">
+                <span class="status-dot" data-state="connecting"></span>
+                <span class="status-text">connecting…</span>
+            </div>
+        </header>
+
+        <nav id="tabs" aria-label="Open tabs"></nav>
+
+        <main id="stage">
+            <pre id="term"></pre>
+        </main>
+
+        <section id="kbd"></section>
+    </div>
+
+    <div id="reconnect-overlay" hidden>
+        <div class="reconnect-card">
+            <div class="reconnect-spinner"></div>
+            <div class="reconnect-title">RECONNECTING</div>
+            <div class="reconnect-sub" id="reconnect-sub">checking link…</div>
+            <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY NOW</button>
+        </div>
+    </div>
+
+    <script type="module" src="/m/app.js"></script>
+</body>
+</html>

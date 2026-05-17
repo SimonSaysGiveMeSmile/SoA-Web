@@ -20,8 +20,6 @@ const http = require('http');
 async function openTunnel(port) {
     const cf = await _tryCloudflared(port);
     if (cf) return cf;
-    const ng = await _tryNgrok(port);
-    if (ng) return ng;
     const lt = await _tryLocaltunnel(port);
     if (lt) return lt;
     return null;

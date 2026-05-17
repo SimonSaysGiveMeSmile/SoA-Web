@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=15';
 import { AudioFX } from '/assets/audiofx.js?v=15';
-import { mountSidebar } from '/assets/widgets.js?v=14';
+import { mountSidebar } from '/assets/widgets.js?v=15';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=14';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
 
@@ -311,6 +311,8 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
+        // Enable debug overlay by default so agent detection is visible
+        window.__SOA_DEBUG_AGENT = true;
         // Poll the second-to-last visible terminal line every second — that's
         // where Claude Code's Ink status bar always lives. More reliable than
         // scanning the PTY stream because Ink re-renders in-place via cursor-up.
@@ -434,7 +436,10 @@ class Shell {
             if (Array.isArray(replay)) {
                 for (const r of replay) {
                     const rt = this.tabs.get(r.id);
-                    if (rt && r.data) rt.queueReplay(r.data);
+                    if (rt && r.data) {
+                        rt.queueReplay(r.data);
+                        this._detectAgentFromStream(r.id, r.data);
+                    }
                 }
             }
             const target = (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
@@ -449,6 +454,10 @@ class Shell {
                 this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: target, cols: rt.term.cols, rows: rt.term.rows });
             }
             this._syncTabsUI(tabs);
+            // Run agent status detection after HELLO so colors are correct
+            // on first load — the replay data has been fed to the stream
+            // detector above, and the buffer poll catches anything missed.
+            setTimeout(() => this._pollAgentStatus(), 300);
         } else {
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
@@ -481,21 +490,17 @@ class Shell {
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
         if (t) t.write(data);
-        // Trigger agent status detection shortly after data arrives so the
-        // indicator updates in near-real-time instead of waiting for the next
-        // poll tick. Throttled per-tab to avoid hammering during heavy output.
-        const now = performance.now();
-        const lastDetect = this._lastAgentDetect || (this._lastAgentDetect = new Map());
-        if (now - (lastDetect.get(id) || 0) > 300) {
-            lastDetect.set(id, now);
-            setTimeout(() => this._pollAgentStatusForTab(id), 50);
-        }
+        // Fast stream-based agent detection — check the raw data for signals
+        // before xterm processes it. More reliable than buffer reading because
+        // we see the exact bytes Claude Code sends.
+        this._detectAgentFromStream(id, data);
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
         // still overlap into the Web Audio mixer like crossfire. The tab id
         // is passed through to the engine so its own per-source throttle
         // stays scoped too — a single scalar there would clip the second
         // tab's voice even after our 180ms gate let it through.
+        const now = performance.now();
         const last = this._lastStdoutCue.get(id) || 0;
         if (now - last > 180) {
             this._lastStdoutCue.set(id, now);
@@ -699,10 +704,140 @@ class Shell {
         this._pollAgentStatus();
     }
 
+    // Stream-based agent detection. Runs on every TERM_DATA chunk — checks the
+    // raw bytes for Claude Code TUI signals. This is the primary detector;
+    // the buffer-based poll is a fallback for initial load / missed chunks.
+    //
+    // We keep a small sliding window of recent data per tab (last ~2KB) so we
+    // can detect multi-chunk patterns (e.g. the boxed prompt arrives across
+    // two frames). The window is reset when a state transition is confirmed.
+    _detectAgentFromStream(id, data) {
+        if (!this._streamBuf) this._streamBuf = new Map();
+        let sb = this._streamBuf.get(id);
+        if (!sb) { sb = { recent: '', lastDetect: 0 }; this._streamBuf.set(id, sb); }
+
+        sb.recent += data;
+        if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
+
+        // Throttle: at most one detection per 200ms per tab
+        const now = performance.now();
+        if (now - sb.lastDetect < 200) return;
+        sb.lastDetect = now;
+
+        // Strip ANSI escape sequences for pattern matching
+        const clean = sb.recent.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+                               .replace(/\x1b\][^\x07]*\x07/g, '')
+                               .replace(/\x1b[()][AB012]/g, '')
+                               .replace(/\x1b\x5b[0-9;]*[mGHJKfsu]/g, '');
+
+        let next = null;
+        let activity = '';
+
+        // Working signals — these appear in the stream while Claude is active
+        const workingSignals = [
+            /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/,
+            /esc to interrupt/i,
+            /\(esc\s+to\s+cancel\)/i,
+            /✳/,
+        ];
+        const workingVerbs = /\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Generating|Updating|Checking|Scanning|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i;
+
+        // Check last 500 chars for working signals (recent activity)
+        const tail = clean.slice(-500);
+
+        if (workingSignals.some(p => p.test(tail))) {
+            next = 'working';
+            const vm = tail.match(workingVerbs);
+            activity = vm ? vm[1] + '...' : 'Working...';
+        } else if (workingVerbs.test(tail)) {
+            next = 'working';
+            const vm = tail.match(workingVerbs);
+            activity = vm ? vm[1] + '...' : 'Working...';
+        }
+
+        // Attention signals — permission prompts
+        if (!next) {
+            const attentionPatterns = [
+                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /\(y\/n\)/i,
+                /\[Y\/n\]/i,
+                /\(Y\)es\s*\/\s*\(N\)o/i,
+                /Allow\?/i,
+                /Permission\s+(?:required|needed)/i,
+            ];
+            if (attentionPatterns.some(p => p.test(tail))) {
+                next = 'attention';
+                activity = 'Needs input';
+            }
+        }
+
+        // Done signals — the boxed input prompt
+        if (!next) {
+            const donePatterns = [
+                /╭─+╮/,
+                /│\s*>\s*│/,
+                /╰─+╯/,
+                /│\s*>\s*$/m,
+            ];
+            if (donePatterns.some(p => p.test(tail))) {
+                next = 'done';
+                activity = 'Awaiting next prompt';
+            }
+        }
+
+        // Shell prompt detection — transition to idle when we see a prompt
+        if (!next) {
+            const shellPrompt = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m;
+            const lastLines = tail.slice(-200);
+            if (shellPrompt.test(lastLines)) {
+                const current = this._agentStatus.get(id);
+                if (current && current !== 'idle') {
+                    next = 'idle';
+                    activity = '';
+                }
+            }
+        }
+
+        if (!next) return;
+
+        // Debug logging
+        if (id === this.activeId && window.__SOA_DEBUG_AGENT) {
+            console.log(`[stream-detect] tab=${id} next=${next} activity="${activity}" tail=`, JSON.stringify(tail.slice(-200)));
+        }
+
+        // Apply the detected status
+        const current = this._agentStatus.get(id) || 'idle';
+        if (next === current) return;
+
+        // Update activity info
+        let s = this._agentBuf.get(id);
+        if (!s) {
+            s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '', statusLine: '', actionLine: '' };
+            this._agentBuf.set(id, s);
+        }
+        if (activity) s.activity = activity;
+
+        // Working and attention are urgent — apply with minimal delay
+        // Done needs a short debounce to avoid flicker from partial renders
+        const delay = (next === 'working' || next === 'attention') ? 50 : 300;
+
+        if (s.pendingStatus === next) return;
+        if (s.pending) clearTimeout(s.pending);
+        s.pendingStatus = next;
+        s.pending = setTimeout(() => {
+            s.pending = null;
+            s.pendingStatus = null;
+            this._setStatus(id, next);
+            // Reset stream buffer on confirmed transition to avoid re-detecting
+            // stale patterns
+            sb.recent = '';
+        }, delay);
+    }
+
     // Read the last N visible lines from the terminal buffer to detect agent
-    // state. This replaces the old stream-based approach which was unreliable
-    // because Ink re-renders in place via cursor-up, making the stripped stream
-    // buffer diverge from what's actually on screen.
+    // state. This is a fallback/confirmation for the stream-based detector —
+    // it catches states on initial load and corrects drift.
     _pollAgentStatus() {
         for (const [id, rt] of this.tabs) {
             if (!rt._opened) continue;
@@ -744,6 +879,12 @@ class Shell {
         const DET = this._getDetector();
         const rt = this.tabs.get(id);
         if (!rt || !rt._opened) return;
+        // If the stream detector recently fired for this tab, skip the buffer
+        // poll to avoid conflicting state transitions.
+        if (this._streamBuf) {
+            const sb = this._streamBuf.get(id);
+            if (sb && performance.now() - sb.lastDetect < 600) return;
+        }
         try {
             const buf = rt.term.buffer.active;
             const totalRows = rt.term.rows;
@@ -1198,6 +1339,25 @@ class Shell {
             const title = (tab && tab.title) || tr('tab.default', { id });
             this._notifyAttention(title);
         }
+        // Visual debug overlay — shows detected status on screen
+        this._updateDebugOverlay(id, status, prev);
+    }
+
+    _updateDebugOverlay(id, status, prev) {
+        if (!window.__SOA_DEBUG_AGENT) return;
+        let overlay = document.getElementById('soa-agent-debug');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'soa-agent-debug';
+            overlay.style.cssText = 'position:fixed;bottom:4px;right:4px;z-index:99999;font:10px/1.3 monospace;background:rgba(0,0,0,0.85);color:#aacfd1;padding:6px 8px;border-radius:4px;max-width:300px;pointer-events:none;';
+            document.body.appendChild(overlay);
+        }
+        const entries = [];
+        for (const [tid, st] of this._agentStatus) {
+            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ffb86c' : st === 'attention' ? '#ff5555' : '#6272a4';
+            entries.push(`<span style="color:${color}">tab${tid}:${st}</span>`);
+        }
+        overlay.innerHTML = entries.join(' | ') + `<br><span style="color:#888">last: tab${id} ${prev}→${status}</span>`;
     }
 
     _notifyAttention(tabTitle) {
