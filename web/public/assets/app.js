@@ -438,7 +438,7 @@ class Shell {
                     const rt = this.tabs.get(r.id);
                     if (rt && r.data) {
                         rt.queueReplay(r.data);
-                        this._detectAgentFromStream(r.id, r.data);
+                        this._detectAgentFromStream(r.id, r.data, { force: true });
                     }
                 }
             }
@@ -711,7 +711,7 @@ class Shell {
     // We keep a small sliding window of recent data per tab (last ~2KB) so we
     // can detect multi-chunk patterns (e.g. the boxed prompt arrives across
     // two frames). The window is reset when a state transition is confirmed.
-    _detectAgentFromStream(id, data) {
+    _detectAgentFromStream(id, data, { force = false } = {}) {
         if (!this._streamBuf) this._streamBuf = new Map();
         let sb = this._streamBuf.get(id);
         if (!sb) { sb = { recent: '', lastDetect: 0 }; this._streamBuf.set(id, sb); }
@@ -719,9 +719,9 @@ class Shell {
         sb.recent += data;
         if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
 
-        // Throttle: at most one detection per 200ms per tab
+        // Throttle: at most one detection per 200ms per tab (skip on force)
         const now = performance.now();
-        if (now - sb.lastDetect < 200) return;
+        if (!force && now - sb.lastDetect < 200) return;
         sb.lastDetect = now;
 
         // Strip ANSI escape sequences for pattern matching
@@ -791,11 +791,8 @@ class Shell {
             const shellPrompt = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m;
             const lastLines = tail.slice(-200);
             if (shellPrompt.test(lastLines)) {
-                const current = this._agentStatus.get(id);
-                if (current && current !== 'idle') {
-                    next = 'idle';
-                    activity = '';
-                }
+                next = 'idle';
+                activity = '';
             }
         }
 
@@ -808,7 +805,8 @@ class Shell {
 
         // Apply the detected status
         const current = this._agentStatus.get(id) || 'idle';
-        if (next === current) return;
+        const firstDetection = !this._agentStatus.has(id);
+        if (next === current && !firstDetection) return;
 
         // Update activity info
         let s = this._agentBuf.get(id);
