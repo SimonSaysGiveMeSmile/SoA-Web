@@ -473,11 +473,23 @@ class Shell {
         tabsEl.textContent = tr(tabsKey, { n: tabs.length });
         tabsEl.setAttribute('data-i18n', tabsKey);
         tabsEl.setAttribute('data-i18n-vars', JSON.stringify({ n: tabs.length }));
+        // Run agent status detection immediately after snapshot so colors
+        // are correct on first load (don't wait for the poll interval).
+        setTimeout(() => this._pollAgentStatus(), 150);
     }
 
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
         if (t) t.write(data);
+        // Trigger agent status detection shortly after data arrives so the
+        // indicator updates in near-real-time instead of waiting for the next
+        // poll tick. Throttled per-tab to avoid hammering during heavy output.
+        const now = performance.now();
+        const lastDetect = this._lastAgentDetect || (this._lastAgentDetect = new Map());
+        if (now - (lastDetect.get(id) || 0) > 300) {
+            lastDetect.set(id, now);
+            setTimeout(() => this._pollAgentStatusForTab(id), 50);
+        }
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
         // still overlap into the Web Audio mixer like crossfire. The tab id
@@ -693,7 +705,14 @@ class Shell {
     // because Ink re-renders in place via cursor-up, making the stripped stream
     // buffer diverge from what's actually on screen.
     _pollAgentStatus() {
-        const DET = this._detector || (this._detector = {
+        for (const [id, rt] of this.tabs) {
+            if (!rt._opened) continue;
+            this._pollAgentStatusForTab(id);
+        }
+    }
+
+    _getDetector() {
+        return this._detector || (this._detector = {
             working: [
                 /esc to interrupt/i,
                 /\(esc\s+to\s+cancel\)/i,
@@ -706,120 +725,132 @@ class Shell {
             donePrompt: /│\s*>/,
             attention: [
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
-                /\n?\s*\d+\.\s+(?:Yes|No|Accept|Reject|Allow|Deny)\b/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Press\s+Enter\s+to/i,
                 /waiting\s+for\s+(?:your\s+)?input/i,
-                /Allow\s+.*\s+tool/i,
                 /Allow\?/i,
                 /❯\s+(?:Yes|No|Allow|Deny|Accept|Reject)/i,
-                /\bPermission\s+(?:required|needed|denied)\b/i,
-                /\bAllow\s+once\b/i,
-                /\bAllow\s+always\b/i,
-                /\bDo you want to\b/i,
+                /\bPermission\s+(?:required|needed)\b/i,
+            ],
+            attentionStrong: [
+                /(?:Allow\s+once|Allow\s+always|Deny)[\s\S]{0,20}(?:Allow\s+once|Allow\s+always|Deny)/i,
+                /\bDo you want to\b.*\?/i,
                 /\bApprove\b.*\?/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
+    }
 
-        for (const [id, rt] of this.tabs) {
-            if (!rt._opened) continue;
-            try {
-                const buf = rt.term.buffer.active;
-                const totalRows = rt.term.rows;
-                const startRow = buf.baseY + Math.max(0, totalRows - 12);
-                const endRow = buf.baseY + totalRows;
-                let visible = '';
-                for (let r = startRow; r < endRow; r++) {
-                    const line = buf.getLine(r);
-                    if (line) visible += line.translateToString(true) + '\n';
+    _pollAgentStatusForTab(id) {
+        const DET = this._getDetector();
+        const rt = this.tabs.get(id);
+        if (!rt || !rt._opened) return;
+        try {
+            const buf = rt.term.buffer.active;
+            const totalRows = rt.term.rows;
+            const startRow = buf.baseY + Math.max(0, totalRows - 12);
+            const endRow = buf.baseY + totalRows;
+            let visible = '';
+            for (let r = startRow; r < endRow; r++) {
+                const line = buf.getLine(r);
+                if (line) visible += line.translateToString(true) + '\n';
+            }
+            if (!visible.trim()) return;
+
+            // Debug: log buffer content for active tab (open DevTools console)
+            if (id === this.activeId && window.__SOA_DEBUG_AGENT) {
+                console.log(`[agent-detect] tab=${id} visible=`, JSON.stringify(visible.split('\n').map((l,i) => `${i}: ${l}`)));
+            }
+
+            // Focus on the last 4 lines for attention detection — permission
+            // prompts always appear at the bottom. This prevents old "Allow"
+            // text higher in the buffer from causing false reds.
+            const visibleLines = visible.split('\n');
+            const bottomLines = visibleLines.slice(-5).join('\n');
+
+            let next;
+            let activity = '';
+            // Priority: working > attention > done > idle
+            // "esc to interrupt" means the agent is actively running — highest priority.
+            if (DET.working.some(p => p.test(visible))) {
+                next = 'working';
+                const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
+                activity = vm ? vm[1] + '...' : 'Working...';
+            } else if (DET.attentionStrong.some(p => p.test(bottomLines)) || DET.attention.some(p => p.test(bottomLines))) {
+                next = 'attention';
+                activity = 'Needs input';
+                for (const p of [...DET.attentionStrong, ...DET.attention]) {
+                    const m = bottomLines.match(p);
+                    if (m) { activity = m[0].trim().slice(0, 40); break; }
                 }
-                if (!visible.trim()) continue;
+            } else if (DET.doneBox.test(visible) && DET.donePrompt.test(visible)) {
+                next = 'done';
+                activity = 'Awaiting next prompt';
+            } else if (DET.shellPrompt.test(visible)) {
+                next = 'idle';
+                activity = '';
+            } else {
+                next = null;
+            }
 
-                // Debug: log buffer content for active tab (open DevTools console)
-                if (id === this.activeId && window.__SOA_DEBUG_AGENT) {
-                    console.log(`[agent-detect] tab=${id} visible=`, JSON.stringify(visible.split('\n').map((l,i) => `${i}: ${l}`)));
-                }
+            // Extract last meaningful line for tile summary
+            const lines = visible.split('\n').filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
+            const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
 
-                let next;
-                let activity = '';
-                // Priority: working > attention > done > idle
-                // "esc to interrupt" means the agent is actively running — highest priority.
-                if (DET.working.some(p => p.test(visible))) {
-                    next = 'working';
-                    const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
-                    activity = vm ? vm[1] + '...' : 'Working...';
-                } else if (DET.attention.some(p => p.test(visible))) {
-                    next = 'attention';
-                    activity = 'Needs input';
-                    for (const p of DET.attention) {
-                        const m = visible.match(p);
-                        if (m) { activity = m[0].trim().slice(0, 40); break; }
-                    }
-                } else if (DET.doneBox.test(visible) && DET.donePrompt.test(visible)) {
-                    next = 'done';
-                    activity = 'Awaiting next prompt';
-                } else if (DET.shellPrompt.test(visible)) {
-                    next = 'idle';
-                    activity = '';
-                } else {
-                    next = null;
-                }
+            // Extract Claude Code status line (e.g. "Thinking… (16s · ↑ 133 tokens)" or "✳ Compacting conversation…")
+            const statusLineMatch = visible.match(/[✳✻◆●◉⟡]\s*[^\n]{3,60}/) ||
+                visible.match(/\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]*(?:\s*\([^)]*\))?[^\n]*/i);
+            const statusLine = statusLineMatch ? statusLineMatch[0].trim().slice(0, 80) : '';
 
-                // Extract last meaningful line for tile summary
-                const lines = visible.split('\n').filter(l => l.trim() && !/^[\s─╰╭│]*$/.test(l));
-                const lastLine = lines.length ? lines[lines.length - 1].trim().slice(0, 80) : '';
+            // Extract current action line (starts with ⏺)
+            const actionMatch = visible.match(/⏺\s+(.+)/);
+            const actionLine = actionMatch ? actionMatch[1].trim().slice(0, 80) : '';
 
-                // Extract Claude Code status line (e.g. "Thinking… (16s · ↑ 133 tokens)" or "✳ Compacting conversation…")
-                const statusLineMatch = visible.match(/[✳✻◆●◉⟡]\s*[^\n]{3,60}/) ||
-                    visible.match(/\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]*(?:\s*\([^)]*\))?[^\n]*/i);
-                const statusLine = statusLineMatch ? statusLineMatch[0].trim().slice(0, 80) : '';
+            let s = this._agentBuf.get(id);
+            if (!s) {
+                s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '', statusLine: '', actionLine: '' };
+                this._agentBuf.set(id, s);
+            }
+            s.lastLine = lastLine;
+            if (statusLine) s.statusLine = statusLine;
+            if (actionLine) s.actionLine = actionLine;
+            // Clear stale action/status when idle or done
+            if (next === 'idle' || next === 'done') { s.statusLine = ''; s.actionLine = ''; }
+            // Update activity: use detected label, or fall back to last line as context
+            if (activity) {
+                s.activity = activity;
+            } else if (next === 'idle' && lastLine) {
+                s.activity = lastLine.slice(0, 50);
+            }
 
-                // Extract current action line (starts with ⏺)
-                const actionMatch = visible.match(/⏺\s+(.+)/);
-                const actionLine = actionMatch ? actionMatch[1].trim().slice(0, 80) : '';
+            if (next == null) return;
+            const current = this._agentStatus.get(id) || 'idle';
+            // On first detection (no prior status set), apply immediately
+            if (!this._agentStatus.has(id)) {
+                this._setStatus(id, next);
+                return;
+            }
+            if (next === current) {
+                if (s.pending) { clearTimeout(s.pending); s.pending = null; s.pendingStatus = null; }
+                return;
+            }
 
-                let s = this._agentBuf.get(id);
-                if (!s) {
-                    s = { buf: '', status: 'idle', pending: null, pendingStatus: null, lastChange: 0, activity: '', lastLine: '', statusLine: '', actionLine: '' };
-                    this._agentBuf.set(id, s);
-                }
-                s.lastLine = lastLine;
-                if (statusLine) s.statusLine = statusLine;
-                if (actionLine) s.actionLine = actionLine;
-                // Clear stale action/status when idle or done
-                if (next === 'idle' || next === 'done') { s.statusLine = ''; s.actionLine = ''; }
-                // Update activity: use detected label, or fall back to last line as context
-                if (activity) {
-                    s.activity = activity;
-                } else if (next === 'idle' && lastLine) {
-                    s.activity = lastLine.slice(0, 50);
-                }
+            // Debounce: attention is urgent, working is quick, done/idle wait
+            const delay = next === 'attention' ? 100
+                        : next === 'working'   ? 100
+                        : 400;
 
-                if (next == null) continue;
-                const current = this._agentStatus.get(id) || 'idle';
-                if (next === current) {
-                    if (s.pending) { clearTimeout(s.pending); s.pending = null; s.pendingStatus = null; }
-                    continue;
-                }
-
-                // Debounce: attention is urgent, working is quick, done/idle wait
-                const delay = next === 'attention' ? 100
-                            : next === 'working'   ? 100
-                            : 400;
-
-                if (s.pendingStatus === next) continue;
-                if (s.pending) clearTimeout(s.pending);
-                s.pendingStatus = next;
-                s.pending = setTimeout(() => {
-                    s.pending = null;
-                    s.pendingStatus = null;
-                    this._setStatus(id, next);
-                }, delay);
-            } catch (_) {}
-        }
+            if (s.pendingStatus === next) return;
+            if (s.pending) clearTimeout(s.pending);
+            s.pendingStatus = next;
+            s.pending = setTimeout(() => {
+                s.pending = null;
+                s.pendingStatus = null;
+                this._setStatus(id, next);
+            }, delay);
+        } catch (_) {}
     }
 
     // Browser-style tab drag and drop.
