@@ -174,7 +174,11 @@ app.get('/api/me', requireAuthed, (req, res) => {
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
 sysinfo.mount(app, requireAuthed);
 const pair = new pairing.PairingManager({ port: PORT });
-pairing.mount(app, requireAuthed, pair);
+pairing.mount(app, requireAuthed, pair, {
+    onTunnelUp: (url) => {
+        if (!ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
+    },
+});
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -491,6 +495,9 @@ server.listen(PORT, HOST, () => {
     if (process.env.SOA_WEB_AUTOPAIR !== '0') {
         pair.start().then(snap => {
             if (snap.state === 'online' && snap.publicUrl) {
+                if (!ALLOWED_ORIGINS.includes(snap.publicUrl)) {
+                    ALLOWED_ORIGINS.push(snap.publicUrl);
+                }
                 console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (QR in the sidebar)`);
             } else if (snap.state === 'error') {
                 console.log(`SoA-Web tunnel:  unavailable — ${snap.error}`);

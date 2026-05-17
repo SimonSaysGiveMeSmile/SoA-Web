@@ -106,12 +106,15 @@ async function toSvg(text, { size = 220 } = {}) {
     });
 }
 
-function mount(app, requireAuthed, pair) {
+function mount(app, requireAuthed, pair, { onTunnelUp } = {}) {
     app.get('/api/pair/status', requireAuthed, (req, res) => {
         res.json({ ok: true, data: pair.snapshot() });
     });
     app.post('/api/pair/start', requireAuthed, async (req, res) => {
         const snap = await pair.start();
+        if (snap.state === 'online' && snap.publicUrl && onTunnelUp) {
+            onTunnelUp(snap.publicUrl);
+        }
         res.json({ ok: true, data: snap });
     });
     app.post('/api/pair/stop', requireAuthed, (req, res) => {
