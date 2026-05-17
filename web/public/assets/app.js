@@ -496,7 +496,6 @@ class Shell {
         // is passed through to the engine so its own per-source throttle
         // stays scoped too — a single scalar there would clip the second
         // tab's voice even after our 180ms gate let it through.
-        const now = performance.now();
         const last = this._lastStdoutCue.get(id) || 0;
         if (now - last > 180) {
             this._lastStdoutCue.set(id, now);
