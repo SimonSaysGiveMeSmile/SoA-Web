@@ -16,7 +16,7 @@
 
 const crypto = require('crypto');
 
-const DEFAULT_IDLE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
+const DEFAULT_IDLE_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 function newToken() {
     return crypto.randomBytes(32).toString('base64url');
