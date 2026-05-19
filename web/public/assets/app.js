@@ -455,9 +455,16 @@ class Shell {
             }
             this._syncTabsUI(tabs);
             // Run agent status detection after HELLO so colors are correct
-            // on first load — the replay data has been fed to the stream
-            // detector above, and the buffer poll catches anything missed.
-            setTimeout(() => this._pollAgentStatus(), 300);
+            // on first load — force a detection pass on all stream buffers
+            // (the throttle would have skipped most tabs during replay).
+            setTimeout(() => {
+                if (this._streamBuf) {
+                    for (const [tid] of this._streamBuf) {
+                        this._detectAgentFromStream(tid, '', true);
+                    }
+                }
+                this._pollAgentStatus();
+            }, 300);
         } else {
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
@@ -711,7 +718,7 @@ class Shell {
     // We keep a small sliding window of recent data per tab (last ~2KB) so we
     // can detect multi-chunk patterns (e.g. the boxed prompt arrives across
     // two frames). The window is reset when a state transition is confirmed.
-    _detectAgentFromStream(id, data) {
+    _detectAgentFromStream(id, data, forceNow) {
         if (!this._streamBuf) this._streamBuf = new Map();
         let sb = this._streamBuf.get(id);
         if (!sb) { sb = { recent: '', lastDetect: 0 }; this._streamBuf.set(id, sb); }
@@ -721,7 +728,7 @@ class Shell {
 
         // Throttle: at most one detection per 200ms per tab
         const now = performance.now();
-        if (now - sb.lastDetect < 200) return;
+        if (!forceNow && now - sb.lastDetect < 200) return;
         sb.lastDetect = now;
 
         // Strip ANSI escape sequences for pattern matching
@@ -755,16 +762,18 @@ class Shell {
             activity = vm ? vm[1] + '...' : 'Working...';
         }
 
-        // Attention signals — permission prompts
-        if (!next) {
+        // Attention signals — permission prompts (skip if bypass mode is active)
+        if (!next && !/BYPASS PERMISSIONS\s+ON/i.test(tail)) {
             const attentionPatterns = [
                 /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
-                /Allow\?/i,
+                /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /Permission\s+(?:required|needed)/i,
+                /\bApprove\b/i,
+                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
             ];
             if (attentionPatterns.some(p => p.test(tail))) {
                 next = 'attention';
@@ -772,13 +781,14 @@ class Shell {
             }
         }
 
-        // Done signals — the boxed input prompt
+        // Done signals — the boxed input prompt or bypass-mode idle
         if (!next) {
             const donePatterns = [
                 /╭─+╮/,
                 /│\s*>\s*│/,
                 /╰─+╯/,
                 /│\s*>\s*$/m,
+                /BYPASS PERMISSIONS\s+ON/i,
             ];
             if (donePatterns.some(p => p.test(tail))) {
                 next = 'done';
@@ -840,8 +850,13 @@ class Shell {
     // it catches states on initial load and corrects drift.
     _pollAgentStatus() {
         for (const [id, rt] of this.tabs) {
-            if (!rt._opened) continue;
-            this._pollAgentStatusForTab(id);
+            if (rt._opened) {
+                this._pollAgentStatusForTab(id);
+            } else {
+                // For tabs without an open xterm (tiles mode), re-run stream
+                // detection on the accumulated buffer as a fallback.
+                this._detectAgentFromStream(id, '', true);
+            }
         }
     }
 
@@ -860,6 +875,7 @@ class Shell {
                 /╰─+╯/,
                 /│\s*>\s*│/,
                 /│\s*>\s*$/m,
+                /BYPASS PERMISSIONS\s+ON/i,
             ],
             attention: [
                 /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
@@ -868,8 +884,10 @@ class Shell {
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /waiting\s+for\s+(?:your\s+)?input/i,
-                /Allow\?/i,
+                /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
+                /\bApprove\b/i,
+                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
@@ -909,12 +927,13 @@ class Shell {
 
             let next;
             let activity = '';
+            const bypassOn = /BYPASS PERMISSIONS\s+ON/i.test(bottomLines);
             // Priority: working > attention > done > idle
             if (DET.working.some(p => p.test(visible))) {
                 next = 'working';
                 const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                 activity = vm ? vm[1] + '...' : 'Working...';
-            } else if (DET.attention.some(p => p.test(bottomLines))) {
+            } else if (!bypassOn && DET.attention.some(p => p.test(bottomLines))) {
                 next = 'attention';
                 activity = 'Needs input';
                 for (const p of DET.attention) {
