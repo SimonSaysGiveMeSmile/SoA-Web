@@ -762,8 +762,8 @@ class Shell {
             activity = vm ? vm[1] + '...' : 'Working...';
         }
 
-        // Attention signals — permission prompts (skip if bypass mode is active)
-        if (!next && !/BYPASS PERMISSIONS\s+ON/i.test(tail)) {
+        // Attention signals — permission prompts, interactive questions
+        if (!next) {
             const attentionPatterns = [
                 /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
@@ -927,13 +927,12 @@ class Shell {
 
             let next;
             let activity = '';
-            const bypassOn = /BYPASS PERMISSIONS\s+ON/i.test(bottomLines);
             // Priority: working > attention > done > idle
             if (DET.working.some(p => p.test(visible))) {
                 next = 'working';
                 const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                 activity = vm ? vm[1] + '...' : 'Working...';
-            } else if (!bypassOn && DET.attention.some(p => p.test(bottomLines))) {
+            } else if (DET.attention.some(p => p.test(bottomLines))) {
                 next = 'attention';
                 activity = 'Needs input';
                 for (const p of DET.attention) {
