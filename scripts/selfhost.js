@@ -139,7 +139,7 @@ async function main() {
     const env = {
         ...process.env,
         SOA_WEB_PORT: args.port,
-        SOA_WEB_HOST: '127.0.0.1',
+        SOA_WEB_HOST: '0.0.0.0',
         SOA_WEB_SESSION_TOKEN: token,
         SOA_WEB_ALLOWED_ORIGINS: args.frontend,
         SOA_WEB_SECURE_COOKIE: '1',

@@ -41,7 +41,7 @@ const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const tabApi           = require('./tabApi');
 
-const HOST = process.env.SOA_WEB_HOST || '127.0.0.1';
+const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
 const DEV  = process.env.SOA_WEB_DEV === '1';
 const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(1000 * 60 * 60 * 6), 10);
@@ -77,6 +77,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
     'https://s0a.app',
     'http://localhost:' + PORT,
     'http://127.0.0.1:' + PORT,
+    ...pairing.lanAddresses(PORT, 'http'),
 ];
 const ALLOWED_ORIGINS = Array.from(new Set([
     ...DEFAULT_ALLOWED_ORIGINS,
