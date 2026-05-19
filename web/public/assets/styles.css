@@ -581,7 +581,29 @@ html[data-welcome="1"] body { overflow: hidden; }
     font-family: 'Fira Mono', ui-monospace, Menlo, Consolas, monospace;
     z-index: 10000;
 }
-.welcome-inner { width: 100%; max-width: 640px; }
+.welcome-inner { width: 100%; max-width: 760px; }
+
+.welcome-intro {
+    margin: 0 0 18px;
+    padding: 12px 14px;
+    border-left: 2px solid rgba(170, 207, 209, 0.4);
+    background: rgba(170, 207, 209, 0.035);
+}
+.welcome-intro-p {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: rgba(230, 244, 246, 0.85);
+}
+
+.welcome-section-title {
+    margin: 0 0 10px;
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.22em;
+    color: rgba(170, 207, 209, 0.7);
+    text-transform: uppercase;
+}
 
 /* Language picker sits above the title on the welcome page. Five tiny
    buttons; the current choice wears an accent underline. Clicking
@@ -635,6 +657,9 @@ html[data-welcome="1"] body { overflow: hidden; }
     grid-template-columns: 1fr 1fr;
     gap: 12px;
     margin-bottom: 18px;
+}
+.welcome-compare--three {
+    grid-template-columns: 1fr 1fr 1fr;
 }
 .welcome-col {
     border: 1px solid rgba(170, 207, 209, 0.2);
@@ -746,25 +771,153 @@ html[data-welcome="1"] body { overflow: hidden; }
 .welcome-enter:hover { background: #c8dfe1; border-color: #c8dfe1; }
 .welcome-enter:active { transform: translateY(1px); }
 
-/* Phone: collapse the compare to one column, shrink type. Tight padding
-   + scaled sizes keep the whole welcome above the fold on 375×667. */
+.welcome-setup { margin-bottom: 18px; }
+.welcome-setup-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.welcome-step {
+    border: 1px solid rgba(170, 207, 209, 0.2);
+    background: rgba(170, 207, 209, 0.03);
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.welcome-step-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.welcome-step-num {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    color: rgba(170, 207, 209, 0.55);
+    border: 1px solid rgba(170, 207, 209, 0.28);
+    padding: 1px 6px;
+}
+.welcome-step-label {
+    font-size: 12.5px;
+    letter-spacing: 0.1em;
+    color: #e6f4f6;
+}
+.welcome-step-desc {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: rgba(170, 207, 209, 0.72);
+}
+.welcome-step .welcome-cmd {
+    font-size: 11px;
+    white-space: pre;
+    line-height: 1.5;
+}
+.welcome-step-after {
+    margin: 12px 0 0;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: rgba(170, 207, 209, 0.65);
+}
+.welcome-step-after code,
+.welcome-faq code {
+    font-family: inherit;
+    font-size: 11px;
+    padding: 1px 5px;
+    background: rgba(170, 207, 209, 0.08);
+    border: 1px solid rgba(170, 207, 209, 0.16);
+    color: #d8eef0;
+}
+
+.welcome-faq {
+    margin-bottom: 18px;
+    border-top: 1px dashed rgba(170, 207, 209, 0.18);
+    padding-top: 14px;
+}
+.welcome-faq-item {
+    border-bottom: 1px dashed rgba(170, 207, 209, 0.12);
+}
+.welcome-faq-item:last-child { border-bottom: none; }
+.welcome-faq-item summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 8px 0;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: rgba(230, 244, 246, 0.88);
+    position: relative;
+    padding-left: 18px;
+}
+.welcome-faq-item summary::-webkit-details-marker { display: none; }
+.welcome-faq-item summary::before {
+    content: '+';
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: rgba(170, 207, 209, 0.7);
+    font-size: 13px;
+    transition: transform 120ms;
+}
+.welcome-faq-item[open] summary::before {
+    content: '−';
+}
+.welcome-faq-item summary:hover {
+    color: #e6f4f6;
+}
+.welcome-faq-item p {
+    margin: 0 0 10px 18px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: rgba(170, 207, 209, 0.78);
+}
+
+/* Tablet: 3-col compare + 2-col setup get tight; collapse compare to two
+   columns and stretch the third underneath, while setup stays 2-col. */
+@media (min-width: 641px) and (max-width: 900px) {
+    .welcome-compare--three {
+        grid-template-columns: 1fr 1fr;
+    }
+    .welcome-compare--three > .welcome-col:nth-child(3) {
+        grid-column: 1 / -1;
+    }
+}
+
+/* Phone: collapse the compare to one column, but keep type readable —
+   body copy ≥ 14px so it isn't a squint exercise. Long shell commands
+   scroll horizontally rather than shrink to unreadable sizes. */
 @media (max-width: 640px) {
-    .welcome { padding: 16px 14px; align-items: flex-start; }
-    .welcome-title { font-size: 20px; letter-spacing: 0.12em; }
-    .welcome-sub { font-size: 9px; letter-spacing: 0.2em; }
-    .welcome-head { margin-bottom: 14px; }
-    .welcome-lang { gap: 2px; margin-bottom: 10px; }
-    .welcome-lang button { padding: 3px 7px; font-size: 10.5px; letter-spacing: 0.1em; }
-    .welcome-compare { grid-template-columns: 1fr; gap: 8px; margin-bottom: 14px; }
-    .welcome-col { padding: 10px 12px; }
-    .welcome-h3 { font-size: 12px; margin-bottom: 6px; }
-    .welcome-list { font-size: 11.5px; line-height: 1.4; }
-    .welcome-list li { padding: 3px 0; }
+    .welcome { padding: 18px 16px; align-items: flex-start; }
+    .welcome-title { font-size: 22px; letter-spacing: 0.12em; }
+    .welcome-sub { font-size: 10px; letter-spacing: 0.2em; }
+    .welcome-head { margin-bottom: 16px; }
+    .welcome-lang { gap: 2px; margin-bottom: 12px; }
+    .welcome-lang button { padding: 5px 9px; font-size: 12px; letter-spacing: 0.1em; min-height: 32px; }
+    .welcome-compare { grid-template-columns: 1fr; gap: 10px; margin-bottom: 16px; }
+    .welcome-compare--three { grid-template-columns: 1fr; }
+    .welcome-col { padding: 12px 14px; }
+    .welcome-h3 { font-size: 14px; margin-bottom: 8px; letter-spacing: 0.08em; }
+    .welcome-list { font-size: 14px; line-height: 1.5; }
+    .welcome-list li { padding: 5px 0 5px 16px; }
+    .welcome-list li::before { top: 7px; }
+    .welcome-intro { padding: 12px 14px; margin-bottom: 16px; }
+    .welcome-intro-p { font-size: 14px; line-height: 1.55; }
+    .welcome-section-title { font-size: 11px; letter-spacing: 0.18em; margin-bottom: 10px; }
+    .welcome-setup-grid { grid-template-columns: 1fr; gap: 12px; }
+    .welcome-step { padding: 12px 14px; gap: 10px; }
+    .welcome-step-num { font-size: 11px; padding: 2px 7px; }
+    .welcome-step-label { font-size: 14px; letter-spacing: 0.06em; }
+    .welcome-step-desc { font-size: 13.5px; line-height: 1.5; }
+    .welcome-step-after { font-size: 13.5px; line-height: 1.55; }
+    .welcome-step-after code, .welcome-faq code { font-size: 12.5px; }
+    .welcome-faq-item summary { font-size: 14px; padding: 12px 0 12px 22px; min-height: 44px; line-height: 1.4; display: flex; align-items: center; }
+    .welcome-faq-item summary::before { left: 4px; font-size: 16px; }
+    .welcome-faq-item p { font-size: 13.5px; line-height: 1.6; margin: 0 0 12px 22px; }
     .welcome-cta { margin-bottom: 14px; }
-    .welcome-cta-caption { font-size: 10.5px; }
-    .welcome-cmd { font-size: 10.5px; padding: 9px 10px; }
-    .welcome-cmdwrap { flex-direction: column; gap: 6px; }
-    .welcome-copy { padding: 7px 0; }
+    .welcome-cta-caption { font-size: 12px; }
+    .welcome-cmd { font-size: 12.5px; padding: 10px 12px; overflow-x: auto; white-space: pre; }
+    .welcome-cmdwrap { flex-direction: column; gap: 8px; }
+    .welcome-copy { min-height: 36px; font-size: 12px; padding: 8px 0; }
     .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 10px; padding-top: 10px; }
     .welcome-enter { width: 100%; padding: 11px; }
     .welcome-link { text-align: center; }
