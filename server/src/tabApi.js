@@ -109,6 +109,7 @@ function mount(app, requireAuthed, sessions) {
         const { line } = req.body || {};
         if (typeof line !== 'string') return res.status(400).json({ ok: false, error: 'line is required' });
         tab.write(line + '\r');
+        setTimeout(() => s.tabMgr.pokeCwd(id), 120);
         res.json({ ok: true });
     });
 

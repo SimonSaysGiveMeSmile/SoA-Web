@@ -38,6 +38,7 @@ const INPUT_KIND = Object.freeze({
     RESTORE_TAB:    'restore-tab',
     HOTKEY:         'hotkey',
     SHELL_COMMAND:  'shell-command',
+    SET_TITLE:      'set-title',
 });
 
 function frame(type, data, id) {

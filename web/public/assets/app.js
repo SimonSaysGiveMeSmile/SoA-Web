@@ -193,11 +193,13 @@ class TabRuntime {
         this._opened = true;
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
+        if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
         return true;
     }
 
-    attach(onData, onResize) {
+    attach(onData, onResize, onTitle) {
         this._onData = onData;
+        this._onTitle = onTitle || null;
         // Debounce + dedupe the resize send. xterm's onResize already fires
         // only on real cols/rows changes, but during a window drag we may
         // churn through several intermediate sizes in a single frame. Each
@@ -220,6 +222,7 @@ class TabRuntime {
         if (this._opened) {
             this.term.onData(d => this._onData && this._onData(d));
             this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
+            if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
         }
     }
 
@@ -497,9 +500,12 @@ class Shell {
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
         if (t) t.write(data);
-        // Fast stream-based agent detection — check the raw data for signals
-        // before xterm processes it. More reliable than buffer reading because
-        // we see the exact bytes Claude Code sends.
+        // For unopened tabs (tiles mode), xterm.js won't fire onTitleChange,
+        // so extract OSC 0/2 title sequences from the raw stream.
+        if (t && !t._opened) {
+            const m = data.match(/\x1b\](?:0|2);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
+            if (m && m[1]) this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: m[1] });
+        }
         this._detectAgentFromStream(id, data);
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
@@ -536,6 +542,7 @@ class Shell {
         rt.attach(
             data => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: data }),
             (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows }),
+            t => this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: t }),
         );
         this.tabs.set(id, rt);
         this.order.push(id);

@@ -419,6 +419,21 @@ function handleInput(session, d) {
             mgr.rename(d.id, title);
             break;
         }
+        case INPUT_KIND.SET_TITLE: {
+            const tab = mgr.get(d.id);
+            if (tab && !tab.userRenamed) {
+                const raw = typeof d.title === 'string' ? d.title.trim().slice(0, 64) : '';
+                if (raw) {
+                    const base = raw.includes('/') ? path.basename(raw) : raw;
+                    if (base && base !== tab.autoTitleBase) {
+                        tab.autoTitleBase = base;
+                        mgr._refreshAutoTitles();
+                        mgr.onTabsChange(mgr.list());
+                    }
+                }
+            }
+            break;
+        }
         case INPUT_KIND.RESTORE_TAB: {
             // Pop the chosen entry (or the most-recent one) from the graveyard
             // and spawn a fresh shell at its saved cwd. The new tab's scrollback
