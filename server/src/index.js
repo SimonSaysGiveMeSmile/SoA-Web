@@ -422,9 +422,15 @@ function handleInput(session, d) {
         case INPUT_KIND.SET_TITLE: {
             const tab = mgr.get(d.id);
             if (tab && !tab.userRenamed) {
-                const raw = typeof d.title === 'string' ? d.title.trim().slice(0, 64) : '';
+                const raw = typeof d.title === 'string' ? d.title.trim().slice(0, 128) : '';
                 if (raw) {
-                    const base = raw.includes('/') ? path.basename(raw) : raw;
+                    // If the title contains pipe-like dividers (Claude Code's
+                    // status line uses U+2502 "│"; some shells use ASCII "|"),
+                    // take the last segment — it's typically the most specific
+                    // identifier (project name, cwd basename).
+                    const parts = raw.split(/[|│┃]/).map(s => s.trim()).filter(Boolean);
+                    let pick = parts.length ? parts[parts.length - 1] : raw;
+                    const base = (pick.includes('/') ? path.basename(pick) : pick).slice(0, 64);
                     if (base && base !== tab.autoTitleBase) {
                         tab.autoTitleBase = base;
                         mgr._refreshAutoTitles();
