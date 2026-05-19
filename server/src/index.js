@@ -38,6 +38,8 @@ const { TabManager }   = require('./tabManager');
 const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
 const pairing          = require('./pairing');
+const tabPersist       = require('./tabPersist');
+const tabApi           = require('./tabApi');
 
 const HOST = process.env.SOA_WEB_HOST || '127.0.0.1';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
@@ -179,6 +181,7 @@ pairing.mount(app, requireAuthed, pair, {
         if (!ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
     },
 });
+tabApi.mount(app, requireAuthed, sessions);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -309,9 +312,23 @@ function onWsConnect(ws, session) {
                     activeId: session.activeTab || 0,
                     graveyard: session.tabMgr.graveyardList(),
                 }));
+                tabPersist.save(session.tabMgr);
             },
             onExit: (tabId, code) => session.send(frame(MSG.TERM_EXIT, { id: tabId, code })),
         });
+
+        // Restore tabs from disk if this is a fresh session with no tabs
+        const saved = tabPersist.load();
+        if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
+            for (const entry of saved.tabs) {
+                const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
+                session.tabMgr.open({
+                    title: entry.userRenamed ? entry.title : undefined,
+                    cwd,
+                    silent: true,
+                });
+            }
+        }
     }
 
     try {
@@ -474,6 +491,10 @@ if (heartbeat.unref) heartbeat.unref();
 function shutdown(code = 0) {
     console.log('\nshutting down…');
     clearInterval(heartbeat);
+    // Persist tab state before killing PTYs
+    for (const s of sessions.sessions.values()) {
+        if (s.tabMgr) tabPersist.saveImmediate(s.tabMgr);
+    }
     try { pair.stop(); } catch (_) {}
     try { wss.close(); } catch (_) {}
     try { sessions.shutdown(); } catch (_) {}
