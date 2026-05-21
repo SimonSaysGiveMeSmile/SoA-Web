@@ -426,8 +426,9 @@ class Shell {
         this._prevConnState = state;
     }
 
-    _onHello({ tabs, activeId, replay, graveyard }) {
+    _onHello({ tabs, activeId, replay, graveyard, connectedDevices }) {
         this._updateGraveyard(graveyard);
+        this._updateDeviceCount(connectedDevices);
         if (Array.isArray(tabs) && tabs.length) {
             for (const t of tabs) this._ensureTab(t.id, t.title);
             // Queue each tab's scrollback instead of writing it straight
@@ -473,7 +474,7 @@ class Shell {
         }
     }
 
-    _onSnapshot({ tabs, activeId, graveyard }) {
+    _onSnapshot({ tabs, activeId, graveyard, connectedDevices }) {
         this._updateGraveyard(graveyard);
         if (!Array.isArray(tabs)) return;
         const known = new Set(tabs.map(t => t.id));
@@ -492,9 +493,24 @@ class Shell {
         tabsEl.textContent = tr(tabsKey, { n: tabs.length });
         tabsEl.setAttribute('data-i18n', tabsKey);
         tabsEl.setAttribute('data-i18n-vars', JSON.stringify({ n: tabs.length }));
+        this._updateDeviceCount(connectedDevices);
         // Run agent status detection immediately after snapshot so colors
         // are correct on first load (don't wait for the poll interval).
         setTimeout(() => this._pollAgentStatus(), 150);
+    }
+
+    _updateDeviceCount(count) {
+        const el = $('#status-devices');
+        if (!el) return;
+        if (count == null || count < 2) {
+            el.style.display = 'none';
+            return;
+        }
+        el.style.display = '';
+        const key = count === 1 ? 'status.devices_one' : 'status.devices_other';
+        el.textContent = tr(key, { n: count });
+        el.setAttribute('data-i18n', key);
+        el.setAttribute('data-i18n-vars', JSON.stringify({ n: count }));
     }
 
     _onTermData({ id, data }) {
@@ -720,6 +736,7 @@ class Shell {
                     if (pct !== this._ctxPct.get(id)) {
                         this._ctxPct.set(id, pct);
                         this._updateCtxPie(id, pct);
+                        this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
                     }
                 }
             } catch (_) {}

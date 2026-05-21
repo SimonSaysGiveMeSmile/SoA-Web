@@ -40,6 +40,9 @@ const sysinfo          = require('./sysinfo');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const tabApi           = require('./tabApi');
+const envStore         = require('./envStore');
+const autoCompact      = require('./autoCompact');
+const autoPilot        = require('./autoPilot');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
@@ -176,6 +179,19 @@ app.get('/api/me', requireAuthed, (req, res) => {
     res.json({ ok: true, authed: true });
 });
 
+app.get('/api/devices', requireAuthed, (req, res) => {
+    const s = req.session;
+    const devices = [];
+    for (const ws of s.sockets) {
+        if (!ws || ws.readyState !== 1) continue;
+        devices.push({
+            connectedAt: ws._connectedAt || null,
+            userAgent: ws._userAgent || '',
+        });
+    }
+    res.json({ ok: true, count: devices.length, devices });
+});
+
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
 sysinfo.mount(app, requireAuthed);
 const pair = new pairing.PairingManager({ port: PORT });
@@ -185,6 +201,9 @@ pairing.mount(app, requireAuthed, pair, {
     },
 });
 tabApi.mount(app, requireAuthed, sessions);
+envStore.mount(app, requireAuthed);
+autoCompact.mount(app, requireAuthed);
+autoPilot.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -293,14 +312,38 @@ server.on('upgrade', (req, socket, head) => {
         } catch (_) { return null; }
     })(req);
 
-    // No login. If the client arrived with a valid session cookie we reuse it;
-    // otherwise we mint a fresh session for this socket. The SPA always hits
-    // /api/me before /ws so the common path is "reuse".
-    const session = existing || sessions.create();
-    wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session));
+    // When a client (e.g. mobile) arrives with a valid SESSION_TOKEN but no
+    // cookie, share the primary desktop session instead of minting an empty one.
+    // This lets the mobile companion see the same tabs and terminal output.
+    const session = existing || _findPrimarySession() || sessions.create();
+    wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session, req));
 });
 
-function onWsConnect(ws, session) {
+function _findPrimarySession() {
+    for (const s of sessions.sessions.values()) {
+        if (s.tabMgr && s.tabMgr.order.length > 0) return s;
+    }
+    return null;
+}
+
+function _broadcastDeviceCount(session, excludeWs) {
+    const count = session.sockets.size;
+    const payload = frame(MSG.SNAPSHOT, {
+        tabs: session.tabMgr ? session.tabMgr.list() : [],
+        activeId: session.activeTab || 0,
+        graveyard: session.tabMgr ? session.tabMgr.graveyardList() : [],
+        connectedDevices: count,
+    });
+    for (const ws of session.sockets) {
+        if (ws === excludeWs) continue;
+        if (!ws || ws.readyState !== 1) continue;
+        try { ws.send(payload); } catch (_) {}
+    }
+}
+
+function onWsConnect(ws, session, req) {
+    ws._connectedAt = Date.now();
+    ws._userAgent = (req && req.headers && req.headers['user-agent']) || '';
     session.attachSocket(ws);
     session.touch();
     ws.isAlive = true;
@@ -320,6 +363,7 @@ function onWsConnect(ws, session) {
                     tabs: list,
                     activeId: session.activeTab || 0,
                     graveyard: session.tabMgr.graveyardList(),
+                    connectedDevices: session.sockets.size,
                 }));
                 tabPersist.save(session.tabMgr);
             },
@@ -338,15 +382,19 @@ function onWsConnect(ws, session) {
         // Restore tabs from disk if this is a fresh session with no tabs
         const saved = tabPersist.load();
         if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
+            const shellEnv = envStore.getEnvForShell();
             for (const entry of saved.tabs) {
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
                 session.tabMgr.open({
                     title: entry.userRenamed ? entry.title : undefined,
                     cwd,
+                    env: shellEnv,
                     silent: true,
                 });
             }
         }
+
+        autoPilot.instance.attach(session.tabMgr, (tabId) => session._agentStatus && session._agentStatus.get(tabId) || 'idle');
     }
 
     try {
@@ -368,7 +416,10 @@ function onWsConnect(ws, session) {
             activeId,
             replay,
             graveyard: session.tabMgr.graveyardList(),
+            connectedDevices: session.sockets.size,
         }));
+        // Notify other clients that a new device joined
+        _broadcastDeviceCount(session, ws);
     } catch (_) { /* ignore */ }
 
     ws.on('message', raw => {
@@ -384,6 +435,7 @@ function onWsConnect(ws, session) {
                     session.send(frame(MSG.SNAPSHOT, {
                         tabs: session.tabMgr.list(),
                         graveyard: session.tabMgr.graveyardList(),
+                        connectedDevices: session.sockets.size,
                     }));
                 }
                 break;
@@ -394,7 +446,10 @@ function onWsConnect(ws, session) {
         }
     });
 
-    ws.on('close', () => { session.detachSocket(ws); });
+    ws.on('close', () => {
+        session.detachSocket(ws);
+        _broadcastDeviceCount(session);
+    });
     ws.on('error', () => { /* close handler will fire too */ });
 }
 
@@ -413,15 +468,15 @@ function handleInput(session, d) {
     };
     switch (d.kind) {
         case INPUT_KIND.NEW_TAB: {
-            const t = mgr.open({ cols: d.cols, rows: d.rows, silent: true });
+            const t = mgr.open({ cols: d.cols, rows: d.rows, silent: true, env: envStore.getEnvForShell() });
             session.activeTab = t.id;
-            session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: t.id }));
+            session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: t.id, connectedDevices: session.sockets.size }));
             break;
         }
         case INPUT_KIND.SWITCH_TAB: {
             if (mgr.get(d.id) && session.activeTab !== d.id) {
                 session.activeTab = d.id;
-                session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: d.id }));
+                session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: d.id, connectedDevices: session.sockets.size }));
             }
             break;
         }
@@ -437,25 +492,11 @@ function handleInput(session, d) {
             break;
         }
         case INPUT_KIND.SET_TITLE: {
-            const tab = mgr.get(d.id);
-            if (tab && !tab.userRenamed) {
-                const raw = typeof d.title === 'string' ? d.title.trim().slice(0, 128) : '';
-                if (raw) {
-                    // If the title contains pipe-like dividers (Claude Code's
-                    // status line uses U+2502 "│"; some shells use ASCII "|"),
-                    // take the last segment — it's typically the most specific
-                    // identifier (project name, cwd basename).
-                    const parts = raw.split(/[|│┃]/).map(s => s.trim()).filter(Boolean);
-                    let pick = parts.length ? parts[parts.length - 1] : raw;
-                    const base = (pick.includes('/') ? path.basename(pick) : pick).slice(0, 64);
-                    if (base && base !== tab.autoTitleBase) {
-                        tab.autoTitleBase = base;
-                        tab.oscTitle = true;
-                        mgr._refreshAutoTitles();
-                        mgr.onTabsChange(mgr.list());
-                    }
-                }
-            }
+            // OSC 0/2 title sequences from programs (zsh prompt, Claude Code
+            // status line, etc.) are intentionally ignored for tab naming.
+            // Tab names follow the cwd folder name exclusively, unless the
+            // user manually renames. This prevents noisy programs from
+            // constantly overriding the clean folder-based label.
             break;
         }
         case INPUT_KIND.RESTORE_TAB: {
@@ -474,6 +515,7 @@ function handleInput(session, d) {
                     tabs: mgr.list(),
                     activeId: t.id,
                     graveyard: mgr.graveyardList(),
+                    connectedDevices: session.sockets.size,
                 }));
             }
             break;
@@ -513,6 +555,13 @@ function handleInput(session, d) {
         case INPUT_KIND.SHELL_COMMAND: {
             const tab = mgr.get(d.id);
             if (tab && typeof d.line === 'string') tab.write(d.line + '\r');
+            break;
+        }
+        case INPUT_KIND.CTX_REPORT: {
+            const pct = Number(d.pct);
+            if (Number.isFinite(pct) && d.id) {
+                autoCompact.reportCtx(mgr, d.id, pct);
+            }
             break;
         }
         default: /* ignore */ break;

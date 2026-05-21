@@ -745,6 +745,54 @@ class PortScanWidget extends Widget {
     }
 }
 
+class AutoPilotWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.autopilot', parent, intervalMs: 5000 });
+    }
+    async tick() {
+        if (isSandbox()) { this.setRows([['STATUS', 'N/A']]); return; }
+        try {
+            const data = await jget('/api/autopilot');
+            const rows = [];
+            const paused = data.paused;
+            rows.push(['STATUS', paused ? 'PAUSED' : 'ACTIVE']);
+            const active = (data.schedules || []).filter(s => s.enabled);
+            rows.push(['SCHEDULES', `${active.length} active`]);
+            for (const s of active.slice(0, 3)) {
+                const sec = Math.max(0, Math.round((s.intervalMs - (Date.now() - s.lastFired)) / 1000));
+                rows.push([`  TAB ${s.tabId}`, `${sec}s`]);
+            }
+            if (data.orchestrator && data.orchestrator.enabled) {
+                rows.push(['ORCHESTRATOR', 'ON']);
+            }
+            this.setRows(rows);
+            this._renderActions(paused);
+        } catch (_) {
+            this.setRows([['STATUS', 'offline']]);
+        }
+    }
+    _renderActions(paused) {
+        let actions = this.el.querySelector('.autopilot-actions');
+        if (!actions) {
+            actions = $el('div', { class: 'autopilot-actions' });
+            this.body.appendChild(actions);
+        }
+        actions.replaceChildren(
+            $el('button', {
+                class: 'port-btn',
+                text: paused ? 'RESUME' : 'PAUSE',
+                onclick: () => this._toggle(paused),
+            })
+        );
+    }
+    async _toggle(currentlyPaused) {
+        try {
+            await jpost(currentlyPaused ? '/api/autopilot/resume' : '/api/autopilot/pause', {});
+            this.tick();
+        } catch (_) {}
+    }
+}
+
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
@@ -755,6 +803,7 @@ export function mountSidebar(parent, ctx = {}) {
         new CpuInfoWidget({ parent }),
         new RamWatcherWidget({ parent }),
         new PortScanWidget({ parent }),
+        new AutoPilotWidget({ parent }),
         new NetStatWidget({ parent }),
         new NetChartWidget({ parent }),
         new GitCommitsWidget({ parent }),

@@ -248,6 +248,227 @@ function buildConnPane() {
     ]);
 }
 
+function _apiBase() {
+    const cfg = window.__SOA_WEB__ || {};
+    return cfg._resolvedBackend || '';
+}
+
+function _apiFetch(path, opts = {}) {
+    const cfg = window.__SOA_WEB__ || {};
+    const base = cfg._resolvedBackend || '';
+    const token = cfg._resolvedToken || '';
+    const url = new URL(base + path);
+    if (token) url.searchParams.set('t', token);
+    return fetch(url.toString(), { credentials: 'include', ...opts });
+}
+
+function buildEnvPane() {
+    const pane = el('div', { class: 'settings-pane-body settings-env-pane' });
+    const baseUrlInput = el('input', { id: 'set-env-baseurl', type: 'text', placeholder: 'https://api.anthropic.com' });
+    const apiKeyInput = el('input', { id: 'set-env-apikey', type: 'password', placeholder: 'sk-ant-...' });
+    const customList = el('div', { class: 'env-custom-list' });
+    const addBtn = el('button', { class: 'soa-modal-copy', text: '+ ' + tr('settings.env.add_var') });
+    const saveEnvBtn = el('button', { class: 'soa-modal-copy', text: tr('settings.btn.save') });
+    const envStatus = el('p', { class: 'settings-status' });
+
+    function addCustomRow(key = '', value = '') {
+        const row = el('div', { class: 'env-custom-row' });
+        const kInput = el('input', { type: 'text', placeholder: 'KEY', value: key, class: 'env-key-input' });
+        const vInput = el('input', { type: 'text', placeholder: 'value', value: value, class: 'env-val-input' });
+        const rm = el('button', { class: 'env-rm-btn', text: '×' });
+        rm.addEventListener('click', () => row.remove());
+        row.append(kInput, vInput, rm);
+        customList.appendChild(row);
+    }
+
+    addBtn.addEventListener('click', () => addCustomRow());
+
+    saveEnvBtn.addEventListener('click', async () => {
+        const custom = [];
+        for (const row of customList.querySelectorAll('.env-custom-row')) {
+            const k = row.querySelector('.env-key-input').value.trim();
+            const v = row.querySelector('.env-val-input').value;
+            if (k) custom.push({ key: k, value: v });
+        }
+        const body = {
+            baseUrl: baseUrlInput.value.trim(),
+            apiKey: apiKeyInput.value || undefined,
+            custom,
+        };
+        if (body.apiKey === undefined) delete body.apiKey;
+        try {
+            const res = await _apiFetch('/api/env', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (data.ok) envStatus.textContent = tr('settings.status.saved', { t: new Date().toTimeString().slice(0, 8) });
+            else envStatus.textContent = 'Error: ' + (data.error || 'unknown');
+        } catch (e) { envStatus.textContent = 'Error: ' + e.message; }
+    });
+
+    (async () => {
+        try {
+            const res = await _apiFetch('/api/env');
+            const data = await res.json();
+            if (data.ok) {
+                baseUrlInput.value = data.claude.baseUrl || '';
+                apiKeyInput.placeholder = data.claude.hasKey ? '****' + data.claude.apiKey.slice(-4) : 'sk-ant-...';
+                for (const { key, value } of (data.custom || [])) addCustomRow(key, value);
+            }
+        } catch (_) {}
+    })();
+
+    pane.append(
+        el('h4', { class: 'settings-section-title', text: tr('settings.env.claude_title') }),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: 'ANTHROPIC_BASE_URL', class: 'env-label' }),
+            baseUrlInput,
+        ]),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: 'ANTHROPIC_API_KEY', class: 'env-label' }),
+            apiKeyInput,
+        ]),
+        el('h4', { class: 'settings-section-title', text: tr('settings.env.custom_title') }),
+        customList,
+        addBtn,
+        el('div', { class: 'settings-row-actions' }, [saveEnvBtn]),
+        envStatus,
+        el('p', { class: 'settings-hint', text: tr('settings.env.hint') }),
+    );
+    return pane;
+}
+
+function buildAutomationPane() {
+    const pane = el('div', { class: 'settings-pane-body settings-auto-pane' });
+    const enableCompact = el('select', { id: 'set-auto-compact-enabled' });
+    enableCompact.append(el('option', { value: 'true', text: 'true' }), el('option', { value: 'false', text: 'false' }));
+    const thresholdInput = el('input', { id: 'set-auto-compact-threshold', type: 'number', value: '80', min: '50', max: '95' });
+    const cooldownInput = el('input', { id: 'set-auto-compact-cooldown', type: 'number', value: '60', min: '30', max: '300' });
+
+    const schedList = el('div', { class: 'auto-sched-list' });
+    const addSchedBtn = el('button', { class: 'soa-modal-copy', text: '+ ' + tr('settings.auto.add_schedule') });
+    const orchEnabled = el('select', { id: 'set-orch-enabled' });
+    orchEnabled.append(el('option', { value: 'false', text: 'false' }), el('option', { value: 'true', text: 'true' }));
+    const orchPrompt = el('textarea', { id: 'set-orch-prompt', rows: '4', placeholder: tr('settings.auto.orch_prompt_hint') });
+    const orchInterval = el('input', { id: 'set-orch-interval', type: 'number', value: '30', min: '15', max: '600' });
+
+    const saveAutoBtn = el('button', { class: 'soa-modal-copy', text: tr('settings.btn.save') });
+    const autoStatus = el('p', { class: 'settings-status' });
+
+    function addSchedRow(tabId = '', message = '', intervalSec = 300, id = '') {
+        const row = el('div', { class: 'auto-sched-row', 'data-sched-id': id });
+        const tInput = el('input', { type: 'number', placeholder: 'Tab ID', value: String(tabId), class: 'sched-tab-input' });
+        const mInput = el('input', { type: 'text', placeholder: 'Message to send', value: message, class: 'sched-msg-input' });
+        const iInput = el('input', { type: 'number', placeholder: 'Interval (s)', value: String(intervalSec), class: 'sched-int-input', min: '10' });
+        const rm = el('button', { class: 'env-rm-btn', text: '×' });
+        rm.addEventListener('click', () => row.remove());
+        row.append(tInput, mInput, iInput, rm);
+        schedList.appendChild(row);
+    }
+
+    addSchedBtn.addEventListener('click', () => addSchedRow());
+
+    saveAutoBtn.addEventListener('click', async () => {
+        try {
+            await _apiFetch('/api/automation', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    autoCompact: {
+                        enabled: enableCompact.value === 'true',
+                        threshold: Number(thresholdInput.value),
+                        cooldownSec: Number(cooldownInput.value),
+                    },
+                }),
+            });
+
+            const schedRows = schedList.querySelectorAll('.auto-sched-row');
+            for (const row of schedRows) {
+                const sched = {
+                    id: row.dataset.schedId || undefined,
+                    tabId: Number(row.querySelector('.sched-tab-input').value),
+                    message: row.querySelector('.sched-msg-input').value,
+                    intervalMs: Number(row.querySelector('.sched-int-input').value) * 1000,
+                    enabled: true,
+                };
+                await _apiFetch('/api/autopilot/schedules', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify(sched),
+                });
+            }
+
+            await _apiFetch('/api/autopilot/orchestrator', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    enabled: orchEnabled.value === 'true',
+                    systemPrompt: orchPrompt.value,
+                    checkIntervalMs: Number(orchInterval.value) * 1000,
+                }),
+            });
+
+            autoStatus.textContent = tr('settings.status.saved', { t: new Date().toTimeString().slice(0, 8) });
+        } catch (e) { autoStatus.textContent = 'Error: ' + e.message; }
+    });
+
+    (async () => {
+        try {
+            const [autoRes, pilotRes] = await Promise.all([
+                _apiFetch('/api/automation'),
+                _apiFetch('/api/autopilot'),
+            ]);
+            const autoData = await autoRes.json();
+            const pilotData = await pilotRes.json();
+            if (autoData.ok) {
+                enableCompact.value = String(autoData.autoCompact.enabled);
+                thresholdInput.value = String(autoData.autoCompact.threshold);
+                cooldownInput.value = String(autoData.autoCompact.cooldownSec);
+            }
+            if (pilotData.ok) {
+                for (const s of (pilotData.schedules || [])) {
+                    addSchedRow(s.tabId, s.message, Math.round(s.intervalMs / 1000), s.id);
+                }
+                orchEnabled.value = String(pilotData.orchestrator.enabled);
+                orchPrompt.value = pilotData.orchestrator.systemPrompt || '';
+                orchInterval.value = String(Math.round(pilotData.orchestrator.checkIntervalMs / 1000));
+            }
+        } catch (_) {}
+    })();
+
+    pane.append(
+        el('h4', { class: 'settings-section-title', text: tr('settings.auto.compact_title') }),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.enabled'), class: 'env-label' }), enableCompact,
+        ]),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.threshold'), class: 'env-label' }), thresholdInput,
+        ]),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.cooldown'), class: 'env-label' }), cooldownInput,
+        ]),
+        el('h4', { class: 'settings-section-title', text: tr('settings.auto.schedules_title') }),
+        el('p', { class: 'settings-hint', text: tr('settings.auto.schedules_hint') }),
+        schedList,
+        addSchedBtn,
+        el('h4', { class: 'settings-section-title', text: tr('settings.auto.orch_title') }),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.enabled'), class: 'env-label' }), orchEnabled,
+        ]),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.orch_prompt'), class: 'env-label' }), orchPrompt,
+        ]),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.orch_interval'), class: 'env-label' }), orchInterval,
+        ]),
+        el('div', { class: 'settings-row-actions' }, [saveAutoBtn]),
+        autoStatus,
+    );
+    return pane;
+}
+
 function collectFromDOM(prev) {
     const get = id => document.getElementById(id);
     return {
@@ -279,6 +500,8 @@ export function openSettingsModal() {
         audio:      buildAudioPane(s),
         misc:       buildMiscPane(s),
         connection: buildConnPane(),
+        env:        buildEnvPane(),
+        automation: buildAutomationPane(),
     };
     Object.values(panes).forEach(p => p.classList.add('settings-pane'));
     panes.appearance.classList.add('settings-pane--active');
@@ -288,6 +511,8 @@ export function openSettingsModal() {
         ['audio',      tr('settings.tab.audio')],
         ['misc',       tr('settings.tab.misc')],
         ['connection', tr('settings.tab.connection')],
+        ['env',        tr('settings.tab.env')],
+        ['automation', tr('settings.tab.automation')],
     ];
     const tabs = tabDefs.map(([k, label]) => {
         const t = el('div', { class: 'settings-tab' + (k === 'appearance' ? ' settings-tab--active' : ''), text: label });

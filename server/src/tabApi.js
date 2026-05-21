@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const { MSG, frame } = require('./protocol');
 const tabPersist = require('./tabPersist');
+const envStore = require('./envStore');
 
 function mount(app, requireAuthed, sessions) {
     const router = express.Router();
@@ -35,7 +36,7 @@ function mount(app, requireAuthed, sessions) {
         if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
         const { title, cwd } = req.body || {};
         const validCwd = cwd && fs.existsSync(cwd) ? cwd : undefined;
-        const tab = s.tabMgr.open({ title: title || undefined, cwd: validCwd, silent: true });
+        const tab = s.tabMgr.open({ title: title || undefined, cwd: validCwd, env: envStore.getEnvForShell(), silent: true });
         s.activeTab = tab.id;
         s.send(frame(MSG.SNAPSHOT, {
             tabs: s.tabMgr.list(),

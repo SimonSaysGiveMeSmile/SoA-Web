@@ -105,7 +105,6 @@ class Tab {
         // up as "Hireal" instead of "tab 1". A caller-supplied title wins,
         // and so does any later user rename (tracked via userRenamed).
         this.autoTitleBase = path.basename(this.cwd) || 'terminal';
-        this.oscTitle = false; // true when title was set via OSC sequence
         this.title = title || this.autoTitleBase;
         this.userRenamed = !!title;
         this.env = { ...process.env, ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
@@ -176,9 +175,6 @@ class Tab {
         const next = resolveCwdByPid(this.pty.pid);
         if (!next || next === this.cwd) return false;
         this.cwd = next;
-        // When cwd changes, the OSC title from the previous context is stale.
-        // Fall back to cwd-based naming until a new OSC title arrives.
-        this.oscTitle = false;
         this.autoTitleBase = path.basename(next) || 'terminal';
         return true;
     }
@@ -227,12 +223,12 @@ class TabManager {
         return t ? t.scrollback.snapshot() : '';
     }
 
-    open({ title, cwd, cols, rows, silent, seedScrollback } = {}) {
+    open({ title, cwd, cols, rows, env, silent, seedScrollback } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
             title: title || undefined,
-            cwd, cols, rows,
+            cwd, cols, rows, env,
             onData: data => this.onData(id, data),
             onExit: code => {
                 this._archive(id);

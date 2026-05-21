@@ -39,6 +39,7 @@ const INPUT_KIND = Object.freeze({
     HOTKEY:         'hotkey',
     SHELL_COMMAND:  'shell-command',
     SET_TITLE:      'set-title',
+    CTX_REPORT:     'ctx-report',
 });
 
 function frame(type, data, id) {
