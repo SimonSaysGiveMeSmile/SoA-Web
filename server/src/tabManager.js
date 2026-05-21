@@ -11,7 +11,6 @@
  * readable error when they try to open a tab.
  */
 
-const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
@@ -101,7 +100,7 @@ function requirePty() {
 class Tab {
     constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit }) {
         this.id = id;
-        this.cwd = cwd || os.homedir();
+        this.cwd = cwd || process.cwd();
         // Default the tab label to the cwd's folder name so "Hireal" shows
         // up as "Hireal" instead of "tab 1". A caller-supplied title wins,
         // and so does any later user rename (tracked via userRenamed).

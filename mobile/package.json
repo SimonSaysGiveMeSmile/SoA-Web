@@ -1,0 +1,15 @@
+{
+  "name": "son-of-anton-mobile",
+  "version": "2.2.21",
+  "description": "Mobile companion web app for Son of Anton. Pair via QR code and mirror the desktop session on a phone.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "dev:standalone": "node scripts/dev-server.js"
+  },
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=18"
+  }
+}

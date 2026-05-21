@@ -135,6 +135,7 @@ app.use((req, res, next) => {
 });
 
 const PUBLIC_DIR = path.resolve(__dirname, '../../web/public');
+const MOBILE_DIR = path.resolve(__dirname, '../../mobile/dist');
 const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ protocol: 1, backend: '' })};`;
 
 // ── Middleware: attach session ──────────────────────────────────────────
@@ -239,9 +240,15 @@ app.get('/install.sh', (req, res, next) => {
 
 app.use(express.static(PUBLIC_DIR, { index: 'index.html', extensions: ['html'] }));
 
+// Mobile companion PWA served at /m/
+app.use('/m', express.static(MOBILE_DIR, { index: 'index.html', extensions: ['html'] }));
+app.get('/m/*', (req, res) => {
+    res.sendFile(path.join(MOBILE_DIR, 'index.html'));
+});
+
 // SPA fallback — any unknown GET serves index.html so client-side routes work.
 app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/') || req.path.startsWith('/_')) return next();
+    if (req.path.startsWith('/api/') || req.path.startsWith('/_') || req.path.startsWith('/m')) return next();
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
