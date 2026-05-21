@@ -773,6 +773,10 @@ class Shell {
         if (!next) {
             const attentionPatterns = [
                 /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /─{10,}[\s\S]{0,200}☐/,
+                /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
+                /Type something\.\s*─/i,
+                /Chat about this\s*$/m,
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
@@ -886,6 +890,10 @@ class Shell {
             ],
             attention: [
                 /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /─{10,}[\s\S]{0,200}☐/,
+                /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
+                /Type something\.\s*─/i,
+                /Chat about this\s*$/m,
                 /Do you want to (?:proceed|continue|make this change|accept)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
@@ -927,10 +935,11 @@ class Shell {
                 console.log(`[agent-detect] tab=${id} visible=`, JSON.stringify(visible.split('\n').map((l,i) => `${i}: ${l}`)));
             }
 
-            // Bottom 6 lines for attention/done detection — these UI elements
-            // always render at the bottom of the viewport.
+            // Bottom lines for attention/done detection — AskUser UI can be
+            // 15+ lines tall, so use a wider window for attention checks.
             const visibleLines = visible.split('\n');
             const bottomLines = visibleLines.slice(-7).join('\n');
+            const bottomWide = visibleLines.slice(-20).join('\n');
 
             let next;
             let activity = '';
@@ -939,11 +948,11 @@ class Shell {
                 next = 'working';
                 const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                 activity = vm ? vm[1] + '...' : 'Working...';
-            } else if (DET.attention.some(p => p.test(bottomLines))) {
+            } else if (DET.attention.some(p => p.test(bottomWide))) {
                 next = 'attention';
                 activity = 'Needs input';
                 for (const p of DET.attention) {
-                    const m = bottomLines.match(p);
+                    const m = bottomWide.match(p);
                     if (m) { activity = m[0].trim().slice(0, 40); break; }
                 }
             } else if (DET.done.some(p => p.test(bottomLines))) {
