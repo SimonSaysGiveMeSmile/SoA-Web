@@ -37,14 +37,15 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 12px;
-    padding-top: max(8px, env(safe-area-inset-top));
+    padding: 10px 14px;
+    padding-top: max(10px, env(safe-area-inset-top));
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
+    background: rgba(5,8,13,0.95);
 }
 .brand {
     font-size: 11px;
-    letter-spacing: 0.2em;
+    letter-spacing: 0.25em;
     opacity: 0.7;
 }
 
@@ -72,17 +73,19 @@ html, body {
 #tabs {
     display: flex;
     gap: 2px;
-    padding: 4px 8px;
+    padding: 6px 10px;
     overflow-x: auto;
     flex-shrink: 0;
     border-bottom: 1px solid var(--line);
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
 }
+#tabs:empty { display: none; }
 #tabs::-webkit-scrollbar { display: none; }
 
 .tab {
     flex-shrink: 0;
-    padding: 5px 12px;
+    padding: 6px 14px;
     font-size: 11px;
     letter-spacing: 0.08em;
     border: none;
@@ -91,9 +94,10 @@ html, body {
     color: var(--fg-dim);
     cursor: pointer;
     white-space: nowrap;
+    transition: background 120ms, color 120ms;
 }
 .tab.active {
-    background: rgba(170,207,209,0.1);
+    background: rgba(170,207,209,0.12);
     color: var(--fg);
 }
 .tab[data-status="working"] { border-left: 2px solid #5fff5f; }
@@ -110,12 +114,12 @@ html, body {
 #term {
     position: absolute;
     inset: 0;
-    padding: 8px 10px;
+    padding: 10px 12px;
     overflow-y: auto;
     overflow-x: hidden;
     font-family: var(--font);
     font-size: 12px;
-    line-height: 1.45;
+    line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-all;
     -webkit-overflow-scrolling: touch;
@@ -133,29 +137,29 @@ html, body {
 #kbd {
     flex-shrink: 0;
     border-top: 1px solid var(--line);
-    padding: 6px 8px;
-    padding-bottom: max(6px, env(safe-area-inset-bottom));
-    background: rgba(5,8,13,0.95);
+    padding: 8px 10px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    background: rgba(5,8,13,0.97);
 }
 
 .kbd-input {
     width: 100%;
-    padding: 8px 10px;
+    padding: 10px 12px;
     font-family: var(--font);
-    font-size: 14px;
+    font-size: 15px;
     background: rgba(170,207,209,0.06);
     border: 1px solid var(--line);
     border-radius: var(--radius);
     color: var(--fg);
     outline: none;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
 }
 .kbd-input::placeholder { color: var(--fg-dim); }
-.kbd-input:focus { border-color: var(--accent); }
+.kbd-input:focus { border-color: var(--accent); box-shadow: 0 0 8px rgba(170,207,209,0.1); }
 
 .kbd-mods {
     display: flex;
-    gap: 4px;
+    gap: 5px;
     overflow-x: auto;
     scrollbar-width: none;
 }
@@ -163,17 +167,18 @@ html, body {
 
 .k {
     flex-shrink: 0;
-    padding: 6px 10px;
+    padding: 8px 12px;
     font-family: var(--font);
-    font-size: 12px;
+    font-size: 13px;
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    background: transparent;
+    background: rgba(170,207,209,0.04);
     color: var(--fg);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
+    transition: background 80ms;
 }
-.k:active { background: rgba(170,207,209,0.15); }
+.k:active { background: rgba(170,207,209,0.18); }
 .k.active { background: var(--accent); color: var(--bg); }
 
 /* ── Reconnect overlay ── */
@@ -184,13 +189,16 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(5,8,13,0.9);
+    background: rgba(5,8,13,0.92);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
 }
 #reconnect-overlay[hidden] { display: none; }
 
 .reconnect-card {
     text-align: center;
     padding: 32px;
+    max-width: 280px;
 }
 .reconnect-spinner {
     width: 24px;
@@ -212,9 +220,16 @@ html, body {
     font-size: 11px;
     color: var(--fg-dim);
     margin-bottom: 16px;
+    line-height: 1.5;
+}
+.reconnect-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
 }
 .reconnect-btn {
-    padding: 8px 20px;
+    padding: 8px 16px;
     font-family: var(--font);
     font-size: 11px;
     letter-spacing: 0.1em;
@@ -225,3 +240,38 @@ html, body {
     cursor: pointer;
 }
 .reconnect-btn:active { background: rgba(170,207,209,0.15); }
+.reconnect-btn-reset {
+    border-color: var(--err);
+    color: var(--err);
+}
+.reconnect-btn-reset:active { background: rgba(255,93,111,0.1); }
+
+/* ── No-session card ── */
+.no-session {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    padding: 32px;
+    gap: 12px;
+}
+.no-session-icon {
+    font-size: 36px;
+    opacity: 0.4;
+}
+.no-session-title {
+    font-size: 12px;
+    letter-spacing: 0.2em;
+    color: var(--fg);
+}
+.no-session-msg {
+    font-size: 12px;
+    color: var(--fg-dim);
+    line-height: 1.6;
+    max-width: 240px;
+}
+
+/* ── Status dot timeout state ── */
+.status-dot[data-state="timeout"] { background: var(--err); animation: pulse 1.5s infinite; }

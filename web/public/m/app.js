@@ -121,11 +121,13 @@ class MobileBridge extends EventTarget {
         this.url = url;
         this.ws = null;
         this.backoff = 500;
+        this.attempts = 0;
         this.closed = false;
         this._ping = null;
+        this._connectTimeout = null;
     }
-    connect() { this.closed = false; this._open(); }
-    close() { this.closed = true; this._clearPing(); if (this.ws) try { this.ws.close(1000); } catch(_){} }
+    connect() { this.closed = false; this.attempts = 0; this._open(); }
+    close() { this.closed = true; this._clearPing(); this._clearTimeout(); if (this.ws) try { this.ws.close(1000); } catch(_){} }
     send(type, data) {
         if (!this.ws || this.ws.readyState !== 1) return false;
         try { this.ws.send(frame(type, data)); return true; } catch(_) { return false; }
@@ -134,12 +136,22 @@ class MobileBridge extends EventTarget {
 
     _open() {
         this._clearPing();
-        this._emit('status', 'connecting');
+        this._clearTimeout();
+        this.attempts++;
+        this._emit('status', { state: 'connecting', attempts: this.attempts });
         const ws = new WebSocket(this.url);
         this.ws = ws;
+        this._connectTimeout = setTimeout(() => {
+            if (ws.readyState !== 1) {
+                ws.close();
+                this._emit('status', { state: 'timeout', attempts: this.attempts });
+            }
+        }, 8000);
         ws.onopen = () => {
+            this._clearTimeout();
             this.backoff = 500;
-            this._emit('status', 'connected');
+            this.attempts = 0;
+            this._emit('status', { state: 'connected' });
             this._ping = setInterval(() => this.send(MSG.PING, { ts: Date.now() }), 20000);
         };
         ws.onmessage = ev => {
@@ -147,8 +159,8 @@ class MobileBridge extends EventTarget {
             if (msg) this._emit(msg.t, msg.d || {});
         };
         ws.onclose = ev => {
-            this._clearPing(); this.ws = null;
-            this._emit('status', 'disconnected');
+            this._clearPing(); this._clearTimeout(); this.ws = null;
+            this._emit('status', { state: 'disconnected', attempts: this.attempts });
             if (this.closed) return;
             setTimeout(() => this._open(), this.backoff);
             this.backoff = Math.min(this.backoff * 2, 15000);
@@ -156,6 +168,7 @@ class MobileBridge extends EventTarget {
         ws.onerror = () => {};
     }
     _clearPing() { if (this._ping) { clearInterval(this._ping); this._ping = null; } }
+    _clearTimeout() { if (this._connectTimeout) { clearTimeout(this._connectTimeout); this._connectTimeout = null; } }
     _emit(name, detail) { this.dispatchEvent(new CustomEvent(name, { detail })); }
 }
 
@@ -282,6 +295,7 @@ class App {
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
         this.reconnectSub = document.getElementById('reconnect-sub');
         this.reconnectRetry = document.getElementById('reconnect-retry');
+        this.reconnectReset = document.getElementById('reconnect-reset');
 
         this._ansiState = newAnsiState();
         this._activeId = 0;
@@ -291,7 +305,7 @@ class App {
 
         const { backend, token } = this._readSession();
         if (!backend) {
-            this.termEl.textContent = 'No session. Re-scan the QR code from the desktop.';
+            this._showNoSession();
             return;
         }
 
@@ -308,6 +322,18 @@ class App {
         this._wireSocket();
         this._wireUi();
         this.bridge.connect();
+    }
+
+    _showNoSession() {
+        this.termEl.innerHTML = '';
+        const card = document.createElement('div');
+        card.className = 'no-session';
+        card.innerHTML = `
+            <div class="no-session-icon">⊘</div>
+            <div class="no-session-title">NO SESSION</div>
+            <div class="no-session-msg">Scan the QR code from the desktop app to pair this device.</div>
+        `;
+        this.termEl.appendChild(card);
     }
 
     _readSession() {
@@ -327,11 +353,21 @@ class App {
     }
     _wireSocket() {
         this.bridge.addEventListener('status', ev => {
-            const state = ev.detail;
+            const { state, attempts } = ev.detail;
             this.statusDot.setAttribute('data-state', state);
-            this.statusText.textContent = state === 'connected' ? 'paired' : state + '…';
-            if (state === 'disconnected') this._showReconnect();
-            else if (state === 'connected') this._hideReconnect();
+            if (state === 'connected') {
+                this.statusText.textContent = 'paired';
+                this._hideReconnect();
+            } else if (state === 'connecting') {
+                this.statusText.textContent = attempts > 1 ? `retry ${attempts}…` : 'connecting…';
+                if (attempts >= 3) this._showReconnect(`attempt ${attempts}…`);
+            } else if (state === 'timeout') {
+                this.statusText.textContent = 'unreachable';
+                this._showReconnect('backend unreachable — tunnel may have expired');
+            } else {
+                this.statusText.textContent = 'disconnected';
+                this._showReconnect('connection lost');
+            }
         });
 
         this.bridge.addEventListener(MSG.HELLO, ev => {
@@ -380,12 +416,30 @@ class App {
             this.bridge.connect();
         });
 
+        if (this.reconnectReset) {
+            this.reconnectReset.addEventListener('click', () => {
+                try { localStorage.removeItem('soa_mobile'); } catch(_){}
+                location.reload();
+            });
+        }
+
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible' && this.bridge.ws === null && !this.bridge.closed) {
                 this.bridge.close();
                 this.bridge.connect();
             }
         });
+
+        let touchStartX = 0;
+        this.tabsEl.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; }, { passive: true });
+        this.tabsEl.addEventListener('touchend', e => {
+            const dx = e.changedTouches[0].clientX - touchStartX;
+            if (Math.abs(dx) < 60) return;
+            const idx = this._tabs.findIndex(t => t.id === this._activeId);
+            if (idx < 0) return;
+            const next = dx < 0 ? idx + 1 : idx - 1;
+            if (next >= 0 && next < this._tabs.length) this._switchTab(this._tabs[next].id);
+        }, { passive: true });
     }
 
     _getTabState(id) {
@@ -463,9 +517,11 @@ class App {
         });
     }
 
-    _showReconnect() {
+    _showReconnect(msg) {
         this.reconnectOverlay.hidden = false;
         this.reconnectRetry.hidden = false;
+        if (this.reconnectReset) this.reconnectReset.hidden = false;
+        if (msg && this.reconnectSub) this.reconnectSub.textContent = msg;
     }
     _hideReconnect() {
         this.reconnectOverlay.hidden = true;
