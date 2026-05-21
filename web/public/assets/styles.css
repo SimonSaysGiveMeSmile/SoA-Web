@@ -129,18 +129,18 @@ html, body {
 
 /* Agent status colors — all tabs (active and inactive).
    working   green   — agent is running (esc to interrupt visible)
-   done      red     — agent finished a turn, waiting for user input
-   attention red     — needs user decision (permission / Y-n / numbered menu)
+   done      orange  — agent finished a turn, waiting for user input
+   attention red     — agent stuck mid-execution, needs user decision (permission / Y-n / numbered menu)
    idle      blue    — no agent detected; plain shell */
 .tab[data-agent="working"] { color: var(--soa-green); border-color: var(--soa-green); }
 .tab[data-agent="working"].active {
   color: #05080d; background: var(--soa-green); border-color: var(--soa-green);
   box-shadow: 0 0 14px rgba(80,250,123,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
-.tab[data-agent="done"] { color: var(--soa-red); border-color: var(--soa-red); }
+.tab[data-agent="done"] { color: #ffb86c; border-color: #ffb86c; }
 .tab[data-agent="done"].active {
-  color: #05080d; background: var(--soa-red); border-color: var(--soa-red);
-  box-shadow: 0 0 14px rgba(255,85,85,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
+  color: #05080d; background: #ffb86c; border-color: #ffb86c;
+  box-shadow: 0 0 14px rgba(255,184,108,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
 .tab[data-agent="attention"] { color: var(--soa-red); border-color: var(--soa-red); }
 .tab[data-agent="attention"].active {
@@ -157,7 +157,7 @@ html, body {
   50%      { opacity: 0.55; }
 }
 .tab[data-agent="attention"] .ctx-pie { animation: soa-agent-pulse 1.1s ease-in-out infinite; }
-.tab[data-agent="done"] .ctx-pie { animation: soa-agent-pulse 1.1s ease-in-out infinite; }
+.tab[data-agent="done"] .ctx-pie { animation: soa-agent-pulse 2s ease-in-out infinite; }
 .tab .x {
   width: 14px; height: 14px; display: grid; place-items: center;
   font-size: 12px; opacity: 0.55; margin-left: 2px;
@@ -985,7 +985,7 @@ html[data-welcome="1"] body { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
     .soa-toast { transition: opacity 120ms linear; transform: translate(-50%, 0); }
 }
-.soa-toast--agent .soa-toast-icon { background: linear-gradient(135deg, #ff5555, #cc3333); }
+.soa-toast--agent .soa-toast-icon { background: linear-gradient(135deg, #ffb86c, #ff9500); }
 
 /* Restore toast — surfaces right after a tab is closed, with an UNDO that
    re-spawns the shell at the saved cwd and re-seeds the scrollback. Re-uses
@@ -1182,8 +1182,8 @@ html[data-welcome="1"] body { overflow: hidden; }
 /* Tile agent colors — mirror the tab colors */
 .tile[data-agent="working"] { border-color: var(--soa-green); box-shadow: inset 0 0 20px rgba(80,250,123,0.08); }
 .tile[data-agent="working"] .tile-activity { color: var(--soa-green); }
-.tile[data-agent="done"] { border-color: var(--soa-red); box-shadow: inset 0 0 20px rgba(255,85,85,0.1); animation: soa-agent-pulse 1.1s ease-in-out infinite; }
-.tile[data-agent="done"] .tile-activity { color: var(--soa-red); }
+.tile[data-agent="done"] { border-color: #ffb86c; box-shadow: inset 0 0 20px rgba(255,184,108,0.08); animation: soa-agent-pulse 2s ease-in-out infinite; }
+.tile[data-agent="done"] .tile-activity { color: #ffb86c; }
 .tile[data-agent="attention"] { border-color: var(--soa-red); box-shadow: inset 0 0 20px rgba(255,85,85,0.1); animation: soa-agent-pulse 1.1s ease-in-out infinite; }
 .tile[data-agent="attention"] .tile-activity { color: var(--soa-red); }
 .tile[data-agent="idle"] { border-color: var(--soa-blue); box-shadow: inset 0 0 20px rgba(98,114,164,0.08); }
