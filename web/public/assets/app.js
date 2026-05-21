@@ -500,11 +500,20 @@ class Shell {
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
         if (t) t.write(data);
-        // For unopened tabs (tiles mode), xterm.js won't fire onTitleChange,
-        // so extract OSC 0/2 title sequences from the raw stream.
-        if (t && !t._opened) {
-            const m = data.match(/\x1b\](?:0|2);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
-            if (m && m[1]) this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: m[1] });
+        // Extract OSC 0/2 title sequences from the raw stream. xterm.js's
+        // onTitleChange can miss titles when data arrives in chunks that split
+        // the escape sequence, so always parse here as the primary source.
+        if (t) {
+            if (!this._oscBuf) this._oscBuf = new Map();
+            let buf = (this._oscBuf.get(id) || '') + data;
+            const m = buf.match(/\x1b\](?:0|2);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
+            if (m && m[1]) {
+                this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: m[1] });
+                buf = buf.slice(buf.indexOf(m[0]) + m[0].length);
+            }
+            // Keep trailing partial OSC (starts with \x1b] but no terminator yet)
+            const partial = buf.match(/\x1b\](?:0|2);[^\x07\x1b]*$/);
+            this._oscBuf.set(id, partial ? partial[0] : '');
         }
         this._detectAgentFromStream(id, data);
         // Throttle stdout cue per-tab so heavy output from one shell doesn't

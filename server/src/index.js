@@ -440,6 +440,7 @@ function handleInput(session, d) {
                     const base = (pick.includes('/') ? path.basename(pick) : pick).slice(0, 64);
                     if (base && base !== tab.autoTitleBase) {
                         tab.autoTitleBase = base;
+                        tab.oscTitle = true;
                         mgr._refreshAutoTitles();
                         mgr.onTabsChange(mgr.list());
                     }

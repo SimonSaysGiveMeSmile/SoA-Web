@@ -775,7 +775,7 @@ html[data-welcome="1"] body { overflow: hidden; }
 .welcome-setup { margin-bottom: 18px; }
 .welcome-setup-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
     gap: 12px;
 }
 .welcome-step {
