@@ -43,6 +43,7 @@ const tabApi           = require('./tabApi');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
+let activePort = PORT;
 const DEV  = process.env.SOA_WEB_DEV === '1';
 const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(1000 * 60 * 60 * 6), 10);
 
@@ -325,6 +326,15 @@ function onWsConnect(ws, session) {
             onExit: (tabId, code) => session.send(frame(MSG.TERM_EXIT, { id: tabId, code })),
         });
 
+        // Periodic cwd poll: catches directory changes from running programs
+        // (scripts, subshells) that don't trigger the Enter-key poll path.
+        session._cwdInterval = setInterval(() => {
+            for (const id of session.tabMgr.order) {
+                session.tabMgr.pokeCwd(id);
+            }
+        }, 3000);
+        if (session._cwdInterval.unref) session._cwdInterval.unref();
+
         // Restore tabs from disk if this is a fresh session with no tabs
         const saved = tabPersist.load();
         if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
@@ -534,15 +544,11 @@ function shutdown(code = 0) {
 process.on('SIGINT',  () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
-server.listen(PORT, HOST, () => {
-    console.log(`SoA-Web ready: http://${HOST}:${PORT}`);
+function onListening() {
+    activePort = server.address().port;
+    sysinfo.setSoaPort(activePort);
+    console.log(`SoA-Web ready: http://${HOST}:${activePort}`);
 
-    // Bring up the Cloudflare Quick Tunnel by default. This is best-effort:
-    // if cloudflared isn't installed the pairing manager falls back to ngrok
-    // / localtunnel, and if all providers fail the local server keeps running
-    // — the user can still reach it on the loopback URL. We kick this off
-    // after listen() so the local port is already bound when the tunnel
-    // tries to dial out.
     if (process.env.SOA_WEB_AUTOPAIR !== '0') {
         pair.start().then(snap => {
             if (snap.state === 'online' && snap.publicUrl) {
@@ -553,8 +559,31 @@ server.listen(PORT, HOST, () => {
             } else if (snap.state === 'error') {
                 console.log(`SoA-Web tunnel:  unavailable — ${snap.error}`);
             }
-        }).catch(() => { /* swallow; pair.snapshot() will reflect the error */ });
+        }).catch(() => {});
+    }
+}
+
+function tryListen(port) {
+    server.listen(port, HOST);
+}
+
+server.on('listening', onListening);
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        const next = (activePort === PORT ? PORT : activePort) + 1;
+        if (next > PORT + 20) {
+            console.error(`SoA-Web: ports ${PORT}–${next - 1} all occupied, giving up.`);
+            process.exit(1);
+        }
+        console.log(`SoA-Web: port ${err.port || activePort} in use, trying ${next}…`);
+        activePort = next;
+        tryListen(next);
+    } else {
+        console.error('SoA-Web server error:', err);
+        process.exit(1);
     }
 });
+
+tryListen(PORT);
 
 module.exports = { app, server };

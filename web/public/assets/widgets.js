@@ -703,6 +703,48 @@ class NetChartWidget extends Widget {
     }
 }
 
+// ── PORT SCANNER ────────────────────────────────────────────────────────
+class PortScanWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.ports', title: 'PORTS', parent, intervalMs: 5000 });
+        this._conflict = null;
+    }
+    async tick() {
+        if (isSandbox()) { this.setRows([['SCAN', 'N/A (sandbox)']]); return; }
+        try {
+            const { data } = await jget('/api/ports');
+            this._conflict = data.conflict;
+            const rows = data.ports.slice(0, 6).map(p => {
+                const label = `${p.port}`;
+                const val = `${p.process} (${p.pid})`;
+                const cls = (data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port) ? 'warn' : '';
+                return [label, val, cls];
+            });
+            if (!rows.length) rows.push(['SCAN', 'no listeners']);
+            this.body.replaceChildren();
+            this.setRows(rows);
+            if (data.conflict) {
+                const actions = $el('div', { class: 'port-actions' });
+                const killBtn = $el('button', {
+                    class: 'port-btn port-btn-kill',
+                    text: `KILL :${data.conflict.port} (${data.conflict.process})`,
+                    onclick: () => this._kill(data.conflict.pid),
+                });
+                actions.appendChild(killBtn);
+                this.body.appendChild(actions);
+            }
+        } catch (e) { this.setRows([['ERR', e.message]]); }
+    }
+    async _kill(pid) {
+        try {
+            await jpost('/api/ports/kill', { pid });
+            this.tick();
+        } catch (e) {
+            this.body.appendChild($el('div', { class: 'port-err', text: e.message }));
+        }
+    }
+}
+
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
@@ -712,6 +754,7 @@ export function mountSidebar(parent, ctx = {}) {
         new DeviceStatusWidget({ parent }),
         new CpuInfoWidget({ parent }),
         new RamWatcherWidget({ parent }),
+        new PortScanWidget({ parent }),
         new NetStatWidget({ parent }),
         new NetChartWidget({ parent }),
         new GitCommitsWidget({ parent }),

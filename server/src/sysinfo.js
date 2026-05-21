@@ -200,6 +200,64 @@ function deviceStatus() {
     });
 }
 
+// Port scanning — lists TCP LISTEN sockets with owning PID/process name.
+let _soaPort = 7332;
+let _soaPid = process.pid;
+function setSoaPort(port) { _soaPort = port; }
+
+function portsInfo() {
+    const platform = os.platform();
+    return new Promise(resolve => {
+        if (platform === 'darwin' || platform === 'linux') {
+            execFile('lsof', ['-iTCP', '-sTCP:LISTEN', '-P', '-n', '-F', 'pcnT'], { timeout: 5000 }, (err, stdout) => {
+                if (err || !stdout) return resolve({ ports: [], soaPort: _soaPort, conflict: null });
+                const entries = [];
+                let cur = {};
+                for (const line of stdout.split('\n')) {
+                    if (!line) continue;
+                    const tag = line[0], val = line.slice(1);
+                    if (tag === 'p') { if (cur.pid) entries.push(cur); cur = { pid: parseInt(val, 10) }; }
+                    else if (tag === 'c') cur.process = val;
+                    else if (tag === 'n') {
+                        const m = /:(\d+)$/.exec(val);
+                        if (m) { cur.port = parseInt(m[1], 10); cur.address = val.slice(0, val.lastIndexOf(':')); }
+                    }
+                    else if (tag === 'T' && val.startsWith('ST=')) cur.state = val.slice(3);
+                }
+                if (cur.pid) entries.push(cur);
+                const ports = entries.filter(e => e.port).map(e => ({
+                    port: e.port, pid: e.pid, process: e.process || '?', address: e.address || '*',
+                }));
+                const unique = [];
+                const seen = new Set();
+                for (const p of ports) {
+                    const key = `${p.port}:${p.pid}`;
+                    if (!seen.has(key)) { seen.add(key); unique.push(p); }
+                }
+                unique.sort((a, b) => a.port - b.port);
+                const conflict = unique.find(p => p.port === _soaPort && p.pid !== _soaPid) || null;
+                resolve({ ports: unique, soaPort: _soaPort, conflict });
+            });
+        } else {
+            resolve({ ports: [], soaPort: _soaPort, conflict: null });
+        }
+    });
+}
+
+function killPort(pid) {
+    return new Promise(async (resolve) => {
+        const info = await portsInfo();
+        const entry = info.ports.find(p => p.pid === pid && p.port === info.soaPort);
+        if (!entry) return resolve({ ok: false, error: 'PID not on conflicting port' });
+        try {
+            process.kill(pid, 'SIGTERM');
+            resolve({ ok: true, pid, signal: 'SIGTERM' });
+        } catch (e) {
+            resolve({ ok: false, error: e.message });
+        }
+    });
+}
+
 function mount(app, requireAuthed) {
     app.get('/api/sys', requireAuthed, (req, res) => res.json({ ok: true, data: sys() }));
     app.get('/api/cpu', requireAuthed, (req, res) => res.json({ ok: true, data: cpuInfo() }));
@@ -222,6 +280,16 @@ function mount(app, requireAuthed) {
         const data = await gitCommits(cwd, req.query && req.query.limit);
         res.json({ ok: true, data });
     });
+    app.get('/api/ports', requireAuthed, async (req, res) => {
+        try { res.json({ ok: true, data: await portsInfo() }); }
+        catch (e) { res.status(500).json({ ok: false, error: String(e && e.message || e) }); }
+    });
+    app.post('/api/ports/kill', requireAuthed, async (req, res) => {
+        const pid = parseInt(req.body && req.body.pid, 10);
+        if (!pid || isNaN(pid)) return res.status(400).json({ ok: false, error: 'missing pid' });
+        try { res.json(await killPort(pid)); }
+        catch (e) { res.status(500).json({ ok: false, error: String(e && e.message || e) }); }
+    });
 }
 
-module.exports = { mount, sys, cpuInfo, ramInfo, netInfo, gitCommits, geoInfo };
+module.exports = { mount, setSoaPort, sys, cpuInfo, ramInfo, netInfo, gitCommits, geoInfo };

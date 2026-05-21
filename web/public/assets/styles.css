@@ -570,7 +570,7 @@ body.nocursor, body.nocursor * { cursor: none !important; }
 html[data-welcome="1"] #welcome { display: flex; }
 html[data-welcome="1"] #boot,
 html[data-welcome="1"] #shell { display: none !important; }
-html[data-welcome="1"] body { overflow: hidden; }
+html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 
 .welcome {
     position: fixed; inset: 0;
@@ -768,8 +768,10 @@ html[data-welcome="1"] body { overflow: hidden; }
     font-size: 11px;
     letter-spacing: 0.18em;
     cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-fill-color: #05080d;
 }
-.welcome-enter:hover { background: #c8dfe1; border-color: #c8dfe1; }
+.welcome-enter:hover { background: #c8dfe1; border-color: #c8dfe1; color: #05080d; -webkit-text-fill-color: #05080d; }
 .welcome-enter:active { transform: translateY(1px); }
 
 .welcome-setup { margin-bottom: 18px; }
@@ -918,9 +920,9 @@ html[data-welcome="1"] body { overflow: hidden; }
     .welcome-cta-caption { font-size: 12px; }
     .welcome-cmd { font-size: 12.5px; padding: 10px 12px; overflow-x: auto; white-space: pre; }
     .welcome-cmdwrap { flex-direction: column; gap: 8px; }
-    .welcome-copy { min-height: 36px; font-size: 12px; padding: 8px 0; }
+    .welcome-copy { min-height: 36px; font-size: 12px; padding: 8px 0; -webkit-tap-highlight-color: transparent; }
     .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 10px; padding-top: 10px; }
-    .welcome-enter { width: 100%; padding: 11px; }
+    .welcome-enter { width: 100%; padding: 14px; font-size: 13px; font-weight: 600; letter-spacing: 0.14em; color: #05080d; -webkit-text-fill-color: #05080d; }
     .welcome-link { text-align: center; }
 }
 

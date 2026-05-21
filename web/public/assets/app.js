@@ -1439,15 +1439,18 @@ class Shell {
     }
 
     _promptRename(id, current) {
-        const next = window.prompt(tr('tab.rename_prompt'), current || tr('tab.default', { id }));
+        const next = window.prompt(
+            (tr('tab.rename_prompt') || 'Rename tab') + '\n' +
+            (tr('tab.rename_clear_hint') || '(Clear to revert to auto-naming)'),
+            current || tr('tab.default', { id })
+        );
         if (next == null) return;
         const title = next.trim().slice(0, 64);
-        if (!title || title === current) return;
-        // Optimistically update local cache so no-arg _syncTabsUI calls
-        // (agent status, tab switch) don't revert to the stale name while
-        // waiting for the server's confirmation snapshot.
+        if (title === current) return;
+        // Empty string clears the user-rename flag on the server, reverting
+        // to auto-naming (cwd folder name). Non-empty pins the title.
         const rt = this.tabs.get(id);
-        if (rt) { rt.title = title; this._tabsUISig = null; this._syncTabsUI(); }
+        if (rt) { rt.title = title || current; this._tabsUISig = null; this._syncTabsUI(); }
         this.bridge.input(INPUT_KIND.RENAME_TAB, { id, title });
     }
 
