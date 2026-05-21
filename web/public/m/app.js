@@ -527,3 +527,5 @@ class App {
         this.reconnectOverlay.hidden = true;
     }
 }
+
+new App();
