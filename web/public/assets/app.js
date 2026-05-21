@@ -1379,7 +1379,7 @@ class Shell {
         }
         const entries = [];
         for (const [tid, st] of this._agentStatus) {
-            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ffb86c' : st === 'attention' ? '#ff5555' : '#6272a4';
+            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ff5555' : st === 'attention' ? '#ff5555' : '#6272a4';
             entries.push(`<span style="color:${color}">tab${tid}:${st}</span>`);
         }
         overlay.innerHTML = entries.join(' | ') + `<br><span style="color:#888">last: tab${id} ${prev}→${status}</span>`;
