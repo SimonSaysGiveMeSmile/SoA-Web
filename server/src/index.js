@@ -32,6 +32,8 @@ const fs   = require('fs');
 const WebSocket = require('ws');
 const express   = require('express');
 
+const consoleLogs      = require('./consoleLogs');
+
 const { MSG, INPUT_KIND, frame, parse } = require('./protocol');
 const { SessionStore } = require('./sessionStore');
 const { TabManager }   = require('./tabManager');
@@ -193,6 +195,7 @@ app.get('/api/devices', requireAuthed, (req, res) => {
 });
 
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
+consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
 const pair = new pairing.PairingManager({ port: PORT });
 pairing.mount(app, requireAuthed, pair, {
@@ -291,7 +294,11 @@ server.on('upgrade', (req, socket, head) => {
 
     // When the allowlist is configured, enforce it on WS upgrades too so a
     // random page can't open an authenticated shell against this backend.
-    if (CROSS_SITE) {
+    // Skip this check when a valid SESSION_TOKEN was presented — the token
+    // already proves authorization (covers mobile via tunnel URLs that
+    // aren't in the static allowlist).
+    const tokenValid = SESSION_TOKEN && constantTimeEq(url.searchParams.get('t') || '', SESSION_TOKEN);
+    if (CROSS_SITE && !tokenValid) {
         const origin = req.headers.origin;
         const sameOrigin = !origin; // curl / non-browser clients
         if (!sameOrigin && !ALLOWED_ORIGINS.includes(origin)) {

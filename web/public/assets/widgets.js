@@ -793,6 +793,61 @@ class AutoPilotWidget extends Widget {
     }
 }
 
+// ── CONSOLE LOG STREAM ──────────────────────────────────────────────────
+class ConsoleLogWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.console', parent, intervalMs: 0 });
+        this._log = $el('div', { class: 'clog-scroll' });
+        this._maxLines = 80;
+        this.body.appendChild(this._log);
+        this._es = null;
+    }
+
+    start() {
+        if (isSandbox()) {
+            this.body.replaceChildren($el('div', { class: 'widget-note', text: tr('widget.sandbox.backend_needed') }));
+            return;
+        }
+        this._connect();
+    }
+
+    _connect() {
+        if (this._es) return;
+        this._es = new EventSource(api('/api/logs'));
+        this._es.onmessage = (ev) => {
+            try {
+                const entry = JSON.parse(ev.data);
+                this._append(entry);
+            } catch (_) {}
+        };
+        this._es.onerror = () => {
+            this._es.close();
+            this._es = null;
+            setTimeout(() => { if (!this._destroyed) this._connect(); }, 5000);
+        };
+    }
+
+    _append(entry) {
+        const time = new Date(entry.ts).toTimeString().slice(0, 8);
+        const lvl = entry.level === 'error' ? 'err' : entry.level === 'warn' ? 'wrn' : 'log';
+        const line = $el('div', { class: `clog-line clog-${lvl}` }, [
+            $el('span', { class: 'clog-ts', text: time }),
+            $el('span', { class: 'clog-lvl', text: lvl.toUpperCase() }),
+            $el('span', { class: 'clog-msg', text: entry.msg }),
+        ]);
+        this._log.appendChild(line);
+        while (this._log.children.length > this._maxLines) {
+            this._log.removeChild(this._log.firstChild);
+        }
+        this._log.scrollTop = this._log.scrollHeight;
+    }
+
+    destroy() {
+        if (this._es) { this._es.close(); this._es = null; }
+        super.destroy();
+    }
+}
+
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
@@ -804,6 +859,7 @@ export function mountSidebar(parent, ctx = {}) {
         new RamWatcherWidget({ parent }),
         new PortScanWidget({ parent }),
         new AutoPilotWidget({ parent }),
+        new ConsoleLogWidget({ parent }),
         new NetStatWidget({ parent }),
         new NetChartWidget({ parent }),
         new GitCommitsWidget({ parent }),

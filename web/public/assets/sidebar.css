@@ -178,3 +178,28 @@
     font-size: 10px; cursor: pointer;
 }
 .globe-meta-btn:hover { border-color: var(--soa-accent); background: rgba(170,207,209,0.06); }
+
+/* ── Console Log widget ────────────────────────────────────────────── */
+.clog-scroll {
+    max-height: 180px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.5;
+    scrollbar-width: thin;
+    scrollbar-color: var(--soa-line-soft) transparent;
+}
+.clog-line {
+    display: flex;
+    gap: 6px;
+    padding: 1px 0;
+    border-bottom: 1px solid rgba(170,207,209,0.04);
+}
+.clog-ts { color: var(--soa-accent-dim); flex-shrink: 0; }
+.clog-lvl { flex-shrink: 0; width: 26px; letter-spacing: 0.08em; }
+.clog-log .clog-lvl { color: var(--soa-accent-dim); }
+.clog-wrn .clog-lvl { color: var(--soa-yellow); }
+.clog-err .clog-lvl { color: var(--soa-red); }
+.clog-msg { color: var(--soa-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clog-wrn .clog-msg { color: var(--soa-yellow); }
+.clog-err .clog-msg { color: var(--soa-red); }

@@ -344,7 +344,7 @@ function buildAutomationPane() {
     const pane = el('div', { class: 'settings-pane-body settings-auto-pane' });
     const enableCompact = el('select', { id: 'set-auto-compact-enabled' });
     enableCompact.append(el('option', { value: 'true', text: 'true' }), el('option', { value: 'false', text: 'false' }));
-    const thresholdInput = el('input', { id: 'set-auto-compact-threshold', type: 'number', value: '80', min: '50', max: '95' });
+    const thresholdInput = el('input', { id: 'set-auto-compact-threshold', type: 'number', value: '10', min: '5', max: '95' });
     const cooldownInput = el('input', { id: 'set-auto-compact-cooldown', type: 'number', value: '60', min: '30', max: '300' });
 
     const schedList = el('div', { class: 'auto-sched-list' });

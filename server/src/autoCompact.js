@@ -26,7 +26,7 @@ function normalizeConfig(data) {
     return {
         autoCompact: {
             enabled: typeof ac.enabled === 'boolean' ? ac.enabled : false,
-            threshold: Math.max(50, Math.min(95, Number(ac.threshold) || 80)),
+            threshold: Math.max(5, Math.min(95, Number(ac.threshold) || 10)),
             cooldownSec: Math.max(30, Math.min(300, Number(ac.cooldownSec) || 60)),
         },
     };
