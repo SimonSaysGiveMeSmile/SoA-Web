@@ -1371,7 +1371,17 @@ class Shell {
         if (status === 'attention' && prev !== 'attention') {
             const tab = this.tabs.get(id);
             const title = (tab && tab.title) || tr('tab.default', { id });
-            this._notifyAttention(title);
+            if (!this._attentionTimers) this._attentionTimers = new Map();
+            clearTimeout(this._attentionTimers.get(id));
+            this._attentionTimers.set(id, setTimeout(() => {
+                if (this._agentStatus.get(id) === 'attention') {
+                    this._notifyAttention(title);
+                }
+                this._attentionTimers.delete(id);
+            }, 2000));
+        } else if (status !== 'attention' && this._attentionTimers && this._attentionTimers.has(id)) {
+            clearTimeout(this._attentionTimers.get(id));
+            this._attentionTimers.delete(id);
         }
         // Visual debug overlay — shows detected status on screen
         this._updateDebugOverlay(id, status, prev);
