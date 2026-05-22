@@ -1,479 +1,1090 @@
 /**
- * SoA-Web Mobile Companion
+ * Son of Anton — Mobile Companion App entry point.
  *
- * Lightweight mobile terminal client. Uses ANSI-to-HTML rendering instead of
- * xterm.js for better performance on phones. Connects to the same WebSocket
- * as the desktop client and receives TERM_DATA frames.
+ * Lifecycle:
+ *   1. Read the session token from the URL (?t=…) or localStorage.
+ *   2. Open a BridgeSocket to the same host that served us. Once paired we
+ *      remember the token so accidental tab closes can resume seamlessly.
+ *   3. Render snapshots into the tab strip + active terminal view.
+ *   4. Stream incremental terminal output into the <pre>.
+ *   5. Forward every user input back to the desktop.
+ *
+ * Reconnection is handled inside BridgeSocket — we just react to its state
+ * events to show / hide the reconnect overlay.
  */
 
-import { MSG, INPUT_KIND, frame, parse } from '/assets/protocol.js?v=14';
+import { BridgeSocket, SocketState, Diagnosis } from './socket.js';
+import { ansiToHtml, newState } from './ansi.js';
+import { VirtualKeyboard } from './keyboard.js';
+import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 
-/* ── ANSI → HTML renderer ─────────────────────────────────────────────── */
+const STORAGE_KEY = 'son-of-anton.session';
+const THEME_KEY = 'son-of-anton.theme';
 
-const PALETTE = [
-    '#000000', '#ff5555', '#50fa7b', '#f1fa8c', '#6272a4',
-    '#ff79c6', '#8be9fd', '#f8f8f2',
-    '#666666', '#ff6e6e', '#69ff94', '#ffffa5', '#7b93bd',
-    '#ff92df', '#a4ffff', '#ffffff'
-];
+/* ── Theme definitions ──────────────────────────────── */
 
-function palette256(idx) {
-    if (idx < 16) return PALETTE[idx];
-    if (idx >= 232) { const v = 8 + (idx - 232) * 10; return `rgb(${v},${v},${v})`; }
-    const n = idx - 16;
-    return `rgb(${Math.floor(n/36)*51},${Math.floor((n/6)%6)*51},${(n%6)*51})`;
+const THEMES = {
+    mono: {
+        name: 'Mono',
+        preview: ['#000000', '#ffffff'],
+        vars: {
+            '--bg':             '#000000',
+            '--bg-alt':         '#111111',
+            '--fg':             '#e0e0e0',
+            '--fg-dim':         'rgba(224,224,224,0.55)',
+            '--fg-faint':       'rgba(224,224,224,0.2)',
+            '--accent':         '#ffffff',
+            '--accent-glow':    'rgba(255,255,255,0.5)',
+            '--accent-bg':      'rgba(255,255,255,0.08)',
+            '--accent-bg-hover':'rgba(255,255,255,0.15)',
+            '--warn':           '#ffb84d',
+            '--err':            '#ff5d6f',
+            '--line':           'rgba(224,224,224,0.22)',
+            '--radius':         '2px',
+            '--panel-bg':       'rgba(0,0,0,0.75)',
+            '--font':           'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        },
+        colorScheme: 'dark',
+    },
+    matrix: {
+        name: 'Matrix',
+        preview: ['#000000', '#5fff5f'],
+        vars: {
+            '--bg':             '#000000',
+            '--bg-alt':         '#03130a',
+            '--fg':             '#aaffaa',
+            '--fg-dim':         'rgba(170,255,170,0.55)',
+            '--fg-faint':       'rgba(170,255,170,0.2)',
+            '--accent':         '#5fff5f',
+            '--accent-glow':    'rgba(95,255,95,0.6)',
+            '--accent-bg':      'rgba(95,255,95,0.08)',
+            '--accent-bg-hover':'rgba(95,255,95,0.15)',
+            '--warn':           '#ffb84d',
+            '--err':            '#ff5d6f',
+            '--line':           'rgba(170,255,170,0.22)',
+            '--radius':         '2px',
+            '--panel-bg':       'rgba(3,19,10,0.85)',
+            '--font':           'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        },
+        colorScheme: 'dark',
+    },
+    amber: {
+        name: 'Amber',
+        preview: ['#0a0800', '#ffb347'],
+        vars: {
+            '--bg':             '#0a0800',
+            '--bg-alt':         '#141000',
+            '--fg':             '#ffd9a0',
+            '--fg-dim':         'rgba(255,217,160,0.55)',
+            '--fg-faint':       'rgba(255,217,160,0.2)',
+            '--accent':         '#ffb347',
+            '--accent-glow':    'rgba(255,179,71,0.6)',
+            '--accent-bg':      'rgba(255,179,71,0.08)',
+            '--accent-bg-hover':'rgba(255,179,71,0.15)',
+            '--warn':           '#ffe066',
+            '--err':            '#ff5d6f',
+            '--line':           'rgba(255,217,160,0.22)',
+            '--radius':         '2px',
+            '--panel-bg':       'rgba(10,8,0,0.85)',
+            '--font':           'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        },
+        colorScheme: 'dark',
+    },
+    ocean: {
+        name: 'Ocean',
+        preview: ['#020c18', '#5fa8ff'],
+        vars: {
+            '--bg':             '#020c18',
+            '--bg-alt':         '#081828',
+            '--fg':             '#b0d4ff',
+            '--fg-dim':         'rgba(176,212,255,0.55)',
+            '--fg-faint':       'rgba(176,212,255,0.2)',
+            '--accent':         '#5fa8ff',
+            '--accent-glow':    'rgba(95,168,255,0.6)',
+            '--accent-bg':      'rgba(95,168,255,0.08)',
+            '--accent-bg-hover':'rgba(95,168,255,0.15)',
+            '--warn':           '#ffb84d',
+            '--err':            '#ff5d6f',
+            '--line':           'rgba(176,212,255,0.22)',
+            '--radius':         '2px',
+            '--panel-bg':       'rgba(2,12,24,0.85)',
+            '--font':           'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        },
+        colorScheme: 'dark',
+    },
+    rose: {
+        name: 'Rose',
+        preview: ['#0e0408', '#ff6b8a'],
+        vars: {
+            '--bg':             '#0e0408',
+            '--bg-alt':         '#180812',
+            '--fg':             '#ffc0d0',
+            '--fg-dim':         'rgba(255,192,208,0.55)',
+            '--fg-faint':       'rgba(255,192,208,0.2)',
+            '--accent':         '#ff6b8a',
+            '--accent-glow':    'rgba(255,107,138,0.6)',
+            '--accent-bg':      'rgba(255,107,138,0.08)',
+            '--accent-bg-hover':'rgba(255,107,138,0.15)',
+            '--warn':           '#ffb84d',
+            '--err':            '#ff5d6f',
+            '--line':           'rgba(255,192,208,0.22)',
+            '--radius':         '2px',
+            '--panel-bg':       'rgba(14,4,8,0.85)',
+            '--font':           'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        },
+        colorScheme: 'dark',
+    },
+    'liquid-glass': {
+        name: 'Liquid Glass',
+        preview: ['#f0f2f5', '#0071e3'],
+        vars: {
+            '--bg':             '#f0f2f5',
+            '--bg-alt':         '#e8eaed',
+            '--fg':             '#1d1d1f',
+            '--fg-dim':         'rgba(29,29,31,0.5)',
+            '--fg-faint':       'rgba(29,29,31,0.15)',
+            '--accent':         '#0071e3',
+            '--accent-glow':    'rgba(0,113,227,0.3)',
+            '--accent-bg':      'rgba(0,113,227,0.08)',
+            '--accent-bg-hover':'rgba(0,113,227,0.14)',
+            '--warn':           '#e67e00',
+            '--err':            '#e3342f',
+            '--line':           'rgba(0,0,0,0.1)',
+            '--radius':         '14px',
+            '--panel-bg':       'rgba(255,255,255,0.55)',
+            '--font':           "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif",
+        },
+        colorScheme: 'light',
+    },
+};
+
+const DEFAULT_THEME = 'mono';
+
+function applyTheme(name) {
+    const theme = THEMES[name] || THEMES[DEFAULT_THEME];
+    const root = document.documentElement;
+    for (const [prop, val] of Object.entries(theme.vars)) {
+        root.style.setProperty(prop, val);
+    }
+    root.setAttribute('data-theme', name);
+    root.style.colorScheme = theme.colorScheme;
+    root.style.fontFamily = theme.vars['--font'];
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme.vars['--bg']);
+    try { localStorage.setItem(THEME_KEY, name); } catch (_) {}
 }
 
-function escHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function loadSavedTheme() {
+    try {
+        const saved = localStorage.getItem(THEME_KEY);
+        if (saved && THEMES[saved]) return saved;
+    } catch (_) {}
+    return DEFAULT_THEME;
 }
 
-function newAnsiState() {
-    return { bold:false, dim:false, italic:false, underline:false, reverse:false, fg:null, bg:null };
-}
+/* ── Boot theme immediately to avoid FOUC ────────── */
+applyTheme(loadSavedTheme());
 
-function spanFor(st) {
-    const cls = [], sty = [];
-    if (st.bold) cls.push('ansi-bold');
-    if (st.dim) cls.push('ansi-dim');
-    if (st.italic) cls.push('ansi-italic');
-    if (st.underline) cls.push('ansi-under');
-    if (st.reverse) cls.push('ansi-rev');
-    if (st.fg) sty.push(`color:${st.fg}`);
-    if (st.bg) sty.push(`background:${st.bg}`);
-    if (!cls.length && !sty.length) return null;
-    return `<span${cls.length ? ` class="${cls.join(' ')}"` : ''}${sty.length ? ` style="${sty.join(';')}"` : ''}>`;
-}
+/* ── App ─────────────────────────────────────────── */
 
-function applySgr(st, params) {
-    if (!params.length) params = [0];
-    let i = 0;
-    while (i < params.length) {
-        const p = params[i];
-        if (p === 0) { st.bold=st.dim=st.italic=st.underline=st.reverse=false; st.fg=null; st.bg=null; }
-        else if (p===1) st.bold=true;
-        else if (p===2) st.dim=true;
-        else if (p===3) st.italic=true;
-        else if (p===4) st.underline=true;
-        else if (p===7) st.reverse=true;
-        else if (p===22) { st.bold=false; st.dim=false; }
-        else if (p===23) st.italic=false;
-        else if (p===24) st.underline=false;
-        else if (p===27) st.reverse=false;
-        else if (p===39) st.fg=null;
-        else if (p===49) st.bg=null;
-        else if (p>=30 && p<=37) st.fg=PALETTE[p-30];
-        else if (p>=40 && p<=47) st.bg=PALETTE[p-40];
-        else if (p>=90 && p<=97) st.fg=PALETTE[p-90+8];
-        else if (p>=100 && p<=107) st.bg=PALETTE[p-100+8];
-        else if (p===38 || p===48) {
-            const tgt = p===38 ? 'fg' : 'bg';
-            const mode = params[i+1];
-            if (mode===5) { st[tgt]=palette256(params[i+2]); i+=2; }
-            else if (mode===2) { st[tgt]=`rgb(${params[i+2]||0},${params[i+3]||0},${params[i+4]||0})`; i+=4; }
+function readToken() {
+    const params = new URLSearchParams(location.search);
+    let t = params.get('t');
+    let backend = params.get('backend');
+    // The QR-encoded URL embeds an alternate transport as `#alt=<origin>` so
+    // the mobile client can fail over LAN↔tunnel without a re-scan.
+    let altOrigin = null;
+    if (location.hash) {
+        const hashParams = new URLSearchParams(location.hash.slice(1));
+        if (!t) t = hashParams.get('t');
+        altOrigin = hashParams.get('alt');
+        if (!backend) backend = hashParams.get('backend');
+    }
+    if (!t) {
+        const pathMatch = location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)/);
+        if (pathMatch) t = pathMatch[1];
+    }
+    // When served same-origin as the backend (the common case via the local
+    // server's /m/), there's no `backend` param — fall back to location.origin.
+    const effectiveBackend = backend || null;
+    if (t) {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                token: t,
+                origin: location.origin,
+                backend: effectiveBackend,
+                altOrigin: altOrigin || null,
+                ts: Date.now(),
+            }));
+        } catch (_) {}
+        if (history.replaceState) {
+            const clean = location.origin + location.pathname;
+            history.replaceState(null, '', clean);
         }
-        i++;
+        return { token: t, backend: effectiveBackend, altOrigin };
     }
+    try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+        if (saved && saved.token && saved.origin === location.origin) {
+            return {
+                token: saved.token,
+                backend: saved.backend || null,
+                altOrigin: saved.altOrigin || null,
+            };
+        }
+    } catch (_) {}
+    return { token: null, backend: null, altOrigin: null };
 }
 
-function ansiToHtml(input, state) {
-    let out = '', buf = '', openTag = false;
-    const flush = () => { if (buf) { out += escHtml(buf); buf = ''; } };
-    const close = () => { if (openTag) { out += '</span>'; openTag = false; } };
-    const open = () => { const s = spanFor(state); if (s) { out += s; openTag = true; } };
-
-    let i = 0;
-    while (i < input.length) {
-        const c = input[i];
-        if (c === '\r') { i++; continue; }
-        if (c === '\n') { flush(); close(); out += '\n'; open(); i++; continue; }
-        if (c !== '\x1b') { buf += c; i++; continue; }
-        flush(); close();
-        const next = input[i+1];
-        if (next === '[') {
-            let j = i+2, params = '';
-            while (j < input.length && /[0-9;?]/.test(input[j])) params += input[j++];
-            const final = input[j]; j++;
-            i = j;
-            if (final === 'm') {
-                applySgr(state, params.split(';').filter(Boolean).map(Number));
-                open();
-            }
-        } else if (next === ']') {
-            let j = i+2;
-            while (j < input.length) {
-                if (input[j] === '\x07') { j++; break; }
-                if (input[j] === '\x1b' && input[j+1] === '\\') { j+=2; break; }
-                j++;
-            }
-            i = j;
-        } else { i += 2; }
-    }
-    flush(); close();
-    return { html: out, state };
+function wsBaseFromHttp(origin) {
+    if (origin.startsWith('https://')) return 'wss://' + origin.slice('https://'.length);
+    if (origin.startsWith('http://'))  return 'ws://'  + origin.slice('http://'.length);
+    return origin;
 }
-
-/* ── WebSocket Bridge ─────────────────────────────────────────────────── */
-
-class MobileBridge extends EventTarget {
-    constructor(url) {
-        super();
-        this.url = url;
-        this.ws = null;
-        this.backoff = 500;
-        this.attempts = 0;
-        this.closed = false;
-        this._ping = null;
-        this._connectTimeout = null;
-    }
-    connect() { this.closed = false; this.attempts = 0; this._open(); }
-    close() { this.closed = true; this._clearPing(); this._clearTimeout(); if (this.ws) try { this.ws.close(1000); } catch(_){} }
-    send(type, data) {
-        if (!this.ws || this.ws.readyState !== 1) return false;
-        try { this.ws.send(frame(type, data)); return true; } catch(_) { return false; }
-    }
-    input(kind, extra={}) { return this.send(MSG.INPUT, { kind, ...extra }); }
-
-    _open() {
-        this._clearPing();
-        this._clearTimeout();
-        this.attempts++;
-        this._emit('status', { state: 'connecting', attempts: this.attempts });
-        const ws = new WebSocket(this.url);
-        this.ws = ws;
-        this._connectTimeout = setTimeout(() => {
-            if (ws.readyState !== 1) {
-                ws.close();
-                this._emit('status', { state: 'timeout', attempts: this.attempts });
-            }
-        }, 8000);
-        ws.onopen = () => {
-            this._clearTimeout();
-            this.backoff = 500;
-            this.attempts = 0;
-            this._emit('status', { state: 'connected' });
-            this._ping = setInterval(() => this.send(MSG.PING, { ts: Date.now() }), 20000);
-        };
-        ws.onmessage = ev => {
-            const msg = parse(ev.data);
-            if (msg) this._emit(msg.t, msg.d || {});
-        };
-        ws.onclose = ev => {
-            this._clearPing(); this._clearTimeout(); this.ws = null;
-            this._emit('status', { state: 'disconnected', attempts: this.attempts });
-            if (this.closed) return;
-            setTimeout(() => this._open(), this.backoff);
-            this.backoff = Math.min(this.backoff * 2, 15000);
-        };
-        ws.onerror = () => {};
-    }
-    _clearPing() { if (this._ping) { clearInterval(this._ping); this._ping = null; } }
-    _clearTimeout() { if (this._connectTimeout) { clearTimeout(this._connectTimeout); this._connectTimeout = null; } }
-    _emit(name, detail) { this.dispatchEvent(new CustomEvent(name, { detail })); }
-}
-
-/* ── Virtual Keyboard ─────────────────────────────────────────────────── */
-
-const MOD_KEYS = [
-    { label: 'esc',  combo: 'esc' },
-    { label: 'tab',  combo: 'tab' },
-    { label: 'ctrl', sticky: true },
-    { label: '⌫',    text: '\x7f' },
-    { label: '◀',    combo: 'left' },
-    { label: '▼',    combo: 'down' },
-    { label: '▲',    combo: 'up' },
-    { label: '▶',    combo: 'right' },
-    { label: '↵',    combo: 'enter' },
-];
-
-class VirtualKeyboard {
-    constructor(root, onInput) {
-        this.root = root;
-        this.onInput = onInput;
-        this.ctrl = false;
-        this._lastVal = '';
-        this._render();
-    }
-    _render() {
-        this.input = document.createElement('input');
-        this.input.type = 'text';
-        this.input.className = 'kbd-input';
-        this.input.placeholder = 'Type here…';
-        this.input.autocomplete = 'off';
-        this.input.autocapitalize = 'none';
-        this.input.setAttribute('enterkeyhint', 'send');
-        this.root.appendChild(this.input);
-
-        this.input.addEventListener('input', () => this._onInput());
-        this.input.addEventListener('keydown', e => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                this._flush();
-                this.onInput('term-keys', { text: '\r' });
-            }
-        });
-
-        const strip = document.createElement('div');
-        strip.className = 'kbd-mods';
-        for (const m of MOD_KEYS) {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'k';
-            btn.textContent = m.label;
-            btn.addEventListener('pointerdown', e => {
-                e.preventDefault();
-                this._handleMod(m, btn);
-            });
-            strip.appendChild(btn);
-        }
-        this.root.appendChild(strip);
-    }
-    _onInput() {
-        const cur = this.input.value;
-        const prev = this._lastVal;
-        if (cur === prev) return;
-        if (cur.length > prev.length) {
-            const added = cur.slice(prev.length);
-            let text = added;
-            if (this.ctrl && text.length === 1) {
-                const code = text.toLowerCase().charCodeAt(0) - 96;
-                if (code > 0 && code < 27) text = String.fromCharCode(code);
-                this._releaseCtrl();
-            }
-            this.onInput('term-keys', { text });
-        } else {
-            this.onInput('term-keys', { text: '\x7f' });
-        }
-        this._lastVal = cur;
-    }
-    _flush() {
-        const text = this.input.value;
-        if (text) this.onInput('term-keys', { text });
-        this.input.value = '';
-        this._lastVal = '';
-    }
-    _handleMod(m, btn) {
-        if (m.sticky) {
-            this.ctrl = !this.ctrl;
-            btn.classList.toggle('active', this.ctrl);
-            this.input.focus();
-            return;
-        }
-        if (m.text) {
-            this.onInput('term-keys', { text: m.text });
-        } else if (m.combo) {
-            if (this.ctrl) {
-                this.onInput('hotkey', { combo: 'ctrl+' + m.combo });
-                this._releaseCtrl();
-            } else {
-                const rawMap = { enter: '\r', tab: '\t' };
-                if (rawMap[m.combo]) {
-                    this.onInput('term-keys', { text: rawMap[m.combo] });
-                } else {
-                    this.onInput('hotkey', { combo: m.combo });
-                }
-            }
-        }
-        this.input.focus();
-    }
-    _releaseCtrl() {
-        this.ctrl = false;
-        const btn = this.root.querySelector('.k.active');
-        if (btn) btn.classList.remove('active');
-    }
-    focus() { this.input.focus(); }
-}
-
-/* ── App ──────────────────────────────────────────────────────────────── */
 
 class App {
     constructor() {
-        this.termEl = document.getElementById('term');
-        this.tabsEl = document.getElementById('tabs');
-        this.statusDot = document.querySelector('.status-dot');
-        this.statusText = document.querySelector('.status-text');
+        this.statusDot   = document.querySelector('#status .status-dot');
+        this.statusText  = document.querySelector('#status .status-text');
+        this.tabsEl      = document.getElementById('tabs');
+        this.termEl      = document.getElementById('term');
+        this.widgetsEl   = document.getElementById('widgets');
+        this.kbdEl       = document.getElementById('kbd');
+        this.viewEls     = Array.from(document.querySelectorAll('.view'));
+        this.viewBtns    = Array.from(document.querySelectorAll('.bb-btn[data-view]'));
+        this.btnNewTab   = document.getElementById('btn-newtab');
+        this.btnMic      = document.getElementById('btn-mic');
+        this.btnSettings = document.getElementById('btn-settings');
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
-        this.reconnectSub = document.getElementById('reconnect-sub');
-        this.reconnectRetry = document.getElementById('reconnect-retry');
-        this.reconnectReset = document.getElementById('reconnect-reset');
+        this.reconnectSub     = document.getElementById('reconnect-sub');
+        this.reconnectDiag    = document.getElementById('reconnect-diag');
+        this.reconnectRetry   = document.getElementById('reconnect-retry');
+        this.reconnectOpenBrowser = document.getElementById('reconnect-open-browser');
 
-        this._ansiState = newAnsiState();
-        this._activeId = 0;
-        this._tabs = [];
+        this.settingsOverlay = document.getElementById('settings-overlay');
+        this.themeGrid = document.getElementById('theme-grid');
+        this.soundGrid = document.getElementById('sound-grid');
+        this.settingsClose = document.getElementById('settings-close');
+        this.btnReload = document.getElementById('btn-reload');
+        this.btnForceReload = document.getElementById('btn-force-reload');
+
+        this._snapshot = null;
+        this._activeTab = 0;
+        this._activeTabId = 0;
+        this._connectedDevices = 0;
         this._tabStates = new Map();
-        this._userScrolledUp = false;
+        this._tabStatuses = new Map();
+        this._toastTimer = null;
+        this._flushScheduled = false;
+        this._currentTheme = loadSavedTheme();
+        this._idleTimer = null;
+        this._chromeHidden = false;
 
-        const { backend, token } = this._readSession();
-        if (!backend) {
-            this._showNoSession();
+        this._baseFontSize = 12;
+        this._termCols = 80;
+        this._userScrolledUp = false;
+        this._lastSentCols = 0;
+
+        this._pullHint = document.createElement('div');
+        this._pullHint.className = 'pull-hint';
+        document.body.appendChild(this._pullHint);
+
+        if (this.themeGrid) this._renderThemeGrid();
+        if (this.soundGrid) this._renderSoundGrid();
+        if (this.btnSettings) this._wireSettings();
+        this._wireIdleHide();
+
+        const { token, backend, altOrigin } = readToken();
+        if (!token) {
+            this._showFatal('No session token. Re-scan the QR code on the desktop.');
             return;
         }
 
-        const wsProto = backend.startsWith('https') ? 'wss' : 'ws';
-        const wsHost = backend.replace(/^https?:\/\//, '');
-        let wsUrl = `${wsProto}://${wsHost}/ws`;
-        if (token) wsUrl += `?t=${encodeURIComponent(token)}`;
+        const primaryOrigin = backend || location.origin;
+        this.socket = new BridgeSocket({
+            url: wsBaseFromHttp(primaryOrigin),
+            altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
+            token,
+        });
 
-        this.bridge = new MobileBridge(wsUrl);
-        this.kbd = new VirtualKeyboard(document.getElementById('kbd'), (kind, payload) => {
-            this.bridge.input(kind, { id: this._activeId, ...payload });
+        this.kbd = new VirtualKeyboard(this.kbdEl, {
+            onInput: (kind, payload) => {
+                sounds.play('key');
+                if (kind === 'term-keys' || kind === 'hotkey') {
+                    payload.id = this._activeTabId;
+                }
+                this.socket.sendInput(kind, payload);
+            },
         });
 
         this._wireSocket();
         this._wireUi();
-        this.bridge.connect();
+
+        window.addEventListener('resize', () => this._fitTerminalFont());
+
+        this.termEl.addEventListener('scroll', () => {
+            this._userScrolledUp = !this._isAtBottom();
+        }, { passive: true });
+
+        this.socket.connect();
     }
 
-    _showNoSession() {
-        this.termEl.innerHTML = '';
-        const card = document.createElement('div');
-        card.className = 'no-session';
-        card.innerHTML = `
-            <div class="no-session-icon">⊘</div>
-            <div class="no-session-title">NO SESSION</div>
-            <div class="no-session-msg">Scan the QR code from the desktop app to pair this device.</div>
-        `;
-        this.termEl.appendChild(card);
-    }
+    /* ── Settings / Themes ── */
 
-    _readSession() {
-        const params = new URLSearchParams(location.search);
-        let backend = params.get('backend');
-        let token = params.get('t') || '';
-        if (backend) {
-            try { localStorage.setItem('soa_mobile', JSON.stringify({ backend, token })); } catch(_){}
-            history.replaceState(null, '', location.pathname);
-            return { backend, token };
+    _renderThemeGrid() {
+        this.themeGrid.innerHTML = '';
+        for (const [id, theme] of Object.entries(THEMES)) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'theme-swatch' + (id === this._currentTheme ? ' active' : '');
+            btn.dataset.theme = id;
+
+            const [bgColor, accentColor] = theme.preview;
+            btn.innerHTML = `
+                <div class="swatch-preview" style="background:${bgColor};">
+                    <div style="position:absolute;inset:25%;border-radius:50%;background:${accentColor};"></div>
+                </div>
+                <span class="swatch-name">${escapeHtml(theme.name)}</span>
+            `;
+            btn.addEventListener('click', () => this._selectTheme(id));
+            this.themeGrid.appendChild(btn);
         }
-        try {
-            const saved = JSON.parse(localStorage.getItem('soa_mobile') || 'null');
-            if (saved && saved.backend) return saved;
-        } catch(_){}
-        return { backend: null, token: null };
     }
+
+    _selectTheme(id) {
+        if (!THEMES[id]) return;
+        this._currentTheme = id;
+        applyTheme(id);
+        this.themeGrid.querySelectorAll('.theme-swatch').forEach(el => {
+            el.classList.toggle('active', el.dataset.theme === id);
+        });
+    }
+
+    _renderSoundGrid() {
+        this.soundGrid.innerHTML = '';
+        const current = sounds.getProfile();
+        for (const { key, name } of sounds.listProfiles()) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'sound-option' + (key === current ? ' active' : '');
+            btn.dataset.profile = key;
+            btn.textContent = name;
+            btn.addEventListener('click', () => this._selectSoundProfile(key));
+            this.soundGrid.appendChild(btn);
+        }
+    }
+
+    _selectSoundProfile(key) {
+        sounds.setProfile(key);
+        this.soundGrid.querySelectorAll('.sound-option').forEach(el => {
+            el.classList.toggle('active', el.dataset.profile === key);
+        });
+        sounds.play('tabSwitch');
+    }
+
+    _wireSettings() {
+        if (!this.settingsOverlay || !this.settingsClose) return;
+        this.btnSettings.addEventListener('click', () => this._openSettings());
+        this.settingsClose.addEventListener('click', () => this._closeSettings());
+        this.settingsOverlay.addEventListener('click', (e) => {
+            if (e.target === this.settingsOverlay) this._closeSettings();
+        });
+        this._wireReloadControls();
+    }
+
+    // Reload controls. Deliberately client-local so they work even when the
+    // desktop is wedged: soft reload just bounces the websocket + re-renders
+    // from the latest snapshot; force reload wipes caches + SW and pulls
+    // everything fresh. Neither touches the desktop session state.
+    _wireReloadControls() {
+        if (this.btnReload) {
+            this.btnReload.addEventListener('click', () => this._softReload());
+        }
+        if (this.btnForceReload) {
+            this.btnForceReload.addEventListener('click', () => this._forceReload());
+        }
+    }
+
+    _softReload() {
+        this._closeSettings();
+        try { this.socket && this.socket.close(); } catch (_) {}
+        // Reset local render state so the next snapshot rebuilds from scratch
+        // rather than diffing against stale data from before the hang.
+        this._snapshot = null;
+        this._tabStates = new Map();
+        this._hasReceivedSnapshot = false;
+        if (this.termEl) this.termEl.innerHTML = '';
+        try { this.socket && this.socket.connect(); } catch (_) {}
+    }
+
+    async _forceReload() {
+        if (!confirm('Force reload will clear cached assets and reload the app. Continue?')) return;
+        this._closeSettings();
+        try { this.socket && this.socket.close(); } catch (_) {}
+        // Nuke the service-worker cache so the reload pulls fresh JS/CSS/HTML
+        // instead of whatever the SW had pinned. Keep localStorage intact so
+        // the session token + theme survive.
+        try {
+            if ('caches' in window) {
+                const keys = await caches.keys();
+                await Promise.all(keys.map(k => caches.delete(k)));
+            }
+        } catch (_) {}
+        try {
+            if (navigator.serviceWorker) {
+                const regs = await navigator.serviceWorker.getRegistrations();
+                await Promise.all(regs.map(r => r.unregister()));
+            }
+        } catch (_) {}
+        // Cache-busted URL to bypass any disk cache the browser still has.
+        const url = new URL(location.href);
+        url.searchParams.set('_r', Date.now().toString(36));
+        location.replace(url.toString());
+    }
+
+    _openSettings() {
+        if (this.settingsOverlay) this.settingsOverlay.classList.add('open');
+    }
+
+    _closeSettings() {
+        if (this.settingsOverlay) this.settingsOverlay.classList.remove('open');
+    }
+
+    /* ── Auto-hide chrome ── */
+
+    _wireIdleHide() {
+        const app = document.getElementById('app');
+        const resetIdle = () => this._showChrome();
+        for (const evt of ['pointerdown', 'pointermove', 'keydown', 'touchstart']) {
+            app.addEventListener(evt, resetIdle, { passive: true });
+        }
+        this._resetIdleTimer();
+    }
+
+    _resetIdleTimer() {
+        clearTimeout(this._idleTimer);
+        this._idleTimer = setTimeout(() => {
+            if (this.settingsOverlay && this.settingsOverlay.classList.contains('open')) return;
+            if (this.reconnectOverlay && !this.reconnectOverlay.hidden) return;
+            this._hideChrome();
+        }, 5000);
+    }
+
+    _hideChrome() {
+        if (this._chromeHidden) return;
+        this._chromeHidden = true;
+        const bb = document.getElementById('bottombar');
+        if (bb) bb.classList.add('chrome-hidden');
+        if (this.kbdEl) this.kbdEl.classList.add('chrome-hidden');
+        this._pullHint.classList.add('visible');
+    }
+
+    _showChrome() {
+        if (this._chromeHidden) {
+            this._chromeHidden = false;
+            const bb = document.getElementById('bottombar');
+            if (bb) bb.classList.remove('chrome-hidden');
+            if (this.kbdEl) this.kbdEl.classList.remove('chrome-hidden');
+            this._pullHint.classList.remove('visible');
+        }
+        this._resetIdleTimer();
+    }
+
+    /* ── Socket ── */
+
     _wireSocket() {
-        this.bridge.addEventListener('status', ev => {
-            const { state, attempts } = ev.detail;
-            this.statusDot.setAttribute('data-state', state);
-            if (state === 'connected') {
-                this.statusText.textContent = 'paired';
-                this._hideReconnect();
-            } else if (state === 'connecting') {
-                this.statusText.textContent = attempts > 1 ? `retry ${attempts}…` : 'connecting…';
-                if (attempts >= 3) this._showReconnect(`attempt ${attempts}…`);
-            } else if (state === 'timeout') {
-                this.statusText.textContent = 'unreachable';
-                this._showReconnect('backend unreachable — tunnel may have expired');
-            } else {
-                this.statusText.textContent = 'disconnected';
-                this._showReconnect('connection lost');
+        this.socket.addEventListener('state', (ev) => {
+            const { state, attempt, code } = ev.detail;
+            switch (state) {
+                case SocketState.CONNECTING:
+                    this._setStatus('connecting', `connecting${attempt > 1 ? ` · try ${attempt}` : '…'}`);
+                    if (attempt > 1) this._showReconnect(`attempt ${attempt}`);
+                    break;
+                case SocketState.CONNECTED:
+                    this._setStatus('connected', 'paired');
+                    this._hideReconnect();
+                    if (this._prevSocketState !== SocketState.CONNECTED) sounds.play('connect');
+                    break;
+                case SocketState.DISCONNECTED:
+                    this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
+                    this._showReconnect('link lost · retrying');
+                    if (this._prevSocketState === SocketState.CONNECTED) sounds.play('disconnect');
+                    break;
+            }
+            this._prevSocketState = state;
+        });
+
+        this.socket.addEventListener('reconnect-scheduled', (ev) => {
+            const { delay } = ev.detail;
+            const secs = Math.max(0, Math.round(delay / 100) / 10);
+            this.reconnectSub.textContent = secs > 0
+                ? `retrying in ${secs}s`
+                : 'retrying now…';
+        });
+
+        this._msgCounts = { hello: 0, snapshot: 0, 'term-data': 0, notice: 0, other: 0 };
+        this._lastMsgAt = 0;
+
+        this.socket.addEventListener('message', (ev) => {
+            const msg = ev.detail;
+            this._lastMsgAt = Date.now();
+            this._msgCounts[msg.t] = (this._msgCounts[msg.t] || 0) + 1;
+            switch (msg.t) {
+                case 'hello':    this._applyHello(msg.d); break;
+                case 'snapshot': this._applySnapshot(msg.d); break;
+                case 'term-data': this._applyTerminalChunk(msg.d); break;
+                case 'term-exit': break;
+                case 'notice':    this._showNotice(msg.d); break;
             }
         });
 
-        this.bridge.addEventListener(MSG.HELLO, ev => {
-            const d = ev.detail;
-            if (d.tabs) this._renderTabs(d.tabs, d.activeId);
-            this._activeId = d.activeId || 0;
-            if (d.replay && d.replay.length) {
-                for (const r of d.replay) {
-                    this._getTabState(r.id).pending += r.data;
-                }
-                this._flushActive();
-            }
+        this.socket.addEventListener('diagnosis', (ev) => {
+            this._showDiagnosis(ev.detail.diagnosis);
         });
 
-        this.bridge.addEventListener(MSG.SNAPSHOT, ev => {
-            const d = ev.detail;
-            if (d.tabs) this._renderTabs(d.tabs, d.activeId);
-            if (d.activeId != null) this._activeId = d.activeId;
-        });
-
-        this.bridge.addEventListener(MSG.TERM_DATA, ev => {
-            const d = ev.detail;
-            const id = d.id != null ? d.id : this._activeId;
-            this._getTabState(id).pending += (d.data || '');
-            if (id === this._activeId && !this._flushRaf) {
-                this._flushRaf = requestAnimationFrame(() => this._flushActive());
-            }
-        });
-
-        this.bridge.addEventListener(MSG.TERM_EXIT, ev => {
-            const id = ev.detail.id;
-            const ts = this._getTabState(id);
-            ts.pending += `\r\n\x1b[90m[process exited]\x1b[0m\r\n`;
-            if (id === this._activeId) this._flushActive();
+        this.socket.addEventListener('endpoint-switched', (ev) => {
+            const host = (() => {
+                try { return new URL(ev.detail.url.replace(/^ws/, 'http')).host; }
+                catch (_) { return ev.detail.url; }
+            })();
+            this.reconnectSub.textContent = `trying alternate link · ${host}`;
         });
     }
 
     _wireUi() {
-        this.termEl.addEventListener('scroll', () => {
-            const el = this.termEl;
-            this._userScrolledUp = (el.scrollHeight - el.scrollTop - el.clientHeight) > 10;
-        }, { passive: true });
-
-        this.reconnectRetry.addEventListener('click', () => {
-            this.bridge.close();
-            this.bridge.connect();
+        this.viewBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const target = btn.getAttribute('data-view');
+                this._showView(target);
+            });
         });
 
-        if (this.reconnectReset) {
-            this.reconnectReset.addEventListener('click', () => {
-                try { localStorage.removeItem('soa_mobile'); } catch(_){}
-                location.reload();
-            });
+        this.btnNewTab.addEventListener('click', () => this.socket.sendInput('new-tab'));
+        this.btnMic.addEventListener('click', () => this.socket.sendInput('voice-toggle'));
+
+        this.termEl.addEventListener('click', () => {
+            this._showView('terminal-view');
+            this.kbd.focus();
+        });
+
+        this.reconnectRetry.addEventListener('click', () => {
+            this.reconnectSub.textContent = 'retrying now…';
+            this.socket.retryNow();
+        });
+
+        this.reconnectOpenBrowser.addEventListener('click', () => {
+            window.open('http://captive.apple.com/hotspot-detect.html', '_blank');
+        });
+    }
+
+    _showView(target) {
+        this.viewEls.forEach(v => v.classList.toggle('active', v.id === target));
+        this.viewBtns.forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-view') === target ? 'true' : 'false'));
+        if (target === 'terminal-view') {
+            this.kbd.show();
+        } else {
+            this.kbd.hide();
+            this.kbd.blur();
+        }
+    }
+
+    _setStatus(state, text) {
+        this.statusDot.setAttribute('data-state', state);
+        this.statusText.textContent = text;
+        if (state === 'connected' && !this._diagTimer) {
+            this._diagTimer = setInterval(() => this._updateDiagStatus(), 2000);
+        }
+    }
+
+    _updateDiagStatus() {
+        if (this.socket.state !== 'connected') {
+            if (this._diagTimer) { clearInterval(this._diagTimer); this._diagTimer = null; }
+            return;
+        }
+        const s = this._msgCounts.snapshot;
+        const t = this._msgCounts['term-data'];
+        this.statusText.textContent = `paired · S:${s} T:${t}`;
+    }
+
+    diag() {
+        const age = this._lastMsgAt ? ((Date.now() - this._lastMsgAt) / 1000).toFixed(1) + 's ago' : 'never';
+        return {
+            socketState: this.socket.state,
+            messages: { ...this._msgCounts },
+            lastMessage: age,
+            activeTab: this._activeTab,
+            activeTabId: this._activeTabId,
+            connectedDevices: this._connectedDevices,
+            tabStates: Array.from(this._tabStates.entries()).map(([k, v]) => ({
+                tab: k,
+                pendingBytes: v.pendingData.length,
+            })),
+            termChildNodes: this.termEl.childNodes.length,
+        };
+    }
+
+    _showReconnect(text) {
+        this.reconnectOverlay.hidden = false;
+        if (text) this.reconnectSub.textContent = text;
+        this.reconnectRetry.hidden = false;
+    }
+    _hideReconnect() {
+        this.reconnectOverlay.hidden = true;
+        this.reconnectDiag.hidden = true;
+        this.reconnectRetry.hidden = true;
+        this.reconnectOpenBrowser.hidden = true;
+    }
+
+    _showDiagnosis(diag) {
+        if (diag === Diagnosis.CONNECTED || diag === Diagnosis.NONE) {
+            this.reconnectDiag.hidden = true;
+            this.reconnectOpenBrowser.hidden = true;
+            return;
+        }
+        this.reconnectDiag.hidden = false;
+        this.reconnectRetry.hidden = false;
+        this.reconnectOpenBrowser.hidden = true;
+
+        switch (diag) {
+            case Diagnosis.CAPTIVE_PORTAL:
+                this.reconnectDiag.textContent =
+                    'WiFi login required — complete the WiFi sign-in page, then tap RETRY.';
+                this.reconnectOpenBrowser.hidden = false;
+                break;
+            case Diagnosis.SERVER_UNREACHABLE:
+                this.reconnectDiag.textContent =
+                    'Desktop not reachable on this network. Public WiFi often blocks local connections — re-scan the PUB (tunnel) QR code from the desktop.';
+                break;
+            case Diagnosis.NETWORK_OFFLINE:
+                this.reconnectDiag.textContent =
+                    'No internet connection. Connect to a network and tap RETRY.';
+                break;
+        }
+    }
+
+    _applyHello(data) {
+        if (!data) return;
+        // HELLO carries the full initial state: tabs, activeId, replay (scrollback)
+        this._applySnapshot(data);
+        // Replay scrollback for each tab so the terminal shows existing output
+        const replay = data.replay || [];
+        for (const r of replay) {
+            if (r.id != null && r.data) {
+                this._applyTerminalChunk({ id: r.id, data: r.data });
+            }
+        }
+    }
+
+    _applySnapshot(snap) {
+        if (!snap) return;
+        this._snapshot = snap;
+
+        // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
+        // Normalize to the shape our renderer expects.
+        const rawTabs = snap.tabs || [];
+        const activeId = snap.activeId || 0;
+        const tabs = rawTabs.map((t, i) => ({
+            index: i,
+            id: t.id,
+            name: t.title || `TAB ${i + 1}`,
+            active: t.id === activeId,
+            status: t.exited ? 'exited' : null,
+            cols: t.cols,
+        }));
+
+        const activeTab = tabs.find(t => t.active);
+        const newActiveTab = activeTab ? activeTab.index : 0;
+        if (this._hasReceivedSnapshot && newActiveTab !== this._activeTab) {
+            sounds.play('tabSwitch');
+        }
+        this._hasReceivedSnapshot = true;
+        this._activeTab = newActiveTab;
+        this._activeTabId = activeId;
+
+        for (const t of tabs) {
+            if (!this._tabStates.has(t.id)) {
+                this._tabStates.set(t.id, { termState: newState(), pendingData: '' });
+            }
         }
 
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible' && this.bridge.ws === null && !this.bridge.closed) {
-                this.bridge.close();
-                this.bridge.connect();
+        this._connectedDevices = snap.connectedDevices || 0;
+        this._renderTabs(tabs);
+        this._renderActiveTerminal();
+        this._updateDeviceCount();
+    }
+
+    _renderTabs(tabs) {
+        // Check for status transitions before re-rendering
+        for (const t of tabs) {
+            const prev = this._tabStatuses.get(t.id);
+            if (prev !== undefined && prev !== t.status && t.status === 'input') {
+                this._showAgentToast(t.name || `TAB ${t.index + 1}`);
+            }
+            this._tabStatuses.set(t.id, t.status);
+        }
+        const frag = document.createDocumentFragment();
+        for (const t of tabs) {
+            const el = document.createElement('button');
+            el.type = 'button';
+            el.className = 'tab' + (t.active ? ' active' : '');
+            el.dataset.tabIndex = String(t.index);
+            el.dataset.tabId = String(t.id);
+            if (t.status) el.setAttribute('data-status', t.status);
+            el.innerHTML = `<span class="tab-name">${escapeHtml(t.name)}</span>`;
+            this._attachTabPointerHandlers(el, t);
+            frag.appendChild(el);
+        }
+
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'tab tab-add';
+        addBtn.textContent = '+';
+        addBtn.addEventListener('click', () => this.socket.sendInput('new-tab'));
+        frag.appendChild(addBtn);
+
+        this.tabsEl.innerHTML = '';
+        this.tabsEl.appendChild(frag);
+    }
+
+    _renderActiveTerminal() {
+        // No-op on snapshot — terminal content arrives via term-data frames
+        // and the hello replay. We just ensure the font is fitted.
+        const activeTab = this._snapshot && this._snapshot.tabs
+            ? this._snapshot.tabs.find(t => t.id === this._activeTabId)
+            : null;
+        if (activeTab && activeTab.cols) {
+            this._fitTerminalFont(activeTab.cols);
+        }
+    }
+
+    _updateDeviceCount() {
+        const count = this._connectedDevices || 0;
+        if (count > 1) {
+            this.statusText.textContent = `paired · ${count} devices`;
+        }
+    }
+
+    // Unified pointer state machine for each tab:
+    //   tap                      → switch-tab
+    //   hold ~280ms + drag       → reorder (see _beginTabDrag)
+    //   hold ~500ms stationary   → open menu
+    _attachTabPointerHandlers(el, tab) {
+        const DRAG_ARM_MS = 280;
+        const MENU_MS = 500;
+        const MOVE_THRESHOLD = 8;
+        const state = { startX: 0, startY: 0, armed: false, dragging: false, cancelled: false, didMenu: false };
+        let armTimer = null, menuTimer = null;
+        const clearTimers = () => {
+            if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+            if (menuTimer) { clearTimeout(menuTimer); menuTimer = null; }
+        };
+
+        el.addEventListener('pointerdown', (e) => {
+            if (e.button != null && e.button !== 0) return;
+            state.startX = e.clientX;
+            state.startY = e.clientY;
+            state.armed = false;
+            state.dragging = false;
+            state.cancelled = false;
+            state.didMenu = false;
+            clearTimers();
+            armTimer = setTimeout(() => {
+                if (state.cancelled || state.dragging) return;
+                state.armed = true;
+                el.classList.add('tab-armed');
+                try { if (navigator.vibrate) navigator.vibrate(8); } catch (_) {}
+            }, DRAG_ARM_MS);
+            menuTimer = setTimeout(() => {
+                if (state.dragging || state.cancelled) return;
+                state.didMenu = true;
+                el.classList.remove('tab-armed');
+                this._showTabMenu(tab, el);
+            }, MENU_MS);
+        });
+
+        el.addEventListener('pointermove', (e) => {
+            if (state.cancelled || state.dragging) return;
+            const moved = Math.hypot(e.clientX - state.startX, e.clientY - state.startY) > MOVE_THRESHOLD;
+            if (!moved) return;
+            if (!state.armed) {
+                // Moved before the drag-arm fired — treat as a scroll gesture
+                // and let the strip pan horizontally.
+                clearTimers();
+                state.cancelled = true;
+                return;
+            }
+            state.dragging = true;
+            clearTimers();
+            el.classList.remove('tab-armed');
+            this._beginTabDrag(el, tab, e, state);
+        });
+
+        const endTap = (e) => {
+            if (!state.dragging && !state.cancelled && !state.didMenu && !state.armed) {
+                this.socket.sendInput('switch-tab', { id: tab.id });
+            } else if (state.armed && !state.dragging && !state.didMenu) {
+                el.classList.remove('tab-armed');
+                this._showTabMenu(tab, el);
+                if (e && e.preventDefault) e.preventDefault();
+            }
+            clearTimers();
+            if (!state.dragging) el.classList.remove('tab-armed');
+            state.cancelled = true;
+        };
+        el.addEventListener('pointerup', endTap);
+        el.addEventListener('pointercancel', () => {
+            clearTimers();
+            el.classList.remove('tab-armed');
+            state.cancelled = true;
+        });
+    }
+
+    // Drag-reorder implementation. Browser-tab feel: the picked-up tab floats
+    // under the finger; neighbors slide live as you move; on release we send
+    // `move-tab` to the desktop, which authoritatively reorders its strip and
+    // the next snapshot confirms the new order.
+    _beginTabDrag(srcEl, tab, startEvent, state) {
+        const strip = this.tabsEl;
+        if (!strip) return;
+
+        const startRect = srcEl.getBoundingClientRect();
+        const grabOffsetX = startEvent.clientX - startRect.left;
+        const ghost = srcEl.cloneNode(true);
+        ghost.classList.add('tab-ghost');
+        ghost.style.width = `${startRect.width}px`;
+        ghost.style.height = `${startRect.height}px`;
+        ghost.style.left = `${startRect.left}px`;
+        ghost.style.top = `${startRect.top}px`;
+        document.body.appendChild(ghost);
+        srcEl.classList.add('tab-dragging');
+
+        // Prevent the horizontal strip from scroll-panning while we drag.
+        const prevOverflow = strip.style.overflowX;
+        strip.style.overflowX = 'hidden';
+
+        let finalBeforeId = null;
+        const tabSelector = '.tab:not(.tab-add):not(.tab-dragging)';
+
+        const update = (clientX, clientY) => {
+            ghost.style.left = `${clientX - grabOffsetX}px`;
+            ghost.style.top = `${startRect.top}px`;
+
+            // Find the tab (or + button) the finger is over within the strip.
+            const siblings = Array.from(strip.querySelectorAll(tabSelector));
+            const addBtn = strip.querySelector('.tab-add');
+            let placeBefore = null; // DOM node to insertBefore(); null = append at end
+            for (const sib of siblings) {
+                const r = sib.getBoundingClientRect();
+                const mid = r.left + r.width / 2;
+                if (clientX < mid) { placeBefore = sib; break; }
+            }
+            if (!placeBefore && addBtn) placeBefore = addBtn;
+
+            if (placeBefore && placeBefore !== srcEl.nextSibling) {
+                strip.insertBefore(srcEl, placeBefore);
+            }
+
+            // Auto-scroll the strip when the finger nears either edge.
+            const sr = strip.getBoundingClientRect();
+            const EDGE = 40;
+            if (clientX < sr.left + EDGE) strip.scrollLeft -= 8;
+            else if (clientX > sr.right - EDGE) strip.scrollLeft += 8;
+        };
+
+        const move = (e) => {
+            e.preventDefault();
+            update(e.clientX, e.clientY);
+        };
+        const end = (e) => {
+            document.removeEventListener('pointermove', move, { capture: true });
+            document.removeEventListener('pointerup', end, { capture: true });
+            document.removeEventListener('pointercancel', end, { capture: true });
+
+            ghost.remove();
+            srcEl.classList.remove('tab-dragging');
+            strip.style.overflowX = prevOverflow;
+
+            // Compute neighbor id for the move-tab payload: the tab now to
+            // the right of src (skipping the + button). -1 means "append".
+            let after = srcEl.nextElementSibling;
+            while (after && after.classList.contains('tab-add')) after = after.nextElementSibling;
+            let finalBeforeId;
+            if (after && after.dataset.tabId != null) {
+                finalBeforeId = parseInt(after.dataset.tabId, 10);
+            } else {
+                finalBeforeId = -1;
+            }
+
+            // Only send if the position actually changed since pickup.
+            const originalNext = srcEl.dataset.origNextId;
+            if (String(finalBeforeId) !== originalNext) {
+                this.socket.sendInput('move-tab', { id: tab.id, before: finalBeforeId });
+            }
+            delete srcEl.dataset.origNextId;
+            state.cancelled = true;
+        };
+
+        // Record the neighbor id at pickup time so we can skip no-op sends.
+        let origNext = srcEl.nextElementSibling;
+        while (origNext && origNext.classList.contains('tab-add')) origNext = origNext.nextElementSibling;
+        srcEl.dataset.origNextId = String(
+            (origNext && origNext.dataset.tabId != null) ? parseInt(origNext.dataset.tabId, 10) : -1
+        );
+
+        document.addEventListener('pointermove', move, { capture: true, passive: false });
+        document.addEventListener('pointerup', end, { capture: true });
+        document.addEventListener('pointercancel', end, { capture: true });
+
+        // Apply the initial position using the pointerdown event that triggered us.
+        update(startEvent.clientX, startEvent.clientY);
+    }
+
+    _showTabMenu(tab, anchorEl) {
+        this._dismissTabMenu();
+        const menu = document.createElement('div');
+        menu.className = 'tab-menu';
+
+        const rect = anchorEl.getBoundingClientRect();
+        menu.style.left = `${rect.left}px`;
+        menu.style.top = `${rect.bottom + 4}px`;
+
+        const resyncBtn = document.createElement('button');
+        resyncBtn.textContent = 'RESYNC';
+        resyncBtn.addEventListener('click', () => {
+            this._dismissTabMenu();
+            this._resync();
+        });
+
+        const renameBtn = document.createElement('button');
+        renameBtn.textContent = 'RENAME';
+        renameBtn.addEventListener('click', () => {
+            this._dismissTabMenu();
+            const name = prompt('Tab name:', tab.name || '');
+            if (name !== null) this.socket.sendInput('rename-tab', { id: tab.id, title: name });
+        });
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'CLOSE';
+        closeBtn.addEventListener('click', () => {
+            this._dismissTabMenu();
+            if (confirm(`Close ${tab.name || 'this tab'}?`)) {
+                this.socket.sendInput('close-tab', { id: tab.id });
             }
         });
 
-        let touchStartX = 0;
-        this.tabsEl.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; }, { passive: true });
-        this.tabsEl.addEventListener('touchend', e => {
-            const dx = e.changedTouches[0].clientX - touchStartX;
-            if (Math.abs(dx) < 60) return;
-            const idx = this._tabs.findIndex(t => t.id === this._activeId);
-            if (idx < 0) return;
-            const next = dx < 0 ? idx + 1 : idx - 1;
-            if (next >= 0 && next < this._tabs.length) this._switchTab(this._tabs[next].id);
-        }, { passive: true });
+        menu.appendChild(resyncBtn);
+        menu.appendChild(renameBtn);
+        menu.appendChild(closeBtn);
+        document.body.appendChild(menu);
+        this._tabMenu = menu;
+
+        const dismiss = (e) => {
+            if (!menu.contains(e.target)) {
+                this._dismissTabMenu();
+                document.removeEventListener('pointerdown', dismiss);
+            }
+        };
+        requestAnimationFrame(() => document.addEventListener('pointerdown', dismiss));
+    }
+
+    _dismissTabMenu() {
+        if (this._tabMenu) {
+            this._tabMenu.remove();
+            this._tabMenu = null;
+        }
+    }
+
+    _resync() {
+        this._tabStates.clear();
+        this._hasReceivedSnapshot = false;
+        this.termEl.innerHTML = '';
+        this.socket.send('request', { what: 'snapshot' });
+    }
+
+    _renderTerminalSnapshot(term) {
+        const ts = this._getTabState(this._activeTab);
+        ts.termState = newState();
+        ts.pendingData = '';
+
+        const prevScrollTop = this.termEl.scrollTop;
+
+        let text = term.screen || term.recent || '';
+        if (!term.screen) {
+            text = text.replace(/\r\n/g, '\n').replace(/\r/g, '');
+        }
+        const { html, state } = ansiToHtml(text, ts.termState);
+        ts.termState = state;
+        this.termEl.innerHTML = html;
+        this._fitTerminalFont(term.cols);
+
+        if (this._userScrolledUp) {
+            this.termEl.scrollTop = prevScrollTop;
+        } else {
+            this._scrollTermBottom();
+        }
+    }
+
+    _applyTerminalChunk(payload) {
+        if (!payload || typeof payload.data !== 'string') return;
+        // Server sends { id: tabId, data: "..." }
+        const tabId = payload.id ?? this._activeTabId;
+        const ts = this._getTabState(tabId);
+        ts.pendingData += payload.data;
+
+        if (tabId === this._activeTabId && !this._flushScheduled) {
+            this._flushScheduled = true;
+            requestAnimationFrame(() => this._flushPending());
+        }
     }
 
     _getTabState(id) {
         if (!this._tabStates.has(id)) {
-            this._tabStates.set(id, { ansi: newAnsiState(), pending: '' });
+            this._tabStates.set(id, { termState: newState(), pendingData: '' });
         }
         return this._tabStates.get(id);
     }
 
-    _flushActive() {
-        this._flushRaf = null;
-        const ts = this._getTabState(this._activeId);
-        if (!ts.pending) return;
-        let data = ts.pending;
-        ts.pending = '';
+    _flushPending() {
+        this._flushScheduled = false;
+        const ts = this._getTabState(this._activeTabId);
+        if (!ts.pendingData) return;
+
+        let data = ts.pendingData;
+        ts.pendingData = '';
 
         data = data.replace(/\r\n/g, '\n');
-        const parts = data.split('\r');
-        for (let i = 0; i < parts.length; i++) {
-            if (i > 0) this._eraseCurrentLine();
-            const seg = parts[i];
+        const crParts = data.split('\r');
+
+        for (let ci = 0; ci < crParts.length; ci++) {
+            if (ci > 0) this._eraseCurrentLine();
+            const seg = crParts[ci];
             if (!seg) continue;
-            const { html, state } = ansiToHtml(seg, ts.ansi);
-            ts.ansi = state;
+            const { html, state } = ansiToHtml(seg, ts.termState);
+            ts.termState = state;
             this.termEl.insertAdjacentHTML('beforeend', html);
         }
 
-        while (this.termEl.childNodes.length > 4000) {
+        const MAX_NODES = 4000;
+        while (this.termEl.childNodes.length > MAX_NODES) {
             this.termEl.removeChild(this.termEl.firstChild);
         }
 
         if (!this._userScrolledUp) {
-            this.termEl.scrollTop = this.termEl.scrollHeight;
+            requestAnimationFrame(() => {
+                this.termEl.scrollTop = this.termEl.scrollHeight;
+            });
         }
+    }
+
+    _scrollTermBottom() {
+        requestAnimationFrame(() => {
+            this.termEl.scrollTop = this.termEl.scrollHeight;
+        });
+    }
+
+    _isAtBottom() {
+        const el = this.termEl;
+        return (el.scrollHeight - el.scrollTop - el.clientHeight) < 10;
     }
 
     _eraseCurrentLine() {
@@ -481,51 +1092,170 @@ class App {
         while (el.childNodes.length) {
             const last = el.childNodes[el.childNodes.length - 1];
             if (last.nodeType === Node.TEXT_NODE) {
-                const nl = last.textContent.lastIndexOf('\n');
-                if (nl !== -1) { last.textContent = last.textContent.substring(0, nl + 1); return; }
+                const nlPos = last.textContent.lastIndexOf('\n');
+                if (nlPos !== -1) {
+                    last.textContent = last.textContent.substring(0, nlPos + 1);
+                    return;
+                }
             }
             el.removeChild(last);
         }
     }
 
-    _renderTabs(tabs, activeId) {
-        this.tabsEl.innerHTML = '';
-        this._tabs = tabs;
-        for (const t of tabs) {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'tab' + (t.id === activeId ? ' active' : '');
-            if (t.status) btn.setAttribute('data-status', t.status);
-            btn.textContent = t.title || t.name || `TAB ${t.id}`;
-            btn.addEventListener('click', () => {
-                this._switchTab(t.id);
-            });
-            this.tabsEl.appendChild(btn);
+    _fitTerminalFont(cols) {
+        if (cols && cols > 0) this._termCols = cols;
+
+        const cs = getComputedStyle(this.termEl);
+        const availW = this.termEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+        if (availW <= 0) return;
+
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:' + this._baseFontSize + 'px/' + 1.45 + ' ' + cs.fontFamily;
+        probe.textContent = 'M';
+        document.body.appendChild(probe);
+        const charW = probe.offsetWidth;
+        document.body.removeChild(probe);
+
+        if (charW <= 0) return;
+
+        const fitCols = Math.floor(availW / charW);
+        if (fitCols !== this._lastSentCols && fitCols > 10) {
+            this._lastSentCols = fitCols;
+            const rows = Math.floor((this.termEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)) / (this._baseFontSize * 1.45));
+            this.socket.sendInput('term-resize', { id: this._activeTabId, cols: fitCols, rows });
         }
+
+        this.termEl.style.fontSize = this._baseFontSize + 'px';
     }
 
-    _switchTab(id) {
-        if (id === this._activeId) return;
-        this._activeId = id;
-        this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
-        this.termEl.innerHTML = '';
-        const ts = this._getTabState(id);
-        ts.ansi = newAnsiState();
-        this._flushActive();
-        this.tabsEl.querySelectorAll('.tab').forEach((el, i) => {
-            el.classList.toggle('active', this._tabs[i] && this._tabs[i].id === id);
-        });
+    _renderWidgets(widgets, host) {
+        const cards = [];
+        if (host && host.name) {
+            cards.push(card('HOST', host.name, host.platform ? host.platform.toUpperCase() : ''));
+        }
+        if (widgets.clock) {
+            const t = new Date(widgets.clock.time);
+            const hh = String(t.getHours()).padStart(2, '0');
+            const mm = String(t.getMinutes()).padStart(2, '0');
+            const ss = String(t.getSeconds()).padStart(2, '0');
+            cards.push(card('CLOCK', `${hh}:${mm}:${ss}`, t.toDateString()));
+        }
+        if (widgets.cpu) {
+            cards.push(meterCard('CPU', widgets.cpu.usagePct));
+        }
+        if (widgets.ram) {
+            cards.push(meterCard('MEMORY', widgets.ram.usagePct));
+        }
+        if (widgets.net) {
+            const inbps  = formatRate(widgets.net.rx_sec || widgets.net.rxBytesPerSec);
+            const outbps = formatRate(widgets.net.tx_sec || widgets.net.txBytesPerSec);
+            cards.push(card('NETWORK', `${inbps} ↓ · ${outbps} ↑`, ''));
+        }
+        if (widgets.deviceStatus) {
+            const ds = widgets.deviceStatus;
+            const batLabel = ds.battery ? ds.battery.label : 'N/A';
+            const netLabel = ds.network || '—';
+            const cpuLabel = ds.cpuTemp != null ? ds.cpuTemp + '°C' : 'N/A';
+            const gpuLabel = ds.gpuTemp != null ? ds.gpuTemp + '°C' : 'N/A';
+            cards.push(card('DEVICE STATUS',
+                `${batLabel} · ${netLabel}`,
+                `CPU ${cpuLabel}  GPU ${gpuLabel}`
+            ));
+        }
+        this.widgetsEl.innerHTML = cards.join('') || `<div class="w-card"><h2>No data yet</h2><div class="w-meta">Waiting for the desktop to push state…</div></div>`;
     }
 
-    _showReconnect(msg) {
-        this.reconnectOverlay.hidden = false;
-        this.reconnectRetry.hidden = false;
-        if (this.reconnectReset) this.reconnectReset.hidden = false;
-        if (msg && this.reconnectSub) this.reconnectSub.textContent = msg;
+    _showNotice({ level, text }) {
+        if (!text) return;
+        const colour = level === 'error' ? '\x1b[91m' : (level === 'warn' ? '\x1b[93m' : '\x1b[92m');
+        this._applyTerminalChunk({ data: `\r\n${colour}[${(level || 'info').toUpperCase()}] ${text}\x1b[0m\r\n` });
     }
-    _hideReconnect() {
-        this.reconnectOverlay.hidden = true;
+
+    _showAgentToast(tabName) {
+        const toast = document.getElementById('agent-toast');
+        if (!toast) return;
+        clearTimeout(this._toastTimer);
+        toast.textContent = `Tab ${tabName} needs your attention.`;
+        toast.classList.add('visible');
+        this._toastTimer = setTimeout(() => toast.classList.remove('visible'), 4000);
+        if ('vibrate' in navigator) try { navigator.vibrate([80, 40, 80]); } catch (_) {}
+    }
+
+    _showFatal(text) {
+        document.getElementById('app').innerHTML = `
+            <div style="padding:32px;text-align:center;color:var(--err);font-size:14px;letter-spacing:.18em;">
+                <div style="font-size:18px;margin-bottom:14px;color:var(--fg);">SESSION REQUIRED</div>
+                <div>${escapeHtml(text)}</div>
+            </div>`;
     }
 }
 
-new App();
+function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+    ));
+}
+
+function card(title, value, meta) {
+    return `<div class="w-card"><h2>${escapeHtml(title)}</h2><div class="w-value">${escapeHtml(value)}</div>${meta ? `<div class="w-meta">${escapeHtml(meta)}</div>` : ''}</div>`;
+}
+
+function meterCard(title, pct) {
+    const v = Math.max(0, Math.min(100, Number(pct) || 0));
+    return `<div class="w-card">
+        <h2>${escapeHtml(title)}</h2>
+        <div class="w-value">${v.toFixed(0)}%</div>
+        <div class="w-bar"><span style="width:${v}%"></span></div>
+    </div>`;
+}
+
+function formatRate(bps) {
+    if (!Number.isFinite(bps)) return '—';
+    if (bps < 1024) return `${bps.toFixed(0)} B/s`;
+    if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+    return `${(bps / 1024 / 1024).toFixed(2)} MB/s`;
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    window._app = new App();
+    // Only register the service worker when served at the root scope (i.e.
+    // same-origin as the backend). On Vercel we live under /m/ which would
+    // give the SW the wrong scope and cache stale assets.
+    if ('serviceWorker' in navigator && location.pathname === '/') {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            location.reload();
+        });
+    }
+    checkVersionMatch();
+});
+
+async function checkVersionMatch() {
+    try {
+        const app = window._app;
+        const backend = (app && app.socket && app.socket.baseUrl)
+            ? app.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://')
+            : location.origin;
+        const versionUrl = location.pathname.startsWith('/m/') ? 'version.json' : '/version.json';
+        const [mobileRes, desktopRes] = await Promise.allSettled([
+            fetch(versionUrl, { cache: 'no-store' }),
+            fetch(backend + '/api/ping', { cache: 'no-store' }),
+        ]);
+        if (mobileRes.status !== 'fulfilled' || !mobileRes.value.ok) return;
+        if (desktopRes.status !== 'fulfilled' || !desktopRes.value.ok) return;
+        const mobile = await mobileRes.value.json();
+        const desktop = await desktopRes.value.json();
+        if (!mobile.version || !desktop.desktopVersion) return;
+        const a = mobile.version.split('.').slice(0, 2).join('.');
+        const b = desktop.desktopVersion.split('.').slice(0, 2).join('.');
+        if (a === b) return;
+        showVersionMismatchBanner(mobile.version, desktop.desktopVersion);
+    } catch (_) { /* silent */ }
+}
+
+function showVersionMismatchBanner(mobileVersion, desktopVersion) {
+    const el = document.createElement('div');
+    el.textContent = `VERSION MISMATCH — mobile ${mobileVersion} · desktop ${desktopVersion}. Please update both to the same release.`;
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;padding:8px 12px;background:#3a0a0a;color:#ffb3b3;font:12px/1.4 monospace;text-align:center;border-bottom:1px solid #ff5d6f;letter-spacing:.08em;';
+    document.body.appendChild(el);
+}

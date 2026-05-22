@@ -1,0 +1,14 @@
+{
+  "name": "Son of Anton — Mobile",
+  "short_name": "SOA Mobile",
+  "description": "Mobile companion for the Son of Anton sci-fi terminal.",
+  "start_url": "/m/",
+  "scope": "/m/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any maskable" }
+  ]
+}

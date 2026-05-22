@@ -1,20 +1,25 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
-    <meta name="theme-color" content="#05080d">
-    <meta name="color-scheme" content="dark">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Son of Anton">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Son of Anton" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon.svg" />
     <title>Son of Anton · Mobile</title>
-    <link rel="stylesheet" href="/m/styles.css">
+    <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
     <div id="app">
         <header id="topbar">
-            <div class="brand">SON OF ANTON</div>
+            <div class="brand">
+                <span class="brand-mark"></span>
+                <span class="brand-text">SON&nbsp;OF&nbsp;ANTON</span>
+            </div>
             <div class="status" id="status">
                 <span class="status-dot" data-state="connecting"></span>
                 <span class="status-text">connecting…</span>
@@ -24,10 +29,52 @@
         <nav id="tabs" aria-label="Open tabs"></nav>
 
         <main id="stage">
-            <pre id="term"></pre>
+            <section id="terminal-view" class="view active">
+                <pre id="term"></pre>
+            </section>
+            <section id="widgets-view" class="view">
+                <div id="widgets"></div>
+            </section>
         </main>
 
-        <section id="kbd"></section>
+        <nav id="bottombar">
+            <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
+            <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
+            <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
+            <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
+            <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>
+        </nav>
+
+        <section id="kbd" aria-label="Virtual keyboard"></section>
+    </div>
+
+    <div id="settings-overlay">
+        <div class="settings-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="settings-header">
+                <div class="settings-title">Settings</div>
+                <button class="settings-close" id="settings-close">&times;</button>
+            </div>
+            <div class="settings-section">
+                <div class="settings-label">Theme</div>
+                <div class="theme-grid" id="theme-grid"></div>
+            </div>
+            <div class="settings-section">
+                <div class="settings-label">Sound</div>
+                <div class="sound-grid" id="sound-grid"></div>
+            </div>
+            <div class="settings-section">
+                <div class="settings-label">Connection</div>
+                <div class="settings-hint" id="reload-hint">
+                    If the desktop session becomes unresponsive, reload the
+                    mobile app locally — your session token stays on this device.
+                </div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-reload" type="button">RELOAD</button>
+                    <button class="settings-btn settings-btn-warn" id="btn-force-reload" type="button">FORCE RELOAD</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div id="reconnect-overlay" hidden>
@@ -35,13 +82,13 @@
             <div class="reconnect-spinner"></div>
             <div class="reconnect-title">RECONNECTING</div>
             <div class="reconnect-sub" id="reconnect-sub">checking link…</div>
-            <div class="reconnect-actions">
-                <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY</button>
-                <button class="reconnect-btn reconnect-btn-reset" id="reconnect-reset" hidden>NEW SESSION</button>
-            </div>
+            <p class="reconnect-diag" id="reconnect-diag" hidden></p>
+            <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY NOW</button>
+            <button class="reconnect-btn reconnect-open" id="reconnect-open-browser" hidden>OPEN WIFI LOGIN</button>
         </div>
     </div>
 
-    <script type="module" src="/m/app.js"></script>
+    <div id="agent-toast"></div>
+    <script type="module" src="app.js"></script>
 </body>
 </html>

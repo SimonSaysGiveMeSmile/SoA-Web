@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#000000"/>
+  <g transform="translate(256 256)">
+    <rect x="-128" y="-128" width="256" height="256" transform="rotate(45)" fill="none" stroke="#ffffff" stroke-width="14"/>
+    <rect x="-72"  y="-72"  width="144" height="144" transform="rotate(45)" fill="none" stroke="#ffffff" stroke-width="10" opacity="0.6"/>
+    <circle r="22" fill="#ffffff"/>
+  </g>
+  <text x="50%" y="92%" text-anchor="middle" font-family="ui-monospace, monospace" font-size="38" letter-spacing="6" fill="#ffffff">SOA</text>
+</svg>
