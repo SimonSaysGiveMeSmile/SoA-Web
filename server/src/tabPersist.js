@@ -1,19 +1,24 @@
 /**
  * TabPersist
  *
- * Saves tab state to disk so context survives server restarts. Two files,
- * deliberately separate so a corrupt scrollback blob can't take down the
- * cheap metadata restore:
+ * Saves tab state to disk so context survives server restarts AND browser
+ * crashes. Three files, deliberately separate so a corrupt scrollback blob
+ * can't take down the cheap metadata or session restore:
  *
  *   ~/.soa-web/tabs.json        — title, cwd, userRenamed, order. Cheap.
  *                                 Saved on every change (debounced 500ms).
  *   ~/.soa-web/scrollback.json  — raw PTY bytes per tab, indexed positionally
  *                                 to tabs.json. Saved every 5 minutes by the
  *                                 server, and one final time on shutdown.
+ *   ~/.soa-web/session.json     — primary session {id, token}, re-seated into
+ *                                 SessionStore on boot so the existing browser
+ *                                 cookie still resolves to a Session.
  *
- * On boot, tabs respawn at their stored cwd; if a scrollback entry exists
- * for that slot it's seeded into the new tab's ring buffer with a divider
- * so the user can see the prior context but knows the process is fresh.
+ * On boot the server reads session.json first to seat the same session in
+ * the in-memory store under the same token, then re-spawns shells at the
+ * stored cwds and seeds each tab's scrollback ring buffer with the saved
+ * bytes plus a divider — the user reconnects and lands on the same view
+ * they left, with a fresh shell underneath.
  */
 
 const fs = require('fs');
@@ -23,6 +28,7 @@ const os = require('os');
 const STATE_DIR = path.join(os.homedir(), '.soa-web');
 const STATE_FILE = path.join(STATE_DIR, 'tabs.json');
 const SCROLLBACK_FILE = path.join(STATE_DIR, 'scrollback.json');
+const SESSION_FILE = path.join(STATE_DIR, 'session.json');
 
 // Cap per-tab scrollback at 128 KiB on disk. The in-memory ring is 256 KiB —
 // halve it on disk so a session with 30 tabs doesn't push 8 MB of JSON every
@@ -56,6 +62,28 @@ function loadScrollback() {
     } catch (_) {
         return null;
     }
+}
+
+function loadSession() {
+    try {
+        const raw = fs.readFileSync(SESSION_FILE, 'utf8');
+        const data = JSON.parse(raw);
+        if (!data || typeof data.token !== 'string' || typeof data.id !== 'string') return null;
+        return data;
+    } catch (_) {
+        return null;
+    }
+}
+
+function saveSession({ id, token }) {
+    try {
+        ensureDir();
+        fs.writeFileSync(
+            SESSION_FILE,
+            JSON.stringify({ id, token, savedAt: new Date().toISOString() }, null, 2) + '\n',
+            { mode: 0o600 },
+        );
+    } catch (_) { /* best-effort */ }
 }
 
 function save(tabMgr) {
@@ -111,7 +139,7 @@ function _writeScrollbackSync(tabMgr) {
             if (snap.length > MAX_SCROLLBACK_PER_TAB) {
                 snap = snap.slice(snap.length - MAX_SCROLLBACK_PER_TAB);
             }
-            tabs.push({ scrollback: snap });
+            tabs.push({ title: tab.title, cwd: tab.cwd, scrollback: snap });
         }
         const data = { savedAt: new Date().toISOString(), tabs };
         const tmp = SCROLLBACK_FILE + '.tmp';
@@ -121,6 +149,7 @@ function _writeScrollbackSync(tabMgr) {
 }
 
 module.exports = {
-    load, loadScrollback, save, saveImmediate, saveAll,
-    STATE_FILE, SCROLLBACK_FILE,
+    load, loadScrollback, loadSession, saveSession,
+    save, saveImmediate, saveAll,
+    STATE_FILE, SCROLLBACK_FILE, SESSION_FILE,
 };

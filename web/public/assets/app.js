@@ -18,9 +18,10 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=15';
 import { AudioFX } from '/assets/audiofx.js?v=15';
-import { mountSidebar } from '/assets/widgets.js?v=15';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=14';
+import { mountSidebar } from '/assets/widgets.js?v=16';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=15';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
+import { pickFolder } from '/assets/folderPicker.js?v=1';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -345,6 +346,17 @@ class Shell {
             this.audio.play('granted');
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         });
+
+        const newTabPick = $('#new-tab-pick');
+        if (newTabPick) {
+            newTabPick.addEventListener('click', async () => {
+                this.audio.play('panels');
+                const cwd = await pickFolder();
+                if (!cwd) return;
+                this.audio.play('granted');
+                this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
+            });
+        }
 
         const audioBtn = $('#toggle-audio');
         const initialAudio = getSettings().audio;
@@ -1955,6 +1967,8 @@ async function bootServerMode({ backend, token }) {
     const audio = new AudioFX({ enabled: s0.audio, volume: s0.audioVolume, feedbackEnabled: !s0.disableFeedbackAudio });
     const bridge = new Bridge({ url: wsUrl(backend, token) });
     const shell = new Shell(bridge, { audio, backend, token });
+    CFG._bridge = bridge;
+    CFG._shell = shell;
     bridge.connect();
     $('#status-session').textContent = crossOrigin ? new URL(backend).host : location.host;
 

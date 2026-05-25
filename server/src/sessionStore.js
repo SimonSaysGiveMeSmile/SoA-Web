@@ -58,9 +58,13 @@ class SessionStore {
         if (this._sweep.unref) this._sweep.unref();
     }
 
-    create() {
-        const id = crypto.randomBytes(12).toString('base64url');
+    create({ id: forcedId, token: forcedToken } = {}) {
+        const id = forcedId || crypto.randomBytes(12).toString('base64url');
         const s = new Session(id);
+        if (forcedToken) {
+            this.byToken.delete(s.token);
+            s.token = forcedToken;
+        }
         this.sessions.set(id, s);
         this.byToken.set(s.token, s);
         return s;
@@ -72,6 +76,7 @@ class SessionStore {
     destroy(session) {
         if (!session) return;
         if (session._cwdInterval) clearInterval(session._cwdInterval);
+        if (session._scrollbackInterval) clearInterval(session._scrollbackInterval);
         if (session.tabMgr && typeof session.tabMgr.killAll === 'function') {
             try { session.tabMgr.killAll(); } catch (_) {}
         }

@@ -1,5 +1,7 @@
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { MSG, frame } = require('./protocol');
 const tabPersist = require('./tabPersist');
 const envStore = require('./envStore');
@@ -136,6 +138,50 @@ function mount(app, requireAuthed, sessions) {
         if (!cols || !rows) return res.status(400).json({ ok: false, error: 'cols and rows required' });
         tab.resize(Math.max(2, cols | 0), Math.max(2, rows | 0));
         res.json({ ok: true });
+    });
+
+    // Directory listing for the "open new tab in folder" picker. Defaults to
+    // $HOME, can navigate anywhere the server process can read. Hidden entries
+    // are filtered unless ?hidden=1. Symlinks to dirs are followed for the
+    // is-directory check via statSync (lstatSync would mark the link itself).
+    router.get('/api/browse', requireAuthed, (req, res) => {
+        const requested = typeof req.query.path === 'string' && req.query.path
+            ? req.query.path
+            : os.homedir();
+        const showHidden = req.query.hidden === '1';
+        let resolved;
+        try {
+            resolved = path.resolve(requested.replace(/^~(?=$|\/)/, os.homedir()));
+        } catch (_) {
+            return res.status(400).json({ ok: false, error: 'invalid path' });
+        }
+        let entries;
+        try {
+            entries = fs.readdirSync(resolved, { withFileTypes: true });
+        } catch (err) {
+            return res.status(400).json({ ok: false, error: err.code === 'ENOENT'
+                ? 'not found' : err.code === 'EACCES'
+                ? 'permission denied' : err.message });
+        }
+        const dirs = [];
+        for (const e of entries) {
+            if (!showHidden && e.name.startsWith('.')) continue;
+            let isDir = e.isDirectory();
+            if (!isDir && e.isSymbolicLink()) {
+                try { isDir = fs.statSync(path.join(resolved, e.name)).isDirectory(); }
+                catch (_) { /* dangling link */ }
+            }
+            if (isDir) dirs.push(e.name);
+        }
+        dirs.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+        const parent = path.dirname(resolved);
+        res.json({
+            ok: true,
+            path: resolved,
+            parent: parent === resolved ? null : parent,
+            home: os.homedir(),
+            dirs,
+        });
     });
 
     app.use(router);

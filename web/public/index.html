@@ -134,8 +134,8 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=36">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=13">
+  <link rel="stylesheet" href="/assets/styles.css?v=37">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=14">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -222,7 +222,9 @@
             <div class="welcome-cmdwrap">
               <pre class="welcome-cmd" id="welcome-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
               <button class="welcome-copy" id="welcome-copy" data-w="copy">COPY</button>
+              <button class="welcome-run" id="welcome-run" data-w="run" title="Download a one-click installer">RUN</button>
             </div>
+            <p class="welcome-run-hint" id="welcome-run-hint" hidden></p>
           </article>
           <article class="welcome-step">
             <header class="welcome-step-head">
@@ -309,6 +311,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 faq_a4: 'Vercel can host the page, but the server needs a long-running Node process. Run it on your own box and point SOA_WEB_BACKEND at the tunnel URL.',
                 cmd_caption: 'Want real shells? Paste this in Terminal:',
                 copy: 'COPY', copied: 'COPIED', select_copy: 'select + copy',
+                run: 'RUN', downloaded: 'DOWNLOADED ↓',
+                run_hint_mac: 'Open soa-web-install.command from Downloads (double-click). Terminal will launch and run the installer. Reload this tab once it finishes.',
+                run_hint_win: 'Windows isn’t supported by the installer. Use WSL: open Ubuntu, then run the copied command.',
+                run_hint_nix: 'Open a terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — then reload this tab.',
                 github: 'source · github',
             },
             zh: {
@@ -344,6 +350,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 faq_a4: 'Vercel 可以托管页面,但服务器需要长期运行的 Node 进程。在你自己的机器上运行服务器,并将 SOA_WEB_BACKEND 指向隧道 URL。',
                 cmd_caption: '想要真实 shell?在终端粘贴:',
                 copy: '复制', copied: '已复制', select_copy: '选中 + 复制',
+                run: '运行', downloaded: '已下载 ↓',
+                run_hint_mac: '在「下载」中双击打开 soa-web-install.command。终端将启动并运行安装程序。完成后刷新此页面。',
+                run_hint_win: '安装程序不支持 Windows。请使用 WSL:打开 Ubuntu,然后运行已复制的命令。',
+                run_hint_nix: '打开终端: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — 然后刷新此页面。',
                 github: '源代码 · GitHub',
             },
             fr: {
@@ -379,6 +389,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 faq_a4: "Vercel peut héberger la page, mais le serveur a besoin d'un process Node persistant. Lancez-le sur votre machine et pointez SOA_WEB_BACKEND vers l'URL du tunnel.",
                 cmd_caption: 'De vrais shells ? Collez ceci dans le Terminal :',
                 copy: 'COPIER', copied: 'COPIÉ', select_copy: 'sélectionner + copier',
+                run: 'LANCER', downloaded: 'TÉLÉCHARGÉ ↓',
+                run_hint_mac: 'Ouvrez soa-web-install.command depuis Téléchargements (double-clic). Terminal se lance et exécute l’installateur. Rechargez cet onglet une fois terminé.',
+                run_hint_win: 'Windows n’est pas pris en charge par l’installateur. Utilisez WSL : ouvrez Ubuntu, puis exécutez la commande copiée.',
+                run_hint_nix: 'Ouvrez un terminal : chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — puis rechargez cet onglet.',
                 github: 'source · github',
             },
             de: {
@@ -414,6 +428,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 faq_a4: 'Vercel kann die Seite hosten, aber der Server braucht einen langlebigen Node-Prozess. Auf eigener Maschine laufen lassen und SOA_WEB_BACKEND auf die Tunnel-URL zeigen.',
                 cmd_caption: 'Echte Shells? Das im Terminal einfügen:',
                 copy: 'KOPIEREN', copied: 'KOPIERT', select_copy: 'auswählen + kopieren',
+                run: 'STARTEN', downloaded: 'GELADEN ↓',
+                run_hint_mac: 'Öffne soa-web-install.command in „Downloads“ per Doppelklick. Terminal startet und führt den Installer aus. Lade diesen Tab nach Abschluss neu.',
+                run_hint_win: 'Windows wird vom Installer nicht unterstützt. Verwende WSL: öffne Ubuntu und führe den kopierten Befehl aus.',
+                run_hint_nix: 'Öffne ein Terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — danach diesen Tab neu laden.',
                 github: 'Quelle · GitHub',
             },
             es: {
@@ -449,6 +467,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 faq_a4: 'Vercel puede alojar la página, pero el servidor necesita un proceso Node persistente. Córrelo en tu máquina y apunta SOA_WEB_BACKEND a la URL del túnel.',
                 cmd_caption: '¿Shells reales? Pega esto en Terminal:',
                 copy: 'COPIAR', copied: 'COPIADO', select_copy: 'seleccionar + copiar',
+                run: 'EJECUTAR', downloaded: 'DESCARGADO ↓',
+                run_hint_mac: 'Abre soa-web-install.command en Descargas (doble clic). Terminal se abrirá y ejecutará el instalador. Recarga esta pestaña al terminar.',
+                run_hint_win: 'Windows no es compatible con el instalador. Usa WSL: abre Ubuntu y ejecuta el comando copiado.',
+                run_hint_nix: 'Abre una terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — luego recarga esta pestaña.',
                 github: 'fuente · github',
             },
         };
@@ -519,6 +541,54 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 }
             });
         });
+
+        // RUN button — generates a self-contained installer script and triggers
+        // a browser download. macOS associates `.command` with Terminal.app, so
+        // double-clicking the file opens Terminal and runs the install. Linux
+        // gets a `.sh` file with chmod-and-execute instructions in the hint.
+        // Browsers can't launch a terminal directly, so this is the closest
+        // path we have to a single-button install.
+        var runBtn = document.getElementById('welcome-run');
+        var runCmd = document.getElementById('welcome-cmd');
+        var runHint = document.getElementById('welcome-run-hint');
+        if (runBtn && runCmd) {
+            var ua = navigator.userAgent || '';
+            var plat = navigator.platform || '';
+            var isMac = /Mac|iPhone|iPad|iPod/.test(plat) || /Mac OS X/.test(ua);
+            var isWin = /Win/.test(plat);
+            var fileName = isMac ? 'soa-web-install.command' : 'soa-web-install.sh';
+            runBtn.addEventListener('click', function () {
+                var installCmd = runCmd.textContent.trim();
+                var script =
+                    '#!/bin/bash\n' +
+                    '# SoA-Web installer. Generated by the welcome page.\n' +
+                    '# macOS: double-click this file to open Terminal and install.\n' +
+                    '# Linux: chmod +x this file and run it from your terminal.\n' +
+                    'set -e\n' +
+                    installCmd + '\n' +
+                    'echo\n' +
+                    'echo "Done. Reload the website tab to pick up the backend."\n' +
+                    'echo\n' +
+                    'read -n 1 -s -r -p "Press any key to close…" || true\n' +
+                    'echo\n';
+                var blob = new Blob([script], { type: 'application/x-shellscript' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url; a.download = fileName;
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+
+                if (runHint) {
+                    var hint = isMac
+                        ? strings.run_hint_mac
+                        : isWin ? strings.run_hint_win : strings.run_hint_nix;
+                    runHint.textContent = hint;
+                    runHint.hidden = false;
+                }
+                runBtn.textContent = strings.downloaded;
+                setTimeout(function () { runBtn.textContent = strings.run; }, 4000);
+            });
+        }
         if (enter) {
             enter.addEventListener('click', function () {
                 try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
@@ -547,6 +617,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
       <div class="tabs" id="tabs"></div>
       <div class="topbar-actions">
         <button id="new-tab" data-icon="＋" data-i18n="topbar.new_tab" data-i18n-title="topbar.new_tab_title" title="New tab (Ctrl+Shift+T)">＋ TAB</button>
+        <button id="new-tab-pick" class="new-tab-pick" title="New tab in folder…" aria-label="New tab in folder">▾</button>
         <button id="toggle-view" data-icon="⊞" data-i18n="topbar.tiles" data-i18n-title="topbar.tiles_title" title="Toggle tiles / tabs view">⊞ TILES</button>
         <select id="lang" class="lang-select" aria-label="Language"></select>
         <button id="toggle-audio" data-icon="♪" data-i18n="topbar.audio_on" data-i18n-title="topbar.audio_title" title="Mute / unmute sound FX" data-state="on">♪ FX</button>
@@ -571,7 +642,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=43"></script>
+  <script type="module" src="/assets/app.js?v=44"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

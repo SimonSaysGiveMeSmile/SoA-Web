@@ -7,17 +7,28 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const COOKIE_NAME = 'soa_web_auth';
 const COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 7;  // 7 days
 
+const SIGN_KEY_FILE = path.join(os.homedir(), '.soa-web', 'sign-key');
+
 function resolveSignKey(env = process.env) {
     const k = env.SOA_WEB_SIGN_KEY;
     if (k && k.length >= 16) return k;
-    // Ephemeral key: cookies survive only as long as the process does. Fine
-    // for dev; set SOA_WEB_SIGN_KEY in production so restarts don't rotate
-    // every user's session.
-    return crypto.randomBytes(32).toString('hex');
+    try {
+        const onDisk = fs.readFileSync(SIGN_KEY_FILE, 'utf8').trim();
+        if (onDisk.length >= 16) return onDisk;
+    } catch (_) { /* not yet written */ }
+    const fresh = crypto.randomBytes(32).toString('hex');
+    try {
+        fs.mkdirSync(path.dirname(SIGN_KEY_FILE), { recursive: true });
+        fs.writeFileSync(SIGN_KEY_FILE, fresh, { mode: 0o600 });
+    } catch (_) { /* fall back to ephemeral */ }
+    return fresh;
 }
 
 function sign(value, key) {

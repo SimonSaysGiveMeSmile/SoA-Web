@@ -93,6 +93,18 @@ const ALLOWED_ORIGINS = Array.from(new Set([
 const CROSS_SITE = ALLOWED_ORIGINS.some(o => !/^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(o));
 
 const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
+
+// Boot-time restore: re-seat the previously persisted session under its
+// original token so any browser cookie still in the wild keeps working
+// after a server restart. Tab cwds and scrollback are restored lazily on
+// the first WS connect (see onWsConnect) so we don't spawn PTYs for a
+// session no one is actually visiting.
+const _persistedSession = tabPersist.loadSession();
+if (_persistedSession) {
+    try { sessions.create({ id: _persistedSession.id, token: _persistedSession.token }); }
+    catch (_) { /* corrupted state — fall through, fresh session minted on first hit */ }
+}
+
 const app = express();
 
 app.disable('x-powered-by');
@@ -141,7 +153,10 @@ app.use((req, res, next) => {
 });
 
 const PUBLIC_DIR = path.resolve(__dirname, '../../web/public');
-const MOBILE_DIR = path.resolve(__dirname, '../../mobile/dist');
+// Single source of truth for the mobile companion lives under web/public/m
+// so that both this Node backend and the Vercel static deploy serve the same
+// client. (mobile/dist/ used to be a separate copy and drifted out of sync.)
+const MOBILE_DIR = path.resolve(__dirname, '../../web/public/m');
 const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ protocol: 1, backend: '' })};`;
 
 // ── Middleware: attach session ──────────────────────────────────────────
@@ -166,6 +181,7 @@ function requireAuthed(req, res, next) {
         s = sessions.create();
         const token = auth.issue(s.token, SIGN_KEY);
         res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
+        tabPersist.saveSession({ id: s.id, token: s.token });
     }
     req.session = s;
     s.touch();
@@ -322,7 +338,11 @@ server.on('upgrade', (req, socket, head) => {
     // When a client (e.g. mobile) arrives with a valid SESSION_TOKEN but no
     // cookie, share the primary desktop session instead of minting an empty one.
     // This lets the mobile companion see the same tabs and terminal output.
-    const session = existing || _findPrimarySession() || sessions.create();
+    let session = existing || _findPrimarySession();
+    if (!session) {
+        session = sessions.create();
+        tabPersist.saveSession({ id: session.id, token: session.token });
+    }
     wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session, req));
 });
 
@@ -391,6 +411,8 @@ function onWsConnect(ws, session, req) {
         // run so the user sees the conversation/work that was on screen
         // before the restart. The PTY itself is fresh — divider makes that
         // explicit so nobody mistakes the seeded text for a live process.
+        // Match scrollback to tab by index; cwd doubles as a sanity check so
+        // a desync between the two files doesn't cross-paste history.
         const saved = tabPersist.load();
         if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
             const shellEnv = envStore.getEnvForShell();
@@ -398,7 +420,8 @@ function onWsConnect(ws, session, req) {
             const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
             saved.tabs.forEach((entry, i) => {
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
-                const prior = sbList[i] && typeof sbList[i].scrollback === 'string' ? sbList[i].scrollback : '';
+                const sb = sbList[i];
+                const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
                 const label = entry.userRenamed && entry.title ? entry.title : (cwd || 'tab');
                 const seed = prior
                     ? prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n`
@@ -487,7 +510,8 @@ function handleInput(session, d) {
     };
     switch (d.kind) {
         case INPUT_KIND.NEW_TAB: {
-            const t = mgr.open({ cols: d.cols, rows: d.rows, silent: true, env: envStore.getEnvForShell() });
+            const cwd = (typeof d.cwd === 'string' && d.cwd && fs.existsSync(d.cwd)) ? d.cwd : undefined;
+            const t = mgr.open({ cols: d.cols, rows: d.rows, cwd, silent: true, env: envStore.getEnvForShell() });
             session.activeTab = t.id;
             session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: t.id, connectedDevices: session.sockets.size }));
             break;
