@@ -386,19 +386,31 @@ function onWsConnect(ws, session, req) {
         }, 3000);
         if (session._cwdInterval.unref) session._cwdInterval.unref();
 
-        // Restore tabs from disk if this is a fresh session with no tabs
+        // Restore tabs from disk if this is a fresh session with no tabs.
+        // Seed each new shell's scrollback with the bytes saved by the prior
+        // run so the user sees the conversation/work that was on screen
+        // before the restart. The PTY itself is fresh — divider makes that
+        // explicit so nobody mistakes the seeded text for a live process.
         const saved = tabPersist.load();
         if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
             const shellEnv = envStore.getEnvForShell();
-            for (const entry of saved.tabs) {
+            const savedSb = tabPersist.loadScrollback();
+            const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
+            saved.tabs.forEach((entry, i) => {
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
+                const prior = sbList[i] && typeof sbList[i].scrollback === 'string' ? sbList[i].scrollback : '';
+                const label = entry.userRenamed && entry.title ? entry.title : (cwd || 'tab');
+                const seed = prior
+                    ? prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n`
+                    : '';
                 session.tabMgr.open({
                     title: entry.userRenamed ? entry.title : undefined,
                     cwd,
                     env: shellEnv,
                     silent: true,
+                    seedScrollback: seed || undefined,
                 });
-            }
+            });
         }
 
         autoPilot.instance.attach(session.tabMgr, (tabId) => session._agentStatus && session._agentStatus.get(tabId) || 'idle');
@@ -584,12 +596,25 @@ const heartbeat = setInterval(() => {
 }, 5000);
 if (heartbeat.unref) heartbeat.unref();
 
+// Persist scrollback to disk every 5 minutes so a server restart doesn't
+// lose the on-screen context. Metadata (titles, cwds) is already saved on
+// every change; this captures the live PTY output for each tab.
+const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(5 * 60 * 1000), 10);
+const scrollbackFlush = setInterval(() => {
+    for (const s of sessions.sessions.values()) {
+        if (s.tabMgr) tabPersist.saveAll(s.tabMgr);
+    }
+}, SCROLLBACK_FLUSH_MS);
+if (scrollbackFlush.unref) scrollbackFlush.unref();
+
 function shutdown(code = 0) {
     console.log('\nshutting down…');
     clearInterval(heartbeat);
-    // Persist tab state before killing PTYs
+    clearInterval(scrollbackFlush);
+    // Persist tabs + scrollback before killing PTYs so the next boot can
+    // seed each tab with what was on screen.
     for (const s of sessions.sessions.values()) {
-        if (s.tabMgr) tabPersist.saveImmediate(s.tabMgr);
+        if (s.tabMgr) tabPersist.saveAll(s.tabMgr);
     }
     try { pair.stop(); } catch (_) {}
     try { wss.close(); } catch (_) {}

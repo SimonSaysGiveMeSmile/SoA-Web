@@ -372,15 +372,40 @@ class MobileQRWidget extends Widget {
         this._lastSnap = snap;
         const lanList = (snap && snap.lan) || [];
         const pubUrl  = snap && snap.publicUrl;
-        const target  = pubUrl || lanList[0] || null;
+        // QR + URLs only appear while pairing is online. When off (idle/error/
+        // starting), render the empty placeholder so the user knows the
+        // tunnel isn't live.
+        const target  = state === 'online' ? (pubUrl || lanList[0] || null) : null;
 
         function pairUrl(backendUrl) {
-            const token = currentToken();
+            const token = (snap && snap.pairToken) || currentToken();
             const u = new URL('/m/', backendUrl);
             u.searchParams.set('backend', backendUrl);
             if (token) u.searchParams.set('t', token);
             return u.toString();
         }
+
+        const actions = state === 'online'
+            ? [
+                $el('button', {
+                    class: 'mqr-toggle mqr-restart',
+                    text: tr('mqr.restart'),
+                    onclick: () => this._restart(),
+                }),
+                $el('button', {
+                    class: 'mqr-toggle mqr-off',
+                    text: tr('mqr.off'),
+                    onclick: () => this._stop(),
+                }),
+            ]
+            : [
+                $el('button', {
+                    class: 'mqr-toggle mqr-start',
+                    text: state === 'starting' ? '…' : tr('mqr.start'),
+                    onclick: () => this._start(),
+                    disabled: state === 'starting' ? true : null,
+                }),
+            ];
 
         this.body.replaceChildren(
             $el('div', { class: `mqr-status mqr-${state}` }, [
@@ -391,37 +416,33 @@ class MobileQRWidget extends Widget {
                 ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(pairUrl(target))}`), alt: 'pairing QR' })]
                 : [$el('div', { class: 'mqr-empty', text: tr('mqr.empty') })]),
             $el('div', { class: 'mqr-urls' },
-                lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
-                    $el('div', { class: 'mqr-url' }, [
-                        $el('span', { class: 'mqr-tag', text: i === 0 && lanList.length ? 'LAN' : 'PUB' }),
-                        $el('span', { class: 'mqr-u',   text: u }),
-                        $el('button', {
-                            class: 'mqr-copy', text: tr('mqr.copy'),
-                            onclick: (e) => {
-                                const btn = e.currentTarget;
-                                const url = pairUrl(u);
-                                const done = () => { btn.textContent = '✓'; setTimeout(() => { btn.textContent = tr('mqr.copy'); }, 1400); };
-                                if (navigator.clipboard && navigator.clipboard.writeText) {
-                                    navigator.clipboard.writeText(url).then(done, () => { btn.textContent = tr('mqr.copy'); });
-                                } else {
-                                    const ta = document.createElement('textarea');
-                                    ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
-                                    document.body.appendChild(ta); ta.select();
-                                    try { document.execCommand('copy'); done(); } catch (_) {}
-                                    document.body.removeChild(ta);
-                                }
-                            },
-                        }),
-                    ]),
-                ),
+                state === 'online'
+                    ? lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
+                        $el('div', { class: 'mqr-url' }, [
+                            $el('span', { class: 'mqr-tag', text: i === 0 && lanList.length ? 'LAN' : 'PUB' }),
+                            $el('span', { class: 'mqr-u',   text: u }),
+                            $el('button', {
+                                class: 'mqr-copy', text: tr('mqr.copy'),
+                                onclick: (e) => {
+                                    const btn = e.currentTarget;
+                                    const url = pairUrl(u);
+                                    const done = () => { btn.textContent = '✓'; setTimeout(() => { btn.textContent = tr('mqr.copy'); }, 1400); };
+                                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                                        navigator.clipboard.writeText(url).then(done, () => { btn.textContent = tr('mqr.copy'); });
+                                    } else {
+                                        const ta = document.createElement('textarea');
+                                        ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                                        document.body.appendChild(ta); ta.select();
+                                        try { document.execCommand('copy'); done(); } catch (_) {}
+                                        document.body.removeChild(ta);
+                                    }
+                                },
+                            }),
+                        ]),
+                    )
+                    : [],
             ),
-            $el('div', { class: 'mqr-actions' }, [
-                $el('button', {
-                    class: 'mqr-toggle',
-                    text: state === 'online' ? tr('mqr.stop') : (state === 'starting' ? '…' : tr('mqr.pair')),
-                    onclick: () => state === 'online' ? this._stop() : this._start(),
-                }),
-            ]),
+            $el('div', { class: 'mqr-actions' }, actions),
             snap && snap.error ? $el('div', { class: 'mqr-err', text: snap.error }) : '',
         );
     }
@@ -459,6 +480,22 @@ class MobileQRWidget extends Widget {
             this._render(data.state, data);
             if (this.audio) this.audio.play('panels');
         } catch (e) { /* ignore */ }
+    }
+
+    async _restart() {
+        // Stop, then start. Render the transient 'starting' state so the
+        // button doesn't flash a misleading 'OFF' between calls.
+        this._render('starting', this._lastSnap);
+        if (this.audio) this.audio.play('scan');
+        try { await jpost('/api/pair/stop', {}); } catch (_) {}
+        try {
+            const { data } = await jpost('/api/pair/start', {});
+            this._render(data.state, data);
+            if (data.state === 'online' && this.audio) this.audio.play('granted');
+            if (data.state === 'error' && this.audio) this.audio.play('denied');
+        } catch (e) {
+            this._render('error', { error: e.message });
+        }
     }
 }
 

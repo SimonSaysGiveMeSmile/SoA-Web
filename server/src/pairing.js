@@ -107,18 +107,27 @@ async function toSvg(text, { size = 220 } = {}) {
 }
 
 function mount(app, requireAuthed, pair, { onTunnelUp } = {}) {
+    // Helper: tag the snapshot with the caller's session token so the desktop
+    // can embed it as ?t= in the QR. The phone uses cookie auth via the WS
+    // upgrade, but cookies don't cross devices — the token in the QR is what
+    // lets the phone attach to the same session that the desktop is in.
+    const withToken = (snap, req) => {
+        const tok = req && req.session && req.session.token;
+        return tok ? Object.assign({}, snap, { pairToken: tok }) : snap;
+    };
+
     app.get('/api/pair/status', requireAuthed, (req, res) => {
-        res.json({ ok: true, data: pair.snapshot() });
+        res.json({ ok: true, data: withToken(pair.snapshot(), req) });
     });
     app.post('/api/pair/start', requireAuthed, async (req, res) => {
         const snap = await pair.start();
         if (snap.state === 'online' && snap.publicUrl && onTunnelUp) {
             onTunnelUp(snap.publicUrl);
         }
-        res.json({ ok: true, data: snap });
+        res.json({ ok: true, data: withToken(snap, req) });
     });
     app.post('/api/pair/stop', requireAuthed, (req, res) => {
-        res.json({ ok: true, data: pair.stop() });
+        res.json({ ok: true, data: withToken(pair.stop(), req) });
     });
     app.get('/api/pair/qr', requireAuthed, async (req, res) => {
         const text = String((req.query && req.query.text) || '').slice(0, 2000);

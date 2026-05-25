@@ -16,10 +16,14 @@ try {
 
 const { execFile, spawn } = require('child_process');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 async function openTunnel(port) {
     const cf = await _tryCloudflared(port);
     if (cf) return cf;
+    const ng = await _tryNgrok(port);
+    if (ng) return ng;
     const lt = await _tryLocaltunnel(port);
     if (lt) return lt;
     return null;
@@ -168,6 +172,17 @@ async function _tryLocaltunnel(port) {
 // ── helpers ───────────────────────────────────────────────────────
 
 function _findBinary(name) {
+    // Probe well-known install locations first so the lookup works even when
+    // the parent process's PATH is stripped (launchd, IDE shells, etc.).
+    const candidates = [
+        '/opt/homebrew/bin/' + name,
+        '/usr/local/bin/' + name,
+        '/usr/bin/' + name,
+        '/bin/' + name,
+    ];
+    for (const c of candidates) {
+        try { if (fs.existsSync(c)) return Promise.resolve(c); } catch (_) {}
+    }
     return new Promise(resolve => {
         execFile('which', [name], (err, stdout) => {
             if (err || !stdout.trim()) return resolve(null);

@@ -37,9 +37,12 @@
 .mqr-u   { color: var(--soa-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mqr-copy { background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line-soft); padding: 2px 6px; font-size: 9px; cursor: pointer; }
 .mqr-copy:hover { color: var(--soa-accent); border-color: var(--soa-accent); }
-.mqr-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
+.mqr-actions { margin-top: 8px; display: flex; justify-content: flex-end; gap: 6px; }
 .mqr-toggle { background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-accent); padding: 4px 14px; font-family: var(--font-display); font-size: 10px; letter-spacing: 0.3em; cursor: pointer; }
 .mqr-toggle:hover { background: rgba(170,207,209,0.08); }
+.mqr-toggle[disabled] { opacity: 0.5; cursor: default; }
+.mqr-toggle.mqr-off { color: var(--soa-red); border-color: var(--soa-red); }
+.mqr-toggle.mqr-off:hover { background: rgba(255,80,80,0.08); }
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
 
 /* ── Port scanner widget ───────────────────────────────────────────── */
