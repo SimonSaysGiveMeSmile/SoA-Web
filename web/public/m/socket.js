@@ -155,7 +155,9 @@ export class BridgeSocket extends EventTarget {
 
     _open() {
         this._clearTimers();
-        const url = `${this.baseUrl}/ws?t=${encodeURIComponent(this.token)}`;
+        const url = this.token
+            ? `${this.baseUrl}/ws?t=${encodeURIComponent(this.token)}`
+            : `${this.baseUrl}/ws`;
         this._setState(SocketState.CONNECTING, { attempt: this._attempt + 1 });
 
         this._probeConnectivity().then(diag => {

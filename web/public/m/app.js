@@ -295,12 +295,38 @@ class App {
         this._wireIdleHide();
 
         const { token, backend, altOrigin } = readToken();
+        const primaryOrigin = backend || location.origin;
+
         if (!token) {
-            this._showFatal('No session token. Re-scan the QR code on the desktop.');
+            // The QR/link arrived without a token. That's only fine if the
+            // backend isn't gating /ws on a session token — otherwise the WS
+            // upgrade would 401 forever. Probe /api/ping (which is open) to
+            // find out which case we're in.
+            this._bootWithoutToken(primaryOrigin, altOrigin);
             return;
         }
 
-        const primaryOrigin = backend || location.origin;
+        this._boot(primaryOrigin, altOrigin, token);
+    }
+
+    async _bootWithoutToken(primaryOrigin, altOrigin) {
+        let tokenRequired = true;
+        try {
+            const res = await fetch(primaryOrigin + '/api/ping', { cache: 'no-store' });
+            if (res.ok) {
+                const body = await res.json().catch(() => null);
+                if (body && body.tokenRequired === false) tokenRequired = false;
+            }
+        } catch (_) { /* network failure → fall through to fatal */ }
+
+        if (tokenRequired) {
+            this._showFatal('No session token. Re-scan the QR code on the desktop.');
+            return;
+        }
+        this._boot(primaryOrigin, altOrigin, '');
+    }
+
+    _boot(primaryOrigin, altOrigin, token) {
         this.socket = new BridgeSocket({
             url: wsBaseFromHttp(primaryOrigin),
             altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
