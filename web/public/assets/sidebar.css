@@ -109,6 +109,9 @@
     color: rgba(170,207,209,0.72);
     margin-bottom: 8px;
 }
+.widget-note-warn {
+    color: #f0a060;
+}
 .widget-btn {
     display: block;
     width: 100%;

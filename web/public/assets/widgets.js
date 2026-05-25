@@ -885,9 +885,54 @@ class ConsoleLogWidget extends Widget {
     }
 }
 
+// ── INSTALLER ────────────────────────────────────────────────────────────
+// One-button install/update for the local backend. Sends the install command
+// to the active tab's PTY via SHELL_COMMAND, so the user sees the installer
+// run in a real terminal rather than blind-execing in the background.
+class InstallerWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.installer', parent, intervalMs: 0 });
+        this._cmd = 'curl -fsSL https://www.s0a.app/install.sh | sh';
+        this._lastSentAt = 0;
+    }
+    onLangChange() { this.tick(); }
+    _runInActiveTab() {
+        const cfg = window.__SOA_WEB__ || {};
+        const bridge = cfg._bridge;
+        const shell = cfg._shell;
+        if (!bridge || !shell || shell.activeId == null) {
+            this._setStatus(tr('widget.installer.no_tab'), true);
+            return;
+        }
+        const now = Date.now();
+        if (now - this._lastSentAt < 1500) return;
+        this._lastSentAt = now;
+        bridge.input('shell-command', { id: shell.activeId, line: this._cmd });
+        this._setStatus(tr('widget.installer.sent'), false);
+    }
+    _setStatus(text, isWarn) {
+        if (!this._statusEl) return;
+        this._statusEl.textContent = text;
+        this._statusEl.classList.toggle('widget-note-warn', !!isWarn);
+    }
+    tick() {
+        this._statusEl = $el('div', { class: 'widget-note', text: '' });
+        this.body.replaceChildren(
+            $el('div', { class: 'widget-note', text: tr('widget.installer.body') }),
+            $el('button', {
+                class: 'widget-btn',
+                text: tr('widget.installer.run'),
+                onclick: () => this._runInActiveTab(),
+            }),
+            this._statusEl,
+        );
+    }
+}
+
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
+        new InstallerWidget({ parent }),
         new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),
         new SysInfoWidget({ parent }),
