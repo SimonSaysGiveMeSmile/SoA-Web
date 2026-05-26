@@ -350,14 +350,6 @@ class Shell {
             this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
         });
 
-        const newTabPick = $('#new-tab-pick');
-        if (newTabPick) {
-            newTabPick.addEventListener('click', () => {
-                this.audio.play('granted');
-                this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
-            });
-        }
-
         const tmBtn = $('#timemachine');
         if (tmBtn) {
             tmBtn.addEventListener('click', async () => {

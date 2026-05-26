@@ -69,8 +69,9 @@ html, body {
   background: linear-gradient(to bottom, #0a1318, var(--soa-bg));
 }
 .brand {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 12px;
   min-width: 226px;
+  padding-left: 8px;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
@@ -226,6 +227,9 @@ html, body {
     font-size: 14px;
     letter-spacing: 0;
     line-height: 1;
+}
+.topbar-actions #timemachine[data-icon]::before {
+    font-size: 18px;
 }
 
 /* Primary CTA: make the desktop-app download read as the promoted action
@@ -1273,18 +1277,6 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 
 /* ── New-tab folder picker ─────────────────────────────────────── */
-.new-tab-pick {
-  background: transparent; color: #aacfd1;
-  border: 1px solid rgba(170,207,209,0.28);
-  border-left: none;
-  padding: 0 8px;
-  font-family: inherit; font-size: 11px;
-  cursor: pointer;
-  margin-left: -4px;
-  transition: background 80ms;
-}
-.new-tab-pick:hover { background: rgba(170,207,209,0.08); }
-
 .soa-folder-picker { width: min(560px, calc(100vw - 32px)); }
 .fp-path {
   font-size: 12px; color: #d8eef0;
