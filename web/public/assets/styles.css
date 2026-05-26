@@ -70,12 +70,26 @@ html, body {
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
-  width: 226px; min-width: 226px;
+  min-width: 226px;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
   white-space: nowrap;
 }
+.brand #toggle-sidebar {
+  background: transparent; color: var(--soa-accent);
+  border: 1px solid var(--soa-accent-dim);
+  width: 30px; height: 30px; padding: 0;
+  font-size: 0; letter-spacing: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; box-sizing: border-box;
+  font-family: var(--font-display);
+}
+.brand #toggle-sidebar::before {
+  content: attr(data-icon);
+  font-size: 14px; line-height: 1;
+}
+.brand #toggle-sidebar:hover { border-color: var(--soa-accent); }
 .tile-back-btn {
   background: transparent; border: 1px solid var(--soa-accent-dim);
   color: var(--soa-accent); padding: 4px 10px;
@@ -332,7 +346,9 @@ html, body {
         gap: 8px;
         padding: 0 8px;
     }
-    .brand { display: none; }
+    .brand { min-width: 0; }
+    .brand .soa-name-link, .brand #tile-back { display: none; }
+    .brand #toggle-sidebar { width: 32px; height: 32px; }
     .tabs {
         gap: 4px; min-width: 0;
         /* iOS momentum scrolling and a touch-native action (don't hijack
@@ -1301,3 +1317,29 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   display: flex; gap: 8px; justify-content: flex-end;
   margin-top: 12px;
 }
+
+/* ── Time machine modal ─────────────────────────────────────────
+   Reuses .soa-modal-backdrop scrim + .soa-modal frame, but overrides
+   width and adds a scrollable list of snapshots. */
+.soa-tm-modal { width: min(640px, calc(100vw - 32px)); max-height: min(80vh, 720px); display: flex; flex-direction: column; }
+.soa-tm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px dashed rgba(170,207,209,0.24); padding-bottom: 10px; margin-bottom: 8px; }
+.soa-tm-head h2 { margin: 0; font-size: 12px; letter-spacing: 0.18em; color: var(--soa-accent); }
+.soa-tm-actions { display: flex; gap: 6px; }
+.soa-tm-actions button { background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-accent-dim); padding: 4px 10px; font-family: inherit; font-size: 11px; letter-spacing: 0.08em; cursor: pointer; }
+.soa-tm-actions button:hover { border-color: var(--soa-accent); }
+.soa-tm-actions .soa-tm-close { width: 28px; padding: 0; }
+.soa-tm-sub { font-size: 11px; color: rgba(170,207,209,0.62); margin: 0 0 8px; }
+.soa-tm-list { flex: 1 1 auto; overflow: auto; border: 1px solid rgba(170,207,209,0.16); padding: 6px; min-height: 120px; }
+.soa-tm-list:empty::before, .soa-tm-list[data-empty]:not([data-empty=""])::before { content: attr(data-empty); display: block; padding: 28px 12px; text-align: center; color: rgba(170,207,209,0.5); font-size: 11px; }
+.soa-tm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 8px; border-bottom: 1px dashed rgba(170,207,209,0.12); }
+.soa-tm-row:last-child { border-bottom: 0; }
+.soa-tm-row:hover { background: rgba(170,207,209,0.04); }
+.soa-tm-when { display: flex; flex-direction: column; min-width: 0; }
+.soa-tm-when strong { font-weight: 500; color: var(--soa-accent); font-size: 12px; }
+.soa-tm-meta { font-size: 10px; color: rgba(170,207,209,0.55); letter-spacing: 0.04em; }
+.soa-tm-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.soa-tm-row-actions button { background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-accent-dim); padding: 4px 10px; font-family: inherit; font-size: 11px; letter-spacing: 0.06em; cursor: pointer; }
+.soa-tm-row-actions button:hover { border-color: var(--soa-accent); }
+.soa-tm-row-actions .soa-tm-del { padding: 4px 8px; }
+.soa-tm-foot { margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(170,207,209,0.18); color: rgba(170,207,209,0.5); }
+.soa-tm-foot small { font-size: 10px; line-height: 1.4; }

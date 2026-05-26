@@ -342,19 +342,32 @@ class Shell {
             this._updateViewBtn();
         }
 
-        $('#new-tab').addEventListener('click', () => {
+        $('#new-tab').addEventListener('click', async () => {
+            this.audio.play('panels');
+            const cwd = await pickFolder();
+            if (!cwd) return;
             this.audio.play('granted');
-            this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
+            this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
         });
 
         const newTabPick = $('#new-tab-pick');
         if (newTabPick) {
-            newTabPick.addEventListener('click', async () => {
-                this.audio.play('panels');
-                const cwd = await pickFolder();
-                if (!cwd) return;
+            newTabPick.addEventListener('click', () => {
                 this.audio.play('granted');
-                this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
+                this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
+            });
+        }
+
+        const tmBtn = $('#timemachine');
+        if (tmBtn) {
+            tmBtn.addEventListener('click', async () => {
+                this.audio.play('panels');
+                try {
+                    const tm = await import('/assets/timemachine.js?v=1');
+                    tm.openTimemachineModal(this);
+                } catch (err) {
+                    console.warn('[timemachine] open failed', err);
+                }
             });
         }
 
@@ -1981,6 +1994,10 @@ async function bootServerMode({ backend, token }) {
         if (shell.viewMode === 'tiles') shell._applyViewMode();
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
+
+    import('/assets/timemachine.js?v=1')
+        .then(tm => tm.startTimemachine(shell))
+        .catch(err => console.warn('[timemachine] boot failed', err));
 }
 
 async function _doBoot() {
