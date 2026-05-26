@@ -69,9 +69,9 @@ html, body {
   background: linear-gradient(to bottom, #0a1318, var(--soa-bg));
 }
 .brand {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 18px;
   min-width: 226px;
-  padding-left: 8px;
+  padding-left: 24px;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
@@ -228,8 +228,20 @@ html, body {
     letter-spacing: 0;
     line-height: 1;
 }
+/* Timemachine clock — rendered as an SVG via CSS mask so it inherits
+   currentColor (the accent line) and stays crisp at any zoom. The SVG is
+   a clock face with hour/minute hands; data-icon attribute is left empty
+   on the button because the mask supplies the visual. */
 .topbar-actions #timemachine[data-icon]::before {
-    font-size: 18px;
+    content: "";
+    display: block;
+    width: 20px; height: 20px;
+    background: currentColor;
+    -webkit-mask: var(--soa-icon-clock) center / contain no-repeat;
+            mask: var(--soa-icon-clock) center / contain no-repeat;
+}
+:root {
+    --soa-icon-clock: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='9'/><path d='M12 7v5l3.5 2'/></svg>");
 }
 
 /* Primary CTA: make the desktop-app download read as the promoted action
