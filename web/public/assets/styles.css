@@ -64,14 +64,14 @@ html, body {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 16px;
-  padding: 0 14px;
+  padding: 0 14px 0 0;
   border-bottom: 1px solid var(--soa-line);
   background: linear-gradient(to bottom, #0a1318, var(--soa-bg));
 }
 .brand {
-  display: flex; align-items: center; gap: 18px;
+  display: flex; align-items: center; gap: 12px;
   min-width: 226px;
-  padding-left: 24px;
+  padding-left: 0;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
   text-shadow: 0 0 10px rgba(170,207,209,0.4);
