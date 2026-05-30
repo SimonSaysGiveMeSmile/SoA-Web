@@ -10,6 +10,23 @@
 
 const PROTOCOL_VERSION = 1;
 
+// Mobile-side bridge diagnostics. On by default so the phone's remote
+// inspector (Safari Web Inspector / chrome://inspect) shows the full
+// connection lifecycle without a rebuild. Flip ?debug=0 to silence.
+const DEBUG = (() => {
+    try {
+        const p = new URLSearchParams(location.search).get('debug');
+        if (p === '0') return false;
+        if (p === '1') return true;
+        const saved = localStorage.getItem('son-of-anton.debug');
+        return saved !== '0';
+    } catch (_) { return true; }
+})();
+
+function blog(...args) {
+    if (DEBUG) console.log('%c[bridge]', 'color:#5fff5f', ...args);
+}
+
 export const SocketState = Object.freeze({
     IDLE:         'idle',
     CONNECTING:   'connecting',
@@ -43,6 +60,10 @@ export class BridgeSocket extends EventTarget {
         this._endpointIdx = 0;
         this.baseUrl = this._endpoints[0] || url;
         this.token = token;
+        blog('init — endpoints:', this._endpoints, 'token:', token ? '(present)' : '(none)', 'pageProto:', location.protocol);
+        if (this._endpoints.length === 0) {
+            blog('WARNING: no eligible ws endpoints. On an https page, ws:// LAN URLs are dropped (mixed content) — only a wss:// tunnel works.');
+        }
         this.state = SocketState.IDLE;
         this.diagnosis = Diagnosis.NONE;
         this.ws = null;
@@ -135,6 +156,7 @@ export class BridgeSocket extends EventTarget {
         this._endpointIdx = (this._endpointIdx + 1) % this._endpoints.length;
         this.baseUrl = this._endpoints[this._endpointIdx];
         this._failuresOnCurrent = 0;
+        blog('rotate → endpoint[' + this._endpointIdx + ']', this.baseUrl);
         this.dispatchEvent(new CustomEvent('endpoint-switched', {
             detail: { url: this.baseUrl, index: this._endpointIdx },
         }));
@@ -159,12 +181,15 @@ export class BridgeSocket extends EventTarget {
             ? `${this.baseUrl}/ws?t=${encodeURIComponent(this.token)}`
             : `${this.baseUrl}/ws`;
         this._setState(SocketState.CONNECTING, { attempt: this._attempt + 1 });
+        blog('open → probing', this.baseUrl, '(attempt', this._attempt + 1 + ')');
 
         this._probeConnectivity().then(diag => {
             if (this._stop) return;
+            blog('probe result:', diag, 'for', this.baseUrl);
             this._setDiagnosis(diag);
 
             if (diag === Diagnosis.NETWORK_OFFLINE || diag === Diagnosis.CAPTIVE_PORTAL) {
+                blog('blocked by', diag, '— not opening ws, scheduling retry');
                 this._scheduleReconnect();
                 return;
             }
@@ -174,6 +199,7 @@ export class BridgeSocket extends EventTarget {
             // of burning another WS handshake on the same dead host.
             if (diag === Diagnosis.SERVER_UNREACHABLE) {
                 this._failuresOnCurrent += 1;
+                blog('server unreachable (', this._failuresOnCurrent, 'strikes on this endpoint )');
                 if (this._failuresOnCurrent >= 2 && this._rotateEndpoint()) {
                     this._scheduleReconnect(0);
                     return;
@@ -184,14 +210,17 @@ export class BridgeSocket extends EventTarget {
 
             let ws;
             try {
+                blog('probe OK — opening WebSocket to', url);
                 ws = new WebSocket(url);
             } catch (e) {
+                blog('WebSocket constructor threw:', e && e.message);
                 this._scheduleReconnect();
                 return;
             }
             this.ws = ws;
 
             ws.addEventListener('open', () => {
+                blog('WS OPEN ✓', this.baseUrl);
                 this._attempt = 0;
                 this._failuresOnCurrent = 0;
                 this._lastPongAt = Date.now();
@@ -211,12 +240,18 @@ export class BridgeSocket extends EventTarget {
                     this._lastPongAt = Date.now();
                     return;
                 }
+                if (DEBUG) {
+                    const sz = typeof ev.data === 'string' ? ev.data.length : 0;
+                    if (msg.t === 'term-data') blog('recv term-data tab=' + (msg.d && msg.d.id), sz + 'B');
+                    else blog('recv', msg.t, sz + 'B');
+                }
                 this.dispatchEvent(new CustomEvent('message', { detail: msg }));
             });
 
-            ws.addEventListener('error', () => {});
+            ws.addEventListener('error', () => { blog('WS error event (close will follow)'); });
 
             ws.addEventListener('close', (ev) => {
+                blog('WS CLOSE code=' + ev.code, 'reason=' + (ev.reason || '(none)'), 'wasConnected=' + (this.state === SocketState.CONNECTED));
                 this._stopHeartbeat();
                 this.ws = null;
                 if (this._stop) {
@@ -271,8 +306,10 @@ export class BridgeSocket extends EventTarget {
                 const body = await res.json().catch(() => null);
                 if (body && body.ok) return Diagnosis.CONNECTED;
             }
+            blog('probe: /api/ping returned', res.status, '→ treating as captive portal');
             return Diagnosis.CAPTIVE_PORTAL;
-        } catch (_) {
+        } catch (e) {
+            blog('probe: /api/ping fetch failed (', e && e.name, ') — checking internet reachability');
             // Server unreachable — check internet to classify further
         }
 

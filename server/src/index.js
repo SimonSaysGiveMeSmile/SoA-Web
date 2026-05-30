@@ -45,6 +45,7 @@ const tabApi           = require('./tabApi');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
+const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
@@ -297,11 +298,15 @@ const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
+    const ua = (req.headers['user-agent'] || '').slice(0, 80);
+    const origin = req.headers.origin || '(none)';
+    dbg('ws-upgrade', 'incoming', url.pathname, 'origin=' + origin, 'hasCookie=' + !!req.headers.cookie, 'hasToken=' + !!url.searchParams.get('t'), 'ua=' + ua);
     if (url.pathname !== '/ws') { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
 
     if (SESSION_TOKEN) {
         const presented = url.searchParams.get('t') || '';
         if (!constantTimeEq(presented, SESSION_TOKEN)) {
+            dbg('ws-upgrade', 'REJECT 401: session token mismatch (presented len=' + presented.length + ')');
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
             return;
@@ -318,6 +323,7 @@ server.on('upgrade', (req, socket, head) => {
         const origin = req.headers.origin;
         const sameOrigin = !origin; // curl / non-browser clients
         if (!sameOrigin && !ALLOWED_ORIGINS.includes(origin)) {
+            dbg('ws-upgrade', 'REJECT 403: origin not in allowlist:', origin, '— allowed:', ALLOWED_ORIGINS.join(','));
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
@@ -342,6 +348,11 @@ server.on('upgrade', (req, socket, head) => {
     if (!session) {
         session = sessions.create();
         tabPersist.saveSession({ id: session.id, token: session.token });
+        dbg('ws-upgrade', 'bound to NEW empty session', session.id.slice(0, 8), '(no cookie match, no primary found — mobile will see no tabs)');
+    } else {
+        const via = existing ? 'cookie' : 'primary-share';
+        const tabCount = session.tabMgr ? session.tabMgr.order.length : 0;
+        dbg('ws-upgrade', 'bound to session', session.id.slice(0, 8), 'via', via, '— tabs=' + tabCount, 'existingSockets=' + session.sockets.size);
     }
     wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session, req));
 });
@@ -394,7 +405,10 @@ function onWsConnect(ws, session, req) {
     if (!session.tabs) session.tabs = [];
     if (!session.tabMgr) {
         session.tabMgr = new TabManager({
-            onData: (tabId, data) => session.send(frame(MSG.TERM_DATA, { id: tabId, data })),
+            onData: (tabId, data) => {
+                agg('term-out', 'session=' + session.id.slice(0, 8) + ' tab=' + tabId, data.length, '→ ' + session.sockets.size + ' socket(s)');
+                session.send(frame(MSG.TERM_DATA, { id: tabId, data }));
+            },
             onTabsChange: list => {
                 // If the active tab just went away, pick the next available
                 // one so HELLO after a reload doesn't point at a dead id.
@@ -477,6 +491,7 @@ function onWsConnect(ws, session, req) {
             graveyard: session.tabMgr.graveyardList(),
             connectedDevices: session.sockets.size,
         }));
+        dbg('ws-hello', 'sent to', ws._userAgent.slice(0, 40), '— tabs=' + tabList.length, 'activeId=' + activeId, 'replayBytes=' + replay.reduce((n, r) => n + r.data.length, 0), 'devices=' + session.sockets.size);
         // Notify other clients that a new device joined
         _broadcastDeviceCount(session, ws);
     } catch (_) { /* ignore */ }
@@ -515,6 +530,13 @@ function onWsConnect(ws, session, req) {
 
 function handleInput(session, d) {
     const mgr = session.tabMgr;
+    if (d.kind === INPUT_KIND.TERM_RESIZE) {
+        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(resizes SHARED pty; desktop will reflow)');
+    } else if (d.kind === INPUT_KIND.TERM_KEYS) {
+        dbg('input', 'TERM_KEYS tab=' + d.id, JSON.stringify((d.text || '').slice(0, 16)));
+    } else if (d.kind) {
+        dbg('input', d.kind, 'tab=' + (d.id != null ? d.id : '-'));
+    }
     // Debounce cwd polling per tab: a typed `cd /foo && cd /bar` bursts
     // several CRs within a few ms, and we only want one lsof/readlink per
     // burst. The timer is stored on the session so it's GC'd with it.

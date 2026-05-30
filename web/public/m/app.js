@@ -280,10 +280,10 @@ class App {
         this._idleTimer = null;
         this._chromeHidden = false;
 
-        this._baseFontSize = 12;
+        this._minFontSize = 5;
+        this._maxFontSize = 15;
         this._termCols = 80;
         this._userScrolledUp = false;
-        this._lastSentCols = 0;
 
         this._pullHint = document.createElement('div');
         this._pullHint.className = 'pull-hint';
@@ -1135,23 +1135,27 @@ class App {
         const availW = this.termEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
         if (availW <= 0) return;
 
+        // Measure character width at a known reference size, then derive the
+        // per-pixel advance (monospace ⇒ width scales linearly with font-size).
+        const REF = 16;
         const probe = document.createElement('span');
-        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:' + this._baseFontSize + 'px/' + 1.45 + ' ' + cs.fontFamily;
+        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:' + REF + 'px/' + 1.45 + ' ' + cs.fontFamily;
         probe.textContent = 'M';
         document.body.appendChild(probe);
-        const charW = probe.offsetWidth;
+        const charWAtRef = probe.offsetWidth;
         document.body.removeChild(probe);
+        if (charWAtRef <= 0) return;
 
-        if (charW <= 0) return;
+        // Mobile is a VIEWER of the desktop's terminal. We do NOT resize the
+        // shared PTY (that SIGWINCHes the desktop and corrupts its layout).
+        // Instead we shrink our own font so the desktop's `cols` columns fit
+        // the phone width, preserving the exact wrapping the desktop renders.
+        const targetCols = this._termCols || 80;
+        const charWPerPx = charWAtRef / REF;
+        let fontSize = availW / (targetCols * charWPerPx);
+        fontSize = Math.max(this._minFontSize, Math.min(this._maxFontSize, fontSize));
 
-        const fitCols = Math.floor(availW / charW);
-        if (fitCols !== this._lastSentCols && fitCols > 10) {
-            this._lastSentCols = fitCols;
-            const rows = Math.floor((this.termEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)) / (this._baseFontSize * 1.45));
-            this.socket.sendInput('term-resize', { id: this._activeTabId, cols: fitCols, rows });
-        }
-
-        this.termEl.style.fontSize = this._baseFontSize + 'px';
+        this.termEl.style.fontSize = fontSize + 'px';
     }
 
     _renderWidgets(widgets, host) {

@@ -18,14 +18,19 @@ const { execFile, spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { dbg } = require('./debug');
 
 async function openTunnel(port) {
+    dbg('tunnel', 'openTunnel: probing providers for port', port);
     const cf = await _tryCloudflared(port);
-    if (cf) return cf;
+    if (cf) { dbg('tunnel', 'cloudflared up:', cf.url); return cf; }
+    dbg('tunnel', 'cloudflared unavailable, trying ngrok');
     const ng = await _tryNgrok(port);
-    if (ng) return ng;
+    if (ng) { dbg('tunnel', 'ngrok up:', ng.url); return ng; }
+    dbg('tunnel', 'ngrok unavailable, trying localtunnel');
     const lt = await _tryLocaltunnel(port);
-    if (lt) return lt;
+    if (lt) { dbg('tunnel', 'localtunnel up:', lt.url); return lt; }
+    dbg('tunnel', 'no tunnel provider succeeded');
     return null;
 }
 
@@ -33,7 +38,8 @@ async function openTunnel(port) {
 
 async function _tryCloudflared(port) {
     const cfPath = await _findBinary('cloudflared');
-    if (!cfPath) return null;
+    if (!cfPath) { dbg('tunnel', 'cloudflared binary not found on PATH or well-known dirs'); return null; }
+    dbg('tunnel', 'cloudflared binary:', cfPath);
     try {
         const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`], {
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -42,6 +48,7 @@ async function _tryCloudflared(port) {
 
         const url = await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
+                dbg('tunnel', 'cloudflared timed out after 30s waiting for URL; last output:', buf.slice(-400));
                 try { proc.kill(); } catch (_) {}
                 reject(new Error('cloudflared timeout'));
             }, 30000);
@@ -56,8 +63,8 @@ async function _tryCloudflared(port) {
             };
             proc.stdout.on('data', onData);
             proc.stderr.on('data', onData);
-            proc.on('error', e => { clearTimeout(timeout); reject(e); });
-            proc.on('exit', code => { clearTimeout(timeout); reject(new Error('cloudflared exit ' + code)); });
+            proc.on('error', e => { clearTimeout(timeout); dbg('tunnel', 'cloudflared spawn error:', e.message); reject(e); });
+            proc.on('exit', code => { clearTimeout(timeout); dbg('tunnel', 'cloudflared exited early, code', code, '— output:', buf.slice(-400)); reject(new Error('cloudflared exit ' + code)); });
         });
 
         let dead = false;
@@ -65,6 +72,7 @@ async function _tryCloudflared(port) {
         proc.on('exit', () => {
             if (dead) return;
             dead = true;
+            dbg('tunnel', 'cloudflared process exited (tunnel down):', url);
             if (onDeath) onDeath();
         });
 
