@@ -20,6 +20,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
+const MIC_SETTINGS_KEY = 'son-of-anton.mic-settings';
 
 /* ── Theme definitions ──────────────────────────────── */
 
@@ -268,6 +269,13 @@ class App {
         this.btnReload = document.getElementById('btn-reload');
         this.btnForceReload = document.getElementById('btn-force-reload');
 
+        this.micDeviceSelect = document.getElementById('mic-device-select');
+        this.micGainSlider = document.getElementById('mic-gain-slider');
+        this.micGainValue = document.getElementById('mic-gain-value');
+        this.micMeterBar = document.getElementById('mic-meter-bar');
+        this.btnTestMic = document.getElementById('btn-test-mic');
+        this.btnRefreshDevices = document.getElementById('btn-refresh-devices');
+
         this._snapshot = null;
         this._activeTab = 0;
         this._activeTabId = 0;
@@ -285,6 +293,13 @@ class App {
         this._termCols = 80;
         this._userScrolledUp = false;
 
+        this._micStream = null;
+        this._micAnalyser = null;
+        this._micGainNode = null;
+        this._micMonitorInterval = null;
+        this._micDevices = [];
+        this._micSettings = this._loadMicSettings();
+
         this._pullHint = document.createElement('div');
         this._pullHint.className = 'pull-hint';
         document.body.appendChild(this._pullHint);
@@ -292,6 +307,7 @@ class App {
         if (this.themeGrid) this._renderThemeGrid();
         if (this.soundGrid) this._renderSoundGrid();
         if (this.btnSettings) this._wireSettings();
+        this._wireMicSettings();
         this._wireIdleHide();
 
         const { token, backend, altOrigin } = readToken();
@@ -474,6 +490,244 @@ class App {
 
     _closeSettings() {
         if (this.settingsOverlay) this.settingsOverlay.classList.remove('open');
+        this._stopMicMonitor();
+    }
+
+    /* ── Microphone Settings ── */
+
+    _loadMicSettings() {
+        try {
+            const saved = localStorage.getItem(MIC_SETTINGS_KEY);
+            if (saved) {
+                return JSON.parse(saved);
+            }
+        } catch (_) {}
+        return { deviceId: 'default', gain: 100 };
+    }
+
+    _saveMicSettings() {
+        try {
+            localStorage.setItem(MIC_SETTINGS_KEY, JSON.stringify(this._micSettings));
+        } catch (_) {}
+    }
+
+    _wireMicSettings() {
+        if (!this.micDeviceSelect || !this.micGainSlider) return;
+
+        // Load saved settings
+        if (this.micGainSlider) {
+            this.micGainSlider.value = this._micSettings.gain;
+            if (this.micGainValue) this.micGainValue.textContent = `${this._micSettings.gain}%`;
+        }
+
+        // Enumerate devices on load
+        this._enumerateMicDevices();
+
+        // Device selection
+        this.micDeviceSelect.addEventListener('change', (e) => {
+            this._micSettings.deviceId = e.target.value;
+            this._saveMicSettings();
+            // If mic is active, restart with new device
+            if (this._micStream) {
+                this._stopMicMonitor();
+                this._startMicMonitor();
+            }
+        });
+
+        // Gain control
+        this.micGainSlider.addEventListener('input', (e) => {
+            const gain = parseInt(e.target.value, 10);
+            this._micSettings.gain = gain;
+            if (this.micGainValue) this.micGainValue.textContent = `${gain}%`;
+            this._saveMicSettings();
+            // Apply gain in real-time if monitoring
+            if (this._micGainNode) {
+                this._micGainNode.gain.value = gain / 100;
+            }
+        });
+
+        // Test mic button
+        if (this.btnTestMic) {
+            this.btnTestMic.addEventListener('click', () => this._toggleMicMonitor());
+        }
+
+        // Refresh devices button
+        if (this.btnRefreshDevices) {
+            this.btnRefreshDevices.addEventListener('click', () => this._enumerateMicDevices());
+        }
+    }
+
+    async _enumerateMicDevices() {
+        if (!this.micDeviceSelect) return;
+
+        try {
+            // Request permission first to get device labels
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.getTracks().forEach(t => t.stop());
+
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            this._micDevices = devices.filter(d => d.kind === 'audioinput');
+
+            this.micDeviceSelect.innerHTML = '';
+
+            if (this._micDevices.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = 'No microphones found';
+                this.micDeviceSelect.appendChild(opt);
+                return;
+            }
+
+            // Add default option
+            const defaultOpt = document.createElement('option');
+            defaultOpt.value = 'default';
+            defaultOpt.textContent = 'Default Microphone';
+            this.micDeviceSelect.appendChild(defaultOpt);
+
+            // Add each device
+            for (const device of this._micDevices) {
+                const opt = document.createElement('option');
+                opt.value = device.deviceId;
+                opt.textContent = device.label || `Microphone ${this._micDevices.indexOf(device) + 1}`;
+                this.micDeviceSelect.appendChild(opt);
+            }
+
+            // Restore saved selection
+            if (this._micSettings.deviceId) {
+                this.micDeviceSelect.value = this._micSettings.deviceId;
+            }
+
+        } catch (err) {
+            console.error('Failed to enumerate mic devices:', err);
+            this.micDeviceSelect.innerHTML = '<option value="">Permission denied</option>';
+        }
+    }
+
+    async _toggleMicMonitor() {
+        if (this._micStream) {
+            this._stopMicMonitor();
+            if (this.btnTestMic) this.btnTestMic.textContent = 'TEST MIC';
+        } else {
+            const success = await this._startMicMonitor();
+            if (success && this.btnTestMic) {
+                this.btnTestMic.textContent = 'STOP TEST';
+            }
+        }
+    }
+
+    async _startMicMonitor() {
+        try {
+            const constraints = {
+                audio: {
+                    deviceId: this._micSettings.deviceId === 'default'
+                        ? undefined
+                        : { exact: this._micSettings.deviceId },
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: false,
+                }
+            };
+
+            this._micStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+            // Create audio context for analysis
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            const audioContext = new AudioContext();
+            const source = audioContext.createMediaStreamSource(this._micStream);
+
+            // Gain node for volume control
+            this._micGainNode = audioContext.createGain();
+            this._micGainNode.gain.value = this._micSettings.gain / 100;
+
+            // Analyser for level metering
+            this._micAnalyser = audioContext.createAnalyser();
+            this._micAnalyser.fftSize = 256;
+            this._micAnalyser.smoothingTimeConstant = 0.8;
+
+            source.connect(this._micGainNode).connect(this._micAnalyser);
+
+            // Start monitoring
+            this._updateMicMeter();
+
+            return true;
+        } catch (err) {
+            console.error('Failed to start mic monitor:', err);
+            alert('Failed to access microphone: ' + err.message);
+            return false;
+        }
+    }
+
+    _stopMicMonitor() {
+        if (this._micMonitorInterval) {
+            clearInterval(this._micMonitorInterval);
+            this._micMonitorInterval = null;
+        }
+
+        if (this._micStream) {
+            this._micStream.getTracks().forEach(track => track.stop());
+            this._micStream = null;
+        }
+
+        if (this._micAnalyser) {
+            try {
+                this._micAnalyser.disconnect();
+            } catch (_) {}
+            this._micAnalyser = null;
+        }
+
+        if (this._micGainNode) {
+            try {
+                this._micGainNode.disconnect();
+            } catch (_) {}
+            this._micGainNode = null;
+        }
+
+        if (this.micMeterBar) {
+            this.micMeterBar.style.width = '0%';
+        }
+
+        if (this.btnTestMic) {
+            this.btnTestMic.textContent = 'TEST MIC';
+        }
+    }
+
+    _updateMicMeter() {
+        if (!this._micAnalyser || !this.micMeterBar) return;
+
+        const update = () => {
+            if (!this._micAnalyser) return;
+
+            const dataArray = new Uint8Array(this._micAnalyser.frequencyBinCount);
+            this._micAnalyser.getByteTimeDomainData(dataArray);
+
+            // Calculate RMS level
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                const normalized = (dataArray[i] - 128) / 128;
+                sum += normalized * normalized;
+            }
+            const rms = Math.sqrt(sum / dataArray.length);
+            const db = 20 * Math.log10(rms + 0.0001);
+            const level = Math.max(0, Math.min(100, (db + 60) * (100 / 60)));
+
+            if (this.micMeterBar) {
+                this.micMeterBar.style.width = `${level}%`;
+                // Color code: green -> yellow -> red
+                if (level < 70) {
+                    this.micMeterBar.style.background = 'var(--accent)';
+                } else if (level < 90) {
+                    this.micMeterBar.style.background = 'var(--warn)';
+                } else {
+                    this.micMeterBar.style.background = 'var(--err)';
+                }
+            }
+
+            if (this._micStream) {
+                requestAnimationFrame(update);
+            }
+        };
+
+        update();
     }
 
     /* ── Auto-hide chrome ── */
@@ -726,6 +980,7 @@ class App {
         this._hasReceivedSnapshot = true;
         this._activeTab = newActiveTab;
         this._activeTabId = activeId;
+        console.log('%c[app] snapshot activeId=' + activeId + ' (type: ' + typeof activeId + ')', 'color:#ff9');
 
         for (const t of tabs) {
             if (!this._tabStates.has(t.id)) {
@@ -1057,7 +1312,11 @@ class App {
         const ts = this._getTabState(tabId);
         ts.pendingData += payload.data;
 
-        if (tabId === this._activeTabId && !this._flushScheduled) {
+        const match = tabId === this._activeTabId;
+        if (!match) {
+            console.log('%c[app] term-data tab=' + tabId + ' (type: ' + typeof tabId + ') BUFFERED, activeTabId=' + this._activeTabId + ' (type: ' + typeof this._activeTabId + ')', 'color:#f66');
+        }
+        if (match && !this._flushScheduled) {
             this._flushScheduled = true;
             requestAnimationFrame(() => this._flushPending());
         }

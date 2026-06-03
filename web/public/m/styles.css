@@ -891,3 +891,147 @@ button:active { background: var(--accent-bg-hover); }
 [data-theme="liquid-glass"] .pull-hint {
     background: rgba(0,0,0,0.15);
 }
+
+/* ── Microphone Settings ───────────────────────────── */
+
+.mic-control {
+    margin-bottom: 16px;
+}
+
+.mic-label {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    opacity: 0.7;
+}
+
+.mic-select {
+    width: 100%;
+    font: inherit;
+    font-size: 13px;
+    color: var(--fg);
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.mic-select:hover {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+}
+
+.mic-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.mic-gain-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.mic-slider {
+    flex: 1;
+    height: 4px;
+    background: var(--bg-alt);
+    border-radius: 2px;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+}
+
+.mic-slider::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    transition: transform 0.2s ease;
+}
+
+.mic-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+
+.mic-slider::-webkit-slider-thumb:active {
+    transform: scale(1.1);
+}
+
+.mic-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    transition: transform 0.2s ease;
+}
+
+.mic-slider::-moz-range-thumb:hover {
+    transform: scale(1.2);
+}
+
+.mic-slider::-moz-range-thumb:active {
+    transform: scale(1.1);
+}
+
+.mic-slider::-webkit-slider-runnable-track {
+    width: 100%;
+    height: 4px;
+    background: linear-gradient(to right, var(--accent) 0%, var(--accent) var(--value, 50%), var(--bg-alt) var(--value, 50%), var(--bg-alt) 100%);
+    border-radius: 2px;
+}
+
+.mic-slider::-moz-range-track {
+    width: 100%;
+    height: 4px;
+    background: var(--bg-alt);
+    border-radius: 2px;
+}
+
+.mic-value {
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    min-width: 45px;
+    text-align: right;
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.mic-meter {
+    width: 100%;
+    height: 32px;
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+}
+
+.mic-meter-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.05s ease-out;
+    position: relative;
+}
+
+.mic-meter-bar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 2px;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.8);
+    box-shadow: 0 0 8px var(--accent-glow);
+}

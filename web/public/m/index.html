@@ -64,6 +64,33 @@
                 <div class="sound-grid" id="sound-grid"></div>
             </div>
             <div class="settings-section">
+                <div class="settings-label">Microphone</div>
+                <div class="settings-hint">Select input device and adjust gain.</div>
+                <div class="mic-control">
+                    <label for="mic-device-select" class="mic-label">Input Device</label>
+                    <select id="mic-device-select" class="mic-select">
+                        <option value="">Loading devices...</option>
+                    </select>
+                </div>
+                <div class="mic-control">
+                    <label for="mic-gain-slider" class="mic-label">Microphone Gain</label>
+                    <div class="mic-gain-row">
+                        <input type="range" id="mic-gain-slider" class="mic-slider" min="0" max="200" value="100" step="5" />
+                        <span id="mic-gain-value" class="mic-value">100%</span>
+                    </div>
+                </div>
+                <div class="mic-control">
+                    <label class="mic-label">Input Level</label>
+                    <div class="mic-meter">
+                        <div id="mic-meter-bar" class="mic-meter-bar"></div>
+                    </div>
+                </div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-test-mic" type="button">TEST MIC</button>
+                    <button class="settings-btn" id="btn-refresh-devices" type="button">REFRESH DEVICES</button>
+                </div>
+            </div>
+            <div class="settings-section">
                 <div class="settings-label">Connection</div>
                 <div class="settings-hint" id="reload-hint">
                     If the desktop session becomes unresponsive, reload the
