@@ -15,6 +15,7 @@
 
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
 import { ansiToHtml, newState } from './ansi.js';
+import { TermBuffer } from './terminal.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 
@@ -22,7 +23,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v31 · tui-clear+log-topleft · 2026-06-04';
+const MOBILE_BUILD = 'v32 · grid-terminal · 2026-06-04';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -904,7 +905,7 @@ class App {
             connectedDevices: this._connectedDevices,
             tabStates: Array.from(this._tabStates.entries()).map(([k, v]) => ({
                 tab: k,
-                pendingBytes: v.pendingData.length,
+                lines: v.term ? v.term.lineCount() : 0,
             })),
             termChildNodes: this.termEl.childNodes.length,
         };
@@ -974,7 +975,7 @@ class App {
         try { endpoint = new URL(this.socket.baseUrl.replace(/^ws/, 'http')).host; } catch (_) {}
         const ctrl = (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'yes' : 'no';
         const tabs = d.tabStates.map(t =>
-            `#${t.tab}${t.tab === d.activeTabId ? '*' : ''} buf=${t.pendingBytes}`).join('  ') || '(none)';
+            `#${t.tab}${t.tab === d.activeTabId ? '*' : ''} ln=${t.lines}`).join('  ') || '(none)';
         const allLines = (this.termEl.textContent || '').split('\n');
         const blank = allLines.filter(l => l.trim() === '').length;
         this._diagSummaryEl.textContent =
@@ -1092,7 +1093,9 @@ class App {
 
         for (const t of tabs) {
             if (!this._tabStates.has(t.id)) {
-                this._tabStates.set(t.id, { termState: newState(), pendingData: '' });
+                this._tabStates.set(t.id, { term: new TermBuffer({ rows: t.rows || 24 }) });
+            } else if (t.rows) {
+                this._tabStates.get(t.id).term.setRows(t.rows);
             }
         }
 
@@ -1136,14 +1139,17 @@ class App {
     }
 
     _renderActiveTerminal() {
-        // No-op on snapshot — terminal content arrives via term-data frames
-        // and the hello replay. We just ensure the font is fitted.
+        // Repaint the active tab's grid buffer (e.g. after a tab switch or a
+        // snapshot). Content lives in each tab's TermBuffer; here we just render
+        // whichever is active and fit the font.
         const activeTab = this._snapshot && this._snapshot.tabs
             ? this._snapshot.tabs.find(t => t.id === this._activeTabId)
             : null;
-        if (activeTab && activeTab.cols) {
-            this._fitTerminalFont(activeTab.cols);
-        }
+        if (activeTab && activeTab.cols) this._fitTerminalFont(activeTab.cols);
+        const ts = this._getTabState(this._activeTabId);
+        if (activeTab && activeTab.rows) ts.term.setRows(activeTab.rows);
+        this.termEl.innerHTML = ts.term.toHtml();
+        this._scrollTermBottom();
     }
 
     _updateDeviceCount() {
@@ -1391,88 +1397,45 @@ class App {
     }
 
     _renderTerminalSnapshot(term) {
-        const ts = this._getTabState(this._activeTab);
-        ts.termState = newState();
-        ts.pendingData = '';
-
-        const prevScrollTop = this.termEl.scrollTop;
-
-        let text = term.screen || term.recent || '';
-        if (!term.screen) {
-            text = text.replace(/\r\n/g, '\n').replace(/\r/g, '');
-        }
-        const { html, state } = ansiToHtml(text, ts.termState);
-        ts.termState = state;
-        this.termEl.innerHTML = html;
+        const ts = this._getTabState(this._activeTabId);
+        ts.term.reset();
+        if (term.rows) ts.term.setRows(term.rows);
+        ts.term.write(term.screen || term.recent || '');
+        this.termEl.innerHTML = ts.term.toHtml();
         this._fitTerminalFont(term.cols);
-
-        if (this._userScrolledUp) {
-            this.termEl.scrollTop = prevScrollTop;
-        } else {
-            this._scrollTermBottom();
-        }
+        this._scrollTermBottom();
     }
 
     _applyTerminalChunk(payload) {
         if (!payload || typeof payload.data !== 'string') return;
-        // Server sends { id: tabId, data: "..." }
+        // Server sends { id: tabId, data: "..." }. Feed every tab's grid buffer
+        // immediately (cheap, no DOM) so switching tabs shows correct state and
+        // no frame is ever lost; only the active tab triggers a re-render.
         const tabId = payload.id ?? this._activeTabId;
         const ts = this._getTabState(tabId);
-        ts.pendingData += payload.data;
-
-        const match = tabId === this._activeTabId;
-        if (!match) {
-            // Orphaned frame — buffered for a tab that isn't the active one.
-            // If this fires while the screen is blank, activeTabId is wrong.
-            pushLog(`⚠ term-data tab=${tabId} BUFFERED (active=${this._activeTabId}) +${payload.data.length}B`);
-            console.log('%c[app] term-data tab=' + tabId + ' BUFFERED, activeTabId=' + this._activeTabId, 'color:#f66');
-        }
-        if (match && !this._flushScheduled) {
+        ts.term.write(payload.data);
+        if (tabId === this._activeTabId && !this._flushScheduled) {
             this._flushScheduled = true;
-            requestAnimationFrame(() => this._flushPending());
+            requestAnimationFrame(() => this._renderActive());
         }
     }
 
     _getTabState(id) {
         if (!this._tabStates.has(id)) {
-            this._tabStates.set(id, { termState: newState(), pendingData: '' });
+            this._tabStates.set(id, { term: new TermBuffer({ rows: this._screenRows || 24 }) });
         }
         return this._tabStates.get(id);
     }
 
-    _flushPending() {
+    // Re-render the active tab's grid buffer into the DOM. Coalesced via rAF so
+    // a burst of frames produces at most one paint per animation frame.
+    _renderActive() {
         this._flushScheduled = false;
         const ts = this._getTabState(this._activeTabId);
-        if (!ts.pendingData) return;
-
-        let data = ts.pendingData;
-        ts.pendingData = '';
-
-        data = data.replace(/\r\n/g, '\n');
-        const crParts = data.split('\r');
-
-        for (let ci = 0; ci < crParts.length; ci++) {
-            if (ci > 0) this._eraseCurrentLine();
-            const seg = crParts[ci];
-            if (!seg) continue;
-            const { html, state, cleared } = ansiToHtml(seg, ts.termState);
-            ts.termState = state;
-            // A screen-clear / alt-screen / reset wipes the view so full-screen
-            // TUI redraws replace rather than stack into an endless blank log.
-            if (cleared) this.termEl.textContent = '';
-            this._insertTermHtml(html);
-        }
-
-        const MAX_NODES = 4000;
-        while (this.termEl.childNodes.length > MAX_NODES) {
-            this.termEl.removeChild(this.termEl.firstChild);
-        }
-
-        if (!this._userScrolledUp) {
-            requestAnimationFrame(() => {
-                this.termEl.scrollTop = this.termEl.scrollHeight;
-            });
-        }
+        const stayBottom = !this._userScrolledUp;
+        const prevTop = this.termEl.scrollTop;
+        this.termEl.innerHTML = ts.term.toHtml();
+        this.termEl.scrollTop = stayBottom ? this.termEl.scrollHeight : prevTop;
     }
 
     _scrollTermBottom() {
@@ -1484,61 +1447,6 @@ class App {
     _isAtBottom() {
         const el = this.termEl;
         return (el.scrollHeight - el.scrollTop - el.clientHeight) < 10;
-    }
-
-    // Insert rendered html, honoring cursor-up sentinels (\x01U<n>\x01) that
-    // ansiToHtml emits for ESC[nA. Between sentinels we append normally (with a
-    // blank-run backstop); at a sentinel we drop the last n lines so the app's
-    // in-place repaint replaces them instead of stacking new blank lines.
-    _insertTermHtml(html) {
-        if (html.indexOf('\x01') === -1) {
-            this.termEl.insertAdjacentHTML('beforeend', html.replace(/\n{3,}/g, '\n\n'));
-            return;
-        }
-        const parts = html.split(/\x01U(\d+)\x01/);
-        for (let i = 0; i < parts.length; i++) {
-            if (i % 2 === 0) {
-                if (parts[i]) this.termEl.insertAdjacentHTML('beforeend', parts[i].replace(/\n{3,}/g, '\n\n'));
-            } else {
-                this._cursorUpLines(parseInt(parts[i], 10) || 1);
-            }
-        }
-    }
-
-    // Remove the last n line-breaks worth of content from the terminal, so a
-    // cursor-up repaint overwrites in place rather than appending.
-    _cursorUpLines(n) {
-        const el = this.termEl;
-        let need = n;
-        while (need > 0 && el.childNodes.length) {
-            const last = el.childNodes[el.childNodes.length - 1];
-            const text = last.textContent || '';
-            const nl = (text.match(/\n/g) || []).length;
-            if (nl >= need) {
-                let idx = text.length;
-                for (let k = 0; k < need; k++) idx = text.lastIndexOf('\n', idx - 1);
-                last.textContent = text.slice(0, idx + 1);
-                need = 0;
-            } else {
-                need -= nl;
-                el.removeChild(last);
-            }
-        }
-    }
-
-    _eraseCurrentLine() {
-        const el = this.termEl;
-        while (el.childNodes.length) {
-            const last = el.childNodes[el.childNodes.length - 1];
-            if (last.nodeType === Node.TEXT_NODE) {
-                const nlPos = last.textContent.lastIndexOf('\n');
-                if (nlPos !== -1) {
-                    last.textContent = last.textContent.substring(0, nlPos + 1);
-                    return;
-                }
-            }
-            el.removeChild(last);
-        }
     }
 
     _fitTerminalFont(cols) {

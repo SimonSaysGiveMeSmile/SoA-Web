@@ -24,13 +24,13 @@ const PALETTE = [
     '#e6a3ff', '#9fffe9', '#ffffff'
 ];
 
-function escHtml(s) {
+export function escHtml(s) {
     return s.replace(/[&<>"']/g, c => (
         { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
     ));
 }
 
-function spanFor(state) {
+export function spanFor(state) {
     const styles = [];
     const classes = [];
     if (state.bold)      classes.push('ansi-bold');
@@ -51,7 +51,7 @@ function spanFor(state) {
     return `<span${cls}${sty}>`;
 }
 
-function applySgr(state, params) {
+export function applySgr(state, params) {
     if (!params.length) params = [0];
     let i = 0;
     while (i < params.length) {
@@ -91,7 +91,7 @@ function applySgr(state, params) {
     }
 }
 
-function palette256(idx) {
+export function palette256(idx) {
     if (idx < 16) return PALETTE[idx];
     if (idx >= 232) {
         const v = 8 + (idx - 232) * 10;
