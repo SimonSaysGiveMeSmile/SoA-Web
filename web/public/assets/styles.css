@@ -298,7 +298,7 @@ html, body {
 .terms .term {
   position: absolute; inset: 0;
   display: none;
-  padding: 4px 0 4px 6px;
+  padding: 4px 6px;
 }
 .terms .term.active { display: block; }
 .terms .xterm { height: 100%; width: 100%; }
