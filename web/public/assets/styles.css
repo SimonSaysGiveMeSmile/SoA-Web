@@ -1288,13 +1288,89 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   .tile { min-height: 90px; padding: 10px 12px; }
 }
 
+/* ── Dashboard port info panel ──────────────────────────────────── */
+.dashboard-port-info {
+  grid-column: 1 / -1;
+  background: linear-gradient(135deg, rgba(170,207,209,0.08) 0%, rgba(170,207,209,0.03) 100%);
+  border: 1px solid var(--soa-accent-dim);
+  padding: 12px 16px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.dashboard-port-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.dashboard-port-count {
+  font-family: var(--font-display);
+  font-size: 14px;
+  letter-spacing: 0.2em;
+  color: var(--soa-accent);
+  font-weight: bold;
+  text-shadow: 0 0 8px rgba(170,207,209,0.4);
+}
+.dashboard-port-conflict {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--soa-yellow);
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  background: rgba(241,250,140,0.1);
+  border: 1px solid rgba(241,250,140,0.3);
+  border-radius: 2px;
+}
+.dashboard-port-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dashboard-port-item {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--soa-fg);
+  padding: 4px 10px;
+  background: rgba(170,207,209,0.05);
+  border: 1px solid var(--soa-line-soft);
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+}
+
 /* ── New-tab folder picker ─────────────────────────────────────── */
 .soa-folder-picker { width: min(560px, calc(100vw - 32px)); }
+.fp-navbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.fp-nav-btn {
+  background: transparent;
+  color: var(--soa-accent);
+  border: 1px solid var(--soa-accent-dim);
+  padding: 6px 12px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  cursor: pointer;
+  min-width: 36px;
+  transition: all 0.15s ease;
+}
+.fp-nav-btn:hover:not(:disabled) {
+  border-color: var(--soa-accent);
+  background: rgba(170,207,209,0.08);
+}
+.fp-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
 .fp-path {
+  flex: 1;
   font-size: 12px; color: #d8eef0;
   background: rgba(170,207,209,0.06);
   border: 1px solid rgba(170,207,209,0.18);
-  padding: 8px 10px; margin-bottom: 8px;
+  padding: 8px 10px;
   word-break: break-all;
 }
 .fp-list {

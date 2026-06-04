@@ -1631,6 +1631,7 @@ class Shell {
         }
         this._tilesGridEl.style.display = '';
         this._installTilesDrop();
+        this._updateDashboardPortInfo();
         const existing = new Map();
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             existing.set(Number(node.dataset.tileId), node);
@@ -1774,6 +1775,59 @@ class Shell {
             pie.style.background = `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
         }
         pie.title = pct > 0 ? `Context: ${pct}%` : '';
+    }
+
+    async _updateDashboardPortInfo() {
+        if (!this._tilesGridEl) return;
+
+        // Remove existing port info if any
+        const existing = this._tilesGridEl.querySelector('.dashboard-port-info');
+        if (existing) existing.remove();
+
+        try {
+            const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+            const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+            const url = new URL(backend + '/api/ports');
+            if (token) url.searchParams.set('t', token);
+
+            const res = await fetch(url.toString(), { credentials: 'include' });
+            if (!res.ok) return;
+
+            const { data } = await res.json();
+            const count = data.ports.length;
+
+            const portInfo = el('div', { class: 'dashboard-port-info' });
+            const header = el('div', { class: 'dashboard-port-header' });
+            const countLabel = count === 1 ? '1 Active Port' : `${count} Active Ports`;
+            const countEl = el('span', { class: 'dashboard-port-count', text: countLabel });
+            header.appendChild(countEl);
+
+            if (data.conflict) {
+                const conflictEl = el('span', {
+                    class: 'dashboard-port-conflict',
+                    text: `⚠ Port ${data.conflict.port} conflict`
+                });
+                header.appendChild(conflictEl);
+            }
+
+            portInfo.appendChild(header);
+
+            if (count > 0) {
+                const list = el('div', { class: 'dashboard-port-list' });
+                data.ports.slice(0, 5).forEach(p => {
+                    const item = el('div', {
+                        class: 'dashboard-port-item',
+                        text: `:${p.port} — ${p.process}`
+                    });
+                    list.appendChild(item);
+                });
+                portInfo.appendChild(list);
+            }
+
+            this._tilesGridEl.insertBefore(portInfo, this._tilesGridEl.firstChild);
+        } catch (e) {
+            // Silently fail - port info is optional
+        }
     }
 
     _removeTilesGrid() {

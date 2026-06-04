@@ -46,6 +46,29 @@
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
 
 /* ── Port scanner widget ───────────────────────────────────────────── */
+.port-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: rgba(170,207,209,0.05);
+  border: 1px solid var(--soa-line-soft);
+  border-radius: 2px;
+}
+.port-summary-count {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: var(--soa-accent);
+  font-weight: bold;
+}
+.port-summary-conflict {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--soa-yellow);
+  letter-spacing: 0.08em;
+}
 .port-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 .port-btn { background: transparent; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.15em; padding: 3px 8px; cursor: pointer; border: 1px solid var(--soa-line-soft); color: var(--soa-accent-dim); }
 .port-btn:hover { color: var(--soa-accent); border-color: var(--soa-accent); }

@@ -745,12 +745,32 @@ class PortScanWidget extends Widget {
     constructor({ parent }) {
         super({ titleKey: 'widget.ports', title: 'PORTS', parent, intervalMs: 5000 });
         this._conflict = null;
+        this._summary = null;
     }
     async tick() {
         if (isSandbox()) { this.setRows([['SCAN', 'N/A (sandbox)']]); return; }
         try {
             const { data } = await jget('/api/ports');
             this._conflict = data.conflict;
+
+            // Add summary banner at the top for at-a-glance view
+            const summary = $el('div', { class: 'port-summary' });
+            const count = data.ports.length;
+            const countLabel = count === 1 ? '1 active port' : `${count} active ports`;
+            const countEl = $el('div', {
+                class: 'port-summary-count',
+                text: countLabel
+            });
+            summary.appendChild(countEl);
+
+            if (data.conflict) {
+                const conflictEl = $el('div', {
+                    class: 'port-summary-conflict',
+                    text: `⚠ Port ${data.conflict.port} conflict`
+                });
+                summary.appendChild(conflictEl);
+            }
+
             const rows = data.ports.slice(0, 6).map(p => {
                 const label = `${p.port}`;
                 const val = `${p.process} (${p.pid})`;
@@ -758,8 +778,11 @@ class PortScanWidget extends Widget {
                 return [label, val, cls];
             });
             if (!rows.length) rows.push(['SCAN', 'no listeners']);
+
             this.body.replaceChildren();
+            this.body.appendChild(summary);
             this.setRows(rows);
+
             if (data.conflict) {
                 const actions = $el('div', { class: 'port-actions' });
                 const killBtn = $el('button', {

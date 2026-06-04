@@ -38,7 +38,13 @@ export function pickFolder() {
         const backdrop = el('div', { class: 'soa-modal-backdrop' });
         const card = el('div', { class: 'soa-modal soa-folder-picker' });
         const title = el('div', { class: 'soa-modal-title', text: 'OPEN NEW TAB IN…' });
+
+        // Navigation controls
+        const backBtn = el('button', { class: 'fp-nav-btn fp-nav-back', text: '←', disabled: true });
+        const forwardBtn = el('button', { class: 'fp-nav-btn fp-nav-forward', text: '→', disabled: true });
         const pathEl = el('div', { class: 'fp-path', text: '' });
+        const navBar = el('div', { class: 'fp-navbar' }, [backBtn, forwardBtn, pathEl]);
+
         const list = el('div', { class: 'fp-list' });
         const note = el('p', { class: 'soa-modal-note fp-note', text: 'Pick the folder where Son of Anton should start the terminal.' });
         const useBtn = el('button', { class: 'soa-modal-copy', text: 'OPEN HERE' });
@@ -47,6 +53,10 @@ export function pickFolder() {
 
         let currentPath = null;
         let closed = false;
+
+        // Navigation history tracking
+        let history = [];
+        let historyIndex = -1;
         const close = (result) => {
             if (closed) return;
             closed = true;
@@ -63,13 +73,44 @@ export function pickFolder() {
         cancelBtn.addEventListener('click', () => close(null));
         useBtn.addEventListener('click', () => { if (currentPath) close(currentPath); });
 
-        async function navigate(target) {
+        // Back/forward navigation handlers
+        backBtn.addEventListener('click', () => {
+            if (historyIndex > 0) {
+                historyIndex--;
+                navigate(history[historyIndex], false); // false = don't add to history
+            }
+        });
+        forwardBtn.addEventListener('click', () => {
+            if (historyIndex < history.length - 1) {
+                historyIndex++;
+                navigate(history[historyIndex], false);
+            }
+        });
+
+        function updateNavButtons() {
+            backBtn.disabled = historyIndex <= 0;
+            forwardBtn.disabled = historyIndex >= history.length - 1;
+        }
+
+        async function navigate(target, addToHistory = true) {
             list.textContent = '';
             list.appendChild(el('div', { class: 'fp-loading', text: 'loading…' }));
             try {
                 const data = await fetchListing(target);
                 currentPath = data.path;
                 pathEl.textContent = data.path;
+
+                // Update navigation history
+                if (addToHistory) {
+                    // If we're in the middle of history, truncate forward entries
+                    if (historyIndex < history.length - 1) {
+                        history = history.slice(0, historyIndex + 1);
+                    }
+                    history.push(data.path);
+                    historyIndex = history.length - 1;
+                }
+                updateNavButtons();
+
                 list.textContent = '';
                 if (data.parent) {
                     const up = el('button', { class: 'fp-row fp-row--up', text: '⬑ ..' });
@@ -97,7 +138,7 @@ export function pickFolder() {
             }
         }
 
-        card.append(title, pathEl, list, note, actions);
+        card.append(title, navBar, list, note, actions);
         backdrop.appendChild(card);
         document.body.appendChild(backdrop);
         navigate(null); // null → server defaults to $HOME
