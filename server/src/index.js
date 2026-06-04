@@ -364,26 +364,11 @@ function _findPrimarySession() {
     return null;
 }
 
-// Canonical activeId — the SNAPSHOT broadcasts used to send `activeTab || 0`
-// while HELLO had a tabList fallback. The mismatch let cwd-poll-triggered
-// snapshots overwrite the mobile client's activeTabId to 0, after which
-// TERM_DATA frames carrying the real tab id were buffered forever and never
-// flushed (T counter rises, screen stays blank). Use this helper everywhere
-// activeId is emitted so all frames agree.
-function _canonicalActiveId(session, tabList) {
-    const list = tabList || (session.tabMgr ? session.tabMgr.list() : []);
-    if (session.activeTab && list.some(t => t.id === session.activeTab)) {
-        return session.activeTab;
-    }
-    return (list[0] && list[0].id) || 0;
-}
-
 function _broadcastDeviceCount(session, excludeWs) {
     const count = session.sockets.size;
-    const tabList = session.tabMgr ? session.tabMgr.list() : [];
     const payload = frame(MSG.SNAPSHOT, {
-        tabs: tabList,
-        activeId: _canonicalActiveId(session, tabList),
+        tabs: session.tabMgr ? session.tabMgr.list() : [],
+        activeId: session.activeTab || 0,
         graveyard: session.tabMgr ? session.tabMgr.graveyardList() : [],
         connectedDevices: count,
     });
@@ -417,7 +402,7 @@ function onWsConnect(ws, session, req) {
                 }
                 session.send(frame(MSG.SNAPSHOT, {
                     tabs: list,
-                    activeId: _canonicalActiveId(session, list),
+                    activeId: session.activeTab || 0,
                     graveyard: session.tabMgr.graveyardList(),
                     connectedDevices: session.sockets.size,
                 }));
@@ -477,11 +462,9 @@ function onWsConnect(ws, session, req) {
         const replay = tabList
             .map(t => ({ id: t.id, data: session.tabMgr.scrollback(t.id) }))
             .filter(r => r.data && r.data.length);
-        const activeId = _canonicalActiveId(session, tabList);
-        // Persist back so later snapshot broadcasts stay consistent — without
-        // this, a session attached for the first time has activeTab=undefined
-        // and the next cwd-poll snapshot would re-broadcast activeId:0.
-        session.activeTab = activeId;
+        const activeId = (session.activeTab && tabList.some(t => t.id === session.activeTab))
+            ? session.activeTab
+            : (tabList[0] && tabList[0].id) || 0;
         ws.send(frame(MSG.HELLO, {
             serverVersion: 1,
             serverTime: Date.now(),
@@ -508,7 +491,6 @@ function onWsConnect(ws, session, req) {
                 if (msg.d && msg.d.what === 'snapshot') {
                     session.send(frame(MSG.SNAPSHOT, {
                         tabs: session.tabMgr.list(),
-                        activeId: _canonicalActiveId(session),
                         graveyard: session.tabMgr.graveyardList(),
                         connectedDevices: session.sockets.size,
                     }));
