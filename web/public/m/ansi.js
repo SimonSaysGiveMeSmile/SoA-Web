@@ -119,6 +119,13 @@ export function ansiToHtml(input, state = newState()) {
     let out = '';
     let buf = '';
     let openTag = false;
+    // Set when the stream asks to wipe the screen (erase-display 2J/3J, full
+    // reset ESC c, or alternate-screen switch). Full-screen TUI apps (e.g. an
+    // agent CLI) redraw by clearing + repainting every frame; without honoring
+    // the clear, an append-only renderer accumulates a screenful of mostly-
+    // blank lines per frame (hundreds of frames ⇒ thousands of blank lines that
+    // bury the real output). The caller wipes the terminal when this is true.
+    let cleared = false;
 
     const flushBuf = () => {
         if (!buf) return;
@@ -175,8 +182,33 @@ export function ansiToHtml(input, state = newState()) {
                 const nums = params.split(';').filter(Boolean).map(Number);
                 applySgr(state, nums);
                 openTagIfNeeded();
+            } else if (final === 'J' && (params === '2' || params === '3')) {
+                // Erase entire display (and scrollback for 3J) — wipe and
+                // restart this render from a clean screen.
+                cleared = true;
+                out = ''; openTag = false;
+                openTagIfNeeded();
+            } else if (final === 'A') {
+                // Cursor up N rows. Full-screen TUIs (e.g. an agent CLI spinner)
+                // print N blank lines then move back up to repaint in place. An
+                // append-only renderer can't move a cursor, so without this each
+                // repaint stacks N more lines (thousands of blank lines pile up).
+                // Emit a sentinel the caller turns into "drop the last N lines",
+                // which the app's repaint then refills — net-stable line count.
+                const n = Math.max(1, parseInt(params, 10) || 1);
+                flushBuf();
+                closeTag();
+                out += '\x01U' + n + '\x01';
+                openTagIfNeeded();
+            } else if ((final === 'h' || final === 'l') &&
+                       /^\?(1049|1047|47)$/.test(params)) {
+                // Enter/leave the alternate screen buffer — treat either as a
+                // fresh screen so full-screen apps don't stack onto the log.
+                cleared = true;
+                out = ''; openTag = false;
+                openTagIfNeeded();
             } else {
-                /* drop everything else — cursor moves, clears, etc. */
+                /* drop everything else — cursor moves, line erases, etc. */
             }
         } else if (next === ']') {
             // OSC sequence
@@ -199,6 +231,14 @@ export function ansiToHtml(input, state = newState()) {
                 }
             }
             openTagIfNeeded();
+        } else if (next === 'c') {
+            // RIS — full terminal reset. Wipe and start clean.
+            cleared = true;
+            out = ''; openTag = false;
+            state.bold = state.dim = state.italic = state.underline = state.reverse = false;
+            state.fg = null; state.bg = null; state.link = null;
+            i += 2;
+            openTagIfNeeded();
         } else {
             // Skip any 2-byte escape we don't model
             i += 2;
@@ -207,7 +247,7 @@ export function ansiToHtml(input, state = newState()) {
 
     flushBuf();
     closeTag();
-    return { html: out, state };
+    return { html: out, state, cleared };
 }
 
 export function newState() {

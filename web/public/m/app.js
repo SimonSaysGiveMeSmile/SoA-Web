@@ -22,7 +22,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v30 · diag-panel · 2026-06-04';
+const MOBILE_BUILD = 'v31 · tui-clear+log-topleft · 2026-06-04';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -921,6 +921,9 @@ class App {
         btn.id = 'diag-toggle';
         btn.textContent = 'LOG';
         btn.setAttribute('aria-label', 'Diagnostics');
+        // Sit in the top bar next to the brand name so it never overlaps the
+        // bottom control bar. Falls back to floating if the brand isn't found.
+        const brandHost = document.querySelector('#topbar .brand');
 
         const panel = document.createElement('div');
         panel.id = 'diag-panel';
@@ -936,7 +939,7 @@ class App {
             '<div class="diag-log-h">EVENT LOG (newest first)</div>' +
             '<pre class="diag-log"></pre>';
 
-        document.body.appendChild(btn);
+        if (brandHost) brandHost.appendChild(btn); else document.body.appendChild(btn);
         document.body.appendChild(panel);
 
         this._diagPanel = panel;
@@ -972,6 +975,8 @@ class App {
         const ctrl = (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'yes' : 'no';
         const tabs = d.tabStates.map(t =>
             `#${t.tab}${t.tab === d.activeTabId ? '*' : ''} buf=${t.pendingBytes}`).join('  ') || '(none)';
+        const allLines = (this.termEl.textContent || '').split('\n');
+        const blank = allLines.filter(l => l.trim() === '').length;
         this._diagSummaryEl.textContent =
             `BUILD     ${MOBILE_BUILD}\n` +
             `PATH      ${location.pathname}   SW-ctrl: ${ctrl}\n` +
@@ -981,7 +986,8 @@ class App {
             `ACTIVE    tabIndex=${d.activeTab}  activeTabId=${d.activeTabId}\n` +
             `TABS      ${tabs}\n` +
             `LAST MSG  ${d.lastMessage}\n` +
-            `TERMNODES ${d.termChildNodes}   devices=${d.connectedDevices}`;
+            `TERMLINES ${allLines.length} (blank ${blank})   nodes=${d.termChildNodes}\n` +
+            `DEVICES   ${d.connectedDevices}`;
         const log = getLogBuffer();
         const lines = [];
         for (let i = log.length - 1; i >= 0 && lines.length < 80; i--) {
@@ -1449,9 +1455,12 @@ class App {
             if (ci > 0) this._eraseCurrentLine();
             const seg = crParts[ci];
             if (!seg) continue;
-            const { html, state } = ansiToHtml(seg, ts.termState);
+            const { html, state, cleared } = ansiToHtml(seg, ts.termState);
             ts.termState = state;
-            this.termEl.insertAdjacentHTML('beforeend', html);
+            // A screen-clear / alt-screen / reset wipes the view so full-screen
+            // TUI redraws replace rather than stack into an endless blank log.
+            if (cleared) this.termEl.textContent = '';
+            this._insertTermHtml(html);
         }
 
         const MAX_NODES = 4000;
@@ -1475,6 +1484,46 @@ class App {
     _isAtBottom() {
         const el = this.termEl;
         return (el.scrollHeight - el.scrollTop - el.clientHeight) < 10;
+    }
+
+    // Insert rendered html, honoring cursor-up sentinels (\x01U<n>\x01) that
+    // ansiToHtml emits for ESC[nA. Between sentinels we append normally (with a
+    // blank-run backstop); at a sentinel we drop the last n lines so the app's
+    // in-place repaint replaces them instead of stacking new blank lines.
+    _insertTermHtml(html) {
+        if (html.indexOf('\x01') === -1) {
+            this.termEl.insertAdjacentHTML('beforeend', html.replace(/\n{3,}/g, '\n\n'));
+            return;
+        }
+        const parts = html.split(/\x01U(\d+)\x01/);
+        for (let i = 0; i < parts.length; i++) {
+            if (i % 2 === 0) {
+                if (parts[i]) this.termEl.insertAdjacentHTML('beforeend', parts[i].replace(/\n{3,}/g, '\n\n'));
+            } else {
+                this._cursorUpLines(parseInt(parts[i], 10) || 1);
+            }
+        }
+    }
+
+    // Remove the last n line-breaks worth of content from the terminal, so a
+    // cursor-up repaint overwrites in place rather than appending.
+    _cursorUpLines(n) {
+        const el = this.termEl;
+        let need = n;
+        while (need > 0 && el.childNodes.length) {
+            const last = el.childNodes[el.childNodes.length - 1];
+            const text = last.textContent || '';
+            const nl = (text.match(/\n/g) || []).length;
+            if (nl >= need) {
+                let idx = text.length;
+                for (let k = 0; k < need; k++) idx = text.lastIndexOf('\n', idx - 1);
+                last.textContent = text.slice(0, idx + 1);
+                need = 0;
+            } else {
+                need -= nl;
+                el.removeChild(last);
+            }
+        }
     }
 
     _eraseCurrentLine() {
