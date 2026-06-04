@@ -91,6 +91,24 @@ html, body {
   font-size: 14px; line-height: 1;
 }
 .brand #toggle-sidebar:hover { border-color: var(--soa-accent); }
+/* Brand name + hover-revealed build version */
+.soa-brand-name { position: relative; display: inline-flex; align-items: center; }
+.soa-version {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 9px; letter-spacing: 0.12em;
+  color: var(--soa-accent-dim);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.soa-brand-name:hover .soa-version,
+.brand:hover .soa-version {
+  opacity: 0.85;
+  transform: translateX(0);
+}
 .tile-back-btn {
   background: transparent; border: 1px solid var(--soa-accent-dim);
   color: var(--soa-accent); padding: 4px 10px;

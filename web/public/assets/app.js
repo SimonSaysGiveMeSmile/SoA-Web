@@ -126,6 +126,16 @@ function wireReleaseLink() {
     if (url) a.href = url;
 }
 
+// Show the build version when hovering the brand name. The version is hidden
+// by default (CSS) and revealed on .brand:hover; we just fill in the text.
+function wireVersion() {
+    const span = document.querySelector('#soa-version');
+    if (!span) return;
+    const v = (window.__SOA_WEB__ || {}).version || 'dev';
+    span.textContent = 'v' + v;
+    span.title = 'Build ' + v;
+}
+
 const $  = sel => document.querySelector(sel);
 const el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -2049,6 +2059,7 @@ async function bootServerMode({ backend, token }) {
 async function _doBoot() {
     wireLangSelector();
     wireReleaseLink();
+    wireVersion();
     applyStatic();
     const backend = await resolveBackend();
     if (backend) {

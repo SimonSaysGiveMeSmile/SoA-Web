@@ -29,5 +29,6 @@ window.__SOA_WEB__ = {
     backend: '',
     wcClientId: '',
     cfAnalyticsToken: '',
-    releaseUrl: 'https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases'
+    releaseUrl: 'https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases',
+    version: 'dev'
 };

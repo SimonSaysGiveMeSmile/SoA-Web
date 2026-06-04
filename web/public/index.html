@@ -134,7 +134,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=40">
+  <link rel="stylesheet" href="/assets/styles.css?v=41">
   <link rel="stylesheet" href="/assets/sidebar.css?v=14">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
@@ -615,7 +615,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
     <header class="topbar">
       <div class="brand">
         <button id="toggle-sidebar" data-icon="◨" data-i18n="topbar.sidebar" data-i18n-title="topbar.sidebar_title" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
-        <a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a>
+        <span class="soa-brand-name">
+          <a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a>
+          <span class="soa-version" id="soa-version" aria-hidden="true"></span>
+        </span>
         <button id="tile-back" class="tile-back-btn" style="display:none" title="Back to tiles">← BACK</button>
       </div>
       <div class="tabs" id="tabs"></div>
@@ -644,7 +647,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=47"></script>
+  <script type="module" src="/assets/app.js?v=48"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost
