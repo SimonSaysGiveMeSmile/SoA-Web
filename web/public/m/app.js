@@ -962,7 +962,19 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
-        const activeId = snap.activeId || 0;
+        // Defensive activeId resolution. Snapshot broadcasts can carry
+        // activeId:0 or omit it entirely (undefined) — the server's HELLO
+        // resolves a real id via a tabList fallback, but its periodic/
+        // device-count/REQUEST snapshots don't. Blindly trusting that clobbers
+        // a known-good _activeTabId to 0, after which TERM_DATA frames for the
+        // real tab mismatch _activeTabId and get buffered forever (T counter
+        // rises, screen stays blank). Only accept activeId when it names a real
+        // tab; otherwise keep the current active tab, falling back to the first.
+        const idList = rawTabs.map(t => t.id);
+        let activeId = snap.activeId;
+        if (!idList.includes(activeId)) {
+            activeId = idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0);
+        }
         const tabs = rawTabs.map((t, i) => ({
             index: i,
             id: t.id,
