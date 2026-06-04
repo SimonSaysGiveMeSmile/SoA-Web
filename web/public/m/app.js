@@ -13,10 +13,16 @@
  * events to show / hide the reconnect overlay.
  */
 
-import { BridgeSocket, SocketState, Diagnosis } from './socket.js';
+import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
 import { ansiToHtml, newState } from './ansi.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
+
+// Build marker — bump on every mobile-client change. Shown in the on-screen
+// diagnostics panel so a phone (no console) can confirm whether it loaded the
+// latest code or a stale cached bundle. If the panel shows an old marker, the
+// service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
+const MOBILE_BUILD = 'v30 · diag-panel · 2026-06-04';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -361,6 +367,7 @@ class App {
 
         this._wireSocket();
         this._wireUi();
+        this._buildDiagPanel();
 
         window.addEventListener('resize', () => this._fitTerminalFont());
 
@@ -903,6 +910,88 @@ class App {
         };
     }
 
+    // ── On-screen diagnostics panel ──────────────────────────────────────
+    // A phone has no console. This builds an always-available log/status panel
+    // toggled by a floating "LOG" chip (bottom-left). It surfaces the build
+    // marker (to detect stale cache), connection state, message counts, the
+    // resolved activeTabId, per-tab buffered bytes (orphan detection), and a
+    // live event log — everything needed to diagnose "screen stays blank".
+    _buildDiagPanel() {
+        const btn = document.createElement('button');
+        btn.id = 'diag-toggle';
+        btn.textContent = 'LOG';
+        btn.setAttribute('aria-label', 'Diagnostics');
+
+        const panel = document.createElement('div');
+        panel.id = 'diag-panel';
+        panel.hidden = true;
+        panel.innerHTML =
+            '<div class="diag-head">' +
+              '<span class="diag-title">DIAGNOSTICS</span>' +
+              '<span class="diag-build"></span>' +
+              '<button class="diag-copy" type="button">COPY</button>' +
+              '<button class="diag-close" type="button">×</button>' +
+            '</div>' +
+            '<pre class="diag-summary"></pre>' +
+            '<div class="diag-log-h">EVENT LOG (newest first)</div>' +
+            '<pre class="diag-log"></pre>';
+
+        document.body.appendChild(btn);
+        document.body.appendChild(panel);
+
+        this._diagPanel = panel;
+        this._diagSummaryEl = panel.querySelector('.diag-summary');
+        this._diagLogEl = panel.querySelector('.diag-log');
+        panel.querySelector('.diag-build').textContent = MOBILE_BUILD;
+
+        const toggle = () => {
+            panel.hidden = !panel.hidden;
+            if (!panel.hidden) {
+                this._updateDiagPanel();
+                this._diagPanelTimer = setInterval(() => this._updateDiagPanel(), 1000);
+            } else if (this._diagPanelTimer) {
+                clearInterval(this._diagPanelTimer); this._diagPanelTimer = null;
+            }
+        };
+        btn.addEventListener('click', toggle);
+        panel.querySelector('.diag-close').addEventListener('click', toggle);
+        panel.querySelector('.diag-copy').addEventListener('click', () => {
+            const text = this._diagSummaryEl.textContent + '\n\n' + this._diagLogEl.textContent;
+            try { navigator.clipboard.writeText(text); } catch (_) {}
+            const c = panel.querySelector('.diag-copy');
+            c.textContent = 'COPIED'; setTimeout(() => { c.textContent = 'COPY'; }, 1200);
+        });
+        pushLog('diag panel ready · build ' + MOBILE_BUILD);
+    }
+
+    _updateDiagPanel() {
+        if (!this._diagPanel || this._diagPanel.hidden) return;
+        const d = this.diag();
+        let endpoint = '(none)';
+        try { endpoint = new URL(this.socket.baseUrl.replace(/^ws/, 'http')).host; } catch (_) {}
+        const ctrl = (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'yes' : 'no';
+        const tabs = d.tabStates.map(t =>
+            `#${t.tab}${t.tab === d.activeTabId ? '*' : ''} buf=${t.pendingBytes}`).join('  ') || '(none)';
+        this._diagSummaryEl.textContent =
+            `BUILD     ${MOBILE_BUILD}\n` +
+            `PATH      ${location.pathname}   SW-ctrl: ${ctrl}\n` +
+            `SOCKET    ${d.socketState}\n` +
+            `ENDPOINT  ${endpoint}\n` +
+            `MSGS      hello=${d.messages.hello||0} snap=${d.messages.snapshot||0} term=${d.messages['term-data']||0} notice=${d.messages.notice||0}\n` +
+            `ACTIVE    tabIndex=${d.activeTab}  activeTabId=${d.activeTabId}\n` +
+            `TABS      ${tabs}\n` +
+            `LAST MSG  ${d.lastMessage}\n` +
+            `TERMNODES ${d.termChildNodes}   devices=${d.connectedDevices}`;
+        const log = getLogBuffer();
+        const lines = [];
+        for (let i = log.length - 1; i >= 0 && lines.length < 80; i--) {
+            const e = log[i];
+            const ts = new Date(e.t).toLocaleTimeString();
+            lines.push(`${ts}  ${e.line}`);
+        }
+        this._diagLogEl.textContent = lines.join('\n');
+    }
+
     _showReconnect(text) {
         this.reconnectOverlay.hidden = false;
         if (text) this.reconnectSub.textContent = text;
@@ -992,6 +1081,7 @@ class App {
         this._hasReceivedSnapshot = true;
         this._activeTab = newActiveTab;
         this._activeTabId = activeId;
+        pushLog(`snapshot: raw=${JSON.stringify(snap.activeId)} → resolved activeId=${activeId} tabs=[${idList.join(',')}]`);
         console.log('%c[app] snapshot activeId=' + activeId + ' (type: ' + typeof activeId + ')', 'color:#ff9');
 
         for (const t of tabs) {
@@ -1326,7 +1416,10 @@ class App {
 
         const match = tabId === this._activeTabId;
         if (!match) {
-            console.log('%c[app] term-data tab=' + tabId + ' (type: ' + typeof tabId + ') BUFFERED, activeTabId=' + this._activeTabId + ' (type: ' + typeof this._activeTabId + ')', 'color:#f66');
+            // Orphaned frame — buffered for a tab that isn't the active one.
+            // If this fires while the screen is blank, activeTabId is wrong.
+            pushLog(`⚠ term-data tab=${tabId} BUFFERED (active=${this._activeTabId}) +${payload.data.length}B`);
+            console.log('%c[app] term-data tab=' + tabId + ' BUFFERED, activeTabId=' + this._activeTabId, 'color:#f66');
         }
         if (match && !this._flushScheduled) {
             this._flushScheduled = true;

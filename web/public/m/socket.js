@@ -23,7 +23,21 @@ const DEBUG = (() => {
     } catch (_) { return true; }
 })();
 
+// On-screen log ring buffer. A phone has no console, so every blog() line is
+// also retained here for the in-app diagnostics panel (see app.js diag panel).
+const LOG_BUFFER = [];
+export function pushLog(line) {
+    LOG_BUFFER.push({ t: Date.now(), line: String(line) });
+    if (LOG_BUFFER.length > 200) LOG_BUFFER.shift();
+}
+export function getLogBuffer() { return LOG_BUFFER; }
+
 function blog(...args) {
+    let line;
+    try {
+        line = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+    } catch (_) { line = args.join(' '); }
+    pushLog(line);
     if (DEBUG) console.log('%c[bridge]', 'color:#5fff5f', ...args);
 }
 
