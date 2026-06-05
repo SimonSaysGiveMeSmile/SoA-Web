@@ -51,7 +51,11 @@ export class VirtualKeyboard {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 this._flushPendingAndClear();
-                this.onInput('hotkey', { combo: 'enter' });
+                // Send a carriage return through the term-keys path (the same
+                // path typed characters use). The server's hotkey map has no
+                // 'enter' entry, so sending it as a hotkey wrote nothing —
+                // text appeared at the prompt but never submitted.
+                this.onInput('term-keys', { text: '\r' });
             }
         });
 
@@ -121,9 +125,10 @@ export class VirtualKeyboard {
                 break;
             case 'hotkey':
                 if (m.combo === 'enter') {
+                    // Submit via the term-keys CR path (see keydown handler).
                     this._flushPendingAndClear();
-                }
-                if (this.ctrl && m.combo && /^[a-z]$/.test(m.combo)) {
+                    this.onInput('term-keys', { text: '\r' });
+                } else if (this.ctrl && m.combo && /^[a-z]$/.test(m.combo)) {
                     this.onInput('hotkey', { combo: `ctrl+${m.combo}` });
                     this._setCtrl(false);
                 } else {

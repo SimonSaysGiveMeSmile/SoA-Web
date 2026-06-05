@@ -612,6 +612,7 @@ function handleInput(session, d) {
                 'ctrl+l': '\x0c', 'ctrl+a': '\x01', 'ctrl+e': '\x05',
                 'ctrl+k': '\x0b', 'ctrl+u': '\x15', 'ctrl+w': '\x17',
                 'esc':    '\x1b',
+                'enter':  '\r', 'tab': '\t', 'backspace': '\x7f',
                 'up':     '\x1b[A', 'down': '\x1b[B', 'right': '\x1b[C', 'left': '\x1b[D',
             };
             if (map[combo]) tab.write(map[combo]);
