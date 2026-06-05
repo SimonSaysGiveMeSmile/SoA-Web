@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v35 · web-preview · 2026-06-05';
+const MOBILE_BUILD = 'v36 · dashboard · 2026-06-05';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -258,6 +258,7 @@ class App {
         this.tabsEl      = document.getElementById('tabs');
         this.termEl      = document.getElementById('term');
         this.widgetsEl   = document.getElementById('widgets');
+        this.tilesEl     = document.getElementById('tiles');
         this.kbdEl       = document.getElementById('kbd');
         this.viewEls     = Array.from(document.querySelectorAll('.view'));
         this.viewBtns    = Array.from(document.querySelectorAll('.bb-btn[data-view]'));
@@ -291,6 +292,7 @@ class App {
         this._tabStates = new Map();
         this._tabStatuses = new Map();
         this._toastTimer = null;
+        this._tilesTimer = null;
         this._flushScheduled = false;
         this._currentTheme = loadSavedTheme();
         this._idleTimer = null;
@@ -877,6 +879,65 @@ class App {
             this.kbd.blur();
         }
         if (target === 'web-view') this._refreshWebPorts();
+        // Dashboard: render immediately, then keep the terminal-tail previews
+        // live with a 1s tick while the view is open (cheap; stopped on leave).
+        if (target === 'tiles-view') {
+            this._renderTiles();
+            if (!this._tilesTimer) this._tilesTimer = setInterval(() => this._renderTiles(), 1000);
+        } else if (this._tilesTimer) {
+            clearInterval(this._tilesTimer);
+            this._tilesTimer = null;
+        }
+    }
+
+    // ── Dashboard (2-D tile view) ────────────────────────────────────────
+    // Mirrors the desktop tiles: one card per tab with its status colour and a
+    // live peek of the last few terminal lines, so you can tell at a glance
+    // which project needs attention. Per the mobile design there is NO close
+    // (×) button on a tile — tap a tile to jump into that tab's terminal.
+    _renderTiles() {
+        if (!this.tilesEl) return;
+        const tabs = (this._snapshot && this._snapshot.tabs) || [];
+        if (!tabs.length) {
+            this.tilesEl.innerHTML = '<div class="m-tile-empty">No tabs yet — tap + to open one.</div>';
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        tabs.forEach((t, i) => {
+            const id = t.id;
+            const mob = this._mobileStatus && this._mobileStatus.get(id);
+            const css = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
+            const ts = this._getTabState(id);
+            const tail = (ts && ts.term) ? ts.term.tailText(4) : '';
+            const name = t.title || `TAB ${i + 1}`;
+            const tile = document.createElement('button');
+            tile.type = 'button';
+            tile.className = 'm-tile' + (id === this._activeTabId ? ' active' : '');
+            tile.dataset.tabId = String(id);
+            if (css) tile.setAttribute('data-status', css);
+            tile.innerHTML =
+                `<span class="m-tile-dot"></span>` +
+                `<span class="m-tile-title">${escapeHtml(name)}</span>` +
+                `<span class="m-tile-status">${escapeHtml(this._tileStatusLabel(mob, t.exited))}</span>` +
+                `<pre class="m-tile-preview">${escapeHtml(tail)}</pre>`;
+            tile.addEventListener('click', () => {
+                this.socket.sendInput('switch-tab', { id });
+                this._showView('terminal-view');
+                this.kbd.focus();
+            });
+            frag.appendChild(tile);
+        });
+        this.tilesEl.replaceChildren(frag);
+    }
+
+    _tileStatusLabel(mob, exited) {
+        if (exited) return 'exited';
+        switch (mob) {
+            case 'working':   return 'Working…';
+            case 'attention': return 'Needs input';
+            case 'done':      return 'Awaiting next prompt';
+            default:          return 'Shell ready';
+        }
     }
 
     // ── Web preview ──────────────────────────────────────────────────────
@@ -1161,6 +1222,8 @@ class App {
         this._renderTabs(tabs);
         this._renderActiveTerminal();
         this._updateDeviceCount();
+        // Keep the dashboard in sync with tab add/remove/switch when it's open.
+        if (this._tilesTimer) this._renderTiles();
     }
 
     _renderTabs(tabs) {

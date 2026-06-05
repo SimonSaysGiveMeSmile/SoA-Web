@@ -1677,6 +1677,27 @@ class Shell {
         this._tilesGridEl.replaceChildren(fragment);
     }
 
+    // Read the last `n` non-blank lines from a tab's terminal buffer, so the
+    // tile can show a live peek of what each project is doing right now. This
+    // is the raw PTY tail — complementary to the agent-detected status lines.
+    _tileTailText(id, n = 4) {
+        const rt = this.tabs.get(id);
+        if (!rt || !rt._opened) return '';
+        try {
+            const buf = rt.term.buffer.active;
+            const end = buf.baseY + rt.term.rows; // exclusive bottom of viewport
+            const out = [];
+            for (let row = end - 1; row >= 0 && out.length < n; row--) {
+                const line = buf.getLine(row);
+                if (!line) continue;
+                const text = line.translateToString(true).replace(/\s+$/, '');
+                if (!text) continue;
+                out.unshift(text);
+            }
+            return out.join('\n');
+        } catch (_) { return ''; }
+    }
+
     _createTileNode(id) {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || tr('tab.default', { id });
@@ -1687,6 +1708,7 @@ class Shell {
         const statusLine = (s && s.statusLine) || '';
         const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
+        const tail = this._tileTailText(id);
 
         const closeBtn = el('button', { class: 'tile-close', text: '×', onclick: (e) => {
             e.stopPropagation();
@@ -1710,6 +1732,7 @@ class Shell {
             el('span', { class: 'tile-title', text: title }),
             el('span', { class: 'tile-status-line', text: statusLine }),
             el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
+            el('pre', { class: 'tile-preview', text: tail }),
             el('span', { class: 'tile-activity', text: activity }),
             el('span', { class: 'tile-elapsed', text: elapsed }),
         ]);
@@ -1751,6 +1774,8 @@ class Shell {
         if (actionEl && actionEl.textContent !== actionText) actionEl.textContent = actionText;
         const actEl = node.querySelector('.tile-activity');
         if (actEl && actEl.textContent !== activity) actEl.textContent = activity;
+        const previewEl = node.querySelector('.tile-preview');
+        if (previewEl) { const tail = this._tileTailText(id); if (previewEl.textContent !== tail) previewEl.textContent = tail; }
         const elapsedEl = node.querySelector('.tile-elapsed');
         if (elapsedEl && elapsedEl.textContent !== elapsed) elapsedEl.textContent = elapsed;
         const pie = node.querySelector('.tile-pie');
@@ -1779,6 +1804,9 @@ class Shell {
         if (this.viewMode !== 'tiles' || !this._tilesGridEl) return;
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             const id = Number(node.dataset.tileId);
+            // Live terminal tail — refreshed for every tile, even idle shells.
+            const previewEl = node.querySelector('.tile-preview');
+            if (previewEl) { const tail = this._tileTailText(id); if (previewEl.textContent !== tail) previewEl.textContent = tail; }
             const s = this._agentBuf.get(id);
             if (!s) continue;
             if (s.lastChange) {

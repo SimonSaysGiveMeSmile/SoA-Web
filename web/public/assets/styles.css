@@ -1256,6 +1256,20 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   opacity: 0.85;
 }
+.tile-preview {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.35;
+  color: var(--soa-fg); opacity: 0.6;
+  margin: 6px 0 0; padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border-left: 2px solid var(--soa-accent-dim);
+  border-radius: 3px;
+  max-height: 4.5em; overflow: hidden;
+  white-space: pre-wrap; word-break: break-all;
+  /* fade the bottom so a clipped last line reads as "more below" */
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+}
+.tile-preview:empty { display: none; }
 .tile-activity {
   font-family: var(--font-display); font-size: 10px;
   text-transform: uppercase; letter-spacing: 0.14em;

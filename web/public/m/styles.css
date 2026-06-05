@@ -307,6 +307,55 @@ button:active { background: var(--accent-bg-hover); }
 }
 .view.active { display: block; }
 
+/* Dashboard — 2-D tile view (mirrors desktop tiles; no per-tile × button) */
+#tiles-view { padding: 12px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+#tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 10px;
+}
+.m-tile-empty { color: rgba(224,224,224,0.5); font-size: 13px; padding: 28px 12px; text-align: center; }
+.m-tile {
+    position: relative;
+    display: flex; flex-direction: column; gap: 4px;
+    text-align: left; min-height: 118px;
+    padding: 12px 12px 10px;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: rgba(0, 0, 0, 0.4); color: var(--fg);
+    font-family: inherit; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.m-tile.active { box-shadow: 0 0 0 1px var(--accent) inset; }
+.m-tile-dot {
+    position: absolute; top: 10px; right: 10px;
+    width: 9px; height: 9px; border-radius: 50%; background: #4fa3e0;
+}
+.m-tile[data-status="running"]   { border-color: #00e676; }
+.m-tile[data-status="input"]     { border-color: #ff9800; }
+.m-tile[data-status="completed"] { border-color: #ff4444; }
+.m-tile[data-status="running"]   .m-tile-dot { background: #00e676; }
+.m-tile[data-status="input"]     .m-tile-dot { background: #ff9800; }
+.m-tile[data-status="completed"] .m-tile-dot { background: #ff4444; }
+.m-tile[data-status="idle"]      .m-tile-dot { background: #4fa3e0; }
+.m-tile[data-status="exited"]    .m-tile-dot { background: rgba(224,224,224,0.3); }
+.m-tile-title {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.03em; padding-right: 16px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.m-tile-status {
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--accent); opacity: 0.85;
+}
+.m-tile-preview {
+    margin: 4px 0 0; font-family: ui-monospace, Menlo, monospace;
+    font-size: 9px; line-height: 1.35; color: var(--fg); opacity: 0.55;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 4.6em; overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+}
+.m-tile-preview:empty { display: none; }
+
 /* Terminal */
 #term {
     margin: 0;

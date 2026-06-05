@@ -229,6 +229,20 @@ export class TermBuffer {
     }
 
     lineCount() { return this.lines.length; }
+
+    /** Last `n` non-blank lines as plain text — for dashboard tile previews. */
+    tailText(n = 4) {
+        const out = [];
+        for (let r = this.lines.length - 1; r >= 0 && out.length < n; r--) {
+            const line = this.lines[r] || [];
+            let s = '';
+            for (let c = 0; c < line.length; c++) s += (line[c] && line[c].ch) || ' ';
+            s = s.replace(/\s+$/, '');
+            if (!s) continue;
+            out.unshift(s);
+        }
+        return out.join('\n');
+    }
 }
 
 function newStyle() {
