@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v34 · color+tabstatus · 2026-06-05';
+const MOBILE_BUILD = 'v35 · web-preview · 2026-06-05';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -370,6 +370,7 @@ class App {
         this._wireSocket();
         this._wireUi();
         this._buildDiagPanel();
+        this._wireWebPreview();
 
         window.addEventListener('resize', () => this._fitTerminalFont());
 
@@ -875,6 +876,62 @@ class App {
             this.kbd.hide();
             this.kbd.blur();
         }
+        if (target === 'web-view') this._refreshWebPorts();
+    }
+
+    // ── Web preview ──────────────────────────────────────────────────────
+    // Open a local dev-server port (proxied via /preview/<port>/ so it's
+    // viewable through the tunnel) or an arbitrary URL in an embedded frame.
+    _wireWebPreview() {
+        this._webPortSel = document.getElementById('web-port');
+        this._webUrlInp = document.getElementById('web-url');
+        this._webFrame = document.getElementById('web-frame');
+        this._webEmpty = document.getElementById('web-empty');
+        const go = document.getElementById('web-go');
+        const reload = document.getElementById('web-reload');
+        if (!this._webFrame) return;
+
+        const openUrl = (raw) => {
+            let u = (raw || '').trim();
+            if (!u) return;
+            // localhost:3000 / 127.0.0.1:3000 → proxy so the phone can reach it.
+            const lm = u.replace(/^https?:\/\//, '').match(/^(?:localhost|127\.0\.0\.1):(\d{1,5})(\/.*)?$/i);
+            if (lm) u = `/preview/${lm[1]}${lm[2] || '/'}`;
+            else if (/^\d{1,5}$/.test(u)) u = `/preview/${u}/`;           // bare port number
+            else if (!/^https?:\/\//.test(u) && !u.startsWith('/')) u = 'https://' + u;
+            this._openWeb(u);
+        };
+
+        this._webPortSel.addEventListener('change', () => {
+            const p = this._webPortSel.value;
+            if (p) { this._webUrlInp.value = ''; this._openWeb(`/preview/${p}/`); }
+        });
+        go.addEventListener('click', () => openUrl(this._webUrlInp.value));
+        this._webUrlInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') openUrl(this._webUrlInp.value); });
+        if (reload) reload.addEventListener('click', () => { if (this._webFrame.src) this._webFrame.src = this._webFrame.src; });
+    }
+
+    _openWeb(src) {
+        if (!this._webFrame) return;
+        this._webFrame.src = src;
+        this._webFrame.style.display = 'block';
+        if (this._webEmpty) this._webEmpty.style.display = 'none';
+    }
+
+    async _refreshWebPorts() {
+        if (!this._webPortSel) return;
+        try {
+            const base = (this.socket && this.socket.baseUrl)
+                ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://') : '';
+            const res = await fetch(base + '/api/ports', { credentials: 'include', cache: 'no-store' });
+            if (!res.ok) return;
+            const { data } = await res.json();
+            const cur = this._webPortSel.value;
+            const ports = (data && data.ports) || [];
+            this._webPortSel.innerHTML = '<option value="">port…</option>' +
+                ports.map(p => `<option value="${p.port}">:${p.port} ${escapeHtml(p.process || '')}</option>`).join('');
+            if (cur) this._webPortSel.value = cur;
+        } catch (_) { /* ports are best-effort */ }
     }
 
     _setStatus(state, text) {

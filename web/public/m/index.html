@@ -35,11 +35,27 @@
             <section id="widgets-view" class="view">
                 <div id="widgets"></div>
             </section>
+            <section id="web-view" class="view">
+                <div class="web-bar">
+                    <select id="web-port" class="web-port"><option value="">port…</option></select>
+                    <input id="web-url" class="web-url" type="text" inputmode="url"
+                           placeholder="localhost:3000 or https://…" autocapitalize="off"
+                           autocorrect="off" spellcheck="false" />
+                    <button id="web-go" class="web-go" type="button">GO</button>
+                    <button id="web-reload" class="web-go web-reload" type="button" title="Reload">⟳</button>
+                </div>
+                <div class="web-frame-wrap">
+                    <iframe id="web-frame" class="web-frame"
+                            sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"></iframe>
+                    <div id="web-empty" class="web-empty">Pick a local port or type a URL to preview a web page here — viewable from this device through the tunnel.</div>
+                </div>
+            </section>
         </main>
 
         <nav id="bottombar">
             <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
             <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
+            <button class="bb-btn" data-view="web-view">WEB</button>
             <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
             <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
             <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>

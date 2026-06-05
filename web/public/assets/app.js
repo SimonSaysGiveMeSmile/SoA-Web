@@ -373,6 +373,19 @@ class Shell {
             });
         }
 
+        const webBtn = $('#web-preview');
+        if (webBtn) {
+            webBtn.addEventListener('click', async () => {
+                this.audio.play('panels');
+                try {
+                    const wp = await import('/assets/previewPanel.js?v=1');
+                    wp.openPreviewModal(this);
+                } catch (err) {
+                    console.warn('[preview] open failed', err);
+                }
+            });
+        }
+
         const audioBtn = $('#toggle-audio');
         const initialAudio = getSettings().audio;
         audioBtn.dataset.state = initialAudio ? 'on' : 'off';

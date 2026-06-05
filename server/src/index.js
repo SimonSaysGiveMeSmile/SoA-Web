@@ -45,6 +45,7 @@ const tabApi           = require('./tabApi');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
+const preview          = require('./preview');
 const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
@@ -224,6 +225,7 @@ tabApi.mount(app, requireAuthed, sessions);
 envStore.mount(app, requireAuthed);
 autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
+preview.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -301,6 +303,8 @@ server.on('upgrade', (req, socket, head) => {
     const ua = (req.headers['user-agent'] || '').slice(0, 80);
     const origin = req.headers.origin || '(none)';
     dbg('ws-upgrade', 'incoming', url.pathname, 'origin=' + origin, 'hasCookie=' + !!req.headers.cookie, 'hasToken=' + !!url.searchParams.get('t'), 'ua=' + ua);
+    // Dev-server HMR websockets for the local-web preview proxy.
+    if (url.pathname.startsWith('/preview/') && preview.proxyUpgrade(req, socket, head)) return;
     if (url.pathname !== '/ws') { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
 
     if (SESSION_TOKEN) {
