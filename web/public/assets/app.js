@@ -325,8 +325,11 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
-        // Enable debug overlay by default so agent detection is visible
-        window.__SOA_DEBUG_AGENT = true;
+        // Agent-detection debug overlay (bottom-right box) — off by default.
+        // Opt in with ?debugAgent=1 in the URL or localStorage 'soaDebugAgent'='1'.
+        window.__SOA_DEBUG_AGENT =
+            /[?&]debugAgent=1/.test(location.search) ||
+            (() => { try { return localStorage.getItem('soaDebugAgent') === '1'; } catch (_) { return false; } })();
         // Poll the second-to-last visible terminal line every second — that's
         // where Claude Code's Ink status bar always lives. More reliable than
         // scanning the PTY stream because Ink re-renders in-place via cursor-up.
