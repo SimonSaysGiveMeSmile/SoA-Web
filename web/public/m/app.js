@@ -16,6 +16,7 @@
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
 import { ansiToHtml, newState } from './ansi.js';
 import { TermBuffer } from './terminal.js';
+import { classifyAgent, cssStatus } from './agentDetect.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 
@@ -23,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v33 · enter-fix · 2026-06-05';
+const MOBILE_BUILD = 'v34 · color+tabstatus · 2026-06-05';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -1121,7 +1122,11 @@ class App {
             el.className = 'tab' + (t.active ? ' active' : '');
             el.dataset.tabIndex = String(t.index);
             el.dataset.tabId = String(t.id);
-            if (t.status) el.setAttribute('data-status', t.status);
+            // Prefer our locally-detected agent status (server sends none);
+            // fall back to any status the snapshot happened to include.
+            const mob = this._mobileStatus && this._mobileStatus.get(t.id);
+            const status = mob ? cssStatus(mob) : (t.status || null);
+            if (status) el.setAttribute('data-status', status);
             el.innerHTML = `<span class="tab-name">${escapeHtml(t.name)}</span>`;
             this._attachTabPointerHandlers(el, t);
             frag.appendChild(el);
@@ -1414,10 +1419,47 @@ class App {
         const tabId = payload.id ?? this._activeTabId;
         const ts = this._getTabState(tabId);
         ts.term.write(payload.data);
+        this._detectTabAgent(tabId, payload.data);
         if (tabId === this._activeTabId && !this._flushScheduled) {
             this._flushScheduled = true;
             requestAnimationFrame(() => this._renderActive());
         }
+    }
+
+    // Watch each tab's stream for agent-status patterns (green=working,
+    // orange=needs input, blue=idle) and colour the tab. Mirrors the desktop's
+    // client-side detection since the server doesn't send a status field.
+    _detectTabAgent(id, data) {
+        if (!this._agentRecent) this._agentRecent = new Map();
+        if (!this._mobileStatus) this._mobileStatus = new Map();
+        let sb = this._agentRecent.get(id);
+        if (!sb) { sb = { recent: '', last: 0 }; this._agentRecent.set(id, sb); }
+        sb.recent += data;
+        if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
+        const now = Date.now();
+        if (now - sb.last < 250) return;   // throttle per tab
+        sb.last = now;
+        const cur = this._mobileStatus.get(id) || 'idle';
+        const next = classifyAgent(sb.recent, cur);
+        if (next && next !== cur) {
+            this._mobileStatus.set(id, next);
+            this._setTabStatusDom(id, next);
+            if (next === 'attention') this._showAgentToast(this._tabName(id));
+            sb.recent = '';                // avoid re-detecting stale patterns
+        }
+    }
+
+    _setTabStatusDom(id, status) {
+        const css = cssStatus(status);
+        const el = this.tabsEl && this.tabsEl.querySelector(`[data-tab-id="${id}"]`);
+        if (!el) return;
+        if (css) el.setAttribute('data-status', css);
+        else el.removeAttribute('data-status');
+    }
+
+    _tabName(id) {
+        const t = this._snapshot && this._snapshot.tabs && this._snapshot.tabs.find(x => x.id === id);
+        return (t && t.title) || `TAB ${id}`;
     }
 
     _getTabState(id) {

@@ -31,6 +31,12 @@ export class TermBuffer {
         this.col = 0;          // cursor column
         this.style = newStyle();
         this._sig = '';        // signature of current style (for grouping)
+        // sig → frozen style snapshot. Cells store only the sig; the live
+        // `this.style` keeps mutating as SGR codes arrive, so storing a
+        // reference would make every cell render with the FINAL style (e.g.
+        // monochrome after the trailing reset). Snapshot per distinct style.
+        this._styleTable = Object.create(null);
+        this._styleTable[''] = null;
     }
 
     setRows(rows) { if (rows > 0) this.screenRows = rows; }
@@ -38,6 +44,14 @@ export class TermBuffer {
     _styleSig() {
         const s = this.style;
         return `${s.bold?1:0}${s.dim?1:0}${s.italic?1:0}${s.underline?1:0}${s.reverse?1:0}|${s.fg||''}|${s.bg||''}|${s.link||''}`;
+    }
+
+    // Recompute the current style signature and register a frozen snapshot for it.
+    _commitStyle() {
+        this._sig = this._styleSig();
+        if (!(this._sig in this._styleTable)) {
+            this._styleTable[this._sig] = this._sig === '' ? null : { ...this.style };
+        }
     }
 
     _ensureRow(r) {
@@ -64,7 +78,7 @@ export class TermBuffer {
         this._ensureRow(this.row);
         const line = this.lines[this.row];
         this._ensureCol(line, this.col);
-        line[this.col] = { ch, sig: this._sig, style: this.style };
+        line[this.col] = { ch, sig: this._sig };
         this.col++;
     }
 
@@ -125,7 +139,7 @@ export class TermBuffer {
             }
             case 'J': this._eraseDisplay(isNaN(n1) ? 0 : n1); break;
             case 'K': this._eraseLine(isNaN(n1) ? 0 : n1); break;
-            case 'm': applySgr(this.style, params.split(';').filter(Boolean).map(Number)); this._sig = this._styleSig(); break;
+            case 'm': applySgr(this.style, params.split(';').filter(Boolean).map(Number)); this._commitStyle(); break;
             default: break; // unsupported: ignore
         }
         return j;
@@ -142,7 +156,7 @@ export class TermBuffer {
         if (body.startsWith('8;')) {
             const parts = body.slice(2);
             const semi = parts.indexOf(';');
-            if (semi !== -1) { this.style.link = parts.slice(semi + 1) || null; this._sig = this._styleSig(); }
+            if (semi !== -1) { this.style.link = parts.slice(semi + 1) || null; this._commitStyle(); }
         }
         return j;
     }
@@ -184,6 +198,8 @@ export class TermBuffer {
         this._sig = '';
     }
 
+    _styleFor(sig) { return this._styleTable[sig] || null; }
+
     /** Render the buffer to a sanitized HTML string (spans grouped by style). */
     toHtml() {
         let out = '';
@@ -200,8 +216,8 @@ export class TermBuffer {
                 const cell = line[cIdx] || blankCell();
                 if (cell.sig !== curSig) {
                     flush(); closeTag();
-                    curSig = cell.sig; curStyle = cell.style;
-                    const tag = cell.style ? spanFor(cell.style) : null;
+                    curSig = cell.sig; curStyle = this._styleFor(cell.sig);
+                    const tag = curStyle ? spanFor(curStyle) : null;
                     if (tag) { out += tag; open = true; }
                 }
                 run += cell.ch;
