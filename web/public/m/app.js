@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v36 · dashboard · 2026-06-05';
+const MOBILE_BUILD = 'v37 · web-fix · 2026-06-05';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -953,19 +953,14 @@ class App {
         if (!this._webFrame) return;
 
         const openUrl = (raw) => {
-            let u = (raw || '').trim();
+            const u = (raw || '').trim();
             if (!u) return;
-            // localhost:3000 / 127.0.0.1:3000 → proxy so the phone can reach it.
-            const lm = u.replace(/^https?:\/\//, '').match(/^(?:localhost|127\.0\.0\.1):(\d{1,5})(\/.*)?$/i);
-            if (lm) u = `/preview/${lm[1]}${lm[2] || '/'}`;
-            else if (/^\d{1,5}$/.test(u)) u = `/preview/${u}/`;           // bare port number
-            else if (!/^https?:\/\//.test(u) && !u.startsWith('/')) u = 'https://' + u;
-            this._openWeb(u);
+            this._openWeb(this._resolveWebTarget(u));
         };
 
         this._webPortSel.addEventListener('change', () => {
             const p = this._webPortSel.value;
-            if (p) { this._webUrlInp.value = ''; this._openWeb(`/preview/${p}/`); }
+            if (p) { this._webUrlInp.value = ''; this._openWeb(this._proxyUrl(`/preview/${p}/`)); }
         });
         go.addEventListener('click', () => openUrl(this._webUrlInp.value));
         this._webUrlInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') openUrl(this._webUrlInp.value); });
@@ -977,6 +972,30 @@ class App {
         this._webFrame.src = src;
         this._webFrame.style.display = 'block';
         if (this._webEmpty) this._webEmpty.style.display = 'none';
+    }
+
+    // Build an absolute /preview/ URL against the BACKEND origin (not the page
+    // origin — the client may be served from Vercel or a cached SW, where a
+    // relative /preview/ would 404 to the SoA landing page). Carry the session
+    // token so the proxy is reachable from a remote device.
+    _proxyUrl(path) {
+        const base = (this.socket && this.socket.baseUrl)
+            ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '')
+            : location.origin;
+        const tok = this.socket && this.socket.token;
+        let url = base + path;
+        if (tok) url += (url.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(tok);
+        return url;
+    }
+
+    // Turn a user string into a frame URL. Bare port (5555) or localhost:5555 /
+    // 127.0.0.1:5555 → proxied through the backend; anything else → external URL.
+    _resolveWebTarget(raw) {
+        let u = (raw || '').trim();
+        const lm = u.replace(/^https?:\/\//, '').match(/^(?:localhost|127\.0\.0\.1):(\d{1,5})(\/.*)?$/i);
+        if (lm) return this._proxyUrl(`/preview/${lm[1]}${lm[2] || '/'}`);
+        if (/^\d{1,5}$/.test(u)) return this._proxyUrl(`/preview/${u}/`);   // bare port → localhost
+        return /^https?:\/\//.test(u) ? u : 'https://' + u;
     }
 
     async _refreshWebPorts() {
