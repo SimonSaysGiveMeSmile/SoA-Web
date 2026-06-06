@@ -46,6 +46,7 @@ const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
 const preview          = require('./preview');
+const pasteImage       = require('./pasteImage');
 const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
@@ -226,6 +227,7 @@ envStore.mount(app, requireAuthed);
 autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
 preview.mount(app, requireAuthed);
+pasteImage.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {

@@ -1527,23 +1527,63 @@ class Shell {
         return { cols: sz.cols, rows: sz.rows };
     }
 
-    _onPasteImage(e) {
+    async _onPasteImage(e) {
         // Only when a terminal is focused — otherwise leave inputs/modals alone.
         const focused = document.activeElement;
         const inTerm = focused && focused.closest && focused.closest('.xterm');
         if (!inTerm) return;
         const items = (e.clipboardData && e.clipboardData.items) || [];
-        let hasImage = false;
-        for (const it of items) { if (it.type && it.type.indexOf('image/') === 0) { hasImage = true; break; } }
-        if (!hasImage) return;   // plain text paste → let xterm handle it normally
-        // An image is on the clipboard. Stop the empty text-paste and instead
-        // send Ctrl+V so Claude Code pulls the image from the system clipboard.
+        let imgItem = null;
+        for (const it of items) { if (it.type && it.type.indexOf('image/') === 0) { imgItem = it; break; } }
+        if (!imgItem) return;   // plain text paste → let xterm handle it normally
         e.preventDefault();
         e.stopPropagation();
-        if (this.activeId != null) {
-            this.bridge.input(INPUT_KIND.TERM_KEYS, { id: this.activeId, text: '\x16' });
-            this.audio.play('granted');
+        const id = this.activeId;
+        if (id == null) return;
+        const blob = imgItem.getAsFile && imgItem.getAsFile();
+        if (!blob) { this._pasteFallbackCtrlV(id); return; }
+        // Upload the image to a temp file on the machine running the shell, then
+        // type its path into the prompt — like dragging a file into Claude Code.
+        try {
+            const p = await this._uploadPastedImage(blob);
+            if (p) {
+                this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: this._shellQuote(p) + ' ' });
+                this.audio.play('granted');
+                return;
+            }
+        } catch (err) {
+            console.warn('[paste-image] upload failed, falling back to Ctrl+V', err);
         }
+        this._pasteFallbackCtrlV(id);
+    }
+
+    _pasteFallbackCtrlV(id) {
+        // Couldn't upload (endpoint missing / offline) — forward Ctrl+V so a
+        // same-machine Claude Code can still read the system clipboard.
+        this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: '\x16' });
+    }
+
+    async _uploadPastedImage(blob) {
+        const cfg = window.__SOA_WEB__ || {};
+        const base = String(cfg._resolvedBackend || cfg.backend || '').replace(/\/+$/, '');
+        const tok = cfg._resolvedToken || cfg.token || '';
+        const url = base + '/api/paste-image' + (tok ? '?t=' + encodeURIComponent(tok) : '');
+        const res = await fetch(url, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': blob.type || 'image/png' },
+            body: blob,
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data || !data.ok || !data.path) throw new Error('bad response');
+        return data.path;
+    }
+
+    // Quote a path for the prompt only if it has characters that would split it.
+    _shellQuote(p) {
+        if (/^[\w@%+=:,./-]+$/.test(p)) return p;
+        return "'" + String(p).replace(/'/g, "'\\''") + "'";
     }
 
     _hotkey(e) {
