@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v37 · web-fix · 2026-06-05';
+const MOBILE_BUILD = 'v38 · newtab-chooser · 2026-06-05';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -851,7 +851,7 @@ class App {
             });
         });
 
-        this.btnNewTab.addEventListener('click', () => this.socket.sendInput('new-tab'));
+        this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
         this.btnMic.addEventListener('click', () => this.socket.sendInput('voice-toggle'));
 
         this.termEl.addEventListener('click', () => {
@@ -972,6 +972,56 @@ class App {
         this._webFrame.src = src;
         this._webFrame.style.display = 'block';
         if (this._webEmpty) this._webEmpty.style.display = 'none';
+    }
+
+    // New-tab chooser: every "+" asks what to open — a Terminal (shell tab), a
+    // Localhost port, or a Webpage URL. The two web options land in the preview
+    // pane (not a persistent tab).
+    _showNewTabChooser() {
+        if (this._newTabSheet) return;
+        const sheet = document.createElement('div');
+        sheet.className = 'newtab-sheet';
+        sheet.innerHTML =
+            '<div class="newtab-card">' +
+              '<div class="newtab-title">OPEN NEW…</div>' +
+              '<button class="newtab-opt" data-kind="terminal"><span class="nt-ico">❯_</span><span class="nt-txt"><b>Terminal</b><i>A shell in a new tab</i></span></button>' +
+              '<button class="newtab-opt" data-kind="localhost"><span class="nt-ico">◉</span><span class="nt-txt"><b>Localhost</b><i>Preview a local port (e.g. 5555)</i></span></button>' +
+              '<button class="newtab-opt" data-kind="webpage"><span class="nt-ico">⊕</span><span class="nt-txt"><b>Webpage</b><i>Open any URL</i></span></button>' +
+              '<button class="newtab-cancel" type="button">Cancel</button>' +
+            '</div>';
+        document.body.appendChild(sheet);
+        this._newTabSheet = sheet;
+        const close = () => { if (this._newTabSheet) { this._newTabSheet.remove(); this._newTabSheet = null; } };
+        sheet.addEventListener('click', (e) => {
+            if (e.target === sheet || e.target.classList.contains('newtab-cancel')) { close(); return; }
+            const opt = e.target.closest('.newtab-opt');
+            if (!opt) return;
+            const kind = opt.dataset.kind;
+            close();
+            if (kind === 'terminal') this.socket.sendInput('new-tab');
+            else if (kind === 'localhost') this._promptLocalhost();
+            else if (kind === 'webpage') this._promptWebpage();
+        });
+    }
+
+    _promptLocalhost() {
+        const raw = prompt('Local port (e.g. 5555):');
+        if (raw == null) return;
+        const port = String(raw).trim().replace(/[^\d]/g, '');
+        if (!/^\d{1,5}$/.test(port)) return;
+        this._showView('web-view');
+        if (this._webUrlInp) this._webUrlInp.value = port;
+        this._openWeb(this._proxyUrl(`/preview/${port}/`));
+    }
+
+    _promptWebpage() {
+        const raw = prompt('Web address (URL or localhost:port):');
+        if (raw == null) return;
+        const u = String(raw).trim();
+        if (!u) return;
+        this._showView('web-view');
+        if (this._webUrlInp) this._webUrlInp.value = u;
+        this._openWeb(this._resolveWebTarget(u));
     }
 
     // Build an absolute /preview/ URL against the BACKEND origin (not the page
@@ -1275,7 +1325,7 @@ class App {
         addBtn.type = 'button';
         addBtn.className = 'tab tab-add';
         addBtn.textContent = '+';
-        addBtn.addEventListener('click', () => this.socket.sendInput('new-tab'));
+        addBtn.addEventListener('click', () => this._showNewTabChooser());
         frag.appendChild(addBtn);
 
         this.tabsEl.innerHTML = '';

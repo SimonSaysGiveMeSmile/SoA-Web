@@ -355,12 +355,9 @@ class Shell {
             this._updateViewBtn();
         }
 
-        $('#new-tab').addEventListener('click', async () => {
+        $('#new-tab').addEventListener('click', () => {
             this.audio.play('panels');
-            const cwd = await pickFolder();
-            if (!cwd) return;
-            this.audio.play('granted');
-            this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
+            this._openNewTabChooser();
         });
 
         const tmBtn = $('#timemachine');
@@ -376,18 +373,6 @@ class Shell {
             });
         }
 
-        const webBtn = $('#web-preview');
-        if (webBtn) {
-            webBtn.addEventListener('click', async () => {
-                this.audio.play('panels');
-                try {
-                    const wp = await import('/assets/previewPanel.js?v=1');
-                    wp.openPreviewModal(this);
-                } catch (err) {
-                    console.warn('[preview] open failed', err);
-                }
-            });
-        }
 
         const audioBtn = $('#toggle-audio');
         const initialAudio = getSettings().audio;
@@ -1675,6 +1660,59 @@ class Shell {
         }
         for (const old of existing.values()) old.remove();
         this._tilesGridEl.replaceChildren(fragment);
+    }
+
+    // New-tab chooser: every "+" asks what to open — a Terminal (shell tab), a
+    // Localhost port, or a Webpage URL. The two web options open in the preview
+    // panel (not a persistent tab).
+    _openNewTabChooser() {
+        const backdrop = el('div', { class: 'soa-modal-backdrop' });
+        const card = el('div', { class: 'soa-modal soa-newtab' });
+        const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+        const opt = (kind, icon, title, sub) => el('button', {
+            class: 'newtab-opt', type: 'button',
+            onclick: () => { close(); this._newTabPick(kind); },
+        }, [
+            el('span', { class: 'nt-ico', text: icon }),
+            el('span', { class: 'nt-txt' }, [el('b', { text: title }), el('i', { text: sub })]),
+        ]);
+        card.append(
+            el('div', { class: 'newtab-title', text: 'OPEN NEW…' }),
+            opt('terminal', '❯_', 'Terminal', 'A shell in a new tab'),
+            opt('localhost', '◉', 'Localhost', 'Preview a local port (e.g. 5555)'),
+            opt('webpage', '⊕', 'Webpage', 'Open any URL'),
+        );
+        backdrop.appendChild(card);
+        backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(backdrop);
+    }
+
+    async _newTabPick(kind) {
+        if (kind === 'terminal') {
+            const cwd = await pickFolder();
+            if (!cwd) return;
+            this.audio.play('granted');
+            this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
+            return;
+        }
+        let target = '';
+        if (kind === 'localhost') {
+            const raw = window.prompt('Local port (e.g. 5555):');
+            if (raw == null) return;
+            target = String(raw).trim().replace(/[^\d]/g, '');
+            if (!/^\d{1,5}$/.test(target)) return;
+        } else {
+            const raw = window.prompt('Web address (URL or localhost:port):');
+            if (raw == null) return;
+            target = String(raw).trim();
+            if (!target) return;
+        }
+        try {
+            const wp = await import('/assets/previewPanel.js?v=2');
+            wp.openPreviewModal(this, target);
+        } catch (err) { console.warn('[preview] open failed', err); }
     }
 
     // Read the last `n` non-blank lines from a tab's terminal buffer, so the

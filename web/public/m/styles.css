@@ -356,6 +356,46 @@ button:active { background: var(--accent-bg-hover); }
 }
 .m-tile-preview:empty { display: none; }
 
+/* New-tab chooser (bottom sheet) — Terminal / Localhost / Webpage */
+.newtab-sheet {
+    position: fixed; inset: 0; z-index: 4000;
+    display: flex; align-items: flex-end; justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    animation: nt-fade 140ms ease-out;
+}
+@keyframes nt-fade { from { opacity: 0; } to { opacity: 1; } }
+.newtab-card {
+    width: 100%; max-width: 520px;
+    margin: 0 8px calc(env(safe-area-inset-bottom, 0px) + 10px);
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 16px;
+    padding: 10px; display: flex; flex-direction: column; gap: 8px;
+    animation: nt-rise 180ms cubic-bezier(.2,.8,.2,1);
+}
+@keyframes nt-rise { from { transform: translateY(16px); } to { transform: translateY(0); } }
+.newtab-title {
+    font-size: 11px; letter-spacing: 0.18em; color: rgba(224,224,224,0.5);
+    padding: 6px 8px 2px;
+}
+.newtab-opt {
+    display: flex; align-items: center; gap: 14px; text-align: left;
+    padding: 14px 14px; border: 1px solid var(--line); border-radius: 12px;
+    background: rgba(255,255,255,0.03); color: var(--fg);
+    font-family: inherit; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.newtab-opt:active { background: var(--accent-bg); border-color: var(--accent); }
+.newtab-opt .nt-ico {
+    font-size: 18px; width: 30px; flex: 0 0 30px; text-align: center; color: var(--accent);
+}
+.newtab-opt .nt-txt { display: flex; flex-direction: column; gap: 2px; }
+.newtab-opt .nt-txt b { font-size: 15px; font-weight: 600; }
+.newtab-opt .nt-txt i { font-size: 12px; font-style: normal; color: rgba(224,224,224,0.5); }
+.newtab-cancel {
+    padding: 13px; border: 0; border-radius: 12px; margin-top: 2px;
+    background: rgba(255,255,255,0.05); color: var(--fg);
+    font-family: inherit; font-size: 14px; letter-spacing: 0.04em; cursor: pointer;
+}
+
 /* Terminal */
 #term {
     margin: 0;

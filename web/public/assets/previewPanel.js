@@ -40,7 +40,7 @@ async function fetchPorts() {
     } catch (_) { return []; }
 }
 
-export function openPreviewModal() {
+export function openPreviewModal(app, initialTarget) {
     const backdrop = el('div', { class: 'soa-modal-backdrop' });
     const card = el('div', { class: 'soa-modal soa-preview' });
 
@@ -94,5 +94,8 @@ export function openPreviewModal() {
             portSel.appendChild(el('option', { value: String(p.port), text: `:${p.port} ${p.process || ''}` }));
         }
     });
+
+    // Pre-open a target handed in by the new-tab chooser (a bare port or a URL).
+    if (initialTarget) { urlInp.value = initialTarget; resolveAndOpen(initialTarget); }
     urlInp.focus();
 }
