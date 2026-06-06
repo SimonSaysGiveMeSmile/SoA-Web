@@ -419,6 +419,12 @@ class Shell {
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
+        // Image paste: Claude Code grabs clipboard images on Ctrl+V (it ignores
+        // Cmd+V for images). Browsers map Cmd/Ctrl+V to a TEXT paste, so an
+        // image yields no text and nothing happens. Capture the paste before
+        // xterm, and when the clipboard holds an image, forward Ctrl+V (\x16)
+        // to the PTY so Claude Code reads the image off the system clipboard.
+        document.addEventListener('paste', e => this._onPasteImage(e), true);
 
         // The #shell container boots hidden so xterm measures 0×0 on init.
         // Once the shell unhides (app.js boot flow) or the sidebar toggles,
@@ -1519,6 +1525,25 @@ class Shell {
         if (!rt) return { cols: 120, rows: 32 };
         const sz = rt.fitNow();
         return { cols: sz.cols, rows: sz.rows };
+    }
+
+    _onPasteImage(e) {
+        // Only when a terminal is focused — otherwise leave inputs/modals alone.
+        const focused = document.activeElement;
+        const inTerm = focused && focused.closest && focused.closest('.xterm');
+        if (!inTerm) return;
+        const items = (e.clipboardData && e.clipboardData.items) || [];
+        let hasImage = false;
+        for (const it of items) { if (it.type && it.type.indexOf('image/') === 0) { hasImage = true; break; } }
+        if (!hasImage) return;   // plain text paste → let xterm handle it normally
+        // An image is on the clipboard. Stop the empty text-paste and instead
+        // send Ctrl+V so Claude Code pulls the image from the system clipboard.
+        e.preventDefault();
+        e.stopPropagation();
+        if (this.activeId != null) {
+            this.bridge.input(INPUT_KIND.TERM_KEYS, { id: this.activeId, text: '\x16' });
+            this.audio.play('granted');
+        }
     }
 
     _hotkey(e) {
