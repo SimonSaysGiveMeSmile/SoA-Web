@@ -702,8 +702,13 @@ class Shell {
         if (this.viewMode === 'tiles') this._renderTiles();
     }
 
+    // Context consumption at a glance: green (healthy) → yellow → red (near full).
+    _ctxColor(pct) {
+        return pct >= 80 ? '#ff5555' : pct >= 50 ? '#f1c40f' : '#2ecc71';
+    }
+
     _makePie(pct, tabId) {
-        const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : '#aacfd1';
+        const color = this._ctxColor(pct);
         const span = el('span', {
             class: 'ctx-pie',
             title: pct > 0 ? `Context: ${pct}%\nClick for details` : 'Context: —',
@@ -729,7 +734,7 @@ class Shell {
         if (!pie) return;
 
         const bar = pct > 0
-            ? `<div class="ctx-pop-bar"><div class="ctx-pop-fill" style="width:${pct}%;background:${pct>=90?'#ff5555':pct>=75?'#ff9944':pct>=50?'#f1fa8c':'#aacfd1'}"></div></div>`
+            ? `<div class="ctx-pop-bar"><div class="ctx-pop-fill" style="width:${pct}%;background:${this._ctxColor(pct)}"></div></div>`
             : '';
         const note = pct > 0
             ? `<p class="ctx-pop-note">Token counts &amp; cost are not exposed in terminal output. Run <code>/cost</code> inside Claude Code for a session summary.</p>`
@@ -755,28 +760,54 @@ class Shell {
         for (const [id, rt] of this.tabs) {
             if (!rt._opened) continue;
             try {
-                const buf = rt.term.buffer.active;
-                const viewportEnd = buf.baseY + rt.term.rows - 1;
-                const line = buf.getLine(viewportEnd - 1);
-                if (!line) continue;
-                const text = line.translateToString(true);
-                let pct = null, m;
-                if ((m = text.match(/(\d{1,3})%\s+context\s+used/i)))             pct = +m[1];
-                else if ((m = text.match(/(\d{1,3})%\s+until\s+auto-compact/i)))  pct = 100 - +m[1];
-                else if ((m = text.match(/Context\s+low\s*\((\d{1,3})%/i)))       pct = 100 - +m[1];
-                else if ((m = text.match(/Context\s+is\s+(\d{1,3})%/i)))          pct = +m[1];
-                if (pct !== null) {
-                    pct = Math.min(100, Math.max(0, pct));
-                    if (pct !== this._ctxPct.get(id)) {
-                        this._ctxPct.set(id, pct);
-                        this._updateCtxPie(id, pct);
-                        this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
+                const pct = this._extractCtxPct(rt);
+                if (pct !== null && pct !== this._ctxPct.get(id)) {
+                    this._ctxPct.set(id, pct);
+                    this._updateCtxPie(id, pct);
+                    if (this.viewMode === 'tiles') {
+                        const tnode = this._tilesGridEl && this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
+                        if (tnode) this._paintTilePie(tnode, pct);
                     }
+                    this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
                 }
             } catch (_) {}
         }
         this._pollAgentStatus();
     }
+
+    // Pull Claude Code's context reading out of the live screen. Claude prints
+    // it in the status footer, but the exact wording and row vary by version
+    // and terminal height — so scan the whole visible screen (bottom-up, footer
+    // first) and try several phrasings. "used" forms are consumption directly;
+    // "left / remaining / until auto-compact" forms are the inverse. Returns a
+    // 0–100 integer or null when nothing on screen reports context.
+    _extractCtxPct(rt) {
+        const buf = rt.term.buffer.active;
+        const end = buf.baseY + rt.term.rows;            // exclusive bottom
+        const top = Math.max(0, end - rt.term.rows);     // whole visible screen
+        for (let row = end - 1; row >= top; row--) {
+            const line = buf.getLine(row);
+            if (!line) continue;
+            const t = line.translateToString(true);
+            if (!t || t.indexOf('%') === -1) continue;
+            let m;
+            // consumption (used)
+            if ((m = t.match(/(\d{1,3})\s*%\s+context\s+used/i)))                       return this._clampPct(+m[1]);
+            if ((m = t.match(/context\s+used\s*[:\-]?\s*(\d{1,3})\s*%/i)))               return this._clampPct(+m[1]);
+            if ((m = t.match(/context\s+is\s+(\d{1,3})\s*%/i)))                          return this._clampPct(+m[1]);
+            // remaining (left / until auto-compact) → invert
+            if ((m = t.match(/(\d{1,3})\s*%\s+(?:left\s+)?until\s+auto-?compact/i)))     return this._clampPct(100 - +m[1]);
+            if ((m = t.match(/(?:left|remaining)\s+until\s+auto-?compact\s*[:\-]?\s*(\d{1,3})\s*%/i))) return this._clampPct(100 - +m[1]);
+            if ((m = t.match(/context\s+left\s*[:\-]?\s*(\d{1,3})\s*%/i)))               return this._clampPct(100 - +m[1]);
+            if ((m = t.match(/(\d{1,3})\s*%\s+context\s+(?:left|remaining)/i)))          return this._clampPct(100 - +m[1]);
+            if ((m = t.match(/context\s+low\s*\(\s*(\d{1,3})\s*%/i)))                    return this._clampPct(100 - +m[1]);
+            // generic "context … NN%" — assume consumption, lowest priority
+            if ((m = t.match(/context[^%\d]{0,16}?(\d{1,3})\s*%/i)))                     return this._clampPct(+m[1]);
+        }
+        return null;
+    }
+
+    _clampPct(n) { return Math.min(100, Math.max(0, Math.round(n))); }
 
     // Stream-based agent detection. Runs on every TERM_DATA chunk — checks the
     // raw bytes for Claude Code TUI signals. This is the primary detector;
@@ -1928,7 +1959,7 @@ class Shell {
         if (pct <= 0) {
             pie.style.background = 'rgba(255,255,255,0.15)';
         } else {
-            const color = pct >= 90 ? '#ff5555' : pct >= 75 ? '#ff9944' : pct >= 50 ? '#f1fa8c' : '#aacfd1';
+            const color = this._ctxColor(pct);
             pie.style.background = `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
         }
         pie.title = pct > 0 ? `Context: ${pct}%` : '';
