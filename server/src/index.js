@@ -47,6 +47,7 @@ const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
 const preview          = require('./preview');
 const pasteImage       = require('./pasteImage');
+const tts              = require('./tts');
 const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
@@ -228,6 +229,7 @@ autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
 preview.mount(app, requireAuthed);
 pasteImage.mount(app, requireAuthed);
+tts.mount(app, sessions);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -681,6 +683,7 @@ process.on('SIGTERM', () => shutdown(0));
 function onListening() {
     activePort = server.address().port;
     sysinfo.setSoaPort(activePort);
+    tts.setPort(activePort);
     console.log(`SoA-Web ready: http://${HOST}:${activePort}`);
 
     if (process.env.SOA_WEB_AUTOPAIR !== '0') {

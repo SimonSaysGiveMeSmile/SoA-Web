@@ -386,6 +386,26 @@ class Shell {
             if (!on) this.audio.play('info');
         });
 
+        // Text-to-speech toggle: speak Claude's replies aloud (Web Speech API).
+        this._ttsEnabled = false;
+        try { this._ttsEnabled = localStorage.getItem('soa_web_tts') === '1'; } catch (_) {}
+        const ttsBtn = $('#toggle-tts');
+        if (ttsBtn) {
+            ttsBtn.dataset.state = this._ttsEnabled ? 'on' : 'off';
+            ttsBtn.addEventListener('click', () => {
+                this._ttsEnabled = !this._ttsEnabled;
+                ttsBtn.dataset.state = this._ttsEnabled ? 'on' : 'off';
+                try { localStorage.setItem('soa_web_tts', this._ttsEnabled ? '1' : '0'); } catch (_) {}
+                if (this._ttsEnabled) {
+                    // First user gesture unlocks speech; greet so it's obvious it works.
+                    this._speak('Speech on.');
+                } else if (window.speechSynthesis) {
+                    window.speechSynthesis.cancel();
+                }
+                this.audio.play('info');
+            });
+        }
+
         const settingsBtn = $('#open-settings');
         if (settingsBtn) settingsBtn.addEventListener('click', () => {
             this.audio.play('panels');
@@ -444,6 +464,7 @@ class Shell {
         bridge.addEventListener('term-data', e => this._onTermData(e.detail));
         bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
+        bridge.addEventListener('tts',       e => this._onTTS(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
 
@@ -1620,6 +1641,42 @@ class Shell {
     _shellQuote(p) {
         if (/^[\w@%+=:,./-]+$/.test(p)) return p;
         return "'" + String(p).replace(/'/g, "'\\''") + "'";
+    }
+
+    // A `tts` frame arrived (Claude finished a turn; the Stop hook sent its text).
+    _onTTS(d) {
+        if (!this._ttsEnabled) return;
+        const text = d && d.text;
+        if (!text) return;
+        // Speak only the tab you're looking at by default, so multiple Claude
+        // sessions don't talk over each other. tab === null = server couldn't tag.
+        const tab = d.tab;
+        if (tab != null && this.activeId != null && tab !== this.activeId) return;
+        this._speak(text);
+    }
+
+    _speak(text) {
+        try {
+            const synth = window.speechSynthesis;
+            if (!synth) return;
+            if (!this._ttsVoice) this._ttsVoice = this._pickVoice();
+            synth.cancel(); // interrupt any in-progress utterance
+            const u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+            u.rate = 1.05; u.pitch = 1.0;
+            if (this._ttsVoice) u.voice = this._ttsVoice;
+            synth.speak(u);
+        } catch (_) {}
+    }
+
+    _pickVoice() {
+        try {
+            const voices = window.speechSynthesis.getVoices() || [];
+            if (!voices.length) return null;
+            return voices.find(v => /Samantha|Karen|Daniel|Google US English/i.test(v.name) && /^en/i.test(v.lang))
+                || voices.find(v => /en[-_]US/i.test(v.lang))
+                || voices.find(v => /^en/i.test(v.lang))
+                || null;
+        } catch (_) { return null; }
     }
 
     _hotkey(e) {

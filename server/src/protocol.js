@@ -20,6 +20,7 @@ const MSG = Object.freeze({
     NOTICE:     'notice',
     PONG:       'pong',
     BYE:        'bye',
+    TTS:        'tts',
 
     AUTH:       'auth',
     INPUT:      'input',

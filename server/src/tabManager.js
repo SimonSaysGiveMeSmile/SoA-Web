@@ -14,6 +14,7 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
+const tts = require('./tts');
 
 const DEFAULT_SHELL = (() => {
     if (process.platform === 'win32') return process.env.COMSPEC || 'cmd.exe';
@@ -228,7 +229,10 @@ class TabManager {
         const tab = new Tab({
             id,
             title: title || undefined,
-            cwd, cols, rows, env,
+            cwd, cols, rows,
+            // Inject SOA_WEB_TTS_URL + SOA_WEB_TAB so a Claude Code Stop hook
+            // running under this shell can post its spoken text back to us.
+            env: { ...env, ...tts.envFor(id) },
             onData: data => this.onData(id, data),
             onExit: code => {
                 this._archive(id);
