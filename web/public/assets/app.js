@@ -791,9 +791,9 @@ class Shell {
             const t = line.translateToString(true);
             if (!t || t.indexOf('%') === -1) continue;
             let m;
-            // consumption (used)
-            if ((m = t.match(/(\d{1,3})\s*%\s+context\s+used/i)))                       return this._clampPct(+m[1]);
-            if ((m = t.match(/context\s+used\s*[:\-]?\s*(\d{1,3})\s*%/i)))               return this._clampPct(+m[1]);
+            // consumption (used) — tolerate missing spaces in custom statuslines
+            if ((m = t.match(/(\d{1,3})\s*%\s*context\s*used/i)))                        return this._clampPct(+m[1]);
+            if ((m = t.match(/context\s*used\s*[:\-]?\s*(\d{1,3})\s*%/i)))                return this._clampPct(+m[1]);
             if ((m = t.match(/context\s+is\s+(\d{1,3})\s*%/i)))                          return this._clampPct(+m[1]);
             // remaining (left / until auto-compact) → invert
             if ((m = t.match(/(\d{1,3})\s*%\s+(?:left\s+)?until\s+auto-?compact/i)))     return this._clampPct(100 - +m[1]);
@@ -801,8 +801,13 @@ class Shell {
             if ((m = t.match(/context\s+left\s*[:\-]?\s*(\d{1,3})\s*%/i)))               return this._clampPct(100 - +m[1]);
             if ((m = t.match(/(\d{1,3})\s*%\s+context\s+(?:left|remaining)/i)))          return this._clampPct(100 - +m[1]);
             if ((m = t.match(/context\s+low\s*\(\s*(\d{1,3})\s*%/i)))                    return this._clampPct(100 - +m[1]);
+            // custom statusline gauge: a block-bar followed by NN% is the context
+            // meter (e.g. "(1Mcontext) … ███████░░░71%"). Trust it when the line
+            // mentions context; the filled bar represents consumption.
+            if (/context/i.test(t) && (m = t.match(/[█▓▒░]\s*(\d{1,3})\s*%/)))  return this._clampPct(+m[1]);
+            if ((m = t.match(/[█▓▒░]{3,}\s*(\d{1,3})\s*%/)))                    return this._clampPct(+m[1]);
             // generic "context … NN%" — assume consumption, lowest priority
-            if ((m = t.match(/context[^%\d]{0,16}?(\d{1,3})\s*%/i)))                     return this._clampPct(+m[1]);
+            if ((m = t.match(/context[^%\d]{0,24}?(\d{1,3})\s*%/i)))                     return this._clampPct(+m[1]);
         }
         return null;
     }
