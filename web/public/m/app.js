@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v39 · tts · 2026-06-07';
+const MOBILE_BUILD = 'v40 · device · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -265,6 +265,9 @@ class App {
         this.btnNewTab   = document.getElementById('btn-newtab');
         this.btnMic      = document.getElementById('btn-mic');
         this.btnSpeak    = document.getElementById('btn-speak');
+        this.btnCamera   = document.getElementById('btn-camera');
+        this.btnFullscreen = document.getElementById('btn-fullscreen');
+        this.cameraInput = document.getElementById('camera-input');
         this.btnSettings = document.getElementById('btn-settings');
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
         this.reconnectSub     = document.getElementById('reconnect-sub');
@@ -798,11 +801,13 @@ class App {
                 case SocketState.CONNECTED:
                     this._setStatus('connected', 'paired');
                     this._hideReconnect();
+                    this._acquireWakeLock();        // keep the screen on while streaming
                     if (this._prevSocketState !== SocketState.CONNECTED) sounds.play('connect');
                     break;
                 case SocketState.DISCONNECTED:
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
                     this._showReconnect('link lost · retrying');
+                    this._releaseWakeLock();
                     if (this._prevSocketState === SocketState.CONNECTED) sounds.play('disconnect');
                     break;
             }
@@ -867,6 +872,43 @@ class App {
                 if (this._ttsEnabled) this._speak('Speech on.');      // tap unlocks iOS speech
                 else if (window.speechSynthesis) window.speechSynthesis.cancel();
             });
+        }
+
+        // Camera / photo → upload → drop the file path into the active terminal
+        // (Claude reads the image, text-in-image included).
+        if (this.btnCamera && this.cameraInput) {
+            this.btnCamera.addEventListener('click', () => this.cameraInput.click());
+            this.cameraInput.addEventListener('change', () => {
+                const file = this.cameraInput.files && this.cameraInput.files[0];
+                this.cameraInput.value = '';           // allow re-picking the same file
+                if (file) this._sendPhoto(file);
+            });
+        }
+
+        // Focus / fullscreen toggle.
+        if (this.btnFullscreen) {
+            this.btnFullscreen.addEventListener('click', () => this._toggleFocus());
+        }
+        const focusExit = document.getElementById('focus-exit');
+        if (focusExit) focusExit.addEventListener('click', () => this._toggleFocus(false));
+
+        // Re-acquire the wake lock when returning to the tab (locks drop on hide).
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && this.socket && this.socket.state === 'connected') {
+                this._acquireWakeLock();
+            }
+        });
+
+        // Keyboard-aware layout: pin #app to the *visible* viewport so the bottom
+        // bar / keyboard toolbar sit above the on-screen keyboard, not under it.
+        if (window.visualViewport) {
+            const fit = () => {
+                const vv = window.visualViewport;
+                document.getElementById('app').style.height = vv.height + 'px';
+                this._scrollTermBottom();
+            };
+            window.visualViewport.addEventListener('resize', fit);
+            window.visualViewport.addEventListener('scroll', fit);
         }
 
         this.termEl.addEventListener('click', () => {
@@ -988,6 +1030,74 @@ class App {
                 || voices.find(v => /en[-_]US/i.test(v.lang))
                 || voices.find(v => /^en/i.test(v.lang)) || null;
         } catch (_) { return null; }
+    }
+
+    // ── Camera / photo → prompt ──────────────────────────────────────────
+    async _sendPhoto(file) {
+        try {
+            const path = await this._uploadImage(file);
+            if (path && this._activeTabId != null) {
+                this.socket.sendInput('term-keys', { id: this._activeTabId, text: this._quotePath(path) + ' ' });
+                if ('vibrate' in navigator) try { navigator.vibrate(12); } catch (_) {}
+            }
+        } catch (_) {
+            this._showNotice({ level: 'warn', text: 'Photo upload failed — is the desktop reachable?' });
+        }
+    }
+
+    async _uploadImage(blob) {
+        const base = (this.socket && this.socket.baseUrl)
+            ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : location.origin;
+        const tok = this.socket && this.socket.token;
+        const url = base + '/api/paste-image' + (tok ? '?t=' + encodeURIComponent(tok) : '');
+        const res = await fetch(url, {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob,
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data || !data.ok || !data.path) throw new Error('bad response');
+        return data.path;
+    }
+
+    _quotePath(p) {
+        if (/^[\w@%+=:,./-]+$/.test(p)) return p;
+        return "'" + String(p).replace(/'/g, "'\\''") + "'";
+    }
+
+    // ── Focus / fullscreen ───────────────────────────────────────────────
+    _toggleFocus(force) {
+        const app = document.getElementById('app');
+        const on = force != null ? force : !app.classList.contains('focus-mode');
+        app.classList.toggle('focus-mode', on);
+        if (this.btnFullscreen) this.btnFullscreen.setAttribute('aria-pressed', on ? 'true' : 'false');
+        try {
+            if (on && document.documentElement.requestFullscreen) {
+                document.documentElement.requestFullscreen().catch(() => {});
+            } else if (!on && document.fullscreenElement && document.exitFullscreen) {
+                document.exitFullscreen().catch(() => {});
+            }
+        } catch (_) {}
+        // iPhone Safari can't fullscreen a page — nudge the PWA install once.
+        if (on && !document.documentElement.requestFullscreen && !this._fsHinted) {
+            this._fsHinted = true;
+            const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+            if (!standalone) this._showNotice({ level: 'info', text: 'Tip: Share → “Add to Home Screen” for true fullscreen on iPhone.' });
+        }
+        setTimeout(() => this._scrollTermBottom(), 120);
+    }
+
+    // ── Screen wake lock — keep the display on while streaming ────────────
+    async _acquireWakeLock() {
+        try {
+            if (!('wakeLock' in navigator) || this._wakeLock) return;
+            this._wakeLock = await navigator.wakeLock.request('screen');
+            this._wakeLock.addEventListener('release', () => { this._wakeLock = null; });
+        } catch (_) { this._wakeLock = null; }
+    }
+
+    _releaseWakeLock() {
+        try { if (this._wakeLock) { this._wakeLock.release(); this._wakeLock = null; } } catch (_) {}
     }
 
     // ── Web preview ──────────────────────────────────────────────────────

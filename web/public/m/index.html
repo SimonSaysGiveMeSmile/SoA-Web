@@ -20,11 +20,16 @@
                 <span class="brand-mark"></span>
                 <span class="brand-text">SON&nbsp;OF&nbsp;ANTON</span>
             </div>
-            <div class="status" id="status">
-                <span class="status-dot" data-state="connecting"></span>
-                <span class="status-text">connecting…</span>
+            <div class="topbar-right">
+                <div class="status" id="status">
+                    <span class="status-dot" data-state="connecting"></span>
+                    <span class="status-text">connecting…</span>
+                </div>
+                <button id="btn-camera" class="tb-btn" title="Send a photo to the terminal" aria-label="Camera">📷</button>
+                <button id="btn-fullscreen" class="tb-btn" title="Focus / fullscreen" aria-label="Fullscreen">⛶</button>
             </div>
         </header>
+        <input id="camera-input" type="file" accept="image/*" hidden />
 
         <nav id="tabs" aria-label="Open tabs"></nav>
 
@@ -64,6 +69,7 @@
             <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
             <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>
         </nav>
+        <button id="focus-exit" class="focus-exit" title="Exit fullscreen" aria-label="Exit fullscreen">⤢</button>
 
         <section id="kbd" aria-label="Virtual keyboard"></section>
     </div>
