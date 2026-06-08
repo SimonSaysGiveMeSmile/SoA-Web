@@ -1604,7 +1604,10 @@ class Shell {
         try {
             const p = await this._uploadPastedImage(blob);
             if (p) {
-                this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: this._shellQuote(p) + ' ' });
+                // Deliver the path as a *bracketed paste* (ESC[200~ … ESC[201~),
+                // not typed keystrokes — that's how a drag-drop reaches Claude
+                // Code, which is what makes it attach the image (vs. plain text).
+                this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: '\x1b[200~' + p + '\x1b[201~' });
                 this.audio.play('granted');
                 return;
             }

@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v41 · top-controls · 2026-06-07';
+const MOBILE_BUILD = 'v42 · bracketed-paste · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -1037,7 +1037,9 @@ class App {
         try {
             const path = await this._uploadImage(file);
             if (path && this._activeTabId != null) {
-                this.socket.sendInput('term-keys', { id: this._activeTabId, text: this._quotePath(path) + ' ' });
+                // Bracketed paste (ESC[200~ … ESC[201~) so Claude Code treats the
+                // path like a drag-drop and attaches the image, not as typed text.
+                this.socket.sendInput('term-keys', { id: this._activeTabId, text: '\x1b[200~' + path + '\x1b[201~' });
                 if ('vibrate' in navigator) try { navigator.vibrate(12); } catch (_) {}
             }
         } catch (_) {
