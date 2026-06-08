@@ -14,10 +14,29 @@
  */
 
 const express = require('express');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { MSG, frame } = require('./protocol');
 
 let _port = null;
-function setPort(p) { _port = p; }
+
+// Discovery file so the Stop hook and `soa-msg` can find us even when a shell
+// missed the SOA_WEB_TTS_URL env injection (restored tabs, tabs that predate
+// the feature, env not inherited). This is what makes "the agent texts you"
+// reliable rather than dependent on per-PTY env.
+const BRIDGE_FILE = path.join(os.homedir(), '.soa-web', 'bridge.json');
+function setPort(p) {
+    _port = p;
+    try {
+        fs.mkdirSync(path.dirname(BRIDGE_FILE), { recursive: true });
+        fs.writeFileSync(BRIDGE_FILE, JSON.stringify({
+            port: p,
+            ttsUrl: `http://127.0.0.1:${p}/api/tts`,
+            updatedAt: Date.now(),
+        }));
+    } catch (_) { /* best-effort */ }
+}
 
 // Env injected into every PTY so the Stop hook can reach us. Empty until the
 // server is listening (no port yet) — the hook no-ops when the URL is absent.

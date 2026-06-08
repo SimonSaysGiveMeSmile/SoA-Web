@@ -18,8 +18,24 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const TTS_URL = process.env.SOA_WEB_TTS_URL;
+// Resolve where to post. Prefer the per-tab env (gives tab attribution); fall
+// back to the bridge discovery file the server writes on boot so the hook still
+// fires when a shell missed the env injection. If neither resolves, this isn't
+// a SoA machine / the server isn't running — no-op.
+function resolveTtsUrl() {
+    if (process.env.SOA_WEB_TTS_URL) return process.env.SOA_WEB_TTS_URL;
+    try {
+        const f = path.join(os.homedir(), '.soa-web', 'bridge.json');
+        const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+        if (j && j.ttsUrl) return j.ttsUrl;
+    } catch (_) {}
+    return null;
+}
+
+const TTS_URL = resolveTtsUrl();
 if (!TTS_URL) process.exit(0); // not running under SoA — do nothing
 
 function readStdin() {

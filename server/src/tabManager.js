@@ -16,6 +16,19 @@ const fs = require('fs');
 const { execFileSync } = require('child_process');
 const tts = require('./tts');
 
+// Our bundled CLIs (soa-msg, soa-browser) live alongside the server. Prepend
+// that dir to a shell's PATH so agents can invoke them as bare commands. Scoped
+// per-PTY — it never touches the user's global environment.
+const SCRIPTS_DIR = path.resolve(__dirname, '..', '..', 'scripts');
+function withScriptsOnPath(env) {
+    const e = { ...env };
+    const cur = e.PATH || process.env.PATH || '';
+    if (!cur.split(':').includes(SCRIPTS_DIR)) {
+        e.PATH = cur ? `${SCRIPTS_DIR}:${cur}` : SCRIPTS_DIR;
+    }
+    return e;
+}
+
 const DEFAULT_SHELL = (() => {
     if (process.platform === 'win32') return process.env.COMSPEC || 'cmd.exe';
     return process.env.SOA_WEB_SHELL || process.env.SHELL || '/bin/bash';
@@ -231,8 +244,10 @@ class TabManager {
             title: title || undefined,
             cwd, cols, rows,
             // Inject SOA_WEB_TTS_URL + SOA_WEB_TAB so a Claude Code Stop hook
-            // running under this shell can post its spoken text back to us.
-            env: { ...env, ...tts.envFor(id) },
+            // running under this shell can post its spoken text back to us, and
+            // put our scripts dir on PATH so agents can run `soa-msg` /
+            // `soa-browser` as bare commands (scoped to SoA shells only).
+            env: withScriptsOnPath({ ...env, ...tts.envFor(id) }),
             onData: data => this.onData(id, data),
             onExit: code => {
                 this._archive(id);

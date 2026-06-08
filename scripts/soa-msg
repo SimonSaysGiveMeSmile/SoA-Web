@@ -1,0 +1,84 @@
+#!/usr/bin/env node
+/**
+ * soa-msg — let an agent (or any script) send a message to the SoA mobile IM.
+ *
+ * The message appears as an incoming chat bubble in the mobile CHAT view (and is
+ * spoken aloud if the phone has speech on). Unlike the Stop hook — which only
+ * fires at the END of a turn with Claude's final message — this is an explicit,
+ * any-time channel: call it to text the user a status update, a question, or a
+ * heads-up while you're still working.
+ *
+ * Usage:
+ *   soa-msg "Deploy finished — all green."
+ *   echo "piped text" | soa-msg
+ *   soa-msg --tab 3 "Tab-3 specific note"
+ *
+ * It posts to the local server's loopback /api/tts endpoint. The endpoint is
+ * found via SOA_WEB_TTS_URL (injected into SoA shells) or, failing that, the
+ * ~/.soa-web/bridge.json discovery file the server writes on boot.
+ */
+
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function resolveTtsUrl() {
+    if (process.env.SOA_WEB_TTS_URL) return process.env.SOA_WEB_TTS_URL;
+    try {
+        const j = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.soa-web', 'bridge.json'), 'utf8'));
+        if (j && j.ttsUrl) return j.ttsUrl;
+    } catch (_) {}
+    if (process.env.SOA_WEB_PORT) return 'http://127.0.0.1:' + process.env.SOA_WEB_PORT + '/api/tts';
+    return 'http://127.0.0.1:7332/api/tts';
+}
+
+function parseArgs(argv) {
+    let tab = process.env.SOA_WEB_TAB ? Number(process.env.SOA_WEB_TAB) : null;
+    const words = [];
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === '--tab' && argv[i + 1] != null) { tab = Number(argv[++i]); continue; }
+        words.push(argv[i]);
+    }
+    return { tab, text: words.join(' ') };
+}
+
+function readStdin() {
+    return new Promise((resolve) => {
+        if (process.stdin.isTTY) return resolve('');
+        let data = '';
+        process.stdin.setEncoding('utf8');
+        process.stdin.on('data', (c) => { data += c; });
+        process.stdin.on('end', () => resolve(data));
+        setTimeout(() => resolve(data), 300);
+    });
+}
+
+(async () => {
+    const { tab, text: argText } = parseArgs(process.argv.slice(2));
+    const text = (argText || (await readStdin())).trim();
+    if (!text) {
+        console.error('usage: soa-msg [--tab N] "message"   (or pipe text via stdin)');
+        process.exit(1);
+    }
+    const url = resolveTtsUrl();
+    const body = JSON.stringify({ text, tab });
+    const u = new URL(url);
+    const req = http.request({
+        hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+        let b = ''; res.on('data', d => b += d);
+        res.on('end', () => {
+            try {
+                const j = JSON.parse(b);
+                if (j.ok && j.delivered > 0) console.log(`sent → ${j.delivered} device(s)`);
+                else if (j.ok) console.log('sent (no device connected — will not appear until the phone reconnects)');
+                else console.log(JSON.stringify(j));
+            } catch (_) { console.log(b.trim()); }
+            process.exit(0);
+        });
+    });
+    req.on('error', (e) => { console.error('soa-msg error:', e.message, '(is the SoA server running?)'); process.exit(1); });
+    req.write(body); req.end();
+})();
