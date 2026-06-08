@@ -11,7 +11,7 @@
  */
 
 const os = require('os');
-const { openTunnel } = require('./tunnel');
+const { openTunnel, adopt } = require('./tunnel');
 
 function lanAddresses(port, proto = 'http') {
     const out = [];
@@ -70,6 +70,37 @@ class PairingManager {
             this.error = err && err.message || 'tunnel failed';
             return this.snapshot();
         }
+    }
+
+    // Adopt a tunnel that survived a previous daemon process (same URL) so a
+    // restart/redeploy doesn't drop the mobile bridge. Falls through to a fresh
+    // start() at the call site when there's nothing healthy to adopt.
+    async resume() {
+        if (this.state === 'online') return this.snapshot();
+        this.state = 'starting';
+        this.error = null;
+        try {
+            const t = await adopt(this.port);
+            if (!t) { this.state = 'idle'; return this.snapshot(); }
+            this.tunnel = t;
+            this.publicUrl = t.url;
+            this.state = 'online';
+            this.startedAt = Date.now();
+            if ('onDeath' in t) t.onDeath = () => this._reset('tunnel exited');
+            return this.snapshot();
+        } catch (err) {
+            this.state = 'idle';
+            this.error = null;
+            return this.snapshot();
+        }
+    }
+
+    // Drop our handle WITHOUT killing the tunnel, so it keeps running across a
+    // graceful daemon restart and the next boot can re-adopt it. Used on
+    // shutdown; contrast with stop(), which is an explicit user teardown.
+    detach() {
+        this.tunnel = null;
+        this._reset(null);
     }
 
     stop() {

@@ -16,9 +16,99 @@ try {
 
 const { execFile, spawn } = require('child_process');
 const http = require('http');
+const https = require('https');
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { dbg } = require('./debug');
+
+// Where we remember a live tunnel so it can be re-adopted after a daemon
+// restart instead of minting a fresh (different) URL. Keeping the same public
+// URL across restarts is what stops the mobile client from losing the bridge
+// when the desktop is redeployed or refreshed.
+const STATE_FILE = path.join(os.homedir(), '.soa-web', 'tunnel.json');
+
+function _saveState(state) {
+    try {
+        fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+        fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+    } catch (_) { /* best-effort */ }
+}
+function _loadState() {
+    try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch (_) { return null; }
+}
+function _clearState() { try { fs.unlinkSync(STATE_FILE); } catch (_) {} }
+
+// pid liveness without sending a real signal. EPERM means it exists but is
+// owned by someone else (still "alive" for our purposes).
+function _alive(pid) {
+    if (!pid) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+// Probe a tunnel URL end-to-end (through Cloudflare, back to our own origin).
+// 200 from /api/ping means the tunnel is alive AND routing to a live daemon.
+function _probe(url) {
+    return new Promise(resolve => {
+        let done = false;
+        const finish = v => { if (!done) { done = true; resolve(v); } };
+        try {
+            const u = new URL(url.replace(/\/$/, '') + '/api/ping');
+            const lib = u.protocol === 'https:' ? https : http;
+            const req = lib.get(u, res => {
+                res.resume();
+                finish(res.statusCode === 200);
+            });
+            req.on('error', () => finish(false));
+            req.setTimeout(6000, () => { try { req.destroy(); } catch (_) {} finish(false); });
+        } catch (_) { finish(false); }
+    });
+}
+
+// Re-adopt a tunnel that outlived a previous daemon process. Returns a handle
+// shaped like _tryCloudflared's so callers can't tell the difference, or null
+// if there's nothing healthy to adopt. A process that's alive but no longer
+// routing to us is killed so we don't leak orphans or run two tunnels.
+async function adopt(port) {
+    const st = _loadState();
+    if (!st || st.provider !== 'cloudflared' || st.port !== port || !st.pid || !st.url) return null;
+    if (!_alive(st.pid)) { dbg('tunnel', 'adopt: saved pid', st.pid, 'is gone'); _clearState(); return null; }
+    const ok = await _probe(st.url);
+    if (!ok) {
+        dbg('tunnel', 'adopt: pid', st.pid, 'alive but', st.url, 'not routing — killing stale tunnel');
+        try { process.kill(st.pid); } catch (_) {}
+        _clearState();
+        return null;
+    }
+    dbg('tunnel', 'adopt: re-using surviving cloudflared pid', st.pid, st.url);
+    return _wrapAdopted(st);
+}
+
+function _wrapAdopted(st) {
+    let dead = false;
+    let onDeath = null;
+    let timer = setInterval(() => {
+        if (dead) return;
+        if (!_alive(st.pid)) {
+            dead = true;
+            clearInterval(timer);
+            dbg('tunnel', 'adopted cloudflared exited (tunnel down):', st.url);
+            _clearState();
+            if (onDeath) onDeath();
+        }
+    }, 10000);
+    if (timer.unref) timer.unref();
+    return {
+        url: st.url,
+        close: () => {
+            dead = true;
+            clearInterval(timer);
+            try { process.kill(st.pid); } catch (_) {}
+            _clearState();
+        },
+        set onDeath(fn) { onDeath = fn; },
+    };
+}
 
 async function openTunnel(port) {
     dbg('tunnel', 'openTunnel: probing providers for port', port);
@@ -41,9 +131,14 @@ async function _tryCloudflared(port) {
     if (!cfPath) { dbg('tunnel', 'cloudflared binary not found on PATH or well-known dirs'); return null; }
     dbg('tunnel', 'cloudflared binary:', cfPath);
     try {
+        // detached: run cloudflared in its own process group so it survives a
+        // daemon restart (graceful exit or launchd bounce). We unref() it once
+        // the URL is known and persist {pid,url} so the next boot can adopt it
+        // and keep the SAME public URL — the mobile bridge never has to chase
+        // a new address.
         const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            detached: false,
+            detached: true,
         });
 
         const url = await new Promise((resolve, reject) => {
@@ -67,18 +162,23 @@ async function _tryCloudflared(port) {
             proc.on('exit', code => { clearTimeout(timeout); dbg('tunnel', 'cloudflared exited early, code', code, '— output:', buf.slice(-400)); reject(new Error('cloudflared exit ' + code)); });
         });
 
+        // Remember it and let the parent exit independently of it.
+        _saveState({ provider: 'cloudflared', url, pid: proc.pid, port, startedAt: Date.now() });
+        try { proc.unref(); } catch (_) {}
+
         let dead = false;
         let onDeath = null;
         proc.on('exit', () => {
             if (dead) return;
             dead = true;
             dbg('tunnel', 'cloudflared process exited (tunnel down):', url);
+            _clearState();
             if (onDeath) onDeath();
         });
 
         return {
             url,
-            close: () => { dead = true; try { proc.kill(); } catch (_) {} },
+            close: () => { dead = true; try { proc.kill(); } catch (_) {} _clearState(); },
             set onDeath(fn) { onDeath = fn; },
         };
     } catch (_) {
@@ -199,4 +299,4 @@ function _findBinary(name) {
     });
 }
 
-module.exports = { openTunnel, available: !!localtunnel };
+module.exports = { openTunnel, adopt, available: !!localtunnel };
