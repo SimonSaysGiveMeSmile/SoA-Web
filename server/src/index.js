@@ -48,6 +48,7 @@ const autoPilot        = require('./autoPilot');
 const preview          = require('./preview');
 const pasteImage       = require('./pasteImage');
 const tts              = require('./tts');
+const agentBrowser     = require('./agentBrowser');
 const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
@@ -230,6 +231,7 @@ autoPilot.mount(app, requireAuthed);
 preview.mount(app, requireAuthed);
 pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
+agentBrowser.mount(app, requireAuthed, sessions);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -638,6 +640,15 @@ function handleInput(session, d) {
             }
             break;
         }
+        case INPUT_KIND.BROWSER_SUBSCRIBE:
+            agentBrowser.subscribe().catch(() => {});
+            break;
+        case INPUT_KIND.BROWSER_UNSUBSCRIBE:
+            agentBrowser.unsubscribe().catch(() => {});
+            break;
+        case INPUT_KIND.BROWSER_CLICK:
+            agentBrowser.command('click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
+            break;
         default: /* ignore */ break;
     }
 }

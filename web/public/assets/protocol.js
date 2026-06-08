@@ -17,6 +17,7 @@ export const MSG = Object.freeze({
     PONG:      'pong',
     BYE:       'bye',
     TTS:       'tts',
+    BROWSER_FRAME: 'browser-frame',
 
     AUTH:      'auth',
     INPUT:     'input',
@@ -37,6 +38,9 @@ export const INPUT_KIND = Object.freeze({
     SHELL_COMMAND: 'shell-command',
     SET_TITLE:     'set-title',
     CTX_REPORT:    'ctx-report',
+    BROWSER_SUBSCRIBE:   'browser-subscribe',
+    BROWSER_UNSUBSCRIBE: 'browser-unsubscribe',
+    BROWSER_CLICK:       'browser-click',
 });
 
 export function frame(type, data, id) {

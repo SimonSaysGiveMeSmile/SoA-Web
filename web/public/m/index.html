@@ -56,10 +56,12 @@
                            autocorrect="off" spellcheck="false" />
                     <button id="web-go" class="web-go" type="button">GO</button>
                     <button id="web-reload" class="web-go web-reload" type="button" title="Reload">⟳</button>
+                    <button id="agent-toggle" class="web-go" type="button" title="Agent browser — live, isolated, drivable by agents" aria-pressed="false">🤖</button>
                 </div>
                 <div class="web-frame-wrap">
                     <iframe id="web-frame" class="web-frame"
                             sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"></iframe>
+                    <img id="agent-frame" class="agent-frame" alt="agent browser live view" hidden />
                     <div id="web-empty" class="web-empty">Pick a local port or type a URL to preview a web page here — viewable from this device through the tunnel.</div>
                 </div>
             </section>

@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+/**
+ * soa-browser — drive SoA's isolated agent browser from a terminal.
+ *
+ * The browser is a headless Chromium managed by the SoA server, separate from
+ * your real Chrome. Its live view streams into the SoA BROWSER panel, so a human
+ * can watch (and tap to interact) while an agent automates it.
+ *
+ * Usage:
+ *   soa-browser open <url>            navigate (http:// added if missing)
+ *   soa-browser click <x> <y>         click at viewport coords (1024x768)
+ *   soa-browser type <text...>        insert text
+ *   soa-browser key <Enter|Tab|Backspace>
+ *   soa-browser scroll [dy]           wheel scroll (default 300)
+ *   soa-browser back                  history back
+ *   soa-browser eval "<js>"           run JS, print returned value
+ *   soa-browser url                   print current URL
+ *   soa-browser screenshot [out.jpg]  save a JPEG of the current page
+ */
+
+const http = require('http');
+
+function base() {
+    const t = process.env.SOA_WEB_TTS_URL;        // injected into SoA shells
+    if (t) return t.replace(/\/api\/tts$/, '');
+    return 'http://127.0.0.1:' + (process.env.SOA_WEB_PORT || '7332');
+}
+
+function post(body) {
+    return new Promise((resolve, reject) => {
+        const data = JSON.stringify(body);
+        const u = new URL(base() + '/api/agent-browser');
+        const req = http.request({
+            hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+        }, (res) => {
+            let b = ''; res.on('data', d => b += d);
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve({ ok: false, raw: b }); } });
+        });
+        req.on('error', reject);
+        req.write(data); req.end();
+    });
+}
+
+(async () => {
+    const [cmd, ...rest] = process.argv.slice(2);
+    let action, args = {};
+    switch (cmd) {
+        case 'open': case 'navigate': case 'go': action = 'navigate'; args.url = rest.join(' '); break;
+        case 'click':      action = 'click'; args.x = +rest[0]; args.y = +rest[1]; break;
+        case 'type':       action = 'type'; args.text = rest.join(' '); break;
+        case 'key':        action = 'key'; args.key = rest[0]; break;
+        case 'scroll':     action = 'scroll'; args.dy = rest[0] ? +rest[0] : 300; break;
+        case 'back':       action = 'back'; break;
+        case 'eval':       action = 'eval'; args.js = rest.join(' '); break;
+        case 'url':        action = 'url'; break;
+        case 'screenshot': case 'shot': action = 'screenshot'; break;
+        default:
+            console.error('usage: soa-browser open|click|type|key|scroll|back|eval|url|screenshot');
+            process.exit(1);
+    }
+    try {
+        const r = await post({ action, ...args });
+        if (action === 'screenshot' && r && r.data) {
+            const fs = require('fs');
+            const out = rest[0] || 'soa-browser-shot.jpg';
+            fs.writeFileSync(out, Buffer.from(r.data, 'base64'));
+            console.log('saved ' + out);
+        } else {
+            console.log(JSON.stringify(r));
+        }
+        process.exit(r && r.ok === false ? 1 : 0);
+    } catch (e) {
+        console.error('soa-browser error:', e.message, '(is the SoA server running?)');
+        process.exit(1);
+    }
+})();

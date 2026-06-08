@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v43 · browser-system · 2026-06-07';
+const MOBILE_BUILD = 'v44 · agent-browser · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -836,6 +836,7 @@ class App {
                 case 'term-exit': break;
                 case 'notice':    this._showNotice(msg.d); break;
                 case 'tts':       this._onTTS(msg.d); break;
+                case 'browser-frame': this._onBrowserFrame(msg.d); break;
             }
         });
 
@@ -935,7 +936,12 @@ class App {
             this.kbd.hide();
             this.kbd.blur();
         }
-        if (target === 'web-view') this._refreshWebPorts();
+        if (target === 'web-view') {
+            this._refreshWebPorts();
+            if (this._agentMode) this.socket.sendInput('browser-subscribe');
+        } else if (this._agentMode) {
+            this.socket.sendInput('browser-unsubscribe');   // pause stream when away
+        }
         // Dashboard: render immediately, then keep the terminal-tail previews
         // live with a 1s tick while the view is open (cheap; stopped on leave).
         if (target === 'tiles-view') {
@@ -1157,6 +1163,8 @@ class App {
         this._webUrlInp = document.getElementById('web-url');
         this._webFrame = document.getElementById('web-frame');
         this._webEmpty = document.getElementById('web-empty');
+        this._agentFrame = document.getElementById('agent-frame');
+        this._agentToggle = document.getElementById('agent-toggle');
         const go = document.getElementById('web-go');
         const reload = document.getElementById('web-reload');
         if (!this._webFrame) return;
@@ -1164,17 +1172,64 @@ class App {
         const openUrl = (raw) => {
             const u = (raw || '').trim();
             if (!u) return;
+            if (this._agentMode) { this._agentNavigate(u); return; }
             this._openWeb(this._resolveWebTarget(u));
         };
 
         this._webPortSel.addEventListener('change', () => {
             const p = this._webPortSel.value;
-            if (p) { this._webUrlInp.value = ''; this._openWeb(this._proxyUrl(`/preview/${p}/`)); }
+            if (!p) return;
+            this._webUrlInp.value = '';
+            if (this._agentMode) this._agentNavigate('localhost:' + p);
+            else this._openWeb(this._proxyUrl(`/preview/${p}/`));
         });
         go.addEventListener('click', () => openUrl(this._webUrlInp.value));
         this._webUrlInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') openUrl(this._webUrlInp.value); });
-        if (reload) reload.addEventListener('click', () => { if (this._webFrame.src) this._webFrame.src = this._webFrame.src; });
+        if (reload) reload.addEventListener('click', () => { if (!this._agentMode && this._webFrame.src) this._webFrame.src = this._webFrame.src; });
+
+        if (this._agentToggle) this._agentToggle.addEventListener('click', () => this._setAgentMode(!this._agentMode));
+
+        // Tap the live agent view → forward as a click at the page's coords.
+        if (this._agentFrame) {
+            this._agentFrame.addEventListener('click', (e) => {
+                const r = this._agentFrame.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                const x = Math.round((e.clientX - r.left) / r.width * 1024);
+                const y = Math.round((e.clientY - r.top) / r.height * 768);
+                this.socket.sendInput('browser-click', { x, y });
+            });
+        }
     }
+
+    // ── Agent browser (live, isolated headless Chrome) ───────────────────
+    _onBrowserFrame(d) {
+        if (this._agentFrame && d && d.data) this._agentFrame.src = 'data:image/jpeg;base64,' + d.data;
+    }
+
+    _setAgentMode(on) {
+        this._agentMode = on;
+        if (this._agentToggle) this._agentToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+        if (this._agentFrame) this._agentFrame.hidden = !on;
+        if (this._webFrame) this._webFrame.style.display = on ? 'none' : '';
+        if (this._webEmpty) this._webEmpty.style.display = on ? 'none' : '';
+        if (this._webUrlInp) this._webUrlInp.placeholder = on ? 'agent browser — type a URL' : 'localhost:3000 or https://…';
+        this.socket.sendInput(on ? 'browser-subscribe' : 'browser-unsubscribe');
+    }
+
+    async _agentCmd(action, args) {
+        try {
+            const base = (this.socket && this.socket.baseUrl)
+                ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
+            const tok = this.socket && this.socket.token;
+            const res = await fetch(base + '/api/agent-browser' + (tok ? '?t=' + encodeURIComponent(tok) : ''), {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...args }),
+            });
+            return res.ok ? res.json() : null;
+        } catch (_) { return null; }
+    }
+
+    _agentNavigate(url) { this._agentCmd('navigate', { url }); }
 
     _openWeb(src) {
         if (!this._webFrame) return;
