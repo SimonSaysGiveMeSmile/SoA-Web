@@ -348,6 +348,38 @@ button:active { background: var(--accent-bg-hover); }
    composer types into the same PTY, so it's the terminal in conversation form. */
 #chat-view { display: none; }
 #chat-view.active { display: flex; flex-direction: column; }
+.chat-status {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--fg-dim);
+    border-bottom: 1px solid var(--line);
+    background: var(--accent-bg);
+}
+.chat-status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--fg-faint, var(--fg-dim));
+    flex: 0 0 auto;
+}
+.chat-status[data-state="working"] .chat-status-dot {
+    background: var(--accent);
+    animation: chat-pulse 1.1s ease-in-out infinite;
+}
+.chat-status[data-state="working"] .chat-status-text::after {
+    content: '';
+    animation: chat-ellipsis 1.4s steps(4, end) infinite;
+}
+.chat-status[data-state="input"] .chat-status-dot { background: var(--warn, #f1c40f); }
+.chat-status[data-state="completed"] .chat-status-dot { background: var(--accent); }
+.chat-status[data-state="working"] { color: var(--fg); }
+.chat-status[data-state="input"] { color: var(--warn, #f1c40f); }
+@keyframes chat-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes chat-ellipsis { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
 .chat-log {
     flex: 1 1 auto;
     overflow-y: auto;

@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v46 · chat (IM) · 2026-06-07';
+const MOBILE_BUILD = 'v48 · status fix + kbd · 2026-06-08';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -407,6 +407,7 @@ class App {
         this.chatInput    = document.getElementById('chat-input');
         this.chatComposer = document.getElementById('chat-composer');
         this.chatBadge    = document.getElementById('chat-badge');
+        this.chatStatus   = document.getElementById('chat-status');
         this._chatThreads = new Map();   // tabId → [{ from:'agent'|'you', text, full, t }]
         this._chatUnread  = 0;
 
@@ -1048,8 +1049,12 @@ class App {
             window.visualViewport.addEventListener('scroll', fit);
         }
 
+        // Tapping the terminal is the explicit "I want to type" gesture — this
+        // is the ONLY place that raises the keyboard. Switching views (incl. from
+        // the dashboard) never engages it on its own.
         this.termEl.addEventListener('click', () => {
             this._showView('terminal-view');
+            this.kbd.show();
             this.kbd.focus();
         });
 
@@ -1068,7 +1073,8 @@ class App {
         this.viewEls.forEach(v => v.classList.toggle('active', v.id === target));
         this.viewBtns.forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-view') === target ? 'true' : 'false'));
         if (target === 'terminal-view') {
-            this.kbd.show();
+            // Don't auto-raise the keyboard on entry (e.g. tapping a dashboard
+            // tile). It appears only when the user taps the terminal to type.
         } else {
             this.kbd.hide();
             this.kbd.blur();
@@ -1078,6 +1084,7 @@ class App {
             this._chatUnread = 0;
             this._updateChatBadge();
             this._renderChat();
+            this._renderChatStatus();
             setTimeout(() => { try { this.chatInput && this.chatInput.focus(); } catch (_) {} }, 60);
         }
         if (target === 'web-view') {
@@ -1177,7 +1184,8 @@ class App {
             tile.addEventListener('click', () => {
                 this.socket.sendInput('switch-tab', { id });
                 this._showView('terminal-view');
-                this.kbd.focus();
+                // No keyboard here — opening a tab from the dashboard just shows
+                // its terminal. Tap the terminal when you actually want to type.
             });
             frag.appendChild(tile);
         });
@@ -1302,6 +1310,32 @@ class App {
 
     _scrollChatBottom() {
         if (this.chatLog) this.chatLog.scrollTop = this.chatLog.scrollHeight;
+    }
+
+    // Live status strip: reflects the active tab's detected agent state so you
+    // can see it's thinking / waiting on you even between final messages.
+    _renderChatStatus() {
+        if (!this.chatStatus) return;
+        const status = (this._mobileStatus && this._mobileStatus.get(this._activeTabId)) || 'idle';
+        const css = cssStatus(status);   // working→running, attention→input, done→completed
+        const map = {
+            running:   { state: 'working',   text: 'Agent working' },
+            input:     { state: 'input',     text: 'Awaiting your input' },
+            completed: { state: 'completed', text: 'Done' },
+        };
+        const m = map[css];
+        const textEl = this.chatStatus.querySelector('.chat-status-text');
+        if (!m) {
+            // idle: keep a quiet "ready" line rather than hiding, so the strip
+            // doesn't flicker in and out as state changes.
+            this.chatStatus.hidden = false;
+            this.chatStatus.removeAttribute('data-state');
+            if (textEl) textEl.textContent = 'Idle · ready';
+            return;
+        }
+        this.chatStatus.hidden = false;
+        this.chatStatus.setAttribute('data-state', m.state);
+        if (textEl) textEl.textContent = m.text;
     }
 
     _updateChatBadge() {
@@ -1753,6 +1787,27 @@ class App {
                 this._applyTerminalChunk({ id: r.id, data: r.data });
             }
         }
+        // The per-tab detector is throttled (250ms), so a fast replay burst can
+        // leave a tab's status stale at 'idle' after a reconnect/restart. Force
+        // a fresh classification from each tab's buffered tail now.
+        this._redetectAllTabs();
+    }
+
+    // Re-run agent-status detection for every known tab, ignoring the throttle.
+    // Used after a reconnect replay so the status indicators reflect the current
+    // on-screen state instead of waiting for the next live byte.
+    _redetectAllTabs() {
+        if (!this._agentRecent) return;
+        for (const [id, sb] of this._agentRecent) {
+            const cur = (this._mobileStatus && this._mobileStatus.get(id)) || 'idle';
+            const next = classifyAgent(sb.recent, cur);
+            if (next && next !== cur) {
+                if (!this._mobileStatus) this._mobileStatus = new Map();
+                this._mobileStatus.set(id, next);
+                this._setTabStatusDom(id, next);
+            }
+        }
+        if (this._currentView === 'chat-view') this._renderChatStatus();
     }
 
     _applySnapshot(snap) {
@@ -1810,7 +1865,7 @@ class App {
         // Keep the dashboard in sync with tab add/remove/switch when it's open.
         if (this._tilesTimer) this._renderTiles();
         // Follow the active tab's conversation when the chat view is open.
-        if (this._currentView === 'chat-view') this._renderChat();
+        if (this._currentView === 'chat-view') { this._renderChat(); this._renderChatStatus(); }
     }
 
     _renderTabs(tabs) {
@@ -2152,6 +2207,8 @@ class App {
             this._mobileStatus.set(id, next);
             this._setTabStatusDom(id, next);
             if (next === 'attention') this._showAgentToast(this._tabName(id));
+            // Keep the IM status strip live for the tab being viewed.
+            if (this._currentView === 'chat-view' && id === this._activeTabId) this._renderChatStatus();
             sb.recent = '';                // avoid re-detecting stale patterns
         }
     }
