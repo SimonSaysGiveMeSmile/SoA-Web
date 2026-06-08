@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v40 · device · 2026-06-07';
+const MOBILE_BUILD = 'v41 · top-controls · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -771,8 +771,8 @@ class App {
     _hideChrome() {
         if (this._chromeHidden) return;
         this._chromeHidden = true;
-        const bb = document.getElementById('bottombar');
-        if (bb) bb.classList.add('chrome-hidden');
+        const top = document.getElementById('topbar');
+        if (top) top.classList.add('chrome-hidden');
         if (this.kbdEl) this.kbdEl.classList.add('chrome-hidden');
         this._pullHint.classList.add('visible');
     }
@@ -780,8 +780,8 @@ class App {
     _showChrome() {
         if (this._chromeHidden) {
             this._chromeHidden = false;
-            const bb = document.getElementById('bottombar');
-            if (bb) bb.classList.remove('chrome-hidden');
+            const top = document.getElementById('topbar');
+            if (top) top.classList.remove('chrome-hidden');
             if (this.kbdEl) this.kbdEl.classList.remove('chrome-hidden');
             this._pullHint.classList.remove('visible');
         }

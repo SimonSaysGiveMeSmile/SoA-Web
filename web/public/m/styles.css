@@ -65,28 +65,38 @@ button:active { background: var(--accent-bg-hover); }
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: max(env(safe-area-inset-top), 8px) 16px 10px;
+    gap: 8px;
+    padding: max(env(safe-area-inset-top), 8px) 10px 8px;
     border-bottom: 1px solid var(--line);
     background: var(--bg);
 }
+#topbar .brand-mark { flex: 0 0 auto; }
+#topbar .status { flex: 0 0 auto; }
+#topbar .status .status-text { display: none; }   /* dot only — keep the bar slim */
 
-/* Topbar right cluster — status + camera + fullscreen */
-.topbar-right { display: flex; align-items: center; gap: 8px; }
-.tb-btn {
-    background: transparent; border: 1px solid var(--line); border-radius: 8px;
-    color: var(--fg); font-size: 15px; line-height: 1;
-    width: 34px; height: 30px;
-    display: flex; align-items: center; justify-content: center;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+/* Function controls — one horizontally-scrollable strip, like the tabs row */
+#controls {
+    flex: 1 1 auto; min-width: 0;
+    display: flex; align-items: center; gap: 6px;
+    overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none; -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
 }
-.tb-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
-.tb-btn:active { background: var(--accent-bg); }
+#controls::-webkit-scrollbar { width: 0; height: 0; display: none; }
+#controls .bb-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 9px 13px;
+    width: auto;
+}
+#controls .bb-icon, #controls .bb-icon-sm {
+    flex: 0 0 auto; width: auto; min-width: 42px;
+    padding: 9px 10px; text-align: center;
+}
 
 /* Focus / fullscreen mode — hide chrome, hand the terminal the whole screen */
 #app.focus-mode #topbar,
-#app.focus-mode #tabs,
-#app.focus-mode #bottombar { display: none !important; }
+#app.focus-mode #tabs { display: none !important; }
 .focus-exit {
     display: none; position: fixed; z-index: 5000;
     top: max(env(safe-area-inset-top), 8px); right: 10px;
@@ -523,6 +533,15 @@ button:active { background: var(--accent-bg-hover); }
 .bb-icon-sm { flex: 0 0 44px; font-size: 16px; }
 
 /* ── Auto-hide chrome ─────────────────────────────── */
+#topbar.chrome-hidden {
+    transform: translateY(-100%);
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    flex: 0 0 0px;
+    padding: 0; margin: 0; border: none; overflow: hidden;
+}
 #bottombar.chrome-hidden {
     transform: translateY(calc(100% + 20px));
     opacity: 0;

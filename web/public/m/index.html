@@ -16,18 +16,22 @@
 <body>
     <div id="app">
         <header id="topbar">
-            <div class="brand">
-                <span class="brand-mark"></span>
-                <span class="brand-text">SON&nbsp;OF&nbsp;ANTON</span>
+            <span class="brand-mark" title="Son of Anton"></span>
+            <div class="status" id="status">
+                <span class="status-dot" data-state="connecting"></span>
+                <span class="status-text"></span>
             </div>
-            <div class="topbar-right">
-                <div class="status" id="status">
-                    <span class="status-dot" data-state="connecting"></span>
-                    <span class="status-text">connecting…</span>
-                </div>
-                <button id="btn-camera" class="tb-btn" title="Send a photo to the terminal" aria-label="Camera">📷</button>
-                <button id="btn-fullscreen" class="tb-btn" title="Focus / fullscreen" aria-label="Fullscreen">⛶</button>
-            </div>
+            <nav id="controls" class="controls" aria-label="Functions">
+                <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
+                <button class="bb-btn" data-view="tiles-view">DASH</button>
+                <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
+                <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
+                <button class="bb-btn bb-icon" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
+                <button class="bb-btn bb-icon" id="btn-camera" title="Send a photo to the terminal">📷</button>
+                <button class="bb-btn bb-icon" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
+                <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
+                <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>
+            </nav>
         </header>
         <input id="camera-input" type="file" accept="image/*" hidden />
 
@@ -60,15 +64,6 @@
             </section>
         </main>
 
-        <nav id="bottombar">
-            <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
-            <button class="bb-btn" data-view="tiles-view">DASH</button>
-            <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
-            <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
-            <button class="bb-btn bb-icon" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
-            <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
-            <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>
-        </nav>
         <button id="focus-exit" class="focus-exit" title="Exit fullscreen" aria-label="Exit fullscreen">⤢</button>
 
         <section id="kbd" aria-label="Virtual keyboard"></section>
