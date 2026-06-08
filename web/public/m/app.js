@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v42 · bracketed-paste · 2026-06-07';
+const MOBILE_BUILD = 'v43 · browser-system · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -945,6 +945,53 @@ class App {
             clearInterval(this._tilesTimer);
             this._tilesTimer = null;
         }
+        // System: poll host/cpu/ram/device while the view is open.
+        if (target === 'widgets-view') {
+            this._refreshWidgets();
+            if (!this._widgetsTimer) this._widgetsTimer = setInterval(() => this._refreshWidgets(), 2000);
+        } else if (this._widgetsTimer) {
+            clearInterval(this._widgetsTimer);
+            this._widgetsTimer = null;
+        }
+    }
+
+    async _refreshWidgets() {
+        if (!this.widgetsEl) return;
+        const get = async (p) => {
+            try {
+                const base = (this.socket && this.socket.baseUrl)
+                    ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
+                const tok = this.socket && this.socket.token;
+                const res = await fetch(base + p + (tok ? (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(tok) : ''),
+                    { credentials: 'include', cache: 'no-store' });
+                if (!res.ok) return null;
+                return (await res.json()).data;
+            } catch (_) { return null; }
+        };
+        const [sysd, cpu, ram, dev] = await Promise.all([get('/api/sys'), get('/api/cpu'), get('/api/ram'), get('/api/device')]);
+        const GB = 1073741824;
+        const cards = [];
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        const ss = String(now.getSeconds()).padStart(2, '0');
+        cards.push(card('CLOCK', `${hh}:${mm}:${ss}`, now.toDateString()));
+        if (sysd) cards.push(card('HOST', sysd.hostname || '—', `${(sysd.platform || '').toUpperCase()} · ${sysd.arch || ''}`));
+        if (cpu && Array.isArray(cpu.loadavg) && cpu.cores) {
+            cards.push(meterCard('CPU LOAD', Math.min(100, Math.round((cpu.loadavg[0] / cpu.cores) * 100))));
+            cards.push(card('CPU', cpu.model || '—', `${cpu.cores} cores`));
+        }
+        if (ram && ram.usedPct != null) {
+            cards.push(meterCard('MEMORY', ram.usedPct));
+            cards.push(card('MEMORY', `${(ram.used / GB).toFixed(1)} / ${(ram.total / GB).toFixed(0)} GB`, `${ram.usedPct}% used`));
+        }
+        if (dev) {
+            const bat = dev.battery != null ? `${dev.battery}%${dev.charging ? ' ⚡' : ''}` : 'N/A';
+            const meta = `${dev.online ? 'online' : 'offline'}${dev.cpuTemp != null ? ' · ' + dev.cpuTemp + '°C' : ''}${dev.batteryHealth != null ? ' · health ' + dev.batteryHealth + '%' : ''}`;
+            cards.push(card('DEVICE', bat, meta));
+        }
+        this.widgetsEl.innerHTML = cards.join('')
+            || `<div class="w-card"><h2>No data</h2><div class="w-meta">Desktop unreachable.</div></div>`;
     }
 
     // ── Dashboard (2-D tile view) ────────────────────────────────────────
