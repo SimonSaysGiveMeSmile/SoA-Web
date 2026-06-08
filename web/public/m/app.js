@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v38 · newtab-chooser · 2026-06-05';
+const MOBILE_BUILD = 'v39 · tts · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -264,6 +264,7 @@ class App {
         this.viewBtns    = Array.from(document.querySelectorAll('.bb-btn[data-view]'));
         this.btnNewTab   = document.getElementById('btn-newtab');
         this.btnMic      = document.getElementById('btn-mic');
+        this.btnSpeak    = document.getElementById('btn-speak');
         this.btnSettings = document.getElementById('btn-settings');
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
         this.reconnectSub     = document.getElementById('reconnect-sub');
@@ -294,6 +295,8 @@ class App {
         this._toastTimer = null;
         this._tilesTimer = null;
         this._flushScheduled = false;
+        this._ttsEnabled = false;
+        try { this._ttsEnabled = localStorage.getItem('soa_web_tts') === '1'; } catch (_) {}
         this._currentTheme = loadSavedTheme();
         this._idleTimer = null;
         this._chromeHidden = false;
@@ -827,6 +830,7 @@ class App {
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
                 case 'term-exit': break;
                 case 'notice':    this._showNotice(msg.d); break;
+                case 'tts':       this._onTTS(msg.d); break;
             }
         });
 
@@ -853,6 +857,17 @@ class App {
 
         this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
         this.btnMic.addEventListener('click', () => this.socket.sendInput('voice-toggle'));
+
+        if (this.btnSpeak) {
+            this.btnSpeak.setAttribute('aria-pressed', this._ttsEnabled ? 'true' : 'false');
+            this.btnSpeak.addEventListener('click', () => {
+                this._ttsEnabled = !this._ttsEnabled;
+                this.btnSpeak.setAttribute('aria-pressed', this._ttsEnabled ? 'true' : 'false');
+                try { localStorage.setItem('soa_web_tts', this._ttsEnabled ? '1' : '0'); } catch (_) {}
+                if (this._ttsEnabled) this._speak('Speech on.');      // tap unlocks iOS speech
+                else if (window.speechSynthesis) window.speechSynthesis.cancel();
+            });
+        }
 
         this.termEl.addEventListener('click', () => {
             this._showView('terminal-view');
@@ -938,6 +953,41 @@ class App {
             case 'done':      return 'Awaiting next prompt';
             default:          return 'Shell ready';
         }
+    }
+
+    // ── Text-to-speech ───────────────────────────────────────────────────
+    // A `tts` frame arrived (Claude finished a turn; its Stop hook sent text).
+    // Speak the active tab's reply via the Web Speech API.
+    _onTTS(d) {
+        if (!this._ttsEnabled) return;
+        const text = d && d.text;
+        if (!text) return;
+        const tab = d.tab;
+        if (tab != null && this._activeTabId != null && tab !== this._activeTabId) return;
+        this._speak(text);
+    }
+
+    _speak(text) {
+        try {
+            const synth = window.speechSynthesis;
+            if (!synth) return;
+            if (!this._ttsVoice) this._ttsVoice = this._pickVoice();
+            synth.cancel();
+            const u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+            u.rate = 1.05; u.pitch = 1.0;
+            if (this._ttsVoice) u.voice = this._ttsVoice;
+            synth.speak(u);
+        } catch (_) {}
+    }
+
+    _pickVoice() {
+        try {
+            const voices = window.speechSynthesis.getVoices() || [];
+            if (!voices.length) return null;
+            return voices.find(v => /Samantha|Karen|Daniel|Google US English/i.test(v.name) && /^en/i.test(v.lang))
+                || voices.find(v => /en[-_]US/i.test(v.lang))
+                || voices.find(v => /^en/i.test(v.lang)) || null;
+        } catch (_) { return null; }
     }
 
     // ── Web preview ──────────────────────────────────────────────────────
