@@ -23,6 +23,7 @@
             </div>
             <nav id="controls" class="controls" aria-label="Functions">
                 <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
+                <button class="bb-btn" data-view="chat-view">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
                 <button class="bb-btn" data-view="tiles-view">DASH</button>
                 <button class="bb-btn" data-view="web-view">BROWSER</button>
                 <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
@@ -41,6 +42,15 @@
         <main id="stage">
             <section id="terminal-view" class="view active">
                 <pre id="term"></pre>
+            </section>
+            <section id="chat-view" class="view">
+                <div id="chat-log" class="chat-log"></div>
+                <form id="chat-composer" class="chat-composer">
+                    <textarea id="chat-input" class="chat-input" rows="1"
+                              placeholder="Message the agent…" autocapitalize="sentences"
+                              autocorrect="on" spellcheck="true"></textarea>
+                    <button id="chat-send" class="chat-send" type="submit" aria-label="Send">➤</button>
+                </form>
             </section>
             <section id="widgets-view" class="view">
                 <div id="widgets"></div>

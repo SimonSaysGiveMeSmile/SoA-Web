@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v45 · themes · 2026-06-07';
+const MOBILE_BUILD = 'v46 · chat (IM) · 2026-06-07';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -402,6 +402,13 @@ class App {
         this.micMeterBar = document.getElementById('mic-meter-bar');
         this.btnTestMic = document.getElementById('btn-test-mic');
         this.btnRefreshDevices = document.getElementById('btn-refresh-devices');
+
+        this.chatLog      = document.getElementById('chat-log');
+        this.chatInput    = document.getElementById('chat-input');
+        this.chatComposer = document.getElementById('chat-composer');
+        this.chatBadge    = document.getElementById('chat-badge');
+        this._chatThreads = new Map();   // tabId → [{ from:'agent'|'you', text, full, t }]
+        this._chatUnread  = 0;
 
         this._snapshot = null;
         this._activeTab = 0;
@@ -949,7 +956,7 @@ class App {
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
                 case 'term-exit': break;
                 case 'notice':    this._showNotice(msg.d); break;
-                case 'tts':       this._onTTS(msg.d); break;
+                case 'tts':       this._onTTS(msg.d); this._onAgentMessage(msg.d); break;
                 case 'browser-frame': this._onBrowserFrame(msg.d); break;
             }
         });
@@ -977,6 +984,21 @@ class App {
 
         this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
         this.btnMic.addEventListener('click', () => this.socket.sendInput('voice-toggle'));
+
+        // Chat composer: send a message to the active tab's PTY (exactly like
+        // typing it in the terminal) and echo it as an outgoing bubble.
+        if (this.chatComposer && this.chatInput) {
+            const autosize = () => {
+                this.chatInput.style.height = 'auto';
+                this.chatInput.style.height = Math.min(120, this.chatInput.scrollHeight) + 'px';
+            };
+            this.chatInput.addEventListener('input', autosize);
+            this.chatComposer.addEventListener('submit', (e) => { e.preventDefault(); this._sendChat(); });
+            // Enter sends; Shift+Enter inserts a newline (desktop keyboards).
+            this.chatInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
+            });
+        }
 
         if (this.btnSpeak) {
             this.btnSpeak.setAttribute('aria-pressed', this._ttsEnabled ? 'true' : 'false');
@@ -1042,6 +1064,7 @@ class App {
     }
 
     _showView(target) {
+        this._currentView = target;
         this.viewEls.forEach(v => v.classList.toggle('active', v.id === target));
         this.viewBtns.forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-view') === target ? 'true' : 'false'));
         if (target === 'terminal-view') {
@@ -1049,6 +1072,13 @@ class App {
         } else {
             this.kbd.hide();
             this.kbd.blur();
+        }
+        // Chat: render the active tab's thread and clear the unread badge.
+        if (target === 'chat-view') {
+            this._chatUnread = 0;
+            this._updateChatBadge();
+            this._renderChat();
+            setTimeout(() => { try { this.chatInput && this.chatInput.focus(); } catch (_) {} }, 60);
         }
         if (target === 'web-view') {
             this._refreshWebPorts();
@@ -1174,6 +1204,114 @@ class App {
         const tab = d.tab;
         if (tab != null && this._activeTabId != null && tab !== this._activeTabId) return;
         this._speak(text);
+    }
+
+    // ── Chat / IM mode ───────────────────────────────────────────────────
+    // The agent's clean final message for a turn (same feed that drives TTS)
+    // becomes an incoming bubble on that tab's thread. Raw terminal output never
+    // enters here, so the conversation stays readable.
+    _onAgentMessage(d) {
+        const text = d && d.text;
+        if (!text) return;
+        const tab = (d.tab != null) ? d.tab : this._activeTabId;
+        this._pushChat(tab, { from: 'agent', full: String(text), t: Date.now() });
+        const onChat = this._currentView === 'chat-view';
+        const onThisTab = tab === this._activeTabId;
+        if (onChat && onThisTab) {
+            this._renderChat();
+        } else {
+            this._chatUnread++;
+            this._updateChatBadge();
+        }
+    }
+
+    _pushChat(tabId, msg) {
+        if (tabId == null) return;
+        if (!this._chatThreads.has(tabId)) this._chatThreads.set(tabId, []);
+        const thread = this._chatThreads.get(tabId);
+        thread.push(msg);
+        if (thread.length > 200) thread.shift();   // cap memory per tab
+    }
+
+    _sendChat() {
+        const raw = (this.chatInput && this.chatInput.value || '').trim();
+        if (!raw) return;
+        const id = this._activeTabId;
+        if (id == null) return;
+        // Type it into the PTY (newline submits, like pressing Enter in terminal).
+        this.socket.sendInput('term-keys', { id, text: raw + '\r' });
+        this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
+        this.chatInput.value = '';
+        this.chatInput.style.height = 'auto';
+        this._renderChat();
+        sounds.play('tabSwitch');
+    }
+
+    // Trim an agent message to ≤50 words for the bubble; the full text stays
+    // available behind a tap (expandable). Keeps the IM glanceable.
+    _summarize(text, limit = 50) {
+        const clean = String(text).replace(/\s+/g, ' ').trim();
+        const words = clean.split(' ');
+        if (words.length <= limit) return { short: clean, truncated: false };
+        return { short: words.slice(0, limit).join(' ') + '…', truncated: true };
+    }
+
+    _renderChat() {
+        if (!this.chatLog) return;
+        const thread = this._chatThreads.get(this._activeTabId) || [];
+        if (!thread.length) {
+            this.chatLog.innerHTML =
+                `<div class="chat-empty">No messages yet on this tab.<br>` +
+                `Type below to prompt the agent — its replies appear here, summarized. ` +
+                `Switch tabs to follow another conversation.</div>`;
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const m of thread) {
+            const bubble = document.createElement('div');
+            bubble.className = 'chat-msg ' + (m.from === 'you' ? 'you' : 'agent');
+            if (m.from === 'agent') {
+                const { short, truncated } = this._summarize(m.full);
+                if (truncated) {
+                    bubble.classList.add('expandable');
+                    bubble.dataset.expanded = '0';
+                    bubble.textContent = short;
+                    const more = document.createElement('span');
+                    more.className = 'chat-more';
+                    more.textContent = ' more';
+                    bubble.appendChild(more);
+                    bubble.addEventListener('click', () => {
+                        const exp = bubble.dataset.expanded === '1';
+                        bubble.dataset.expanded = exp ? '0' : '1';
+                        bubble.textContent = exp ? short : m.full.replace(/\s+/g, ' ').trim();
+                        if (exp) { const mm = document.createElement('span'); mm.className = 'chat-more'; mm.textContent = ' more'; bubble.appendChild(mm); }
+                        this._scrollChatBottom();
+                    });
+                } else {
+                    bubble.textContent = short;
+                }
+            } else {
+                bubble.textContent = m.full;
+            }
+            frag.appendChild(bubble);
+        }
+        this.chatLog.innerHTML = '';
+        this.chatLog.appendChild(frag);
+        this._scrollChatBottom();
+    }
+
+    _scrollChatBottom() {
+        if (this.chatLog) this.chatLog.scrollTop = this.chatLog.scrollHeight;
+    }
+
+    _updateChatBadge() {
+        if (!this.chatBadge) return;
+        if (this._chatUnread > 0) {
+            this.chatBadge.textContent = this._chatUnread > 99 ? '99+' : String(this._chatUnread);
+            this.chatBadge.hidden = false;
+        } else {
+            this.chatBadge.hidden = true;
+        }
     }
 
     _speak(text) {
@@ -1671,6 +1809,8 @@ class App {
         this._updateDeviceCount();
         // Keep the dashboard in sync with tab add/remove/switch when it's open.
         if (this._tilesTimer) this._renderTiles();
+        // Follow the active tab's conversation when the chat view is open.
+        if (this._currentView === 'chat-view') this._renderChat();
     }
 
     _renderTabs(tabs) {
