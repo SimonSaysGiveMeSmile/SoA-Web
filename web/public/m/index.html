@@ -98,6 +98,19 @@
                 <div class="theme-grid" id="theme-grid"></div>
             </div>
             <div class="settings-section">
+                <div class="settings-label">Terminal Font</div>
+                <div class="settings-hint">Defaults to auto-fit. Slide to enlarge or shrink the terminal text on this device.</div>
+                <div class="mic-control">
+                    <div class="mic-gain-row">
+                        <input type="range" id="font-scale-slider" class="mic-slider" min="60" max="220" value="100" step="10" />
+                        <span id="font-scale-value" class="mic-value">100%</span>
+                    </div>
+                </div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-font-reset" type="button">RESET TO DEFAULT</button>
+                </div>
+            </div>
+            <div class="settings-section">
                 <div class="settings-label">Sound</div>
                 <div class="sound-grid" id="sound-grid"></div>
             </div>

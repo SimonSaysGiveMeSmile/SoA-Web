@@ -6,7 +6,7 @@
  * SW is purely about making the app installable and fast to launch.
  */
 
-const VERSION = 'soa-mobile-v49';
+const VERSION = 'soa-mobile-v50';
 const SHELL = [
     '/',
     '/index.html',

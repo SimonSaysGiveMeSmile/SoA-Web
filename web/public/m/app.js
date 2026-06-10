@@ -24,11 +24,12 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v49 · resume reconnect · 2026-06-10';
+const MOBILE_BUILD = 'v50 · font setting · 2026-06-10';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
 const MIC_SETTINGS_KEY = 'son-of-anton.mic-settings';
+const FONT_SCALE_KEY = 'son-of-anton.font-scale';
 
 /* ── Theme definitions ──────────────────────────────── */
 
@@ -396,6 +397,9 @@ class App {
         this.btnReload = document.getElementById('btn-reload');
         this.btnForceReload = document.getElementById('btn-force-reload');
 
+        this.fontScaleSlider = document.getElementById('font-scale-slider');
+        this.fontScaleValue  = document.getElementById('font-scale-value');
+        this.btnFontReset    = document.getElementById('btn-font-reset');
         this.micDeviceSelect = document.getElementById('mic-device-select');
         this.micGainSlider = document.getElementById('mic-gain-slider');
         this.micGainValue = document.getElementById('mic-gain-value');
@@ -428,6 +432,13 @@ class App {
 
         this._minFontSize = 5;
         this._maxFontSize = 15;
+        // User font preference: a multiplier over the auto-fit size. 1.0 = the
+        // default auto-fit; >1 enlarges (terminal scrolls horizontally), <1 shrinks.
+        this._fontScale = 1;
+        try {
+            const v = parseFloat(localStorage.getItem(FONT_SCALE_KEY));
+            if (!Number.isNaN(v) && v >= 0.5 && v <= 3) this._fontScale = v;
+        } catch (_) {}
         this._termCols = 80;
         this._userScrolledUp = false;
 
@@ -445,6 +456,7 @@ class App {
         if (this.themeGrid) this._renderThemeGrid();
         if (this.soundGrid) this._renderSoundGrid();
         if (this.btnSettings) this._wireSettings();
+        this._wireFontSetting();
         this._wireMicSettings();
         this._wireIdleHide();
 
@@ -649,6 +661,38 @@ class App {
         try {
             localStorage.setItem(MIC_SETTINGS_KEY, JSON.stringify(this._micSettings));
         } catch (_) {}
+    }
+
+    // Terminal font preference. The slider is a percentage over the auto-fit
+    // default (100% = auto). Applied live and persisted per device.
+    _wireFontSetting() {
+        if (!this.fontScaleSlider) return;
+        const sync = () => {
+            const pct = Math.round((this._fontScale || 1) * 100);
+            this.fontScaleSlider.value = String(pct);
+            if (this.fontScaleValue) {
+                this.fontScaleValue.textContent = pct === 100 ? '100% · auto' : `${pct}%`;
+            }
+        };
+        sync();
+        this.fontScaleSlider.addEventListener('input', (e) => {
+            const pct = parseInt(e.target.value, 10) || 100;
+            this._fontScale = pct / 100;
+            if (this.fontScaleValue) this.fontScaleValue.textContent = pct === 100 ? '100% · auto' : `${pct}%`;
+            try { localStorage.setItem(FONT_SCALE_KEY, String(this._fontScale)); } catch (_) {}
+            this._fitTerminalFont();
+            this._scrollTermBottom();
+        });
+        if (this.btnFontReset) {
+            this.btnFontReset.addEventListener('click', () => {
+                this._fontScale = 1;
+                try { localStorage.removeItem(FONT_SCALE_KEY); } catch (_) {}
+                sync();
+                this._fitTerminalFont();
+                this._scrollTermBottom();
+                sounds.play('tabSwitch');
+            });
+        }
     }
 
     _wireMicSettings() {
@@ -2281,6 +2325,10 @@ class App {
         const charWPerPx = charWAtRef / REF;
         let fontSize = availW / (targetCols * charWPerPx);
         fontSize = Math.max(this._minFontSize, Math.min(this._maxFontSize, fontSize));
+        // Apply the user's font preference on top of the auto-fit, then clamp to
+        // an absolute safety range so an extreme value can't make it unusable.
+        fontSize = fontSize * (this._fontScale || 1);
+        fontSize = Math.max(4, Math.min(48, fontSize));
 
         this.termEl.style.fontSize = fontSize + 'px';
     }
