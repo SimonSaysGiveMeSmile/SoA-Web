@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v48 · status fix + kbd · 2026-06-08';
+const MOBILE_BUILD = 'v49 · resume reconnect · 2026-06-10';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';

@@ -86,17 +86,28 @@ export class BridgeSocket extends EventTarget {
         this._stop = false;
         this._reconnectTimer = null;
         this._heartbeatTimer = null;
+        this._livenessTimer = null;
         this._lastPongAt = 0;
         this._probeController = null;
 
+        // Resuming from background / lock screen / bfcache. The socket may look
+        // OPEN but actually be dead (iOS freezes JS, so readyState is stale and
+        // our heartbeat didn't run). Don't trust state === CONNECTED — actively
+        // verify with a ping and reconnect fast if it's a corpse.
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible' && this.state !== SocketState.CONNECTED) {
-                this._scheduleReconnect(0);
-            }
+            if (document.visibilityState === 'visible') this._verifyLiveOrReconnect();
+        });
+        window.addEventListener('focus', () => this._verifyLiveOrReconnect());
+        // pageshow with persisted=true means the page came back from the bfcache
+        // — its WebSocket is always dead. Force a fresh connection.
+        window.addEventListener('pageshow', (e) => {
+            if (e && e.persisted) this._scheduleReconnect(0);
+            else this._verifyLiveOrReconnect();
         });
 
         window.addEventListener('online', () => {
             if (this.state !== SocketState.CONNECTED) this._scheduleReconnect(0);
+            else this._verifyLiveOrReconnect();
         });
         window.addEventListener('offline', () => {
             this._setDiagnosis(Diagnosis.NETWORK_OFFLINE);
@@ -143,6 +154,33 @@ export class BridgeSocket extends EventTarget {
     retryNow() {
         this._attempt = 0;
         this._scheduleReconnect(0);
+    }
+
+    // Decide, on resume, whether the live socket is actually usable. If we're not
+    // cleanly OPEN, reconnect now. If we LOOK connected, prove it: send a ping and
+    // if no pong lands in 2.5s, treat the socket as dead and reconnect. This is
+    // what closes the "page came back but the session is silently gone" gap on
+    // iOS without waiting for the slow heartbeat.
+    _verifyLiveOrReconnect() {
+        if (this._stop) return;
+        // A connect is already underway — let it finish rather than restarting it.
+        if (this.state === SocketState.CONNECTING) return;
+        if (this.state !== SocketState.CONNECTED || !this.ws || this.ws.readyState !== 1) {
+            this._scheduleReconnect(0);
+            return;
+        }
+        const sinceBefore = this._lastPongAt;
+        try { this.send('ping', { ts: Date.now() }); } catch (_) {}
+        if (this._livenessTimer) clearTimeout(this._livenessTimer);
+        this._livenessTimer = setTimeout(() => {
+            if (this._stop) return;
+            // No pong arrived since we asked → the socket is a corpse.
+            if (this._lastPongAt <= sinceBefore) {
+                blog('resume liveness check failed — socket is stale, reconnecting');
+                try { this.ws && this.ws.close(4001, 'stale after resume'); } catch (_) {}
+                this._scheduleReconnect(0);
+            }
+        }, 2500);
     }
 
     /** Merge newly-discovered endpoints (e.g. from /api/ping) into the pool. */
@@ -354,13 +392,13 @@ export class BridgeSocket extends EventTarget {
     _startHeartbeat() {
         this._stopHeartbeat();
         this._heartbeatTimer = setInterval(() => {
-            // If we haven't heard a pong in 15s, assume the connection is dead.
-            if (Date.now() - this._lastPongAt > 15000) {
+            // If we haven't heard a pong in 9s, assume the connection is dead.
+            if (Date.now() - this._lastPongAt > 9000) {
                 try { this.ws && this.ws.close(4000, 'heartbeat timeout'); } catch (_) {}
                 return;
             }
             this.send('ping', { ts: Date.now() });
-        }, 5000);
+        }, 4000);
     }
 
     _stopHeartbeat() {
@@ -371,6 +409,7 @@ export class BridgeSocket extends EventTarget {
     _clearTimers() {
         if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
         this._reconnectTimer = null;
+        if (this._livenessTimer) { clearTimeout(this._livenessTimer); this._livenessTimer = null; }
     }
 }
 
