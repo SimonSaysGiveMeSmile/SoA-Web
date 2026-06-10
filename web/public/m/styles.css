@@ -486,6 +486,15 @@ button:active { background: var(--accent-bg-hover); }
     vertical-align: middle;
 }
 
+/* Desktop-window preset buttons in Settings */
+.win-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+.win-grid .settings-btn { width: 100%; }
+.win-grid .settings-btn[data-win="fullscreen"] { grid-column: 1 / -1; }
+
 /* Dashboard — 2-D tile view (mirrors desktop tiles; no per-tile × button) */
 #tiles-view { padding: 12px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 #tiles {

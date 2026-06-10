@@ -41,6 +41,7 @@ export const INPUT_KIND = Object.freeze({
     BROWSER_SUBSCRIBE:   'browser-subscribe',
     BROWSER_UNSUBSCRIBE: 'browser-unsubscribe',
     BROWSER_CLICK:       'browser-click',
+    WINDOW_CONTROL:      'window-control',
 });
 
 export function frame(type, data, id) {

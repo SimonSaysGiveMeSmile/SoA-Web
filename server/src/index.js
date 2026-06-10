@@ -49,6 +49,7 @@ const preview          = require('./preview');
 const pasteImage       = require('./pasteImage');
 const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
+const windowControl    = require('./windowControl');
 const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
@@ -661,6 +662,11 @@ function handleInput(session, d) {
             break;
         case INPUT_KIND.BROWSER_CLICK:
             agentBrowser.command('click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
+            break;
+        case INPUT_KIND.WINDOW_CONTROL:
+            windowControl.applyPreset(String(d.preset || ''))
+                .then(() => session.send(frame(MSG.NOTICE, { level: 'info', text: `Desktop window → ${d.preset}` })))
+                .catch(err => session.send(frame(MSG.NOTICE, { level: 'warn', text: 'Window control: ' + (err && err.message || 'failed') })));
             break;
         default: /* ignore */ break;
     }

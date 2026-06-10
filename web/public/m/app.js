@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v50 · font setting · 2026-06-10';
+const MOBILE_BUILD = 'v51 · desktop window ctrl · 2026-06-10';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -583,7 +583,22 @@ class App {
         this.settingsOverlay.addEventListener('click', (e) => {
             if (e.target === this.settingsOverlay) this._closeSettings();
         });
+        this._wireWindowControls();
         this._wireReloadControls();
+    }
+
+    // Desktop-window presets: ask the server to resize/move the desktop SoA
+    // window (Chrome) via AppleScript. Result/errors come back as a notice.
+    _wireWindowControls() {
+        const btns = this.settingsOverlay.querySelectorAll('[data-win]');
+        btns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const preset = btn.getAttribute('data-win');
+                this.socket.sendInput('window-control', { preset });
+                if ('vibrate' in navigator) { try { navigator.vibrate(8); } catch (_) {} }
+                sounds.play('tabSwitch');
+            });
+        });
     }
 
     // Reload controls. Deliberately client-local so they work even when the
