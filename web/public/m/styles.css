@@ -486,6 +486,33 @@ button:active { background: var(--accent-bg-hover); }
     vertical-align: middle;
 }
 
+/* Fleet supervisor summary bar (top of dashboard) */
+.manager-bar {
+    margin-bottom: 10px;
+    padding: 9px 11px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--accent-bg);
+}
+.mgr-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.mgr-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
+    color: var(--fg); margin-right: 2px;
+}
+.mgr-chip {
+    font-size: 10px; letter-spacing: 0.04em;
+    padding: 2px 7px; border-radius: 10px;
+    background: rgba(255,255,255,0.08); color: var(--fg-dim);
+    white-space: nowrap;
+}
+.mgr-chip.mgr-working   { color: #00e676; box-shadow: inset 0 0 0 1px rgba(0,230,118,0.35); }
+.mgr-chip.mgr-attention { color: #ff9800; box-shadow: inset 0 0 0 1px rgba(255,152,0,0.45); }
+.mgr-chip.mgr-stuck     { color: #ff4444; box-shadow: inset 0 0 0 1px rgba(255,68,68,0.45); }
+.mgr-chip.mgr-ctx       { color: #f1c40f; box-shadow: inset 0 0 0 1px rgba(241,196,15,0.4); }
+.mgr-callout {
+    margin-top: 6px; font-size: 11px; line-height: 1.4; color: var(--warn, #f1c40f);
+}
+
 /* Desktop-window preset buttons in Settings */
 .win-grid {
     display: grid;

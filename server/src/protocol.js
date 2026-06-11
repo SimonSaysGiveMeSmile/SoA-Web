@@ -22,6 +22,7 @@ const MSG = Object.freeze({
     BYE:        'bye',
     TTS:        'tts',
     BROWSER_FRAME: 'browser-frame',
+    MANAGER:    'manager',
 
     AUTH:       'auth',
     INPUT:      'input',

@@ -50,6 +50,7 @@ const pasteImage       = require('./pasteImage');
 const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
+const sessionManager   = require('./sessionManager');
 const { dbg, agg }     = require('./debug');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
@@ -233,6 +234,7 @@ preview.mount(app, requireAuthed);
 pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
+sessionManager.mount(app, requireAuthed, sessions);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -417,6 +419,9 @@ function onWsConnect(ws, session, req) {
             onData: (tabId, data) => {
                 agg('term-out', 'session=' + session.id.slice(0, 8) + ' tab=' + tabId, data.length, '→ ' + session.sockets.size + ' socket(s)');
                 session.send(frame(MSG.TERM_DATA, { id: tabId, data }));
+                // Feed the always-on supervisor so it tracks status + context
+                // for every tab regardless of which client is watching.
+                try { sessionManager.ensure(session).feed(tabId, data); } catch (_) {}
             },
             onTabsChange: list => {
                 // If the active tab just went away, pick the next available
@@ -443,6 +448,13 @@ function onWsConnect(ws, session, req) {
             }
         }, 3000);
         if (session._cwdInterval.unref) session._cwdInterval.unref();
+
+        // Supervisor tick: refresh stuck/idle derivations and push a MANAGER
+        // snapshot to the dashboard. Always-on (independent of connected clients).
+        session._managerInterval = setInterval(() => {
+            try { sessionManager.ensure(session).broadcast(); } catch (_) {}
+        }, 3000);
+        if (session._managerInterval.unref) session._managerInterval.unref();
 
         // Restore tabs from disk if this is a fresh session with no tabs.
         // Seed each new shell's scrollback with the bytes saved by the prior
@@ -651,6 +663,7 @@ function handleInput(session, d) {
             const pct = Number(d.pct);
             if (Number.isFinite(pct) && d.id) {
                 autoCompact.reportCtx(mgr, d.id, pct);
+                try { sessionManager.ensure(session).reportCtx(d.id, pct); } catch (_) {}
             }
             break;
         }

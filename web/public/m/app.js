@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v52 · ctx + dash fix · 2026-06-10';
+const MOBILE_BUILD = 'v53 · fleet manager · 2026-06-10';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -1019,6 +1019,7 @@ class App {
                 case 'notice':    this._showNotice(msg.d); break;
                 case 'tts':       this._onTTS(msg.d); this._onAgentMessage(msg.d); break;
                 case 'browser-frame': this._onBrowserFrame(msg.d); break;
+                case 'manager':   this._onManager(msg.d); break;
             }
         });
 
@@ -1216,8 +1217,42 @@ class App {
     // live peek of the last few terminal lines, so you can tell at a glance
     // which project needs attention. Per the mobile design there is NO close
     // (×) button on a tile — tap a tile to jump into that tab's terminal.
+    // Overarching supervisor summary (server-side, always-on). Shows fleet-wide
+    // counts and flags which sessions need attention / are stuck / high-context.
+    _onManager(d) {
+        this._manager = d;
+        if (this._currentView === 'tiles-view') this._renderManagerBar();
+    }
+
+    _renderManagerBar() {
+        const bar = document.getElementById('manager-bar');
+        if (!bar) return;
+        const d = this._manager;
+        if (!d || !d.counts || !d.counts.total) { bar.hidden = true; return; }
+        const c = d.counts;
+        const chip = (label, n, cls) => n > 0
+            ? `<span class="mgr-chip ${cls}">${n} ${label}</span>` : '';
+        const attentionTabs = (d.sessions || []).filter(s => s.attention).map(s => s.title);
+        const stuckTabs = (d.sessions || []).filter(s => s.stuck).map(s => s.title);
+        const callout = [];
+        if (attentionTabs.length) callout.push(`⚠ awaiting you: ${attentionTabs.slice(0, 3).join(', ')}${attentionTabs.length > 3 ? '…' : ''}`);
+        if (stuckTabs.length) callout.push(`◷ stuck: ${stuckTabs.slice(0, 3).join(', ')}`);
+        bar.innerHTML =
+            `<div class="mgr-row">` +
+            `<span class="mgr-title">FLEET · ${c.total}</span>` +
+            chip('working', c.working, 'mgr-working') +
+            chip('need input', c.attention, 'mgr-attention') +
+            chip('stuck', c.stuck, 'mgr-stuck') +
+            chip('idle', c.idle, 'mgr-idle') +
+            chip('high&nbsp;ctx', c.highContext, 'mgr-ctx') +
+            `</div>` +
+            (callout.length ? `<div class="mgr-callout">${escapeHtml(callout.join('  ·  '))}</div>` : '');
+        bar.hidden = false;
+    }
+
     _renderTiles() {
         if (!this.tilesEl) return;
+        this._renderManagerBar();
         const tabs = (this._snapshot && this._snapshot.tabs) || [];
         if (!tabs.length) {
             this.tilesEl.innerHTML = '<div class="m-tile-empty">No tabs yet — tap + to open one.</div>';

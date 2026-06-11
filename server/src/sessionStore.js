@@ -76,6 +76,7 @@ class SessionStore {
     destroy(session) {
         if (!session) return;
         if (session._cwdInterval) clearInterval(session._cwdInterval);
+        if (session._managerInterval) clearInterval(session._managerInterval);
         if (session._scrollbackInterval) clearInterval(session._scrollbackInterval);
         if (session.tabMgr && typeof session.tabMgr.killAll === 'function') {
             try { session.tabMgr.killAll(); } catch (_) {}

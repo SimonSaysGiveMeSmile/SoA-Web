@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+/**
+ * soa-sessions — let a *manager agent* see and drive every other SoA session.
+ *
+ * SoA runs many terminals (tabs), each often a Claude Code agent. This CLI gives
+ * a dedicated manager agent (its own tab, its own context) full oversight of the
+ * fleet: read each session's status + context %, read its recent output, send it
+ * input, or compact it. Pair it with the dashboard's always-on supervisor.
+ *
+ * Usage:
+ *   soa-sessions list                     # all sessions: status, context %, signals
+ *   soa-sessions read <id> [lines]        # recent output of a session (default 80)
+ *   soa-sessions send <id> <text...>      # type text + Enter into a session
+ *   soa-sessions say  <id> <text...>      # type text WITHOUT Enter
+ *   soa-sessions compact <id>             # run /compact in a session
+ *
+ * Endpoint discovery: SOA_WEB_TTS_URL (injected into SoA shells) → bridge.json →
+ * default port. Loopback only.
+ */
+
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function base() {
+    if (process.env.SOA_WEB_TTS_URL) return process.env.SOA_WEB_TTS_URL.replace(/\/api\/tts$/, '');
+    try {
+        const j = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.soa-web', 'bridge.json'), 'utf8'));
+        if (j && j.port) return 'http://127.0.0.1:' + j.port;
+    } catch (_) {}
+    return 'http://127.0.0.1:' + (process.env.SOA_WEB_PORT || '7332');
+}
+
+function post(body) {
+    return new Promise((resolve, reject) => {
+        const data = JSON.stringify(body);
+        const u = new URL(base() + '/api/sessions');
+        const req = http.request({
+            hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+        }, (res) => {
+            let b = ''; res.on('data', d => b += d);
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve({ ok: false, raw: b }); } });
+        });
+        req.on('error', reject);
+        req.write(data); req.end();
+    });
+}
+
+function fmtList(snap) {
+    if (!snap.sessions || !snap.sessions.length) return '(no sessions)';
+    const c = snap.counts || {};
+    const head = `${c.total} sessions · ${c.working || 0} working · ${c.attention || 0} need input · ${c.stuck || 0} stuck · ${c.idle || 0} idle · ${c.highContext || 0} high-context`;
+    const rows = snap.sessions.map(s => {
+        const flags = [
+            s.attention ? 'NEEDS-INPUT' : '',
+            s.stuck ? 'STUCK' : '',
+            s.highContext ? 'HIGH-CTX' : '',
+        ].filter(Boolean).join(' ');
+        const ctx = s.ctxPct != null ? s.ctxPct + '%' : '—';
+        return `  #${s.id}  ${(s.title || '').padEnd(20).slice(0, 20)}  ${String(s.status).padEnd(9)}  ctx ${ctx.padStart(4)}  ${flags}`;
+    });
+    return head + '\n' + rows.join('\n');
+}
+
+(async () => {
+    const [cmd, ...rest] = process.argv.slice(2);
+    try {
+        if (!cmd || cmd === 'list' || cmd === 'ls') {
+            const r = await post({ action: 'list' });
+            console.log(r.ok ? fmtList(r) : JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        if (cmd === 'read') {
+            const r = await post({ action: 'read', id: Number(rest[0]), lines: rest[1] ? Number(rest[1]) : undefined });
+            if (r.ok) { console.log(`# session #${r.id} "${r.title}" · ${r.status} · ctx ${r.ctxPct ?? '—'}%\n`); console.log(r.text || '(empty)'); }
+            else console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        if (cmd === 'send' || cmd === 'say') {
+            const id = Number(rest[0]);
+            const text = rest.slice(1).join(' ');
+            const r = await post({ action: 'send', id, text, submit: cmd === 'send' });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        if (cmd === 'compact') {
+            const r = await post({ action: 'compact', id: Number(rest[0]) });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        console.error('usage: soa-sessions list | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>');
+        process.exit(1);
+    } catch (e) {
+        console.error('soa-sessions error:', e.message, '(is the SoA server running?)');
+        process.exit(1);
+    }
+})();

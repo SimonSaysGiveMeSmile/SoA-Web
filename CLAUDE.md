@@ -25,6 +25,26 @@ Note: when you finish a turn, your final message is **automatically** sent to
 the IM (via a Claude Code Stop hook), so you don't need `soa-msg` for that —
 reach for it for *mid-task* updates and questions.
 
+## Managing the whole fleet (manager agent)
+
+SoA runs many sessions (tabs), each often a Claude agent. A **manager agent** is
+just a dedicated session whose job is to oversee the others. It has its own
+context, and `soa-sessions` gives it full read/act access to every other session:
+
+```bash
+soa-sessions list                 # all sessions: status, context %, NEEDS-INPUT/STUCK/HIGH-CTX flags
+soa-sessions read <id> [lines]    # recent output of a session (read its "context")
+soa-sessions send <id> <text>     # type text + Enter into a session (answer a prompt, give a task)
+soa-sessions say  <id> <text>     # type without Enter
+soa-sessions compact <id>         # run /compact on a session that's high on context
+```
+
+A server-side supervisor watches every tab always-on (status + context + stuck
+detection) and feeds the dashboard's FLEET bar; `soa-sessions list` reads the
+same view. As a manager agent: poll `list`, `read` any session that needs
+attention, then `send` an answer, `compact` a high-context one, or `soa-msg` the
+user when a decision is needed. Keep your own running notes as your context.
+
 ## Driving an isolated browser
 
 `soa-browser` controls a headless Chromium the server manages (separate from the
