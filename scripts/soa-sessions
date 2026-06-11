@@ -51,12 +51,15 @@ function post(body) {
 function fmtList(snap) {
     if (!snap.sessions || !snap.sessions.length) return '(no sessions)';
     const c = snap.counts || {};
-    const head = `${c.total} sessions · ${c.working || 0} working · ${c.attention || 0} need input · ${c.stuck || 0} stuck · ${c.idle || 0} idle · ${c.highContext || 0} high-context`;
+    const head = `${c.total} sessions · ${c.working || 0} working · ${c.attention || 0} need input · ${c.stuck || 0} stuck · ${c.idle || 0} idle · ${c.highContext || 0} high-context · ${c.limited || 0} limited`;
+    const hhmm = ms => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
     const rows = snap.sessions.map(s => {
         const flags = [
             s.attention ? 'NEEDS-INPUT' : '',
             s.stuck ? 'STUCK' : '',
             s.highContext ? 'HIGH-CTX' : '',
+            s.limited ? `LIMITED→${s.limitResetAt ? hhmm(s.limitResetAt) : '?'}` : '',
+            s.resumeAt ? `RESUME@${hhmm(s.resumeAt)}` : '',
         ].filter(Boolean).join(' ');
         const ctx = s.ctxPct != null ? s.ctxPct + '%' : '—';
         return `  #${s.id}  ${(s.title || '').padEnd(20).slice(0, 20)}  ${String(s.status).padEnd(9)}  ctx ${ctx.padStart(4)}  ${flags}`;
@@ -90,7 +93,43 @@ function fmtList(snap) {
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
-        console.error('usage: soa-sessions list | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>');
+        // schedule <id|all|limited> <epochMs|+15m|2:30am> [text…]   (text defaults to "continue")
+        if (cmd === 'schedule') {
+            const id = (rest[0] === 'all' || rest[0] === 'limited') ? rest[0] : Number(rest[0]);
+            const at = /^\d{10,}$/.test(rest[1] || '') ? Number(rest[1]) : rest[1];
+            const r = await post({ action: 'schedule', id, at, text: rest.slice(2).join(' ') || 'continue' });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // resume-all [when] [text…] — nudge every limit-hit session (default: 2 min from now)
+        if (cmd === 'resume-all') {
+            const at = rest[0] || '+2m';
+            const r = await post({ action: 'schedule', id: 'limited', at, text: rest.slice(1).join(' ') || 'continue' });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        if (cmd === 'schedules') {
+            const r = await post({ action: 'schedules' });
+            console.log(JSON.stringify(r, null, 2));
+            process.exit(r.ok ? 0 : 1);
+        }
+        if (cmd === 'unschedule') {
+            const r = await post({ action: 'unschedule', scheduleId: rest[0] });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // config [autoResume on|off] [text <resume text…>]
+        if (cmd === 'config') {
+            const body = { action: 'config' };
+            if (rest[0] === 'autoResume') body.autoResume = rest[1] === 'on' || rest[1] === 'true';
+            if (rest[0] === 'text') body.autoResumeText = rest.slice(1).join(' ');
+            const r = await post(body);
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        console.error('usage: soa-sessions list | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>\n' +
+                      '       schedule <id|all|limited> <+15m|2:30am|epochMs> [text] | resume-all [when] [text]\n' +
+                      '       schedules | unschedule <scheduleId> | config autoResume on|off | config text <text>');
         process.exit(1);
     } catch (e) {
         console.error('soa-sessions error:', e.message, '(is the SoA server running?)');

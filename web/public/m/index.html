@@ -123,6 +123,36 @@
                 </div>
             </div>
             <div class="settings-section">
+                <div class="settings-label">Model Access</div>
+                <div class="settings-hint">Which API new shells use for Claude. Subscription uses your login; a provider injects its endpoint + key into every new tab.</div>
+                <div id="provider-list" class="provider-list"></div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-provider-add" type="button">+ ADD PROVIDER</button>
+                </div>
+                <form id="provider-form" class="provider-form" hidden>
+                    <input type="hidden" id="pf-id" />
+                    <input class="pf-input" id="pf-name" placeholder="Name (e.g. proxy-1)" autocomplete="off" />
+                    <input class="pf-input" id="pf-baseurl" placeholder="Base URL (https://…)" autocomplete="off" />
+                    <input class="pf-input" id="pf-token" placeholder="Token / API key" autocomplete="off" />
+                    <select class="pf-input" id="pf-tokenvar">
+                        <option value="ANTHROPIC_AUTH_TOKEN">AUTH_TOKEN (proxy / bearer)</option>
+                        <option value="ANTHROPIC_API_KEY">API_KEY (official API)</option>
+                    </select>
+                    <input class="pf-input" id="pf-model" placeholder="Model override (optional)" autocomplete="off" />
+                    <div class="settings-row">
+                        <button class="settings-btn" id="pf-save" type="submit">SAVE</button>
+                        <button class="settings-btn" id="pf-cancel" type="button">CANCEL</button>
+                    </div>
+                </form>
+            </div>
+            <div class="settings-section">
+                <div class="settings-label">Auto-Resume</div>
+                <div class="settings-hint">When a session hits its usage limit, type "continue" into it automatically ~2 min after the limit resets.</div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-auto-resume" type="button">AUTO-RESUME: …</button>
+                </div>
+            </div>
+            <div class="settings-section">
                 <div class="settings-label">Sound</div>
                 <div class="sound-grid" id="sound-grid"></div>
             </div>

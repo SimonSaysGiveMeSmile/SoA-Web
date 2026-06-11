@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v53 · fleet manager · 2026-06-10';
+const MOBILE_BUILD = 'v54 · providers + auto-resume · 2026-06-11';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -458,6 +458,7 @@ class App {
         if (this.soundGrid) this._renderSoundGrid();
         if (this.btnSettings) this._wireSettings();
         this._wireFontSetting();
+        this._wireModelAccess();
         this._wireMicSettings();
         this._wireIdleHide();
 
@@ -654,6 +655,131 @@ class App {
 
     _openSettings() {
         if (this.settingsOverlay) this.settingsOverlay.classList.add('open');
+        this._refreshModelAccess();
+    }
+
+    // Authed JSON call against the backend (cookie + ?t= token like _refreshWidgets).
+    async _api(path, body) {
+        const base = (this.socket && this.socket.baseUrl)
+            ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
+        const tok = this.socket && this.socket.token;
+        const url = base + path + (tok ? (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(tok) : '');
+        const res = await fetch(url, {
+            method: body ? 'POST' : 'GET',
+            credentials: 'include',
+            cache: 'no-store',
+            headers: body ? { 'content-type': 'application/json' } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        return res.json();
+    }
+
+    /* ── Model Access (provider profiles) + Auto-Resume settings ── */
+
+    async _refreshModelAccess() {
+        const listEl = document.getElementById('provider-list');
+        if (!listEl) return;
+        try {
+            const env = await this._api('/api/env');
+            this._envConfig = env;
+            this._renderProviderList(env);
+        } catch (_) {
+            listEl.innerHTML = '<div class="settings-hint">Could not load providers.</div>';
+        }
+        try {
+            const mgr = await this._api('/api/manager');
+            this._setAutoResumeBtn(!!mgr.autoResume);
+        } catch (_) {}
+    }
+
+    _setAutoResumeBtn(on) {
+        const btn = document.getElementById('btn-auto-resume');
+        if (!btn) return;
+        this._autoResume = on;
+        btn.textContent = 'AUTO-RESUME: ' + (on ? 'ON' : 'OFF');
+        btn.classList.toggle('active', on);
+    }
+
+    _renderProviderList(env) {
+        const listEl = document.getElementById('provider-list');
+        if (!listEl) return;
+        const rows = [];
+        const mkRow = (id, name, detail, isActive, deletable) =>
+            `<div class="provider-row${isActive ? ' active' : ''}" data-pid="${escapeHtml(id)}">` +
+            `<span class="provider-dot"></span>` +
+            `<span class="provider-name">${escapeHtml(name)}</span>` +
+            `<span class="provider-detail">${escapeHtml(detail)}</span>` +
+            (deletable ? `<button type="button" class="provider-edit" data-edit="${escapeHtml(id)}">✎</button>` +
+                         `<button type="button" class="provider-del" data-del="${escapeHtml(id)}">×</button>` : '') +
+            `</div>`;
+        rows.push(mkRow('', 'Subscription', 'claude.ai login (default)', !env.active, false));
+        for (const p of env.providers || []) {
+            const host = (p.baseUrl || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+            rows.push(mkRow(p.id, p.name, `${host || 'api.anthropic.com'} · ${p.token || 'no key'}`, env.active === p.id, true));
+        }
+        listEl.innerHTML = rows.join('');
+    }
+
+    _wireModelAccess() {
+        const listEl = document.getElementById('provider-list');
+        const form = document.getElementById('provider-form');
+        const addBtn = document.getElementById('btn-provider-add');
+        const arBtn = document.getElementById('btn-auto-resume');
+        if (!listEl || !form) return;
+        const f = (id) => document.getElementById(id);
+        const showForm = (p) => {
+            form.hidden = false;
+            f('pf-id').value = p ? p.id : '';
+            f('pf-name').value = p ? p.name : '';
+            f('pf-baseurl').value = p ? p.baseUrl : '';
+            f('pf-token').value = p ? (p.token || '') : '';   // masked = keep stored
+            f('pf-tokenvar').value = p ? p.tokenVar : 'ANTHROPIC_AUTH_TOKEN';
+            f('pf-model').value = p ? p.model : '';
+        };
+        listEl.addEventListener('click', async (e) => {
+            const del = e.target.closest('[data-del]');
+            const edit = e.target.closest('[data-edit]');
+            const row = e.target.closest('.provider-row');
+            try {
+                if (del) {
+                    const r = await this._api('/api/env', { providerAction: 'delete', providerId: del.dataset.del });
+                    this._envConfig = r; this._renderProviderList(r);
+                } else if (edit) {
+                    const p = (this._envConfig.providers || []).find(x => x.id === edit.dataset.edit);
+                    if (p) showForm(p);
+                } else if (row) {
+                    const r = await this._api('/api/env', { active: row.dataset.pid });
+                    this._envConfig = r; this._renderProviderList(r);
+                    this._toast(row.dataset.pid ? 'Provider set for new shells' : 'Back to subscription');
+                }
+            } catch (_) { this._toast('Update failed'); }
+        });
+        if (addBtn) addBtn.addEventListener('click', () => showForm(null));
+        const cancel = f('pf-cancel');
+        if (cancel) cancel.addEventListener('click', () => { form.hidden = true; });
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const provider = {
+                id: f('pf-id').value || undefined,
+                name: f('pf-name').value,
+                baseUrl: f('pf-baseurl').value,
+                token: f('pf-token').value,
+                tokenVar: f('pf-tokenvar').value,
+                model: f('pf-model').value,
+            };
+            if (!provider.name.trim()) return this._toast('Name required');
+            try {
+                const r = await this._api('/api/env', { providerAction: 'upsert', provider });
+                this._envConfig = r; this._renderProviderList(r);
+                form.hidden = true;
+            } catch (_) { this._toast('Save failed'); }
+        });
+        if (arBtn) arBtn.addEventListener('click', async () => {
+            try {
+                const r = await this._api('/api/manager/config', { autoResume: !this._autoResume });
+                this._setAutoResumeBtn(!!r.autoResume);
+            } catch (_) { this._toast('Update failed'); }
+        });
     }
 
     _closeSettings() {
@@ -1245,6 +1371,7 @@ class App {
             chip('stuck', c.stuck, 'mgr-stuck') +
             chip('idle', c.idle, 'mgr-idle') +
             chip('high&nbsp;ctx', c.highContext, 'mgr-ctx') +
+            chip('limited', c.limited, 'mgr-limited') +
             `</div>` +
             (callout.length ? `<div class="mgr-callout">${escapeHtml(callout.join('  ·  '))}</div>` : '');
         bar.hidden = false;
@@ -1283,11 +1410,21 @@ class App {
                   `<span class="m-tile-pie" style="background:conic-gradient(${ctxColor(pct)} ${pct}%, rgba(255,255,255,0.16) 0)"></span>` +
                   `<span class="m-tile-pct">${pct}%</span></span>`
                 : '';
+            // Supervisor: usage-limit hit → show when it lifts / when the
+            // scheduled auto-resume will nudge this session.
+            const sup = this._manager && (this._manager.sessions || []).find(x => x.id === id);
+            const hhmm = (ms) => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
+            const limitHtml = (sup && sup.limited)
+                ? `<span class="m-tile-limit" title="Usage limit hit">⏾ ` +
+                  (sup.resumeAt ? `resume ${hhmm(sup.resumeAt)}` : (sup.limitResetAt ? `resets ${hhmm(sup.limitResetAt)}` : 'limited')) +
+                  `</span>`
+                : '';
             tile.innerHTML =
                 `<span class="m-tile-dot"></span>` +
                 `<span class="m-tile-title">${escapeHtml(name)}</span>` +
                 ctxHtml +
                 `<span class="m-tile-status">${escapeHtml(this._tileStatusLabel(mob, t.exited))}</span>` +
+                limitHtml +
                 `<pre class="m-tile-preview">${escapeHtml(preview)}</pre>`;
             tile.addEventListener('click', () => {
                 this.socket.sendInput('switch-tab', { id });
@@ -2453,6 +2590,16 @@ class App {
         if (!text) return;
         const colour = level === 'error' ? '\x1b[91m' : (level === 'warn' ? '\x1b[93m' : '\x1b[92m');
         this._applyTerminalChunk({ data: `\r\n${colour}[${(level || 'info').toUpperCase()}] ${text}\x1b[0m\r\n` });
+    }
+
+    // Generic brief toast (reuses the agent-toast element).
+    _toast(msg) {
+        const toast = document.getElementById('agent-toast');
+        if (!toast) return;
+        clearTimeout(this._toastTimer);
+        toast.textContent = msg;
+        toast.classList.add('visible');
+        this._toastTimer = setTimeout(() => toast.classList.remove('visible'), 2500);
     }
 
     _showAgentToast(tabName) {

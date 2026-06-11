@@ -14,8 +14,47 @@
  * other session — list them, read their recent output, send input, compact.
  */
 
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const express = require('express');
 const { MSG, frame } = require('./protocol');
+
+// ── Manager config + pending resume schedules (persisted across restarts) ──
+const STATE_DIR = path.join(os.homedir(), '.soa-web');
+const MANAGER_FILE = path.join(STATE_DIR, 'manager.json');
+
+function loadManagerState() {
+    try {
+        const d = JSON.parse(fs.readFileSync(MANAGER_FILE, 'utf8'));
+        return {
+            autoResume: d.autoResume === true,
+            autoResumeText: typeof d.autoResumeText === 'string' && d.autoResumeText ? d.autoResumeText.slice(0, 200) : 'continue',
+            schedules: Array.isArray(d.schedules) ? d.schedules.filter(s => s && Number(s.at) > 0) : [],
+        };
+    } catch (_) {
+        return { autoResume: false, autoResumeText: 'continue', schedules: [] };
+    }
+}
+function saveManagerState(st) {
+    try {
+        fs.mkdirSync(STATE_DIR, { recursive: true });
+        fs.writeFileSync(MANAGER_FILE, JSON.stringify(st, null, 2), 'utf8');
+    } catch (_) { /* best-effort */ }
+}
+
+// "You've hit your session limit · resets 2:30am (America/Los_Angeles)"
+const LIMIT_RE = /hit your (?:session|usage|weekly) limit[^\n]*?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+
+// Next wall-clock occurrence of H:MM am/pm, as epoch ms (server-local time).
+function nextOccurrence(h12, min, ampm, now = Date.now()) {
+    let h = h12 % 12;
+    if (/pm/i.test(ampm)) h += 12;
+    const d = new Date(now);
+    d.setHours(h, min, 0, 0);
+    if (d.getTime() <= now) d.setTime(d.getTime() + 24 * 60 * 60 * 1000);
+    return d.getTime();
+}
 
 // ── Stream detectors (ported from web/public/m/agentDetect.js; keep in sync) ──
 const WORKING = [
@@ -77,12 +116,50 @@ class SessionManager {
     constructor(session) {
         this.session = session;
         this.tabs = new Map();       // tabId → state
+        this.state = loadManagerState();   // {autoResume, autoResumeText, schedules}
+        // Fire due resume schedules even when no client is connected.
+        this._schedTimer = setInterval(() => this._fireDue(), 15_000);
+        if (this._schedTimer.unref) this._schedTimer.unref();
+    }
+
+    _saveState() { saveManagerState(this.state); }
+
+    // ── One-shot "send text to tab at time" schedules ──
+    schedule(tabId, at, text) {
+        const id = Math.random().toString(36).slice(2, 10);
+        // One pending auto/manual resume per tab — newest wins.
+        this.state.schedules = this.state.schedules.filter(s => s.tabId !== tabId);
+        this.state.schedules.push({ id, tabId, at, text: String(text).slice(0, 500) });
+        this._saveState();
+        return id;
+    }
+
+    unschedule(id) {
+        const before = this.state.schedules.length;
+        this.state.schedules = this.state.schedules.filter(s => s.id !== id);
+        if (this.state.schedules.length !== before) this._saveState();
+        return this.state.schedules.length !== before;
+    }
+
+    _fireDue() {
+        const now = Date.now();
+        const due = this.state.schedules.filter(s => s.at <= now);
+        if (!due.length) return;
+        this.state.schedules = this.state.schedules.filter(s => s.at > now);
+        this._saveState();
+        const mgr = this.session.tabMgr;
+        for (const s of due) {
+            const tab = mgr && mgr.get(s.tabId);
+            if (!tab) continue;
+            try { tab.write(s.text + '\r'); } catch (_) {}
+        }
+        this.broadcast();
     }
 
     _state(id) {
         let s = this.tabs.get(id);
         if (!s) {
-            s = { status: 'idle', ctxPct: null, recent: '', lastOutputAt: 0, lastStatusAt: 0 };
+            s = { status: 'idle', ctxPct: null, recent: '', lastOutputAt: 0, lastStatusAt: 0, limit: null };
             this.tabs.set(id, s);
         }
         return s;
@@ -94,9 +171,25 @@ class SessionManager {
         s.lastOutputAt = Date.now();
         s.recent = (s.recent + data).slice(-6000);
         const next = classifyAgent(s.recent, s.status);
-        if (next && next !== s.status) { s.status = next; s.lastStatusAt = Date.now(); }
+        if (next && next !== s.status) {
+            s.status = next; s.lastStatusAt = Date.now();
+            // Output is flowing again as real work → the limit is behind us.
+            if (next === 'working') s.limit = null;
+        }
         const pct = extractCtxPct(s.recent);
         if (pct != null) s.ctxPct = pct;
+        // Usage-limit banner → remember when it lifts; optionally schedule an
+        // automatic resume nudge shortly after the reset time.
+        const lm = strip(s.recent).slice(-1000).match(LIMIT_RE);
+        if (lm) {
+            const resetAt = nextOccurrence(+lm[1], +(lm[2] || 0), lm[3]);
+            if (!s.limit || s.limit.resetAt !== resetAt) {
+                s.limit = { resetAt, label: lm[0].slice(0, 120) };
+                if (this.state.autoResume) {
+                    this.schedule(id, resetAt + 2 * 60_000, this.state.autoResumeText);
+                }
+            }
+        }
     }
 
     // Clients (desktop/mobile) can report an authoritative ctx reading.
@@ -115,6 +208,7 @@ class SessionManager {
             const tab = mgr.get(id);
             const s = this._state(id);
             const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS;
+            const sched = this.state.schedules.find(x => x.tabId === id);
             return {
                 id,
                 title: (tab && tab.title) || `tab ${id}`,
@@ -125,6 +219,9 @@ class SessionManager {
                 stuck,
                 highContext: s.ctxPct != null && s.ctxPct >= HIGH_CTX,
                 idleMs: s.lastOutputAt ? now - s.lastOutputAt : null,
+                limited: !!s.limit,
+                limitResetAt: s.limit ? s.limit.resetAt : null,
+                resumeAt: sched ? sched.at : null,
             };
         });
         const counts = {
@@ -134,8 +231,9 @@ class SessionManager {
             stuck: sessions.filter(x => x.stuck).length,
             idle: sessions.filter(x => x.idle).length,
             highContext: sessions.filter(x => x.highContext).length,
+            limited: sessions.filter(x => x.limited).length,
         };
-        return { sessions, counts, ts: now };
+        return { sessions, counts, ts: now, autoResume: this.state.autoResume };
     }
 
     broadcast() {
@@ -165,6 +263,21 @@ function mount(app, requireAuthed, sessions) {
     }
 
     // Read-only fleet view (authed; powers the dashboard too).
+    // Authed config (the mobile Settings sheet) — same knobs as the loopback
+    // 'config' action, but reachable from the phone over the tunnel.
+    app.post('/api/manager/config', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+        const s = (req.session && req.session.tabMgr) ? req.session : primary();
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        const man = ensure(s);
+        const body = req.body || {};
+        if (typeof body.autoResume === 'boolean') man.state.autoResume = body.autoResume;
+        if (typeof body.autoResumeText === 'string' && body.autoResumeText.trim()) {
+            man.state.autoResumeText = body.autoResumeText.trim().slice(0, 200);
+        }
+        man._saveState();
+        res.json({ ok: true, autoResume: man.state.autoResume, autoResumeText: man.state.autoResumeText });
+    });
+
     app.get('/api/manager', requireAuthed, (req, res) => {
         const s = req.session && req.session.tabMgr ? req.session : primary();
         if (!s) return res.json({ ok: true, sessions: [], counts: {} });
@@ -210,6 +323,45 @@ function mount(app, requireAuthed, sessions) {
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
                 tab.write('/compact\r');
                 return res.json({ ok: true, id, compacted: true });
+            }
+            // schedule: queue text to be typed into tab(s) at a future time.
+            // {action:'schedule', id|'all'|'limited', at: epochMs | '+Nm' | 'H:MM(am|pm)', text}
+            if (action === 'schedule') {
+                const text = String(body.text || 'continue');
+                let at = null;
+                const when = body.at;
+                if (typeof when === 'number' && when > 0) at = when;
+                else if (typeof when === 'string') {
+                    let m;
+                    if ((m = when.match(/^\+(\d+)m$/i))) at = Date.now() + (+m[1]) * 60_000;
+                    else if ((m = when.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i))) at = nextOccurrence(+m[1], +(m[2] || 0), m[3]);
+                }
+                if (!at) return res.status(400).json({ ok: false, error: 'bad time — use epochMs, "+15m", or "2:30am"' });
+                let targets;
+                if (body.id === 'all') targets = mgr.order.slice();
+                else if (body.id === 'limited') targets = mgr.order.filter(tid => man._state(tid).limit);
+                else {
+                    const id = Number(body.id);
+                    if (!mgr.get(id)) return res.status(404).json({ ok: false, error: 'tab not found' });
+                    targets = [id];
+                }
+                const scheduled = targets.map(tid => ({ tabId: tid, scheduleId: man.schedule(tid, at, text) }));
+                return res.json({ ok: true, at, text, scheduled });
+            }
+            if (action === 'schedules') {
+                return res.json({ ok: true, autoResume: man.state.autoResume, schedules: man.state.schedules });
+            }
+            if (action === 'unschedule') {
+                return res.json({ ok: man.unschedule(String(body.scheduleId || '')) });
+            }
+            // config: {action:'config', autoResume?:bool, autoResumeText?:string}
+            if (action === 'config') {
+                if (typeof body.autoResume === 'boolean') man.state.autoResume = body.autoResume;
+                if (typeof body.autoResumeText === 'string' && body.autoResumeText.trim()) {
+                    man.state.autoResumeText = body.autoResumeText.trim().slice(0, 200);
+                }
+                man._saveState();
+                return res.json({ ok: true, autoResume: man.state.autoResume, autoResumeText: man.state.autoResumeText });
             }
             return res.status(400).json({ ok: false, error: 'unknown action: ' + action });
         } catch (err) {
