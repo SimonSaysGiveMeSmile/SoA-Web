@@ -698,10 +698,22 @@ if (heartbeat.unref) heartbeat.unref();
 // lose the on-screen context. Metadata (titles, cwds) is already saved on
 // every change; this captures the live PTY output for each tab.
 const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(5 * 60 * 1000), 10);
-const scrollbackFlush = setInterval(() => {
+// Flush only the session that actually owns tabs. Flushing every session
+// last-writer-wins into the same two files, so an empty tabMgr (e.g. a WS
+// client that bound while no session had tabs) iterated last would erase the
+// real state on disk — this is what clobbered tabs.json on 2026-06-11.
+// Intentional close-all still persists via the debounced onTabsChange save.
+function persistableSession() {
+    let best = null;
     for (const s of sessions.sessions.values()) {
-        if (s.tabMgr) tabPersist.saveAll(s.tabMgr);
+        if (!s.tabMgr || s.tabMgr.order.length === 0) continue;
+        if (!best || s.tabMgr.order.length > best.tabMgr.order.length) best = s;
     }
+    return best;
+}
+const scrollbackFlush = setInterval(() => {
+    const s = persistableSession();
+    if (s) tabPersist.saveAll(s.tabMgr);
 }, SCROLLBACK_FLUSH_MS);
 if (scrollbackFlush.unref) scrollbackFlush.unref();
 
@@ -711,9 +723,8 @@ function shutdown(code = 0) {
     clearInterval(scrollbackFlush);
     // Persist tabs + scrollback before killing PTYs so the next boot can
     // seed each tab with what was on screen.
-    for (const s of sessions.sessions.values()) {
-        if (s.tabMgr) tabPersist.saveAll(s.tabMgr);
-    }
+    const flushS = persistableSession();
+    if (flushS) tabPersist.saveAll(flushS.tabMgr);
     // Detach (don't kill) the tunnel so it survives the restart and the next
     // boot re-adopts the same public URL — the mobile bridge stays reachable.
     try { pair.detach(); } catch (_) {}
