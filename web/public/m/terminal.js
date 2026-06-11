@@ -243,6 +243,39 @@ export class TermBuffer {
         }
         return out.join('\n');
     }
+
+    // Cleaner tail for dashboard tiles. The literal bottom rows of a TUI are the
+    // static input box (box-drawing) + status line, which look frozen and
+    // garbled. Skip pure decoration / blank / spinner lines and return the last
+    // n lines that carry real content, with box-drawing stripped.
+    previewLines(n = 3) {
+        // Box-drawing + block elements + braille (spinner) glyphs = decoration.
+        const DECO = /[─-▟⠀-⣿■-◿]/g;
+        const out = [];
+        for (let r = this.lines.length - 1; r >= 0 && out.length < n; r--) {
+            const line = this.lines[r] || [];
+            let s = '';
+            for (let c = 0; c < line.length; c++) s += (line[c] && line[c].ch) || ' ';
+            s = s.replace(DECO, ' ').replace(/\s+/g, ' ').trim();
+            if (s.length < 2 || !/[A-Za-z0-9]/.test(s)) continue;
+            out.unshift(s);
+        }
+        return out.join('\n');
+    }
+
+    // Raw plain text of the last n rows, for scanning status lines (e.g. the
+    // Claude context %). Keeps original chars so regexes can match bar gauges.
+    recentText(n = 40) {
+        const out = [];
+        const start = Math.max(0, this.lines.length - n);
+        for (let r = start; r < this.lines.length; r++) {
+            const line = this.lines[r] || [];
+            let s = '';
+            for (let c = 0; c < line.length; c++) s += (line[c] && line[c].ch) || ' ';
+            out.push(s.replace(/\s+$/, ''));
+        }
+        return out.join('\n');
+    }
 }
 
 function newStyle() {

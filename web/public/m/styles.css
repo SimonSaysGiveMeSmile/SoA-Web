@@ -527,7 +527,7 @@ button:active { background: var(--accent-bg-hover); }
 .m-tile[data-status="idle"]      .m-tile-dot { background: #4fa3e0; }
 .m-tile[data-status="exited"]    .m-tile-dot { background: rgba(224,224,224,0.3); }
 .m-tile-title {
-    font-size: 12px; font-weight: 600; letter-spacing: 0.03em; padding-right: 16px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.03em; padding-right: 52px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .m-tile-status {
@@ -543,6 +543,19 @@ button:active { background: var(--accent-bg-hover); }
     mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
 }
 .m-tile-preview:empty { display: none; }
+/* Per-tab context-usage pie + % (top-right of the tile) */
+.m-tile-ctx {
+    position: absolute; top: 8px; right: 8px;
+    display: flex; align-items: center; gap: 4px;
+}
+.m-tile-pie {
+    width: 12px; height: 12px; border-radius: 50%;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
+}
+.m-tile-pct {
+    font-size: 9px; font-variant-numeric: tabular-nums;
+    color: var(--fg-dim); letter-spacing: 0.02em;
+}
 
 /* New-tab chooser (bottom sheet) — Terminal / Localhost / Webpage */
 .newtab-sheet {

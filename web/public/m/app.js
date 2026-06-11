@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v51 · desktop window ctrl · 2026-06-10';
+const MOBILE_BUILD = 'v52 · ctx + dash fix · 2026-06-10';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -421,6 +421,7 @@ class App {
         this._connectedDevices = 0;
         this._tabStates = new Map();
         this._tabStatuses = new Map();
+        this._ctxPct = new Map();      // tabId → 0-100 context usage %
         this._toastTimer = null;
         this._tilesTimer = null;
         this._flushScheduled = false;
@@ -1228,18 +1229,31 @@ class App {
             const mob = this._mobileStatus && this._mobileStatus.get(id);
             const css = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
             const ts = this._getTabState(id);
-            const tail = (ts && ts.term) ? ts.term.tailText(4) : '';
+            // Freshly scan this tab's screen so context + preview are current
+            // even for tabs that haven't streamed in the last detection window.
+            if (ts && ts.term) this._scanCtx(id);
+            // Cleaner preview: real content lines, decoration stripped. Fall back
+            // to the raw tail only if nothing meaningful is found.
+            let preview = (ts && ts.term) ? ts.term.previewLines(3) : '';
+            if (!preview && ts && ts.term) preview = ts.term.tailText(3);
             const name = t.title || `TAB ${i + 1}`;
+            const pct = this._ctxPct.get(id);
             const tile = document.createElement('button');
             tile.type = 'button';
             tile.className = 'm-tile' + (id === this._activeTabId ? ' active' : '');
             tile.dataset.tabId = String(id);
             if (css) tile.setAttribute('data-status', css);
+            const ctxHtml = (pct != null)
+                ? `<span class="m-tile-ctx" title="Context ${pct}% used">` +
+                  `<span class="m-tile-pie" style="background:conic-gradient(${ctxColor(pct)} ${pct}%, rgba(255,255,255,0.16) 0)"></span>` +
+                  `<span class="m-tile-pct">${pct}%</span></span>`
+                : '';
             tile.innerHTML =
                 `<span class="m-tile-dot"></span>` +
                 `<span class="m-tile-title">${escapeHtml(name)}</span>` +
+                ctxHtml +
                 `<span class="m-tile-status">${escapeHtml(this._tileStatusLabel(mob, t.exited))}</span>` +
-                `<pre class="m-tile-preview">${escapeHtml(tail)}</pre>`;
+                `<pre class="m-tile-preview">${escapeHtml(preview)}</pre>`;
             tile.addEventListener('click', () => {
                 this.socket.sendInput('switch-tab', { id });
                 this._showView('terminal-view');
@@ -1384,17 +1398,18 @@ class App {
         };
         const m = map[css];
         const textEl = this.chatStatus.querySelector('.chat-status-text');
+        const pct = this._ctxPct.get(this._activeTabId);
+        const ctxSuffix = (pct != null) ? ` · ctx ${pct}%` : '';
+        this.chatStatus.hidden = false;
         if (!m) {
             // idle: keep a quiet "ready" line rather than hiding, so the strip
             // doesn't flicker in and out as state changes.
-            this.chatStatus.hidden = false;
             this.chatStatus.removeAttribute('data-state');
-            if (textEl) textEl.textContent = 'Idle · ready';
+            if (textEl) textEl.textContent = 'Idle · ready' + ctxSuffix;
             return;
         }
-        this.chatStatus.hidden = false;
         this.chatStatus.setAttribute('data-state', m.state);
-        if (textEl) textEl.textContent = m.text;
+        if (textEl) textEl.textContent = m.text + ctxSuffix;
     }
 
     _updateChatBadge() {
@@ -2270,6 +2285,10 @@ class App {
             if (this._currentView === 'chat-view' && id === this._activeTabId) this._renderChatStatus();
             sb.recent = '';                // avoid re-detecting stale patterns
         }
+        // Track context % live from the tab's rendered screen (the statusline
+        // where Claude prints it). Scanning the buffer — not the raw stream
+        // window — survives redraws and partial chunks.
+        this._scanCtx(id);
     }
 
     _setTabStatusDom(id, status) {
@@ -2278,6 +2297,16 @@ class App {
         if (!el) return;
         if (css) el.setAttribute('data-status', css);
         else el.removeAttribute('data-status');
+    }
+
+    // Read the tab's rendered screen for Claude's context % and record it.
+    _scanCtx(id) {
+        const ts = this._tabStates.get(id);
+        if (!ts || !ts.term) return;
+        const pct = extractCtxPct(ts.term.recentText(40));
+        if (pct == null || this._ctxPct.get(id) === pct) return;
+        this._ctxPct.set(id, pct);
+        if (this._currentView === 'chat-view' && id === this._activeTabId) this._renderChatStatus();
     }
 
     _tabName(id) {
@@ -2414,6 +2443,36 @@ function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
         { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
     ));
+}
+
+// Pull Claude Code's context % out of recent terminal text. Mirrors the desktop
+// detector: scan lines bottom-up, try several phrasings (used / remaining /
+// custom bar-gauge statuslines). Returns a 0–100 integer or null.
+function extractCtxPct(text) {
+    if (!text) return null;
+    const clamp = n => Math.min(100, Math.max(0, Math.round(n)));
+    const lines = String(text).split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const t = lines[i];
+        if (!t || t.indexOf('%') === -1) continue;
+        let m;
+        if ((m = t.match(/(\d{1,3})\s*%\s*context\s*used/i)))                  return clamp(+m[1]);
+        if ((m = t.match(/context\s*used\s*[:\-]?\s*(\d{1,3})\s*%/i)))          return clamp(+m[1]);
+        if ((m = t.match(/context\s+is\s+(\d{1,3})\s*%/i)))                    return clamp(+m[1]);
+        if ((m = t.match(/(\d{1,3})\s*%\s+(?:left\s+)?until\s+auto-?compact/i))) return clamp(100 - +m[1]);
+        if ((m = t.match(/(?:left|remaining)\s+until\s+auto-?compact\s*[:\-]?\s*(\d{1,3})\s*%/i))) return clamp(100 - +m[1]);
+        if ((m = t.match(/context\s+left\s*[:\-]?\s*(\d{1,3})\s*%/i)))          return clamp(100 - +m[1]);
+        if ((m = t.match(/(\d{1,3})\s*%\s+context\s+(?:left|remaining)/i)))     return clamp(100 - +m[1]);
+        if ((m = t.match(/context\s+low\s*\(\s*(\d{1,3})\s*%/i)))              return clamp(100 - +m[1]);
+        if (/context/i.test(t) && (m = t.match(/[█▓▒░]\s*(\d{1,3})\s*%/)))      return clamp(+m[1]);
+        if ((m = t.match(/[█▓▒░]{3,}\s*(\d{1,3})\s*%/)))                       return clamp(+m[1]);
+        if ((m = t.match(/context[^%\d]{0,24}?(\d{1,3})\s*%/i)))               return clamp(+m[1]);
+    }
+    return null;
+}
+
+function ctxColor(pct) {
+    return pct >= 80 ? '#ff5555' : pct >= 50 ? '#f1c40f' : '#2ecc71';
 }
 
 function card(title, value, meta) {
