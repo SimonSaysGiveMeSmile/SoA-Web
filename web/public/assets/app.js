@@ -468,6 +468,7 @@ class Shell {
         bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
         bridge.addEventListener('tts',       e => this._onTTS(e.detail));
+        bridge.addEventListener('manager',   e => this._onManager(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
 
@@ -1823,7 +1824,13 @@ class Shell {
             fragment.appendChild(node);
         }
         for (const old of existing.values()) old.remove();
+        // replaceChildren wipes the pinned header cards too — carry them
+        // across the re-render (FLEET bar above, port info below) instead of
+        // waiting for the next async refresh to repaint them.
+        const pinnedPorts = this._tilesGridEl.querySelector('.dashboard-port-info');
         this._tilesGridEl.replaceChildren(fragment);
+        if (pinnedPorts) this._tilesGridEl.insertBefore(pinnedPorts, this._tilesGridEl.firstChild);
+        this._renderFleetBar();
     }
 
     // New-tab chooser: every "+" asks what to open — a Terminal (shell tab), a
@@ -2033,12 +2040,63 @@ class Shell {
         pie.title = pct > 0 ? `Context: ${pct}%` : '';
     }
 
+    // Overarching supervisor summary — same data as the mobile FLEET bar.
+    // The daemon streams `manager` frames whenever supervisor state changes;
+    // this pins them as a card at the top of the tiles dashboard. Display
+    // only: it never sends anything, so it can't disturb the daemon or the
+    // sessions it reports on.
+    _onManager(d) {
+        this._manager = d;
+        if (this.viewMode === 'tiles') this._renderFleetBar();
+    }
+
+    _renderFleetBar() {
+        if (!this._tilesGridEl) return;
+        const d = this._manager;
+        if (!d || !d.counts || !d.counts.total) {
+            if (this._fleetBarEl) { this._fleetBarEl.remove(); this._fleetBarEl = null; }
+            return;
+        }
+        if (!this._fleetBarEl || !this._fleetBarEl.isConnected) {
+            this._fleetBarEl = el('div', { class: 'dashboard-fleet-bar' });
+        }
+        // Always pinned above the port info card.
+        if (this._tilesGridEl.firstChild !== this._fleetBarEl) {
+            this._tilesGridEl.insertBefore(this._fleetBarEl, this._tilesGridEl.firstChild);
+        }
+        const c = d.counts;
+        const row = el('div', { class: 'fleet-row' });
+        row.appendChild(el('span', { class: 'fleet-title', text: `FLEET · ${c.total}` }));
+        const chip = (label, n, cls) => {
+            if (n > 0) row.appendChild(el('span', { class: `fleet-chip ${cls}`, text: `${n} ${label}` }));
+        };
+        chip('working',    c.working,     'fleet-working');
+        chip('need input', c.attention,   'fleet-attention');
+        chip('stuck',      c.stuck,       'fleet-stuck');
+        chip('idle',       c.idle,        'fleet-idle');
+        chip('high ctx',   c.highContext, 'fleet-ctx');
+        chip('limited',    c.limited,     'fleet-limited');
+        const attention = (d.sessions || []).filter(s => s.attention).map(s => s.title);
+        const stuck     = (d.sessions || []).filter(s => s.stuck).map(s => s.title);
+        const callout = [];
+        if (attention.length) callout.push(`⚠ awaiting you: ${attention.slice(0, 3).join(', ')}${attention.length > 3 ? '…' : ''}`);
+        if (stuck.length) callout.push(`◷ stuck: ${stuck.slice(0, 3).join(', ')}`);
+        const kids = [row];
+        if (callout.length) kids.push(el('div', { class: 'fleet-callout', text: callout.join('  ·  ') }));
+        this._fleetBarEl.replaceChildren(...kids);
+    }
+
     async _updateDashboardPortInfo() {
         if (!this._tilesGridEl) return;
 
-        // Remove existing port info if any
-        const existing = this._tilesGridEl.querySelector('.dashboard-port-info');
-        if (existing) existing.remove();
+        // _renderTiles fires on every snapshot, and each call used to start
+        // its own fetch; concurrent slow responses then stacked duplicate
+        // "Active Ports" cards (each removed the old card BEFORE its fetch
+        // and inserted AFTER). One in-flight fetch at a time, refreshed at
+        // most every 10s — the existing card stays up in the meantime.
+        if (this._portInfoBusy) return;
+        if (this._portInfoAt && Date.now() - this._portInfoAt < 10_000) return;
+        this._portInfoBusy = true;
 
         try {
             const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
@@ -2050,6 +2108,8 @@ class Shell {
             if (!res.ok) return;
 
             const { data } = await res.json();
+            this._portInfoAt = Date.now();
+            if (!this._tilesGridEl) return;
             const count = data.ports.length;
 
             const portInfo = el('div', { class: 'dashboard-port-info' });
@@ -2080,9 +2140,18 @@ class Shell {
                 portInfo.appendChild(list);
             }
 
-            this._tilesGridEl.insertBefore(portInfo, this._tilesGridEl.firstChild);
+            // Swap in atomically: clear every existing copy (including any
+            // duplicates an older build left behind) only now that the
+            // replacement is ready, then pin below the FLEET bar if present.
+            this._tilesGridEl.querySelectorAll('.dashboard-port-info').forEach(n => n.remove());
+            const anchor = (this._fleetBarEl && this._fleetBarEl.isConnected)
+                ? this._fleetBarEl.nextSibling
+                : this._tilesGridEl.firstChild;
+            this._tilesGridEl.insertBefore(portInfo, anchor);
         } catch (e) {
             // Silently fail - port info is optional
+        } finally {
+            this._portInfoBusy = false;
         }
     }
 

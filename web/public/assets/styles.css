@@ -1339,6 +1339,54 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   .tile { min-height: 90px; padding: 10px 12px; }
 }
 
+/* ── Dashboard FLEET bar (manager/supervisor summary) ───────────── */
+.dashboard-fleet-bar {
+  grid-column: 1 / -1;
+  background: linear-gradient(135deg, rgba(170,207,209,0.10) 0%, rgba(170,207,209,0.04) 100%);
+  border: 1px solid var(--soa-accent-dim);
+  padding: 12px 16px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.fleet-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-title {
+  font-family: var(--font-display);
+  font-size: 14px;
+  letter-spacing: 0.2em;
+  color: var(--soa-accent);
+  font-weight: bold;
+  text-shadow: 0 0 8px rgba(170,207,209,0.4);
+  margin-right: 8px;
+}
+.fleet-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  background: rgba(170,207,209,0.05);
+  border-radius: 3px;
+  color: var(--soa-fg);
+  box-shadow: inset 0 0 0 1px var(--soa-line-soft);
+}
+.fleet-chip.fleet-working   { color: #00e676; box-shadow: inset 0 0 0 1px rgba(0,230,118,0.35); }
+.fleet-chip.fleet-attention { color: #ff9800; box-shadow: inset 0 0 0 1px rgba(255,152,0,0.45); }
+.fleet-chip.fleet-stuck     { color: #ff4444; box-shadow: inset 0 0 0 1px rgba(255,68,68,0.45); }
+.fleet-chip.fleet-ctx       { color: #f1c40f; box-shadow: inset 0 0 0 1px rgba(241,196,15,0.4); }
+.fleet-chip.fleet-limited   { color: #b39ddb; box-shadow: inset 0 0 0 1px rgba(179,157,219,0.45); }
+.fleet-callout {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--soa-yellow);
+}
+
 /* ── Dashboard port info panel ──────────────────────────────────── */
 .dashboard-port-info {
   grid-column: 1 / -1;
