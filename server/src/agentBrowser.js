@@ -25,7 +25,9 @@ const WebSocket = require('ws');
 const express = require('express');
 const { MSG, frame } = require('./protocol');
 
-const DEBUG_PORT = 9223;
+// Overridable so two daemons on one machine (prod + the s0a.app product
+// install) don't fight over a single Chrome remote-debug port.
+const DEBUG_PORT = Number(process.env.SOA_WEB_BROWSER_DEBUG_PORT) || 9223;
 const PROFILE = require('./stateDir').stateFile('agent-chrome');
 const VIEW = { w: 1024, h: 768 };
 

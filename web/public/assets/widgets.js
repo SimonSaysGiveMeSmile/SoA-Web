@@ -10,8 +10,8 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=12';
-import { getSettings } from '/assets/settings.js?v=12';
+import { t as tr } from '/assets/i18n.js?v=17';
+import { getSettings } from '/assets/settings.js?v=17';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);

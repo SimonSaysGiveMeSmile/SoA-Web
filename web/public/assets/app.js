@@ -16,11 +16,11 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=15';
-import { AudioFX } from '/assets/audiofx.js?v=15';
-import { mountSidebar } from '/assets/widgets.js?v=16';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=15';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
+import { AudioFX } from '/assets/audiofx.js?v=17';
+import { mountSidebar } from '/assets/widgets.js?v=17';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
@@ -54,8 +54,6 @@ function saveBackend(backend, token) {
     } catch (_) {}
 }
 
-function clearSaved() { try { localStorage.removeItem(LS_KEY); } catch (_) {} }
-
 function pickBackendFromURL() {
     const q = new URLSearchParams(location.search);
     const backend = q.get('backend');
@@ -73,7 +71,12 @@ async function probePing(backend, token, timeoutMs = 2500) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
         const u = new URL(backend + '/api/ping');
-        if (token) u.searchParams.set('t', token);
+        // The token is deliberately NOT sent on the probe: /api/ping is
+        // unauthenticated, so it buys nothing — and a saved pairing now
+        // persists across backend outages, so probing forever with ?t=
+        // would hand the token to whoever later acquires a recycled
+        // hostname. (The token still flows to the chosen backend in
+        // bootServerMode.)
         // Probe without credentials. /api/ping is unauthenticated and omitting
         // cookies sidesteps browsers that suppress third-party cookies on
         // cross-site fetches — we only want to know whether the backend is
@@ -2229,13 +2232,21 @@ async function resolveBackend() {
             saveBackend(fromURL.backend, fromURL.token);
             return fromURL;
         }
-        return null;
+        // Pairing via deep link failed — say so, but keep going: a saved or
+        // local backend may still be reachable (previously this dead-ended).
+        console.warn('[soa-web] ?backend= pairing failed (unreachable):', fromURL.backend);
+        const bs = $('#boot-status');
+        if (bs) bs.textContent = tr('boot.negotiating') + ' (pairing link unreachable — trying known backends)';
     }
     const saved = loadSaved();
     if (saved) {
         const probed = await probePing(saved.backend, saved.token, 2500);
         if (probed && probed.ok) return saved;
-        clearSaved();
+        // Do NOT clear the pairing on one failed ping — a daemon restart or a
+        // transient outage used to permanently un-pair the browser here and
+        // funnel boot into the sandbox fallback. Keep it; it is re-probed on
+        // every load and the user can overwrite it via ?backend= any time.
+        console.warn('[soa-web] saved backend unreachable, keeping pairing:', saved.backend);
     }
     if (CFG.backend) {
         const cfgBackend = String(CFG.backend).replace(/\/+$/, '');
@@ -2309,27 +2320,76 @@ async function _doBoot() {
         await bootServerMode(backend);
         return;
     }
-    // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=13');
-}
-
-async function boot() {
-    const html = document.documentElement;
-    // Welcome gate: first visit stops here, but we expose __soaBootNow so
-    // the "ENTER TERMINAL" button can drop the gate and finish boot
-    // without a full reload.
-    if (html.dataset.welcome === '1') {
-        window.__soaBootNow = () => _doBoot();
-        return;
+    // No reachable backend — hand off to the in-browser sandbox. The import
+    // is guarded: if ANY module in the sandbox graph fails to fetch, Chrome
+    // rejects with "Failed to fetch dynamically imported module: app-wc.js"
+    // naming only the top-level file. Without the guard that error killed
+    // boot dead with no retry and no way to pair a backend.
+    try {
+        await import('/assets/app-wc.js?v=14');
+    } catch (err) {
+        console.error('[soa-web] sandbox module graph failed to load', err);
+        // Name the actual failing resource(s) — the error string won't.
+        try {
+            const bad = performance.getEntriesByType('resource')
+                .filter(e => (e.initiatorType === 'script' || e.initiatorType === 'other')
+                    && e.transferSize === 0 && e.decodedBodySize === 0
+                    && /\/assets\/|esm\.sh|webcontainer/.test(e.name));
+            if (bad.length) console.error('[soa-web] suspect resources:', bad.map(e => e.name));
+        } catch (_) {}
+        renderSandboxFailure(err);
     }
-    await _doBoot();
 }
 
-boot().catch(err => {
+// Sandbox failed to load (CDN/network/deploy hiccup). Give the user real
+// options instead of a dead boot screen: retry, or pair a backend directly
+// (the manual-connect prompt normally lives inside app-wc.js — unreachable
+// when the import itself is what failed).
+function renderSandboxFailure(err) {
+    const node = $('#boot-status');
+    if (!node) return;
+    const detail = err && err.message ? err.message : String(err);
+    node.textContent = tr('boot.failed', { detail });
+    const actions = document.createElement('div');
+    actions.style.cssText = 'margin-top:12px;display:flex;gap:10px;justify-content:center;';
+    const mkBtn = (label, fn) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.style.cssText = 'padding:6px 14px;background:transparent;border:1px solid currentColor;color:inherit;cursor:pointer;font:inherit;';
+        b.addEventListener('click', fn);
+        return b;
+    };
+    actions.appendChild(mkBtn('RETRY', () => location.reload()));
+    actions.appendChild(mkBtn('CONNECT BACKEND…', () => {
+        const backend = window.prompt('Backend URL (e.g. http://localhost:4010, or from `npm run selfhost`):', 'http://localhost:4010');
+        if (!backend) return;
+        const token = window.prompt('Session token (leave empty if none):') || '';
+        saveBackend(backend, token.trim());
+        location.reload();
+    }));
+    node.insertAdjacentElement('afterend', actions);
+}
+
+function bootFailed(err) {
     console.error('[soa-web] boot failed', err);
     const detail = err && err.stack
         ? err.stack.split('\n').slice(0, 3).join(' | ')
         : String(err);
     const node = $('#boot-status');
     if (node) node.textContent = tr('boot.failed', { detail });
-});
+}
+
+async function boot() {
+    const html = document.documentElement;
+    // Welcome gate: first visit stops here, but we expose __soaBootNow so
+    // the "ENTER TERMINAL" button can drop the gate and finish boot
+    // without a full reload. The .catch matters: this path used to swallow
+    // boot errors entirely (first visits never saw boot.failed).
+    if (html.dataset.welcome === '1') {
+        window.__soaBootNow = () => _doBoot().catch(bootFailed);
+        return;
+    }
+    await _doBoot();
+}
+
+boot().catch(bootFailed);

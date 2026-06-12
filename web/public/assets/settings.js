@@ -15,7 +15,7 @@
  * broadcast a `soa:settings` window event so widgets/tabs can re-render.
  */
 
-import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=5';
+import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=17';
 
 const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
