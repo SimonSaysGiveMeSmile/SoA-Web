@@ -3,7 +3,7 @@ const path = require('path');
 const os = require('os');
 const express = require('express');
 
-const STATE_DIR = path.join(os.homedir(), '.soa-web');
+const { STATE_DIR } = require('./stateDir');
 const CONFIG_FILE = path.join(STATE_DIR, 'automation.json');
 
 function ensureDir() {

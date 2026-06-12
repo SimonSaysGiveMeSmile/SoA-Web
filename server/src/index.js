@@ -52,10 +52,18 @@ const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
 const { dbg, agg }     = require('./debug');
+const { STATE_DIR, MODE } = require('./stateDir');
+const instanceLock     = require('./instanceLock');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
 let activePort = PORT;
+
+// One daemon per state dir — a second instance pointed at the same dir would
+// clobber tabs.json/scrollback.json (the 2026-06 corruption incidents). Must
+// run before any state is read or written; exits with a clear message if the
+// dir is owned by a live daemon.
+instanceLock.acquireOrExit(PORT);
 const DEV  = process.env.SOA_WEB_DEV === '1';
 const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(1000 * 60 * 60 * 6), 10);
 
@@ -267,7 +275,7 @@ app.use((req, res, next) => {
 // SOA_WEB_INSTALL_LOG (default ~/.soa-web/install-log.jsonl). Best-effort:
 // any I/O error is swallowed so a broken disk can't take the page down.
 const INSTALL_LOG_PATH = process.env.SOA_WEB_INSTALL_LOG
-    || path.join(require('os').homedir(), '.soa-web', 'install-log.jsonl');
+    || require('./stateDir').stateFile('install-log.jsonl');
 function logInstallHit(req) {
     try {
         const dir = path.dirname(INSTALL_LOG_PATH);
@@ -730,6 +738,7 @@ function shutdown(code = 0) {
     try { pair.detach(); } catch (_) {}
     try { wss.close(); } catch (_) {}
     try { sessions.shutdown(); } catch (_) {}
+    instanceLock.release();
     server.close(() => process.exit(code));
     setTimeout(() => process.exit(code), 5000).unref();
 }
@@ -740,7 +749,9 @@ function onListening() {
     activePort = server.address().port;
     sysinfo.setSoaPort(activePort);
     tts.setPort(activePort);
-    console.log(`SoA-Web ready: http://${HOST}:${activePort}`);
+    // Refresh the lock with the port we actually bound (may have hopped).
+    instanceLock.acquireOrExit(activePort);
+    console.log(`SoA-Web ready: http://${HOST}:${activePort}  [${MODE} · state: ${STATE_DIR}]`);
 
     if (process.env.SOA_WEB_AUTOPAIR !== '0') {
         const registerTunnel = (url) => {

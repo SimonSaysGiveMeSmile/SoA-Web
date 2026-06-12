@@ -21,7 +21,7 @@ const express = require('express');
 const { MSG, frame } = require('./protocol');
 
 // ── Manager config + pending resume schedules (persisted across restarts) ──
-const STATE_DIR = path.join(os.homedir(), '.soa-web');
+const { STATE_DIR } = require('./stateDir');
 const MANAGER_FILE = path.join(STATE_DIR, 'manager.json');
 
 function loadManagerState() {

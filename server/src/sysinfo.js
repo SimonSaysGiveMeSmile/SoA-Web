@@ -209,7 +209,11 @@ function portsInfo() {
     const platform = os.platform();
     return new Promise(resolve => {
         if (platform === 'darwin' || platform === 'linux') {
-            execFile('lsof', ['-iTCP', '-sTCP:LISTEN', '-P', '-n', '-F', 'pcnT'], { timeout: 5000 }, (err, stdout) => {
+            // lsof lives in /usr/sbin, which daemons launched from a user shell
+            // (scripts/local.js, npm start) often don't have on PATH — that made
+            // the dashboard report "0 Active Ports". Augment PATH explicitly.
+            const env = { ...process.env, PATH: `${process.env.PATH || ''}:/usr/sbin:/sbin` };
+            execFile('lsof', ['-iTCP', '-sTCP:LISTEN', '-P', '-n', '-F', 'pcnT'], { timeout: 5000, env }, (err, stdout) => {
                 if (err || !stdout) return resolve({ ports: [], soaPort: _soaPort, conflict: null });
                 const entries = [];
                 let cur = {};

@@ -25,7 +25,7 @@ let _port = null;
 // missed the SOA_WEB_TTS_URL env injection (restored tabs, tabs that predate
 // the feature, env not inherited). This is what makes "the agent texts you"
 // reliable rather than dependent on per-PTY env.
-const BRIDGE_FILE = path.join(os.homedir(), '.soa-web', 'bridge.json');
+const BRIDGE_FILE = require('./stateDir').stateFile('bridge.json');
 function setPort(p) {
     _port = p;
     try {

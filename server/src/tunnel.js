@@ -26,7 +26,7 @@ const { dbg } = require('./debug');
 // restart instead of minting a fresh (different) URL. Keeping the same public
 // URL across restarts is what stops the mobile client from losing the bridge
 // when the desktop is redeployed or refreshed.
-const STATE_FILE = path.join(os.homedir(), '.soa-web', 'tunnel.json');
+const STATE_FILE = require('./stateDir').stateFile('tunnel.json');
 
 function _saveState(state) {
     try {

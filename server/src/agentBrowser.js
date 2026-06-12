@@ -26,7 +26,7 @@ const express = require('express');
 const { MSG, frame } = require('./protocol');
 
 const DEBUG_PORT = 9223;
-const PROFILE = path.join(os.homedir(), '.soa-web', 'agent-chrome');
+const PROFILE = require('./stateDir').stateFile('agent-chrome');
 const VIEW = { w: 1024, h: 768 };
 
 function findChrome() {

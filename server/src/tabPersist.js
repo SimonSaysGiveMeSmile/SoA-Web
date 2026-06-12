@@ -25,7 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const STATE_DIR = path.join(os.homedir(), '.soa-web');
+const { STATE_DIR } = require('./stateDir');
 const STATE_FILE = path.join(STATE_DIR, 'tabs.json');
 const SCROLLBACK_FILE = path.join(STATE_DIR, 'scrollback.json');
 const SESSION_FILE = path.join(STATE_DIR, 'session.json');
