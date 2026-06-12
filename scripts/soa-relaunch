@@ -1,0 +1,190 @@
+#!/usr/bin/env node
+/**
+ * soa-relaunch — rebuild the fleet after a daemon crash / tab-state loss.
+ *
+ * The daemon's tabs.json is disposable; the real context lives in
+ * ~/.claude/projects/<encoded-cwd>/<session>.jsonl. This script:
+ *
+ *   1. scans ~/.claude/projects for sessions touched in the last N hours,
+ *      resolves each project's REAL cwd from the transcript itself (the
+ *      encoded dir name is lossy: "-" can be "/", "." or "-"),
+ *   2. opens one tab per project over the daemon's WebSocket (localhost
+ *      cookie auto-provision — same path as smoke-ws.js),
+ *   3. types the startup sequence into each tab:
+ *        unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN AI_BASE_URL AI_API_KEY
+ *        claude --resume <latest-session-id>  (falls back to --continue, then fresh)
+ *   4. sends /login into the FIRST tab only — credentials are global
+ *      (~/.claude), so one login re-auths every tab. --login-all sends it
+ *      everywhere if you really want 14 OAuth flows.
+ *
+ * Usage:
+ *   soa-relaunch                 # restore everything from the last 36h
+ *   soa-relaunch --dry-run       # print the plan, touch nothing
+ *   soa-relaunch --hours 12      # narrower window
+ *   soa-relaunch --no-login      # skip the /login step
+ *   soa-relaunch --login-all     # /login in every tab, not just the first
+ *   soa-relaunch --port 7332     # daemon port (default 7332)
+ */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const WebSocket = require(path.resolve(__dirname, '../node_modules/ws'));
+
+const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+const UNSET_LINE = 'unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN AI_BASE_URL AI_API_KEY';
+// Boot time for the Claude TUI before /login is typed into it.
+const CLAUDE_BOOT_MS = 12000;
+// Stagger between tab launches so 14 claudes don't cold-start at once.
+const STAGGER_MS = 1500;
+
+function parseArgs(argv) {
+    const out = { hours: 36, port: 7332, dryRun: false, login: true, loginAll: false };
+    for (let i = 2; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === '--hours') out.hours = parseFloat(argv[++i]);
+        else if (a === '--port') out.port = parseInt(argv[++i], 10);
+        else if (a === '--dry-run') out.dryRun = true;
+        else if (a === '--no-login') out.login = false;
+        else if (a === '--login-all') out.loginAll = true;
+        else if (a === '--help' || a === '-h') { console.log(fs.readFileSync(__filename, 'utf8').split('*/')[0] + '*/'); process.exit(0); }
+    }
+    return out;
+}
+
+// ── 1. discover projects ────────────────────────────────────────────────────
+function discover(hours) {
+    const cutoff = Date.now() - hours * 3600 * 1000;
+    const projects = [];
+    for (const entry of fs.readdirSync(PROJECTS_DIR)) {
+        const dir = path.join(PROJECTS_DIR, entry);
+        // Skip workflow/subagent transcripts and throwaway tmp checkouts.
+        if (entry.startsWith('wf_') || entry === 'subagents') continue;
+        if (entry.startsWith('-private-tmp') || entry.startsWith('-tmp')) continue;
+        let files;
+        try { files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch (_) { continue; }
+        let latest = null, latestMtime = 0;
+        for (const f of files) {
+            const p = path.join(dir, f);
+            const mt = fs.statSync(p).mtimeMs;
+            if (mt > latestMtime) { latestMtime = mt; latest = p; }
+        }
+        if (!latest || latestMtime < cutoff) continue;
+        // Newest transcript first; fall back to siblings (a freshly-compacted
+        // session can start with a summary block that carries no cwd).
+        const byAge = files.map(f => path.join(dir, f))
+            .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+        let cwd = null;
+        for (const p of byAge) { cwd = resolveCwd(p); if (cwd) break; }
+        if (!cwd || cwd.startsWith('/tmp/') || cwd.startsWith('/private/tmp/')) continue;
+        if (!fs.existsSync(cwd)) continue;
+        projects.push({
+            cwd,
+            sessionId: path.basename(latest, '.jsonl'),
+            mtime: latestMtime,
+            title: path.basename(cwd),
+        });
+    }
+    // Most recently active first — that's the tab the user wants focused.
+    return projects.sort((a, b) => b.mtime - a.mtime);
+}
+
+// The encoded dir name is lossy, so read the cwd the transcript recorded.
+// Scan up to 4MB — a compacted session's summary preamble can push the
+// first real entry (which carries cwd) far past the head of the file.
+function resolveCwd(jsonlPath) {
+    try {
+        const fd = fs.openSync(jsonlPath, 'r');
+        const buf = Buffer.alloc(4 * 1024 * 1024);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        fs.closeSync(fd);
+        const m = buf.toString('utf8', 0, n).match(/"cwd"\s*:\s*"([^"]+)"/);
+        return m ? m[1] : null;
+    } catch (_) { return null; }
+}
+
+// ── 2. daemon connection (same localhost auto-provision as smoke-ws.js) ────
+function provisionSession(port) {
+    return new Promise((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/api/me' }, res => {
+            const cookies = res.headers['set-cookie'] || [];
+            res.on('data', () => {});
+            res.on('end', () => resolve(cookies.map(c => c.split(';')[0]).join('; ')));
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function main() {
+    const args = parseArgs(process.argv);
+    const projects = discover(args.hours);
+    if (!projects.length) {
+        console.error(`soa-relaunch: no project sessions found in the last ${args.hours}h`);
+        process.exit(1);
+    }
+    console.log(`soa-relaunch: ${projects.length} project(s) from the last ${args.hours}h:\n`);
+    for (const p of projects) {
+        console.log(`  ${p.title.padEnd(24)} ${p.cwd}\n  ${''.padEnd(24)} ↳ resume ${p.sessionId}`);
+    }
+    if (args.dryRun) { console.log('\n(dry run — nothing launched)'); return; }
+
+    const jar = await provisionSession(args.port);
+    const ws = new WebSocket(`ws://127.0.0.1:${args.port}/ws`, { headers: { cookie: jar } });
+    const send = (kind, d) => ws.send(JSON.stringify({ v: 1, t: 'input', d: { kind, ...d } }));
+
+    let existingCwds = new Set();
+    let resolveTab = null; // resolves with the snapshot after a new-tab
+
+    await new Promise((resolve, reject) => {
+        ws.on('error', reject);
+        ws.on('message', raw => {
+            let m; try { m = JSON.parse(raw.toString()); } catch (_) { return; }
+            if (m.t === 'hello') resolve();
+            if (m.t === 'snapshot' && resolveTab) { const r = resolveTab; resolveTab = null; r(m.d); }
+            if (m.t === 'snapshot' && m.d && Array.isArray(m.d.tabs)) {
+                for (const t of m.d.tabs) if (t.cwd) existingCwds.add(t.cwd);
+            }
+        });
+    });
+    await sleep(500); // let the initial snapshot land so existingCwds is filled
+
+    const launched = [];
+    let first = true;
+    for (const p of projects) {
+        if (existingCwds.has(p.cwd)) {
+            console.log(`skip (tab already open): ${p.title}`);
+            continue;
+        }
+        const snap = await new Promise(res => { resolveTab = res; send('new-tab', { cwd: p.cwd, cols: 220, rows: 50 }); });
+        const tabId = snap && snap.activeId;
+        if (tabId == null) { console.error(`! no tab id for ${p.title} — skipping`); continue; }
+        existingCwds.add(p.cwd);
+        await sleep(800); // let the shell print its prompt
+        send('shell-command', { id: tabId, line: UNSET_LINE });
+        await sleep(200);
+        send('shell-command', { id: tabId, line: `claude --resume ${p.sessionId} || claude --continue || claude` });
+        launched.push({ ...p, tabId, doLogin: args.login && (args.loginAll || first) });
+        console.log(`launched: ${p.title} (tab ${tabId})${first ? '  ← will /login here' : ''}`);
+        first = false;
+        await sleep(STAGGER_MS);
+    }
+
+    if (launched.some(l => l.doLogin)) {
+        console.log(`\nwaiting ${CLAUDE_BOOT_MS / 1000}s for Claude to boot before /login…`);
+        await sleep(CLAUDE_BOOT_MS);
+        for (const l of launched) {
+            if (!l.doLogin) continue;
+            send('shell-command', { id: l.tabId, line: '/login' });
+            console.log(`sent /login → ${l.title}`);
+            await sleep(500);
+        }
+    }
+    await sleep(500);
+    ws.close();
+    console.log(`\ndone: ${launched.length} tab(s) launched. Credentials are global — once the /login completes, every tab is authed.`);
+}
+
+main().catch(e => { console.error('soa-relaunch error:', e.message || e); process.exit(1); });
