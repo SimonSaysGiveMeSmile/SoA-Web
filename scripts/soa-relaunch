@@ -144,7 +144,10 @@ async function main() {
             let m; try { m = JSON.parse(raw.toString()); } catch (_) { return; }
             if (m.t === 'hello') resolve();
             if (m.t === 'snapshot' && resolveTab) { const r = resolveTab; resolveTab = null; r(m.d); }
-            if (m.t === 'snapshot' && m.d && Array.isArray(m.d.tabs)) {
+            // Harvest open cwds from BOTH hello and snapshot frames — the hello
+            // carries the live tab list, so dedup works even if no snapshot
+            // arrives before the launch loop starts.
+            if ((m.t === 'hello' || m.t === 'snapshot') && m.d && Array.isArray(m.d.tabs)) {
                 for (const t of m.d.tabs) if (t.cwd) existingCwds.add(t.cwd);
             }
         });

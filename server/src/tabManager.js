@@ -217,7 +217,9 @@ class TabManager {
     list() {
         return this.order.map(id => {
             const t = this.tabs.get(id);
-            return { id: t.id, title: t.title, cols: t.cols, rows: t.rows, exited: t.exited };
+            // cwd lets clients dedup by project — soa-relaunch skips tabs whose
+            // cwd is already open instead of duplicating the whole fleet.
+            return { id: t.id, title: t.title, cols: t.cols, rows: t.rows, exited: t.exited, cwd: t.cwd || null };
         });
     }
 
