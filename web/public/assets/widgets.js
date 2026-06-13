@@ -78,6 +78,23 @@ async function jpost(url, body) {
     return r.json();
 }
 
+// Pause every widget's polling while the page is in a background tab. A single
+// document-level listener drives all live widgets, so a dozen sidebar widgets
+// don't each attach their own. Hidden tabs stop firing fetches entirely — which
+// also means far fewer in-flight requests to abort during a network change.
+const _liveWidgets = new Set();
+let _visBound = false;
+function _bindWidgetVisibility() {
+    if (_visBound) return;
+    _visBound = true;
+    document.addEventListener('visibilitychange', () => {
+        const hidden = document.hidden;
+        for (const w of _liveWidgets) {
+            try { hidden ? w._suspend() : w._resume(); } catch (_) {}
+        }
+    });
+}
+
 class Widget {
     constructor({ title, titleKey, parent, intervalMs }) {
         this.titleKey = titleKey || null;
@@ -108,8 +125,12 @@ class Widget {
     }
 
     start() {
+        _liveWidgets.add(this);
+        _bindWidgetVisibility();
         this.tick();
-        if (this.intervalMs && !this._timer) {
+        // Don't arm a polling timer while the page is hidden — _resume starts it
+        // when the tab is foregrounded again.
+        if (this.intervalMs && !this._timer && !document.hidden) {
             this._timer = setInterval(() => this.tick(), this.intervalMs);
         }
     }
@@ -118,8 +139,22 @@ class Widget {
         if (this._timer) { clearInterval(this._timer); this._timer = null; }
     }
 
+    // Visibility hooks (driven by the shared listener). _suspend only pauses the
+    // polling cadence; _resume refreshes once and re-arms it. Event-driven /
+    // static widgets (intervalMs 0) are no-ops here.
+    _suspend() {
+        if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    }
+
+    _resume() {
+        if (this._destroyed || this._timer || !this.intervalMs) return;
+        this.tick();
+        this._timer = setInterval(() => this.tick(), this.intervalMs);
+    }
+
     destroy() {
         this._destroyed = true;
+        _liveWidgets.delete(this);
         this.stop();
         if (this._langOff) { this._langOff(); this._langOff = null; }
         this.root.remove();
@@ -548,6 +583,9 @@ class LocationGlobeWidget extends Widget {
         this.body.append(this._canvasHost, this._meta);
         this._pin = null;
         this._lastLoc = null;
+        this._offscreen = false;  // set by IntersectionObserver in _boot
+        this._geoFails = 0;       // consecutive /api/geo failures (backoff)
+        this._geoNextAt = 0;      // epoch ms before which tick() skips the fetch
         this._bootPromise = this._boot();
     }
 
@@ -560,6 +598,10 @@ class LocationGlobeWidget extends Widget {
             // Encom measures the host by offsetWidth/Height synchronously, so
             // it must be in the DOM and painted before we instantiate.
             await new Promise(r => requestAnimationFrame(r));
+            // destroy() can land during the await above (tab-switch / WS
+            // reconnect re-mounts the sidebar); bail before wiring up the globe,
+            // resize listener and IntersectionObserver onto a dead widget.
+            if (this._destroyed) return;
             const w = this._canvasHost.offsetWidth || 240;
             const h = this._canvasHost.offsetHeight || 200;
             const tron = 'rgb(170,207,209)';
@@ -599,26 +641,68 @@ class LocationGlobeWidget extends Widget {
                 }
             }
             this.globe.addConstellation(sats);
+            // Pause the render loop when the globe scrolls out of the sidebar
+            // viewport (the heaviest continuous cost shouldn't run unseen).
+            try {
+                this._io = new IntersectionObserver((entries) => {
+                    const e = entries[entries.length - 1];
+                    this._offscreen = !(e && e.isIntersecting);
+                    if (!this._offscreen) this._kickAnim();
+                }, { threshold: 0.01 });
+                this._io.observe(this._canvasHost);
+            } catch (_) { this._offscreen = false; }
         } catch (e) {
             this._canvasHost.replaceChildren($el('div', { class: 'globe-err', text: tr('widget.globe.unavailable') + ': ' + e.message }));
         }
     }
 
     _tickAnim() {
+        this._rafId = null;
         if (this._destroyed) return;
+        // The globe is pure decoration — don't spin a 60fps WebGL loop while the
+        // page is backgrounded or the canvas is scrolled out of view. _kickAnim
+        // restarts it when it becomes visible again.
+        if (document.hidden || this._offscreen) return;
         try { this.globe.tick(); } catch (_) {}
         this._rafId = requestAnimationFrame(() => this._tickAnim());
     }
 
+    _kickAnim() {
+        if (this._destroyed || this._rafId || !this.globe) return;
+        if (document.hidden || this._offscreen) return;
+        this._tickAnim();
+    }
+
+    _suspend() {
+        super._suspend();
+        if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+    }
+
+    _resume() {
+        super._resume();
+        this._kickAnim();
+    }
+
     async tick() {
         if (isSandbox()) { this._renderSandbox(); return; }
+        // /api/geo reports the server's public IP/location — effectively static.
+        // Once we have a fix, recheck only every ~10 min; on failure (e.g. the
+        // upstream 502s) back off exponentially instead of retrying every cycle.
+        const now = Date.now();
+        if (this._geoNextAt && now < this._geoNextAt) return;
         try {
             const { data } = await jget('/api/geo');
             this._lastGeo = data;
             this._placePin(data);
             this._refreshMeta(data);
+            this._geoFails = 0;
+            this._geoNextAt = now + 10 * 60_000;
         } catch (e) {
-            this._meta.textContent = tr('widget.globe.unavailable');
+            this._geoFails++;
+            // Keep the last good location on screen; only show "unavailable" if
+            // we never managed to get one.
+            if (!this._lastGeo) this._meta.textContent = tr('widget.globe.unavailable');
+            this._geoNextAt = now + Math.min(10 * 60_000, 30_000 * 2 ** this._geoFails);
         }
     }
 
@@ -678,6 +762,7 @@ class LocationGlobeWidget extends Widget {
 
     destroy() {
         if (this._rafId) cancelAnimationFrame(this._rafId);
+        if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
         if (this._onResize) window.removeEventListener('resize', this._onResize);
         try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
         super.destroy();
@@ -864,11 +949,22 @@ class ConsoleLogWidget extends Widget {
     }
 
     start() {
+        super.start();  // registers in _liveWidgets (intervalMs:0 → no poll timer)
         if (isSandbox()) {
             this.body.replaceChildren($el('div', { class: 'widget-note', text: tr('widget.sandbox.backend_needed') }));
             return;
         }
         this._connect();
+    }
+
+    // Close the EventSource while the tab is backgrounded to avoid a
+    // persistent idle connection (and the 502 spam if the backend is down).
+    _suspend() {
+        if (this._es) { this._es.close(); this._es = null; }
+    }
+
+    _resume() {
+        if (!this._destroyed && !this._es && !isSandbox()) this._connect();
     }
 
     _connect() {

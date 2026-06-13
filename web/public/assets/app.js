@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
-import { mountSidebar } from '/assets/widgets.js?v=17';
+import { mountSidebar } from '/assets/widgets.js?v=18';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -342,6 +342,13 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
+        // Tabs whose PTY emitted output since the last status scan. The 500ms
+        // poll re-scans only dirty tabs (idle tabs cost nothing), with a full
+        // sweep every ~8s as a backstop so a missed seed can't strand a tab's
+        // status/context. Seeded in _onTermData and on HELLO replay below.
+        this._pollDirty = new Set();
+        this._pollTickN = 0;
+        this._pollWasHidden = false;
         // Agent-detection debug overlay (bottom-right box) — off by default.
         // Opt in with ?debugAgent=1 in the URL or localStorage 'soaDebugAgent'='1'.
         window.__SOA_DEBUG_AGENT =
@@ -516,6 +523,7 @@ class Shell {
                     if (rt && r.data) {
                         rt.queueReplay(r.data);
                         this._detectAgentFromStream(r.id, r.data);
+                        this._pollDirty.add(r.id);
                     }
                 }
             }
@@ -639,6 +647,7 @@ class Shell {
             this._oscBuf.set(id, partial ? partial[0] : '');
         }
         this._detectAgentFromStream(id, data);
+        this._pollDirty.add(id);   // new output → re-scan status/context next tick
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
         // still overlap into the Web Audio mixer like crossfire. The tab id
@@ -717,6 +726,10 @@ class Shell {
                 rt.flushPendingReplay();
                 rt.scrollToBottom();
                 rt.focus();
+                // flushPendingReplay paints the grid without going through
+                // _onTermData, so seed the dirty flag to re-scan ctx%/status on
+                // the next tick instead of waiting for the ~8s full sweep.
+                this._pollDirty.add(id);
             }
         }
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
@@ -830,22 +843,36 @@ class Shell {
     }
 
     _pollCtxLines() {
+        // Don't burn the main thread scanning 16 terminals while the page is in
+        // a background tab — resume with a full sweep once it's foregrounded.
+        if (document.hidden) { this._pollWasHidden = true; return; }
+        // Fast path: only re-scan tabs that emitted output since the last tick.
+        // Full sweep every ~8s (and on return from hidden) guarantees eventual
+        // consistency even if a dirty-seed site is ever missed.
+        const full = this._pollWasHidden || (++this._pollTickN % 16 === 0);
+        this._pollWasHidden = false;
         for (const [id, rt] of this.tabs) {
-            if (!rt._opened) continue;
-            try {
-                const pct = this._extractCtxPct(rt);
-                if (pct !== null && pct !== this._ctxPct.get(id)) {
-                    this._ctxPct.set(id, pct);
-                    this._updateCtxPie(id, pct);
-                    if (this.viewMode === 'tiles') {
-                        const tnode = this._tilesGridEl && this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
-                        if (tnode) this._paintTilePie(tnode, pct);
+            if (!full && !this._pollDirty.has(id)) continue;
+            this._pollDirty.delete(id);
+            if (rt._opened) {
+                try {
+                    const pct = this._extractCtxPct(rt);
+                    if (pct !== null && pct !== this._ctxPct.get(id)) {
+                        this._ctxPct.set(id, pct);
+                        this._updateCtxPie(id, pct);
+                        if (this.viewMode === 'tiles') {
+                            const tnode = this._tilesGridEl && this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
+                            if (tnode) this._paintTilePie(tnode, pct);
+                        }
+                        this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
                     }
-                    this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
-                }
-            } catch (_) {}
+                } catch (_) {}
+                this._pollAgentStatusForTab(id);
+            } else {
+                // Tiles mode / unopened xterm: re-run detection on the buffer.
+                this._detectAgentFromStream(id, '', true);
+            }
         }
-        this._pollAgentStatus();
     }
 
     // Pull Claude Code's context reading out of the live screen. Claude prints
@@ -2301,6 +2328,7 @@ class Shell {
             rt.flushPendingReplay();
             rt.scrollToBottom();
             rt.focus();
+            this._pollDirty.add(id);   // re-scan ctx%/status after the flush paint
         });
 
         this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
