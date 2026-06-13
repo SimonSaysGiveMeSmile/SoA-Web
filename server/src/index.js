@@ -142,9 +142,9 @@ app.use((req, res, next) => {
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'content-type');
         res.setHeader('Access-Control-Max-Age', '600');
-        if (req.headers['access-control-request-private-network'] === 'true') {
-            res.setHeader('Access-Control-Allow-Private-Network', 'true');
-        }
+        // Send on every allowed response (not just preflight) — Chrome requires
+        // the PNA header on the actual response too, not only on OPTIONS.
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
     }
     if (req.method === 'OPTIONS' && origin) {
         return res.status(allowed ? 204 : 403).end();
