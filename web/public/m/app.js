@@ -418,6 +418,19 @@ class App {
         this._snapshot = null;
         this._activeTab = 0;
         this._activeTabId = 0;
+        // Per-device active tab. The server keeps ONE session-global active tab
+        // and stamps it into every snapshot's activeId (3s cwd poll, device
+        // connect/disconnect, and any device's switch). We must NOT blindly
+        // follow that — otherwise this phone's view gets yanked whenever another
+        // device switches tabs. A user TAP is handled optimistically-local
+        // (_switchTabLocal), so it never depends on the server echo. The only
+        // thing we follow from the server is a tab THIS device just CREATED,
+        // whose id the server assigns: when we send new-tab we capture the set
+        // of ids that exist right then, and _applySnapshot adopts the activeId
+        // of the first snapshot naming an id NOT in that set (the genuinely new
+        // tab), then clears it. Matching the NEW id — not "any valid activeId" —
+        // stops a racing poll/device-count snapshot from stealing the focus.
+        this._adoptNewTabIds = null;
         this._connectedDevices = 0;
         this._tabStates = new Map();
         this._tabStatuses = new Map();
@@ -1427,7 +1440,10 @@ class App {
                 limitHtml +
                 `<pre class="m-tile-preview">${escapeHtml(preview)}</pre>`;
             tile.addEventListener('click', () => {
-                this.socket.sendInput('switch-tab', { id });
+                // User-initiated switch on THIS device — optimistic-local so it
+                // works even if the server suppresses the echo (desktop already
+                // on this tab), and so a foreign switch can never yank us.
+                this._switchTabLocal(id);
                 this._showView('terminal-view');
                 // No keyboard here — opening a tab from the dashboard just shows
                 // its terminal. Tap the terminal when you actually want to type.
@@ -1794,7 +1810,15 @@ class App {
             if (!opt) return;
             const kind = opt.dataset.kind;
             close();
-            if (kind === 'terminal') this.socket.sendInput('new-tab');
+            if (kind === 'terminal') {
+                // This device is creating the tab, so it SHOULD focus the new
+                // server-assigned tab. Capture the current id set; _applySnapshot
+                // adopts the activeId of the first snapshot naming an id NOT in
+                // this set (the genuinely new tab), so a racing poll/device-count
+                // snapshot carrying an old id can't steal the focus.
+                this._adoptNewTabIds = new Set((this._snapshot && this._snapshot.tabs || []).map(t => t.id));
+                this.socket.sendInput('new-tab');
+            }
             else if (kind === 'localhost') this._promptLocalhost();
             else if (kind === 'webpage') this._promptWebpage();
         });
@@ -2056,6 +2080,24 @@ class App {
         if (this._currentView === 'chat-view') this._renderChatStatus();
     }
 
+    // Switch the viewed tab OPTIMISTICALLY-LOCAL, then notify the server. A
+    // mobile switch is a server round-trip, but we must NOT wait for the echo:
+    // the server suppresses the echo snapshot when the session-global active tab
+    // is already this id (e.g. the desktop is sitting on it), which would leave
+    // the tap dead. Rendering locally also means no intent flag that could dangle
+    // and later hijack an unrelated snapshot. We re-apply the last snapshot with
+    // _activeTabId pre-set: its keep-path resolves activeId to our new id and
+    // repaints tabs + terminal. Output for every tab is already buffered, so the
+    // switched-to tab shows correct content immediately.
+    _switchTabLocal(id) {
+        if (id == null) return;
+        if (this._activeTabId !== id && this._snapshot) {
+            this._activeTabId = id;
+            this._applySnapshot(this._snapshot);
+        }
+        this.socket.sendInput('switch-tab', { id });
+    }
+
     _applySnapshot(snap) {
         if (!snap) return;
         this._snapshot = snap;
@@ -2063,17 +2105,47 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
-        // Defensive activeId resolution. Snapshot broadcasts can carry
-        // activeId:0 or omit it entirely (undefined) — the server's HELLO
-        // resolves a real id via a tabList fallback, but its periodic/
-        // device-count/REQUEST snapshots don't. Blindly trusting that clobbers
-        // a known-good _activeTabId to 0, after which TERM_DATA frames for the
-        // real tab mismatch _activeTabId and get buffered forever (T counter
-        // rises, screen stays blank). Only accept activeId when it names a real
-        // tab; otherwise keep the current active tab, falling back to the first.
+        // Per-device active-tab resolution.
+        //
+        // "Which tab this phone is viewing" is a CLIENT-LOCAL concept. The server
+        // keeps one session-global active tab and re-stamps it into snap.activeId
+        // on its 3s cwd poll, on device connect/disconnect, and on ANY device's
+        // switch. If we adopted snap.activeId every time, another device switching
+        // tabs would involuntarily yank this phone's view. So we adopt the server
+        // activeId in only two cases:
+        //   1. INITIAL load / manual resync — !this._hasReceivedSnapshot. Covers
+        //      a fresh page and _resync() (which clears the flag); _applyHello()
+        //      funnels through here before _hasReceivedSnapshot is set, so HELLO
+        //      is covered. NOTE: a transparent auto-reconnect does NOT clear the
+        //      flag, so it intentionally keeps this phone's current tab.
+        //   2. THIS device just created a tab: _adoptNewTabIds holds the id set
+        //      captured at new-tab time, and we adopt the activeId of the first
+        //      snapshot naming an id NOT in that set (the genuinely new tab).
+        //      Matching the NEW id rather than "any valid activeId" means a racing
+        //      cwd-poll/device-count/foreign-switch snapshot carrying the
+        //      old-but-still-valid activeId cannot burn the intent.
+        // A user TAP is not handled here at all — _switchTabLocal sets the active
+        // tab optimistically, so it works even when the server suppresses the echo
+        // (it does when the session-global tab is already that id). For every
+        // other snapshot we KEEP this._activeTabId, applying the close-active-tab
+        // fallback only if the tab we're viewing vanished from the list.
+        //
+        // Defensive note (kept): snapshot broadcasts can carry activeId:0 or omit
+        // it entirely. We only accept activeId when it names a real tab; otherwise
+        // we keep the current tab so TERM_DATA frames keep matching _activeTabId
+        // (mismatched frames buffer forever — blank screen).
         const idList = rawTabs.map(t => t.id);
-        let activeId = snap.activeId;
-        if (!idList.includes(activeId)) {
+        let activeId;
+        if (!this._hasReceivedSnapshot) {
+            this._adoptNewTabIds = null;
+            activeId = idList.includes(snap.activeId) ? snap.activeId
+                : (idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0));
+        } else if (this._adoptNewTabIds && idList.includes(snap.activeId) && !this._adoptNewTabIds.has(snap.activeId)) {
+            this._adoptNewTabIds = null;
+            activeId = snap.activeId;
+        } else {
+            // Keep the device-local active tab; fall back to the first tab only if
+            // the one we were viewing is gone (e.g. it was just closed).
             activeId = idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0);
         }
         const tabs = rawTabs.map((t, i) => ({
@@ -2229,7 +2301,10 @@ class App {
 
         const endTap = (e) => {
             if (!state.dragging && !state.cancelled && !state.didMenu && !state.armed) {
-                this.socket.sendInput('switch-tab', { id: tab.id });
+                // User tapped this tab on THIS device — switch optimistically
+                // (a mobile switch is a server round-trip whose echo may be
+                // suppressed when another device already sits on this tab).
+                this._switchTabLocal(tab.id);
             } else if (state.armed && !state.dragging && !state.didMenu) {
                 el.classList.remove('tab-armed');
                 this._showTabMenu(tab, el);
@@ -2405,6 +2480,7 @@ class App {
     _resync() {
         this._tabStates.clear();
         this._hasReceivedSnapshot = false;
+        this._adoptNewTabIds = null;
         this.termEl.innerHTML = '';
         this.socket.send('request', { what: 'snapshot' });
     }

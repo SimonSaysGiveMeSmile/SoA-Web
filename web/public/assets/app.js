@@ -320,6 +320,20 @@ class Shell {
         this.tabs = new Map();
         this.order = [];
         this.activeId = null;
+        // Per-device active tab is client-local: snapshots fire on the 3s cwd
+        // poll, on device connect/disconnect, and on ANY device's switch, all
+        // carrying the session-global activeId. Adopting it blindly yanks this
+        // device's view and pings SWITCH_TAB back, gluing devices together.
+        // A normal SWITCH is already optimistic-local (see _activate), so it
+        // needs no server round-trip. The only thing we must follow from the
+        // server is a tab THIS device just CREATED/RESTORED, whose id the server
+        // assigns. When we send NEW_TAB/RESTORE_TAB we snapshot the set of tab
+        // ids that exist right then; _onSnapshot adopts the activeId of the
+        // first snapshot that names a tab NOT in that set (i.e. the genuinely
+        // new tab), then clears the pending set. Matching the NEW id — not just
+        // "any valid activeId" — means a racing cwd-poll/device-count snapshot
+        // carrying the old (still-valid) activeId can't burn the intent.
+        this._adoptNewTabIds = null;
         this.tabsEl = $('#tabs');
         this.termsEl = $('#terms');
         this.sidebarEl = $('#sidebar');
@@ -505,7 +519,15 @@ class Shell {
                     }
                 }
             }
-            const target = (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
+            // HELLO fires on a genuine page load AND on every transparent WS
+            // auto-reconnect (sleep/flaky wifi). On reconnect this.activeId is
+            // already set, so KEEP the tab the user is viewing instead of
+            // jumping to the session-global activeId (which another device may
+            // have moved). Only a fresh load (activeId still null) adopts the
+            // server's last-viewed tab.
+            const keepLocal = this.activeId != null && tabs.some(t => t.id === this.activeId);
+            const target = keepLocal ? this.activeId
+                : (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
             this._activate(target);
             // Tell the PTY what width we actually ended up at. _activate's
             // fitNow goes through the debounced _onResize (60ms) — good for
@@ -529,6 +551,10 @@ class Shell {
                 this._pollAgentStatus();
             }, 300);
         } else {
+            // First connect with no existing tabs: this device is creating the
+            // session's only tab. No intent needed — the ensuing snapshot has
+            // activeId still null locally, so the initial-load branch focuses
+            // the sole new tab.
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
     }
@@ -544,9 +570,31 @@ class Shell {
         // bar. _ensureTab only appends new ids, so adopt the snapshot order.
         this.order = tabs.map(t => t.id);
         this._syncTabsUI(tabs);
-        const nextActive = (activeId && this.tabs.has(activeId)) ? activeId
-            : (this.activeId == null && tabs[0]) ? tabs[0].id : null;
-        if (nextActive && nextActive !== this.activeId) this._activate(nextActive);
+        // Per-device active tab: do NOT follow the session-global activeId on
+        // routine snapshots. Adopt it only when (a) this is effectively initial
+        // load — local activeId is still null, so there is nothing to disturb —
+        // or (b) this device just sent NEW_TAB/RESTORE_TAB and this snapshot
+        // names the genuinely new tab (an id absent from the set we captured
+        // when we acted). Matching the NEW id rather than "any valid activeId"
+        // means a racing cwd-poll/device-count/foreign-switch snapshot carrying
+        // the old-but-still-valid activeId cannot burn the intent.
+        const serverActiveValid = !!(activeId && this.tabs.has(activeId));
+        if (this.activeId == null) {
+            // Fresh page / reload: restore the last-viewed tab.
+            this._adoptNewTabIds = null;
+            const initial = serverActiveValid ? activeId : (tabs[0] ? tabs[0].id : null);
+            if (initial && initial !== this.activeId) this._activate(initial);
+        } else if (this._adoptNewTabIds && serverActiveValid && !this._adoptNewTabIds.has(activeId)) {
+            // This device created/restored a tab and this is its new id — focus it.
+            this._adoptNewTabIds = null;
+            if (activeId !== this.activeId) this._activate(activeId);
+        } else if (!this.tabs.has(this.activeId)) {
+            // The tab we were viewing disappeared from the snapshot (closed,
+            // possibly by another device): fall back locally to the first tab.
+            const fallback = tabs[0] ? tabs[0].id : null;
+            if (fallback) this._activate(fallback); else this.activeId = null;
+        }
+        // Otherwise keep the user's current local active tab untouched.
         const tabsEl = $('#status-tabs');
         const tabsKey = tabs.length === 1 ? 'status.tabs_one' : 'status.tabs_other';
         tabsEl.textContent = tr(tabsKey, { n: tabs.length });
@@ -1397,6 +1445,8 @@ class Shell {
             : this.graveyard[this.graveyard.length - 1];
         if (!target) return;
         const size = this._sendSize();
+        // This device restored the tab from the graveyard — follow the new id.
+        this._adoptNewTabIds = new Set(this.tabs.keys());
         this.bridge.input(INPUT_KIND.RESTORE_TAB, { id: target.id, ...size });
         this.audio.play('granted');
     }
@@ -1717,6 +1767,8 @@ class Shell {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
             this.audio.play('granted');
+            // This device opened the new tab — focus its new id when it lands.
+            this._adoptNewTabIds = new Set(this.tabs.keys());
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'w') {
@@ -1865,6 +1917,8 @@ class Shell {
             const cwd = await pickFolder();
             if (!cwd) return;
             this.audio.play('granted');
+            // This device opened the new tab — focus its new id when it lands.
+            this._adoptNewTabIds = new Set(this.tabs.keys());
             this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
             return;
         }
