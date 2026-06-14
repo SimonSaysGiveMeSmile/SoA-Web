@@ -446,7 +446,7 @@ function onWsConnect(ws, session, req) {
                 }));
                 tabPersist.save(session.tabMgr);
             },
-            onExit: (tabId, code) => session.send(frame(MSG.TERM_EXIT, { id: tabId, code })),
+            onExit: (tabId, code) => { try { agentBrowser.teardown(tabId); } catch (_) {} session.send(frame(MSG.TERM_EXIT, { id: tabId, code })); },
         });
 
         // Periodic cwd poll: catches directory changes from running programs
@@ -550,13 +550,14 @@ function onWsConnect(ws, session, req) {
                 }
                 break;
             case MSG.INPUT:
-                handleInput(session, msg.d || {});
+                handleInput(session, msg.d || {}, ws);
                 break;
             default: /* forward-compat: ignore unknown types */ break;
         }
     });
 
     ws.on('close', () => {
+        try { agentBrowser.unsubscribeAll(ws); } catch (_) {}
         session.detachSocket(ws);
         _broadcastDeviceCount(session);
     });
@@ -590,7 +591,7 @@ function scheduleAutoResume(restoredTabs) {
     }, 1200);
 }
 
-function handleInput(session, d) {
+function handleInput(session, d, ws) {
     const mgr = session.tabMgr;
     if (d.kind === INPUT_KIND.TERM_RESIZE) {
         dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(resizes SHARED pty; desktop will reflow)');
@@ -712,13 +713,14 @@ function handleInput(session, d) {
             break;
         }
         case INPUT_KIND.BROWSER_SUBSCRIBE:
-            agentBrowser.subscribe().catch(() => {});
+            // Watch one tab's browser (d.id), defaulting to this device's active tab.
+            agentBrowser.subscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
             break;
         case INPUT_KIND.BROWSER_UNSUBSCRIBE:
-            agentBrowser.unsubscribe().catch(() => {});
+            agentBrowser.unsubscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
             break;
         case INPUT_KIND.BROWSER_CLICK:
-            agentBrowser.command('click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
+            agentBrowser.command(d.id != null ? d.id : session.activeTab, 'click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
             break;
         case INPUT_KIND.WINDOW_CONTROL:
             windowControl.applyPreset(String(d.preset || ''))
