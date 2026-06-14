@@ -41,6 +41,7 @@ const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
+const claudeSessions   = require('./claudeSessions');
 const tabApi           = require('./tabApi');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
@@ -476,6 +477,7 @@ function onWsConnect(ws, session, req) {
             const shellEnv = envStore.getEnvForShell();
             const savedSb = tabPersist.loadScrollback();
             const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
+            const restoredTabs = [];
             saved.tabs.forEach((entry, i) => {
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
                 const sb = sbList[i];
@@ -484,14 +486,21 @@ function onWsConnect(ws, session, req) {
                 const seed = prior
                     ? prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n`
                     : '';
-                session.tabMgr.open({
+                const tab = session.tabMgr.open({
                     title: entry.userRenamed ? entry.title : undefined,
                     cwd,
                     env: shellEnv,
                     silent: true,
                     seedScrollback: seed || undefined,
                 });
+                if (tab && cwd) restoredTabs.push({ tab, cwd });
             });
+            // A fresh daemon respawns dead shells, so each tab's Claude
+            // conversation is gone unless we resume it. Auto-resume the tabs
+            // whose cwd has a recent transcript (SOA_WEB_NO_AUTO_RESUME=1 off).
+            if (restoredTabs.length && process.env.SOA_WEB_NO_AUTO_RESUME !== '1') {
+                scheduleAutoResume(restoredTabs);
+            }
         }
 
         autoPilot.instance.attach(session.tabMgr, (tabId) => session._agentStatus && session._agentStatus.get(tabId) || 'idle');
@@ -552,6 +561,33 @@ function onWsConnect(ws, session, req) {
         _broadcastDeviceCount(session);
     });
     ws.on('error', () => { /* close handler will fire too */ });
+}
+
+// Auto-resume Claude in tabs restored after a daemon restart. The respawned
+// shells are fresh (dead), so each tab's conversation is lost unless we resume
+// it. For every restored tab whose cwd has a recent Claude transcript, type
+//   claude --resume <latest-session> || claude --continue
+// once the shell has had a moment to print its prompt, staggered so N claudes
+// don't all cold-start at once. The project scan is deferred off the connect
+// path. Disable with SOA_WEB_NO_AUTO_RESUME=1.
+function scheduleAutoResume(restoredTabs) {
+    setTimeout(() => {
+        let map;
+        try { map = claudeSessions.latestSessionByCwd(72); }
+        catch (e) { dbg('auto-resume', 'scan failed', String((e && e.message) || e)); return; }
+        let n = 0;
+        for (const { tab, cwd } of restoredTabs) {
+            const hit = map.get(cwd);
+            if (!hit) continue;
+            const wait = n * 1500; // stagger cold-starts
+            n++;
+            setTimeout(() => {
+                // tab.write is a no-op if the PTY already exited.
+                try { tab.write(`claude --resume ${hit.sessionId} || claude --continue\r`); } catch (_) {}
+            }, wait);
+        }
+        if (n) dbg('auto-resume', `armed ${n}/${restoredTabs.length} restored tab(s)`);
+    }, 1200);
 }
 
 function handleInput(session, d) {
