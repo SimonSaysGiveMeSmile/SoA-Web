@@ -2191,22 +2191,77 @@ class Shell {
     // it types into each tab's PTY via TERM_KEYS, the same path a keypress takes,
     // so it needs no server support and can't desync tab state.
     _openBroadcast() {
-        const n = this.order.length;
+        const ids = this.order.slice();
+        const n = ids.length;
         const backdrop = el('div', { class: 'soa-modal-backdrop' });
         const card = el('div', { class: 'soa-modal soa-bcast' });
         const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
         const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
 
+        // Which tabs receive the broadcast. Defaults to ALL — preserving the
+        // original behavior — but the per-tab checkboxes and quick-select chips
+        // below let you narrow it to a subset (one project, just the agents that
+        // need input, etc.) before sending.
+        const selected = new Set(ids);
+
+        // ---- target selector: one checkbox row per tab --------------------
+        const STATUS_LABELS = { working: 'Working', attention: 'Needs input', done: 'Done', idle: 'Idle' };
+        const rows = ids.map((id) => {
+            const rt = this.tabs.get(id);
+            const title = (rt && rt.title) || tr('tab.default', { id });
+            const status = this._agentStatus.get(id) || 'idle';
+            const pct = this._ctxPct.get(id) || 0;
+            const chk = el('input', { type: 'checkbox', class: 'bcast-row-chk' });
+            chk.checked = true;
+            const row = el('label', { class: 'bcast-row', 'data-agent': status }, [
+                chk,
+                el('span', { class: 'bcast-row-dot' }),
+                el('span', { class: 'bcast-row-title', text: title }),
+                el('span', { class: 'bcast-row-ctx', text: pct ? pct + '%' : '' }),
+            ]);
+            chk.addEventListener('change', () => {
+                if (chk.checked) selected.add(id); else selected.delete(id);
+                refresh();
+            });
+            return { row, chk, id, status };
+        });
+        const listEl = el('div', { class: 'bcast-list' }, rows.map(r => r.row));
+
+        // Quick-select chips: All / None, plus one per agent status present, so
+        // "send to everyone that needs input" is a single tap.
+        const setSel = (predicate) => {
+            selected.clear();
+            for (const r of rows) {
+                r.chk.checked = predicate(r);
+                if (r.chk.checked) selected.add(r.id);
+            }
+            refresh();
+        };
+        const present = [...new Set(rows.map(r => r.status))].filter(s => STATUS_LABELS[s]);
+        const quickEl = el('div', { class: 'bcast-quick-row' }, [
+            el('button', { class: 'bcast-quick', type: 'button', text: `All ${n}`, onclick: () => setSel(() => true) }),
+            el('button', { class: 'bcast-quick', type: 'button', text: 'None', onclick: () => setSel(() => false) }),
+            ...present.map(s => el('button', {
+                class: 'bcast-quick', type: 'button', 'data-agent': s,
+                text: STATUS_LABELS[s], onclick: () => setSel(r => r.status === s),
+            })),
+        ]);
+        const countEl = el('span', { class: 'bcast-count' });
+
         const input = el('input', { class: 'bcast-input', type: 'text', spellcheck: 'false',
-            placeholder: `Command to send to all ${n} terminals…` });
+            placeholder: 'Command to send to the selected terminals…' });
         const enterChk = el('input', { type: 'checkbox', id: 'bcast-enter', checked: 'checked' });
         const enterLbl = el('label', { class: 'bcast-chk', for: 'bcast-enter' }, [enterChk, ' press Enter after']);
 
-        // Recovery presets. A preset with `key` blasts a bare control key to all
-        // tabs immediately; otherwise it just fills the input to review first.
-        // `claude --continue` resumes the most recent conversation in each tab's
-        // cwd in-place — the fix for "tabs reopened after a restart but Claude is
-        // a dead shell". (Bare `claude` would start fresh and lose context.)
+        // Briefly highlight the selector when the user tries to send with nothing
+        // selected — cheaper than a disabled-button explanation.
+        const flashEmpty = () => { quickEl.classList.remove('bcast-flash'); void quickEl.offsetWidth; quickEl.classList.add('bcast-flash'); };
+
+        // Recovery presets. A preset with `key` blasts a bare control key to the
+        // selected tabs immediately; otherwise it just fills the input to review
+        // first. `claude --continue` resumes the most recent conversation in each
+        // tab's cwd in-place — the fix for "tabs reopened after a restart but
+        // Claude is a dead shell". (Bare `claude` would start fresh and lose context.)
         const presets = [
             { label: 'Resume ⟲ (claude -c)', text: 'claude --continue' },
             { label: 'claude --resume (pick)', text: 'claude --resume' },
@@ -2218,17 +2273,20 @@ class Shell {
         const chips = el('div', { class: 'bcast-presets' }, presets.map(p => el('button', {
             class: 'bcast-chip', type: 'button', text: p.label,
             onclick: () => {
-                if (p.key != null) { this._broadcastRaw(p.key); this.audio.play('granted'); close(); }
-                else { input.value = p.text; input.focus(); }
+                if (p.key != null) {
+                    if (!selected.size) { flashEmpty(); return; }
+                    this._broadcastRaw(p.key, [...selected]); this.audio.play('granted'); close();
+                } else { input.value = p.text; input.focus(); }
             },
         })));
 
         const sendBtn = el('button', { class: 'bcast-send', type: 'button', text: `SEND TO ALL ${n}` });
         const cancelBtn = el('button', { class: 'bcast-cancel', type: 'button', text: 'Cancel' });
         const doSend = () => {
+            if (!selected.size) { flashEmpty(); return; }
             const text = input.value;
             if (!text.trim() && !enterChk.checked) { input.focus(); return; }
-            this._broadcastRaw(text + (enterChk.checked ? '\r' : ''));
+            this._broadcastRaw(text + (enterChk.checked ? '\r' : ''), [...selected]);
             this.audio.play('granted');
             close();
         };
@@ -2236,9 +2294,22 @@ class Shell {
         cancelBtn.addEventListener('click', close);
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
 
+        // Keep the count read-out and the send-button label in sync with the
+        // current selection.
+        const refresh = () => {
+            const k = selected.size;
+            countEl.textContent = `${k} of ${n} selected`;
+            sendBtn.textContent = k === n ? `SEND TO ALL ${n}` : `SEND TO ${k}`;
+            sendBtn.classList.toggle('is-empty', k === 0);
+        };
+        refresh();
+
         card.append(
-            el('div', { class: 'bcast-title', text: 'BROADCAST TO ALL' }),
-            el('div', { class: 'bcast-sub', text: `Types into every one of the ${n} terminals at once — resume all Claude conversations after a restart (claude -c), switch model, or recover from a disruption. Use when Claude is dead in the tabs.` }),
+            el('div', { class: 'bcast-title', text: 'BROADCAST' }),
+            el('div', { class: 'bcast-sub', text: 'Types into the selected terminals at once — resume Claude after a restart (claude -c), switch model, or recover from a disruption. Pick targets below; defaults to all.' }),
+            quickEl,
+            countEl,
+            listEl,
             chips,
             input,
             enterLbl,
@@ -2251,11 +2322,14 @@ class Shell {
         input.focus();
     }
 
-    // Type raw bytes into every tab's PTY. Returns the number of tabs reached.
-    _broadcastRaw(text) {
+    // Type raw bytes into a set of tabs' PTYs. `ids` defaults to every tab
+    // (legacy broadcast-to-all). Returns the number of live tabs reached.
+    _broadcastRaw(text, ids) {
         if (!text) return 0;
+        const targets = (ids && ids.length) ? ids : this.order;
         let n = 0;
-        for (const id of this.order) {
+        for (const id of targets) {
+            if (!this.tabs.has(id)) continue;
             this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text });
             n++;
         }

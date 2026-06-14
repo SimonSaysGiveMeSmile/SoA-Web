@@ -1344,7 +1344,7 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .soa-newtab .nt-txt i { font-size: 11px; font-style: normal; color: var(--soa-accent-dim); opacity: 0.8; }
 
 /* Broadcast-to-all modal */
-.soa-bcast { width: min(94vw, 560px); padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.soa-bcast { width: min(94vw, 560px); max-height: 88vh; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
 .soa-bcast .bcast-title { font-family: var(--font-display); letter-spacing: 0.3em; font-size: 14px; color: var(--soa-accent); }
 .soa-bcast .bcast-sub { font-family: var(--font-mono); font-size: 11px; opacity: 0.6; line-height: 1.5; }
 .soa-bcast .bcast-presets { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1366,6 +1366,38 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .soa-bcast .bcast-cancel { background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line); }
 .soa-bcast .bcast-send { background: var(--soa-red); color: #05080d; border: 1px solid var(--soa-red); font-weight: 700; }
 .soa-bcast .bcast-send:hover { box-shadow: 0 0 14px rgba(255,85,85,0.4); }
+.soa-bcast .bcast-send.is-empty { opacity: 0.4; }
+
+/* Broadcast target selector */
+.soa-bcast .bcast-quick-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.soa-bcast .bcast-quick {
+  background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line);
+  padding: 3px 10px; font-family: var(--font-mono); font-size: 10px; cursor: pointer; border-radius: 2px;
+}
+.soa-bcast .bcast-quick:hover { border-color: var(--soa-accent); color: var(--soa-accent); }
+.soa-bcast .bcast-quick[data-agent="working"]:hover { border-color: var(--soa-green); color: var(--soa-green); }
+.soa-bcast .bcast-quick[data-agent="attention"]:hover { border-color: var(--soa-red); color: var(--soa-red); }
+.soa-bcast .bcast-quick[data-agent="done"]:hover { border-color: #ffb86c; color: #ffb86c; }
+.soa-bcast .bcast-quick-row.bcast-flash { animation: soa-agent-pulse 0.4s ease-in-out 2; }
+.soa-bcast .bcast-count { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); opacity: 0.8; }
+.soa-bcast .bcast-list {
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 230px; overflow-y: auto;
+  border: 1px solid var(--soa-line); border-radius: 2px; background: var(--soa-bg-deep);
+}
+.soa-bcast .bcast-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 10px; font-family: var(--font-mono); font-size: 12px; cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.soa-bcast .bcast-row:hover { background: rgba(170,207,209,0.06); }
+.soa-bcast .bcast-row-chk { accent-color: var(--soa-accent); cursor: pointer; }
+.soa-bcast .bcast-row-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--soa-accent-dim); }
+.soa-bcast .bcast-row[data-agent="working"] .bcast-row-dot { background: var(--soa-green); }
+.soa-bcast .bcast-row[data-agent="done"] .bcast-row-dot { background: #ffb86c; }
+.soa-bcast .bcast-row[data-agent="attention"] .bcast-row-dot { background: var(--soa-red); }
+.soa-bcast .bcast-row-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.soa-bcast .bcast-row-ctx { flex: 0 0 auto; font-size: 10px; color: var(--soa-accent-dim); opacity: 0.7; }
 .tile-activity {
   font-family: var(--font-display); font-size: 10px;
   text-transform: uppercase; letter-spacing: 0.14em;
