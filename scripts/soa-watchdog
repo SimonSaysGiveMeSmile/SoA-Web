@@ -1,30 +1,21 @@
 #!/bin/bash
 #
 # SoA-Web watchdog — keeps the PROD daemon (:7332, ~/.soa-web) alive so the user
-# never has to ask for a manual restore.
+# never has to ask for a manual restore. Run every 60s by com.soa-web.watchdog.
 #
-# Run periodically by the com.soa-web.watchdog launchd job (StartInterval). It is
-# a belt-and-suspenders layer on top of the daemon's own launchd KeepAlive:
+# Design goals (v2):
+#   1. LOAD-TOLERANT. The host often runs many heavy Claude agents (load can hit
+#      ~100 on 10 cores). A momentarily starved daemon is NOT dead — killing it
+#      then churns the tunnel URL and forces a re-pin. So: if the daemon PROCESS
+#      is alive but slow, give it a ~30s grace window before doing anything.
+#   2. TUNNEL-PRESERVING. Recover a hung daemon with SIGTERM first — the detached
+#      cloudflared survives, and the restart re-adopts the SAME public URL (no
+#      re-pin). Only escalate to SIGKILL/kickstart -k if it ignores SIGTERM.
+#   3. FAST on real death. If the process is GONE, restart immediately.
 #
-#   - launchd KeepAlive restarts the daemon when the PROCESS EXITS. But it cannot
-#     see a HUNG daemon (process alive, event loop wedged, not serving). This
-#     watchdog probes the HTTP health endpoint and force-restarts on no-answer.
-#   - It also covers the historical failure mode where the daemon exited cleanly
-#     (code 0) under a conditional KeepAlive and launchd left it dead.
-#
-# On a restart the daemon re-adopts (or respawns) the Cloudflare tunnel from
-# tunnel.json and the persisted tabs/scrollback come back on the next client
-# connect — so a single kickstart restores the whole surface.
-#
-# SAFETY:
-#   - Only ever touches the launchd job labelled com.soa-web.server and port 7332.
-#   - NEVER touches the product instance (:4010 / ~/.soa-web-local), which is a
-#     separate, non-launchd process and must stay independent.
-#   - Only restarts an EXISTING launchd job (kickstart) or bootstraps it from the
-#     installed plist; it never spawns a second daemon (instanceLock guards that
-#     too).
-#   - To stop the daemon intentionally, bootout the watchdog FIRST, then the
-#     daemon — otherwise this will bring it straight back.
+# SAFETY: only ever touches com.soa-web.server / :7332. NEVER the product
+# instance (:4010 / ~/.soa-web-local). Never spawns a second daemon. To stop the
+# daemon by hand, bootout the watchdog FIRST, then the daemon.
 
 set -u
 
@@ -32,6 +23,8 @@ LABEL="com.soa-web.server"
 PORT="${SOA_WEB_PORT:-7332}"
 UID_="$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+LOCK="$HOME/.soa-web/daemon.lock"
+TUNJSON="$HOME/.soa-web/tunnel.json"
 LOG="$HOME/.soa-web/logs/watchdog.log"
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -39,32 +32,58 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null
 ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
 log() { echo "$(ts) $*" >> "$LOG" 2>/dev/null; }
 
-# Health probe: /api/ping is the open, fast discovery endpoint. Retry a few
-# times with a short gap so a transient blip (GC pause, brief overload, a
-# screencast burst) never triggers a needless restart that would drop PTYs.
-healthy() {
-    local i
-    for i in 1 2 3; do
-        if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
+ping_ok() { curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; }
+
+# pid that owns the prod state lock, echoed only if that process is actually alive
+live_owner() {
+    local p
+    p="$(sed -n 's/.*"pid":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$LOCK" 2>/dev/null | head -1)"
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"
 }
 
-if healthy; then
+tunnel_url() { sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$TUNJSON" 2>/dev/null | head -1; }
+
+# Healthy — the common case, costs one fast local request.
+if ping_ok; then exit 0; fi
+
+PID="$(live_owner)"
+
+if [ -z "$PID" ]; then
+    # No live owner: the daemon is genuinely down. Restart now (no grace window —
+    # a dead process won't recover on its own under the current KeepAlive).
+    if [ -e "$PLIST" ] && ! launchctl print "gui/${UID_}/${LABEL}" >/dev/null 2>&1; then
+        log "daemon down + job not loaded — bootstrap"
+        launchctl bootstrap "gui/${UID_}" "$PLIST" >> "$LOG" 2>&1
+    else
+        log "daemon down (no live lock owner) — kickstart"
+        launchctl kickstart "gui/${UID_}/${LABEL}" >> "$LOG" 2>&1
+    fi
+    sleep 3; log "post-recovery tunnel: $(tunnel_url)"
     exit 0
 fi
 
-# Unhealthy. If the launchd job isn't even loaded (booted out / fresh login race),
-# bootstrap it from the installed plist; otherwise force a clean restart.
-if [ -e "$PLIST" ] && ! launchctl print "gui/${UID_}/${LABEL}" >/dev/null 2>&1; then
-    log "daemon job not loaded — bootstrapping from ${PLIST}"
-    launchctl bootstrap "gui/${UID_}" "$PLIST" >>"$LOG" 2>&1
-    exit 0
-fi
+# Process IS alive but the first probe failed — it may just be load-starved.
+# Re-probe over ~30s before concluding it's wedged, so we never kill a daemon
+# that is merely busy (which would needlessly churn the tunnel URL).
+for _ in 1 2 3 4 5; do
+    sleep 5
+    if ping_ok; then exit 0; fi
+done
 
-log "daemon on :${PORT} unreachable after 3 probes — launchctl kickstart -k ${LABEL}"
-launchctl kickstart -k "gui/${UID_}/${LABEL}" >>"$LOG" 2>&1
+# Alive AND unresponsive for ~30s = genuinely hung. SIGTERM first so the detached
+# tunnel survives and the restart re-adopts the SAME URL.
+log "daemon pid $PID alive but unresponsive ~30s — SIGTERM (preserve tunnel $(tunnel_url))"
+kill -TERM "$PID" 2>/dev/null
+for _ in 1 2 3 4 5 6 7 8; do sleep 1; kill -0 "$PID" 2>/dev/null || break; done
+
+if kill -0 "$PID" 2>/dev/null; then
+    log "pid $PID ignored SIGTERM — kickstart -k (tunnel may churn)"
+    launchctl kickstart -k "gui/${UID_}/${LABEL}" >> "$LOG" 2>&1
+else
+    # Exited cleanly. A conditional KeepAlive won't restart a clean exit, so make
+    # sure it comes back; it adopts the surviving tunnel → same URL.
+    launchctl kickstart "gui/${UID_}/${LABEL}" >> "$LOG" 2>&1
+    log "restarted via SIGTERM+kickstart"
+fi
+sleep 3; log "post-recovery tunnel: $(tunnel_url)"
 exit 0
