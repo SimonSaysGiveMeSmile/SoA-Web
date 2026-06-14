@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
-import { mountSidebar } from '/assets/widgets.js?v=19';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=20';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -270,9 +270,30 @@ class TabRuntime {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
             this.fit.fit();
+            // FitAddon subtracts a phantom ~15px scrollbar (xterm's Viewport
+            // falls back to 15 when our CSS hides the scrollbar), which strands
+            // a dead vertical strip on the right. Grow the grid into the real
+            // width — our viewport is overflow:hidden so no scrollbar takes space.
+            this._fillWidth();
             this._everFit = true;
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
+    }
+
+    // Recompute cols from the actual render width with NO scrollbar subtraction.
+    // Conservative floor() never overflows into a horizontal scroll; only grows
+    // past FitAddon's undercount, never shrinks. No-op if xterm internals or the
+    // measurement aren't available (falls back to FitAddon's result).
+    _fillWidth() {
+        try {
+            const core = this.term._core;
+            const dims = core && core._renderService && core._renderService.dimensions;
+            const cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            const elW = this.term.element && this.term.element.clientWidth;
+            if (!cellW || cellW < 1 || !elW) return;
+            const cols = Math.max(2, Math.floor(elW / cellW));
+            if (cols > this.term.cols) this.term.resize(cols, this.term.rows);
+        } catch (_) {}
     }
 
     // Pin the viewport to the bottom of the buffer. Used when activating a
@@ -304,7 +325,7 @@ class TabRuntime {
     applySettings(s) {
         try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
         try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
-        if (this._ensureOpen()) { try { this.fit.fit(); } catch (_) {} }
+        if (this._ensureOpen()) { try { this.fitNow(); } catch (_) {} }
     }
 
     dispose() {
@@ -449,8 +470,13 @@ class Shell {
         if (window.matchMedia('(max-width: 768px)').matches) {
             stageEl.classList.add('no-sidebar');
         }
+        // Pause the sidebar widgets whenever it's collapsed (its normal state on
+        // phones, and the common full-screen-terminal state on desktop) so they
+        // stop polling /api/* against an invisible pane.
+        setSidebarHidden(stageEl.classList.contains('no-sidebar'));
         sideBtn.addEventListener('click', () => {
             stageEl.classList.toggle('no-sidebar');
+            setSidebarHidden(stageEl.classList.contains('no-sidebar'));
             this.audio.play('panels');
             this._fitActive();
         });
@@ -460,6 +486,7 @@ class Shell {
             if (!window.matchMedia('(max-width: 768px)').matches) return;
             if (stageEl.classList.contains('no-sidebar')) return;
             stageEl.classList.add('no-sidebar');
+            setSidebarHidden(true);
             this._fitActive();
         });
 
