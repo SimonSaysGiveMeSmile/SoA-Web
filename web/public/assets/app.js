@@ -384,6 +384,9 @@ class Shell {
             this._openNewTabChooser();
         });
 
+        const bcastBtn = $('#broadcast');
+        if (bcastBtn) bcastBtn.addEventListener('click', () => { this.audio.play('panels'); this._openBroadcast(); });
+
         const tmBtn = $('#timemachine');
         if (tmBtn) {
             tmBtn.addEventListener('click', async () => {
@@ -609,9 +612,15 @@ class Shell {
         tabsEl.setAttribute('data-i18n', tabsKey);
         tabsEl.setAttribute('data-i18n-vars', JSON.stringify({ n: tabs.length }));
         this._updateDeviceCount(connectedDevices);
-        // Run agent status detection immediately after snapshot so colors
-        // are correct on first load (don't wait for the poll interval).
-        setTimeout(() => this._pollAgentStatus(), 150);
+        // Run the full agent-status scan once, on the first snapshot, so
+        // colors are right on initial load. Later snapshots fire on every
+        // cwd/title change and carry NO terminal bytes, so a full N-tab regex
+        // sweep here finds nothing the 500ms dirty-gated _pollCtxLines loop
+        // won't already catch — and it defeats that dirty gate.
+        if (!this._didInitialStatusScan) {
+            this._didInitialStatusScan = true;
+            setTimeout(() => this._pollAgentStatus(), 150);
+        }
     }
 
     _updateDeviceCount(count) {
@@ -634,7 +643,10 @@ class Shell {
         // Extract OSC 0/2 title sequences from the raw stream. xterm.js's
         // onTitleChange can miss titles when data arrives in chunks that split
         // the escape sequence, so always parse here as the primary source.
-        if (t) {
+        // Only pay the OSC-title scan when an OSC sequence is actually present
+        // (or we're mid-sequence from a prior chunk) — skips a regex + string
+        // concat on the vast majority of output chunks across all tabs.
+        if (t && (data.indexOf('\x1b]') !== -1 || (this._oscBuf && this._oscBuf.get(id)))) {
             if (!this._oscBuf) this._oscBuf = new Map();
             let buf = (this._oscBuf.get(id) || '') + data;
             const m = buf.match(/\x1b\](?:0|2);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
@@ -739,7 +751,12 @@ class Shell {
 
     _syncTabsUI(list) {
         const tabs = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0) + '#' + tabs.map(t => this._agentStatus.get(t.id) || '').join('|');
+        // agentStatus is intentionally NOT folded into this signature: status
+        // changes are applied as a targeted data-agent attribute swap in
+        // _setStatus, so including it here would rebuild all N tab buttons on
+        // every working↔done flip. Only structural changes (set/title/active)
+        // bust the row cache.
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         // replaceChildren destroys the old tab buttons, which resets the
@@ -955,11 +972,29 @@ class Shell {
         // Check last 500 chars for working signals (recent activity)
         const tail = clean.slice(-500);
 
-        if (workingSignals.some(p => p.test(tail))) {
+        // Error signals win over everything — an API/connection failure (model
+        // switch, internet drop, provider outage) must be unmistakably RED, per
+        // the status-color rule (red = stuck/broken, not merely awaiting input).
+        // Auto-clears once real output resumes and the error scrolls out.
+        const errorPatterns = [
+            /API Error\b/i,
+            /Unable to connect to API/i,
+            /\bECONNREFUSED\b/,
+            /\bConnection\s*Refused\b/i,
+            /\bConnection error\b/i,
+            /\bfetch failed\b/i,
+            /\boverloaded_error\b/i,
+        ];
+        if (errorPatterns.some(p => p.test(tail))) {
+            next = 'error';
+            activity = 'API error';
+        }
+
+        if (!next && workingSignals.some(p => p.test(tail))) {
             next = 'working';
             const vm = tail.match(workingVerbs);
             activity = vm ? vm[1] + '...' : 'Working...';
-        } else if (workingVerbs.test(tail)) {
+        } else if (!next && workingVerbs.test(tail)) {
             next = 'working';
             const vm = tail.match(workingVerbs);
             activity = vm ? vm[1] + '...' : 'Working...';
@@ -1037,7 +1072,7 @@ class Shell {
 
         // Working and attention are urgent — apply with minimal delay
         // Done needs a short debounce to avoid flicker from partial renders
-        const delay = (next === 'working' || next === 'attention') ? 50 : 300;
+        const delay = (next === 'working' || next === 'attention' || next === 'error') ? 50 : 300;
 
         if (s.pendingStatus === next) return;
         if (s.pending) clearTimeout(s.pending);
@@ -1076,6 +1111,15 @@ class Shell {
                 /✳\s*\S/,
                 /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i,
                 /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b.*[…⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/i,
+            ],
+            error: [
+                /API Error\b/i,
+                /Unable to connect to API/i,
+                /\bECONNREFUSED\b/,
+                /\bConnection\s*Refused\b/i,
+                /\bConnection error\b/i,
+                /\bfetch failed\b/i,
+                /\boverloaded_error\b/i,
             ],
             done: [
                 /╭─+╮[\s\S]*│\s*>/,
@@ -1139,8 +1183,13 @@ class Shell {
 
             let next;
             let activity = '';
-            // Priority: working > attention > done > idle
-            if (DET.working.some(p => p.test(visible))) {
+            // Priority: error > working > attention > done > idle. An API/
+            // connection failure must surface as RED even while idle (the error
+            // sits on screen with no new output to drive the stream detector).
+            if (DET.error.some(p => p.test(bottomWide))) {
+                next = 'error';
+                activity = 'API error';
+            } else if (DET.working.some(p => p.test(visible))) {
                 next = 'working';
                 const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                 activity = vm ? vm[1] + '...' : 'Working...';
@@ -1214,7 +1263,8 @@ class Shell {
             }
 
             // Debounce: attention is urgent, working is quick, done/idle wait
-            const delay = next === 'attention' ? 100
+            const delay = next === 'error'     ? 100
+                        : next === 'attention' ? 100
                         : next === 'working'   ? 100
                         : 400;
 
@@ -1559,8 +1609,15 @@ class Shell {
         // Track when this status started for elapsed time display
         const s = this._agentBuf.get(id);
         if (s) s.lastChange = Date.now();
-        this._tabsUISig = null;
-        this._syncTabsUI();
+        // Status drives only a CSS color/pulse via the tab button's
+        // data-agent attribute (and, in tiles mode, the tile node updated
+        // below). Swap that one attribute instead of nulling the whole
+        // tab-row cache and replaceChildren-rebuilding all N buttons + pies
+        // on every working↔done flip — the dominant DOM churn with many live
+        // tabs. Fall back to a full sync only if the node isn't rendered yet.
+        const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (tabNode) tabNode.setAttribute('data-agent', status);
+        else { this._tabsUISig = null; this._syncTabsUI(); }
         // Live-update the tile if in tiles mode without a full re-render.
         if (this.viewMode === 'tiles' && this._tilesGridEl) {
             const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);
@@ -1596,7 +1653,7 @@ class Shell {
         }
         const entries = [];
         for (const [tid, st] of this._agentStatus) {
-            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ffb86c' : st === 'attention' ? '#ff5555' : '#6272a4';
+            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ffb86c' : (st === 'attention' || st === 'error') ? '#ff5555' : '#6272a4';
             entries.push(`<span style="color:${color}">tab${tid}:${st}</span>`);
         }
         overlay.innerHTML = entries.join(' | ') + `<br><span style="color:#888">last: tab${id} ${prev}→${status}</span>`;
@@ -1939,6 +1996,79 @@ class Shell {
         document.body.appendChild(backdrop);
     }
 
+    // Broadcast a command/keystroke to EVERY terminal at once. Built for fleet
+    // recovery — switching model across all agents, or nudging them all to
+    // retry/resume after an internet drop or provider outage. Pure client-side:
+    // it types into each tab's PTY via TERM_KEYS, the same path a keypress takes,
+    // so it needs no server support and can't desync tab state.
+    _openBroadcast() {
+        const n = this.order.length;
+        const backdrop = el('div', { class: 'soa-modal-backdrop' });
+        const card = el('div', { class: 'soa-modal soa-bcast' });
+        const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+
+        const input = el('input', { class: 'bcast-input', type: 'text', spellcheck: 'false',
+            placeholder: `Command to send to all ${n} terminals…` });
+        const enterChk = el('input', { type: 'checkbox', id: 'bcast-enter', checked: 'checked' });
+        const enterLbl = el('label', { class: 'bcast-chk', for: 'bcast-enter' }, [enterChk, ' press Enter after']);
+
+        // Recovery presets. A preset with `key` blasts a bare control key to all
+        // tabs immediately; otherwise it just fills the input to review first.
+        const presets = [
+            { label: 'claude --resume', text: 'claude --resume' },
+            { label: '/model opus', text: '/model opus' },
+            { label: 'Enter ⏎ (retry)', key: '\r' },
+            { label: 'Esc', key: '\x1b' },
+            { label: 'Ctrl-C', key: '\x03' },
+        ];
+        const chips = el('div', { class: 'bcast-presets' }, presets.map(p => el('button', {
+            class: 'bcast-chip', type: 'button', text: p.label,
+            onclick: () => {
+                if (p.key != null) { this._broadcastRaw(p.key); this.audio.play('granted'); close(); }
+                else { input.value = p.text; input.focus(); }
+            },
+        })));
+
+        const sendBtn = el('button', { class: 'bcast-send', type: 'button', text: `SEND TO ALL ${n}` });
+        const cancelBtn = el('button', { class: 'bcast-cancel', type: 'button', text: 'Cancel' });
+        const doSend = () => {
+            const text = input.value;
+            if (!text.trim() && !enterChk.checked) { input.focus(); return; }
+            this._broadcastRaw(text + (enterChk.checked ? '\r' : ''));
+            this.audio.play('granted');
+            close();
+        };
+        sendBtn.addEventListener('click', doSend);
+        cancelBtn.addEventListener('click', close);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+
+        card.append(
+            el('div', { class: 'bcast-title', text: 'BROADCAST TO ALL' }),
+            el('div', { class: 'bcast-sub', text: `Types into every one of the ${n} terminals at once — for model switches or post-disruption recovery.` }),
+            chips,
+            input,
+            enterLbl,
+            el('div', { class: 'bcast-actions' }, [cancelBtn, sendBtn]),
+        );
+        backdrop.appendChild(card);
+        backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(backdrop);
+        input.focus();
+    }
+
+    // Type raw bytes into every tab's PTY. Returns the number of tabs reached.
+    _broadcastRaw(text) {
+        if (!text) return 0;
+        let n = 0;
+        for (const id of this.order) {
+            this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text });
+            n++;
+        }
+        return n;
+    }
+
     async _newTabPick(kind) {
         if (kind === 'terminal') {
             const cwd = await pickFolder();
@@ -2076,6 +2206,7 @@ class Shell {
         if (status === 'working') return 'Working...';
         if (status === 'done') return 'Awaiting next prompt';
         if (status === 'attention') return 'Needs input';
+        if (status === 'error') return 'API error';
         return 'Shell ready';
     }
 
@@ -2092,6 +2223,9 @@ class Shell {
 
     _refreshTileElapsed() {
         if (this.viewMode !== 'tiles' || !this._tilesGridEl) return;
+        // Skip the per-second 17-tile buffer scan while backgrounded (phone
+        // screen off / app in another tab) — it resumes on foreground.
+        if (document.hidden) return;
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             const id = Number(node.dataset.tileId);
             // Live terminal tail — refreshed for every tile, even idle shells.

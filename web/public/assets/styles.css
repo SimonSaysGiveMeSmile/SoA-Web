@@ -164,6 +164,7 @@ html, body {
    working   green   — agent is running (esc to interrupt visible)
    done      orange  — agent finished a turn, waiting for user input
    attention red     — agent stuck mid-execution, needs user decision (permission / Y-n / numbered menu)
+   error     red     — API/connection failure (model switch / internet drop); fast urgent pulse
    idle      blue    — no agent detected; plain shell */
 .tab[data-agent="working"] { color: var(--soa-green); border-color: var(--soa-green); }
 .tab[data-agent="working"].active {
@@ -185,12 +186,20 @@ html, body {
   color: #05080d; background: var(--soa-blue); border-color: var(--soa-blue);
   box-shadow: 0 0 14px rgba(98,114,164,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
 }
+/* error — API/connection failure. Red like attention but with a faster, more
+   urgent pulse so a broken session stands out from one merely awaiting input. */
+.tab[data-agent="error"] { color: var(--soa-red); border-color: var(--soa-red); }
+.tab[data-agent="error"].active {
+  color: #05080d; background: var(--soa-red); border-color: var(--soa-red);
+  box-shadow: 0 0 16px rgba(255,85,85,0.5), inset 0 0 0 1px rgba(255,255,255,0.08);
+}
 @keyframes soa-agent-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.55; }
 }
 .tab[data-agent="attention"] .ctx-pie { animation: soa-agent-pulse 1.1s ease-in-out infinite; }
 .tab[data-agent="done"] .ctx-pie { animation: soa-agent-pulse 2s ease-in-out infinite; }
+.tab[data-agent="error"] .ctx-pie { animation: soa-agent-pulse 0.7s ease-in-out infinite; }
 .tab .x {
   width: 14px; height: 14px; display: grid; place-items: center;
   font-size: 12px; opacity: 0.55; margin-left: 2px;
@@ -1289,6 +1298,30 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .soa-newtab .nt-txt { display: flex; flex-direction: column; gap: 2px; }
 .soa-newtab .nt-txt b { font-size: 14px; font-weight: 600; }
 .soa-newtab .nt-txt i { font-size: 11px; font-style: normal; color: var(--soa-accent-dim); opacity: 0.8; }
+
+/* Broadcast-to-all modal */
+.soa-bcast { width: min(94vw, 560px); padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.soa-bcast .bcast-title { font-family: var(--font-display); letter-spacing: 0.3em; font-size: 14px; color: var(--soa-accent); }
+.soa-bcast .bcast-sub { font-family: var(--font-mono); font-size: 11px; opacity: 0.6; line-height: 1.5; }
+.soa-bcast .bcast-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.soa-bcast .bcast-chip {
+  background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-line);
+  padding: 5px 12px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; border-radius: 2px;
+}
+.soa-bcast .bcast-chip:hover { border-color: var(--soa-accent); background: rgba(170,207,209,0.08); }
+.soa-bcast .bcast-input {
+  background: var(--soa-bg-deep); color: var(--soa-fg); border: 1px solid var(--soa-line);
+  padding: 10px 12px; font-family: var(--font-mono); font-size: 13px; outline: none;
+}
+.soa-bcast .bcast-input:focus { border-color: var(--soa-accent); }
+.soa-bcast .bcast-chk { font-family: var(--font-mono); font-size: 11px; opacity: 0.85; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.soa-bcast .bcast-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.soa-bcast .bcast-cancel, .soa-bcast .bcast-send {
+  font-family: var(--font-display); letter-spacing: 0.18em; font-size: 11px; padding: 8px 16px; cursor: pointer; border-radius: 2px;
+}
+.soa-bcast .bcast-cancel { background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line); }
+.soa-bcast .bcast-send { background: var(--soa-red); color: #05080d; border: 1px solid var(--soa-red); font-weight: 700; }
+.soa-bcast .bcast-send:hover { box-shadow: 0 0 14px rgba(255,85,85,0.4); }
 .tile-activity {
   font-family: var(--font-display); font-size: 10px;
   text-transform: uppercase; letter-spacing: 0.14em;
@@ -1320,6 +1353,8 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .tile[data-agent="done"] .tile-activity { color: #ffb86c; }
 .tile[data-agent="attention"] { border-color: var(--soa-red); box-shadow: inset 0 0 20px rgba(255,85,85,0.1); animation: soa-agent-pulse 1.1s ease-in-out infinite; }
 .tile[data-agent="attention"] .tile-activity { color: var(--soa-red); }
+.tile[data-agent="error"] { border-color: var(--soa-red); box-shadow: inset 0 0 22px rgba(255,85,85,0.18); animation: soa-agent-pulse 0.7s ease-in-out infinite; }
+.tile[data-agent="error"] .tile-activity { color: var(--soa-red); }
 .tile[data-agent="idle"] { border-color: var(--soa-blue); box-shadow: inset 0 0 20px rgba(98,114,164,0.08); }
 .tile[data-agent="idle"] .tile-activity { color: var(--soa-blue); }
 
