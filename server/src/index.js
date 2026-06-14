@@ -508,26 +508,41 @@ function onWsConnect(ws, session, req) {
 
     try {
         const tabList = session.tabMgr.list();
-        // Replay scrollback right after the tab list so a reloading browser
-        // catches up on everything it missed — tabs, which one was active,
-        // and the accumulated output for each — before any new term-data
-        // frames arrive. This is what makes a page refresh non-destructive.
-        const replay = tabList
-            .map(t => ({ id: t.id, data: session.tabMgr.scrollback(t.id) }))
-            .filter(r => r.data && r.data.length);
         const activeId = (session.activeTab && tabList.some(t => t.id === session.activeTab))
             ? session.activeTab
             : (tabList[0] && tabList[0].id) || 0;
+        // Replay scrollback so a reloading browser catches up on everything it
+        // missed — tabs, which one was active, and accumulated output — before
+        // any new term-data frames arrive. This is what makes a refresh
+        // non-destructive.
+        //
+        // Send ONLY the active tab's scrollback inline with HELLO; stream every
+        // other tab's scrollback as separate REPLAY frames afterwards. With
+        // ~17 tabs × up to 256 KiB each, a single all-tabs HELLO is multiple MB.
+        // A WebSocket frame is atomic on the wire: while that one frame crawls
+        // over a slow mobile/tunnel link, NO ping/pong control frame can
+        // interleave, so both the client's 9 s app-heartbeat and the server's
+        // 5 s ws.ping() watchdog fire and tear the socket down — which
+        // reconnects and resends the same giant frame: an endless reconnect
+        // loop that also makes the terminal take "a minute" to appear. Split
+        // into per-tab frames so heartbeats interleave → stable socket, and the
+        // tab the user actually lands on paints immediately.
+        const helloReplay = [];
+        const activeData = session.tabMgr.scrollback(activeId);
+        if (activeData && activeData.length) helloReplay.push({ id: activeId, data: activeData });
         ws.send(frame(MSG.HELLO, {
             serverVersion: 1,
             serverTime: Date.now(),
             tabs: tabList,
             activeId,
-            replay,
+            replay: helloReplay,
             graveyard: session.tabMgr.graveyardList(),
             connectedDevices: session.sockets.size,
         }));
-        dbg('ws-hello', 'sent to', ws._userAgent.slice(0, 40), '— tabs=' + tabList.length, 'activeId=' + activeId, 'replayBytes=' + replay.reduce((n, r) => n + r.data.length, 0), 'devices=' + session.sockets.size);
+        dbg('ws-hello', 'sent to', ws._userAgent.slice(0, 40), '— tabs=' + tabList.length, 'activeId=' + activeId, 'activeReplayBytes=' + (activeData ? activeData.length : 0), 'devices=' + session.sockets.size);
+        // Stream the remaining tabs' scrollback (active tab excluded — it went
+        // out in HELLO). Best-effort, off the connect path.
+        streamBackgroundReplay(ws, session, tabList, activeId);
         // Notify other clients that a new device joined
         _broadcastDeviceCount(session, ws);
     } catch (_) { /* ignore */ }
@@ -562,6 +577,33 @@ function onWsConnect(ws, session, req) {
         _broadcastDeviceCount(session);
     });
     ws.on('error', () => { /* close handler will fire too */ });
+}
+
+// Stream each background tab's scrollback as its own REPLAY frame, one at a
+// time, yielding to the event loop between sends so WebSocket control frames
+// (ping/pong) and the client's keepalive interleave instead of being stuck
+// behind one multi-MB HELLO. Honours backpressure: if the socket's send buffer
+// is already deep, wait for it to drain before queuing more. Best-effort —
+// bails the moment the socket is no longer OPEN (closed, or reconnected with a
+// fresh ws that will get its own stream).
+const REPLAY_HIGH_WATER = 512 * 1024; // bytes buffered before we pause to drain
+function streamBackgroundReplay(ws, session, tabList, activeId) {
+    const ids = tabList.map(t => t.id).filter(id => id !== activeId);
+    if (!ids.length) return;
+    let i = 0;
+    const sendNext = () => {
+        if (!ws || ws.readyState !== 1) return; // socket gone / reconnected
+        if (i >= ids.length) return;
+        if (ws.bufferedAmount > REPLAY_HIGH_WATER) { setTimeout(sendNext, 50); return; }
+        const id = ids[i++];
+        let data = '';
+        try { data = session.tabMgr.scrollback(id); } catch (_) {}
+        if (data && data.length) {
+            try { ws.send(frame(MSG.REPLAY, { id, data })); } catch (_) { return; }
+        }
+        setImmediate(sendNext);
+    };
+    setImmediate(sendNext);
 }
 
 // Auto-resume Claude in tabs restored after a daemon restart. The respawned

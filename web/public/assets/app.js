@@ -520,6 +520,7 @@ class Shell {
         }
 
         bridge.addEventListener('hello',     e => this._onHello(e.detail));
+        bridge.addEventListener('replay',    e => this._onReplay(e.detail));
         bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
         bridge.addEventListener('term-data', e => this._onTermData(e.detail));
         bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
@@ -602,6 +603,21 @@ class Shell {
             // the sole new tab.
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
+    }
+
+    // A background tab's scrollback, streamed one frame per tab right after
+    // HELLO (the active tab's scrollback rides inline with HELLO). Same handling
+    // as a HELLO replay entry — queue-until-fit rather than the live term-data
+    // path, so absolute-column escapes in the scrollback don't land at 80×24
+    // before the tab is sized. Flush immediately if it's the tab on screen.
+    _onReplay({ id, data }) {
+        if (id == null || !data) return;
+        const rt = this.tabs.get(id);
+        if (!rt) return;
+        rt.queueReplay(data);
+        this._detectAgentFromStream(id, data);
+        this._pollDirty.add(id);
+        if (id === this.activeId) rt.flushPendingReplay();
     }
 
     _onSnapshot({ tabs, activeId, graveyard, connectedDevices }) {

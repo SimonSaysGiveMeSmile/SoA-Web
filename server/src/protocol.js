@@ -14,6 +14,7 @@ const PROTOCOL_VERSION = 1;
 
 const MSG = Object.freeze({
     HELLO:      'hello',
+    REPLAY:     'replay',
     SNAPSHOT:   'snapshot',
     TERM_DATA:  'term-data',
     TERM_EXIT:  'term-exit',

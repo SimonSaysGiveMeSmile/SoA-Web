@@ -1153,6 +1153,10 @@ class App {
             switch (msg.t) {
                 case 'hello':    this._applyHello(msg.d); break;
                 case 'snapshot': this._applySnapshot(msg.d); break;
+                // Background tabs' scrollback, streamed one frame per tab after
+                // HELLO (active tab ships inline with HELLO). Same handling as a
+                // live term-data chunk: write the off-screen buffer + classify.
+                case 'replay':    this._applyTerminalChunk(msg.d); break;
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
                 case 'term-exit': break;
                 case 'notice':    this._showNotice(msg.d); break;

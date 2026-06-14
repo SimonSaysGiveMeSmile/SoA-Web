@@ -88,6 +88,12 @@ export class BridgeSocket extends EventTarget {
         this._heartbeatTimer = null;
         this._livenessTimer = null;
         this._lastPongAt = 0;
+        // Any inbound frame proves the socket is alive — not just a pong. During
+        // the initial scrollback stream the server may send several large REPLAY
+        // frames back-to-back; tracking last-received-anything keeps the
+        // heartbeat from killing a perfectly healthy socket whose pong is merely
+        // queued behind that burst.
+        this._lastRecvAt = 0;
         this._probeController = null;
 
         // Resuming from background / lock screen / bfcache. The socket may look
@@ -276,6 +282,7 @@ export class BridgeSocket extends EventTarget {
                 this._attempt = 0;
                 this._failuresOnCurrent = 0;
                 this._lastPongAt = Date.now();
+                this._lastRecvAt = Date.now();
                 this._setDiagnosis(Diagnosis.CONNECTED);
                 this._setState(SocketState.CONNECTED);
                 this._startHeartbeat();
@@ -284,6 +291,7 @@ export class BridgeSocket extends EventTarget {
             });
 
             ws.addEventListener('message', (ev) => {
+                this._lastRecvAt = Date.now();
                 let msg;
                 try { msg = JSON.parse(ev.data); }
                 catch (_) { return; }
@@ -392,8 +400,12 @@ export class BridgeSocket extends EventTarget {
     _startHeartbeat() {
         this._stopHeartbeat();
         this._heartbeatTimer = setInterval(() => {
-            // If we haven't heard a pong in 9s, assume the connection is dead.
-            if (Date.now() - this._lastPongAt > 9000) {
+            // Dead only if we've heard NOTHING (no pong, no data frame) in 9s.
+            // Using last-received-anything — not last-pong — means a long burst
+            // of inbound frames keeps the socket considered alive even if its
+            // pong is momentarily queued behind them.
+            const lastSeen = Math.max(this._lastPongAt, this._lastRecvAt);
+            if (Date.now() - lastSeen > 9000) {
                 try { this.ws && this.ws.close(4000, 'heartbeat timeout'); } catch (_) {}
                 return;
             }
