@@ -1002,20 +1002,23 @@ class Shell {
 
         // Attention signals — permission prompts, interactive questions
         if (!next) {
+            // Attention = the agent genuinely needs a decision: an explicit
+            // choice/permission prompt. Deliberately NARROW — idle input-box
+            // placeholders ("Try …", "Type something", "Chat about this") and
+            // prose that merely mentions approve/confirm are NOT attention; they
+            // fall through to done/idle. (Old over-broad /\bApprove\b/, the
+            // placeholder strings, and /press .* to confirm/ caused false reds.)
             const attentionPatterns = [
-                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+                /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /─{10,}[\s\S]{0,200}☐/,
                 /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
-                /Type something\.\s*─/i,
-                /Chat about this\s*$/m,
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
-                /Permission\s+(?:required|needed)/i,
-                /\bApprove\b/i,
-                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
+                /\bPermission\s+(?:required|needed)\b/i,
             ];
             if (attentionPatterns.some(p => p.test(tail))) {
                 next = 'attention';
@@ -1128,21 +1131,20 @@ class Shell {
                 /│\s*>\s*$/m,
                 /BYPASS PERMISSIONS\s+ON/i,
             ],
+            // See the stream detector above: attention is narrow — only genuine
+            // choice/permission prompts. Idle placeholders and prose that just
+            // mentions approve/confirm must NOT trigger a red status.
             attention: [
-                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+                /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /─{10,}[\s\S]{0,200}☐/,
                 /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
-                /Type something\.\s*─/i,
-                /Chat about this\s*$/m,
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
-                /waiting\s+for\s+(?:your\s+)?input/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
-                /\bApprove\b/i,
-                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
