@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SoA-Web watchdog. Runs scripts/soa-watchdog every 60s to keep the prod daemon
+  (com.soa-web.server, :7332) alive even when launchd KeepAlive can't see the
+  failure (a hung process, or a clean exit). Install to ~/Library/LaunchAgents/
+  and `launchctl bootstrap gui/$(id -u) <plist>`. Adjust the absolute paths to
+  the install user's home.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-watchdog</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/watchdog.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/watchdog.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SOA_WEB_PORT</key>
+        <string>7332</string>
+    </dict>
+</dict>
+</plist>

@@ -68,3 +68,17 @@ scrollback/tabs, leaves the tunnel running) then
 `launchctl kickstart -k gui/$(id -u)/com.soa-web.server`. The tunnel URL is
 persisted to `~/.soa-web/tunnel.json` and re-adopted across restarts, so it
 stays stable.
+
+## Self-healing (no more manual restores)
+
+The prod daemon is supervised so it comes back on its own — see
+`deploy/launchd/`. Two layers: (1) the `com.soa-web.server` launchd job uses
+**unconditional `KeepAlive`** (any exit → restart in ≤10s; the old conditional
+form left a clean exit-0 dead, which was the recurring "please restore"); (2) a
+`com.soa-web.watchdog` job runs `scripts/soa-watchdog` every 60s, pinging
+`/api/ping` and `kickstart -k`-ing the daemon if it's **hung or down** (the case
+KeepAlive can't see). On restart the daemon re-adopts the tunnel + persisted
+tabs. The watchdog only touches `com.soa-web.server`/`:7332` — never the product
+instance (`:4010`/`~/.soa-web-local`). To stop the daemon by hand, bootout the
+**watchdog first** (else it revives the daemon). Action log:
+`~/.soa-web/logs/watchdog.log`.

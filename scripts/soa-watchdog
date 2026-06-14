@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# SoA-Web watchdog — keeps the PROD daemon (:7332, ~/.soa-web) alive so the user
+# never has to ask for a manual restore.
+#
+# Run periodically by the com.soa-web.watchdog launchd job (StartInterval). It is
+# a belt-and-suspenders layer on top of the daemon's own launchd KeepAlive:
+#
+#   - launchd KeepAlive restarts the daemon when the PROCESS EXITS. But it cannot
+#     see a HUNG daemon (process alive, event loop wedged, not serving). This
+#     watchdog probes the HTTP health endpoint and force-restarts on no-answer.
+#   - It also covers the historical failure mode where the daemon exited cleanly
+#     (code 0) under a conditional KeepAlive and launchd left it dead.
+#
+# On a restart the daemon re-adopts (or respawns) the Cloudflare tunnel from
+# tunnel.json and the persisted tabs/scrollback come back on the next client
+# connect — so a single kickstart restores the whole surface.
+#
+# SAFETY:
+#   - Only ever touches the launchd job labelled com.soa-web.server and port 7332.
+#   - NEVER touches the product instance (:4010 / ~/.soa-web-local), which is a
+#     separate, non-launchd process and must stay independent.
+#   - Only restarts an EXISTING launchd job (kickstart) or bootstraps it from the
+#     installed plist; it never spawns a second daemon (instanceLock guards that
+#     too).
+#   - To stop the daemon intentionally, bootout the watchdog FIRST, then the
+#     daemon — otherwise this will bring it straight back.
+
+set -u
+
+LABEL="com.soa-web.server"
+PORT="${SOA_WEB_PORT:-7332}"
+UID_="$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+LOG="$HOME/.soa-web/logs/watchdog.log"
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(ts) $*" >> "$LOG" 2>/dev/null; }
+
+# Health probe: /api/ping is the open, fast discovery endpoint. Retry a few
+# times with a short gap so a transient blip (GC pause, brief overload, a
+# screencast burst) never triggers a needless restart that would drop PTYs.
+healthy() {
+    local i
+    for i in 1 2 3; do
+        if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+if healthy; then
+    exit 0
+fi
+
+# Unhealthy. If the launchd job isn't even loaded (booted out / fresh login race),
+# bootstrap it from the installed plist; otherwise force a clean restart.
+if [ -e "$PLIST" ] && ! launchctl print "gui/${UID_}/${LABEL}" >/dev/null 2>&1; then
+    log "daemon job not loaded — bootstrapping from ${PLIST}"
+    launchctl bootstrap "gui/${UID_}" "$PLIST" >>"$LOG" 2>&1
+    exit 0
+fi
+
+log "daemon on :${PORT} unreachable after 3 probes — launchctl kickstart -k ${LABEL}"
+launchctl kickstart -k "gui/${UID_}/${LABEL}" >>"$LOG" 2>&1
+exit 0

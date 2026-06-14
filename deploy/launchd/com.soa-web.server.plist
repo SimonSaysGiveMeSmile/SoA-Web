@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SoA-Web prod daemon (:7332, ~/.soa-web).
+
+  KeepAlive is UNCONDITIONAL (<true/>) on purpose: launchd restarts the daemon
+  whenever it exits, for ANY reason. The earlier conditional form
+  (SuccessfulExit=false) meant a clean exit (code 0) left the daemon dead until
+  someone manually restored it — the recurring "context lost, please restore"
+  pain. With <true/>, a clean exit, a crash, or a `kill -TERM` all auto-restart
+  within ThrottleInterval, and the daemon re-adopts the tunnel + persisted tabs.
+
+  To stop the daemon intentionally now: `launchctl bootout gui/$(id -u)
+  com.soa-web.watchdog` first (so the watchdog doesn't revive it), then bootout
+  com.soa-web.server.
+
+  Adjust absolute paths to the install user's home.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/test/.soa-web/server/src/index.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SOA_WEB_HOST</key>
+        <string>0.0.0.0</string>
+        <key>SOA_WEB_PORT</key>
+        <string>7332</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
