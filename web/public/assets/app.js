@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
-import { mountSidebar } from '/assets/widgets.js?v=18';
+import { mountSidebar } from '/assets/widgets.js?v=19';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -2349,10 +2349,22 @@ class Shell {
 
             if (count > 0) {
                 const list = el('div', { class: 'dashboard-port-list' });
-                data.ports.slice(0, 5).forEach(p => {
-                    const item = el('div', {
+                // Every port is clickable → opens it in the preview (proxied
+                // through /preview/<port>/ so it's viewable here and on paired
+                // phones). It's always safe — the proxy only ever reaches your
+                // own localhost; non-web ports just render whatever they serve.
+                data.ports.forEach(p => {
+                    const item = el('button', {
                         class: 'dashboard-port-item',
-                        text: `:${p.port} — ${p.process}`
+                        type: 'button',
+                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                        text: `:${p.port} — ${p.process}`,
+                        onclick: async () => {
+                            try {
+                                const wp = await import('/assets/previewPanel.js?v=2');
+                                wp.openPreviewModal(this, String(p.port));
+                            } catch (err) { console.warn('[ports] preview open failed', err); }
+                        },
                     });
                     list.appendChild(item);
                 });

@@ -856,17 +856,31 @@ class PortScanWidget extends Widget {
                 summary.appendChild(conflictEl);
             }
 
-            const rows = data.ports.slice(0, 6).map(p => {
-                const label = `${p.port}`;
-                const val = `${p.process} (${p.pid})`;
-                const cls = (data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port) ? 'warn' : '';
-                return [label, val, cls];
-            });
-            if (!rows.length) rows.push(['SCAN', 'no listeners']);
-
             this.body.replaceChildren();
             this.body.appendChild(summary);
-            this.setRows(rows);
+
+            // Clickable list of EVERY port → opens it in the preview (proxied via
+            // /preview/<port>/, localhost-only so it's safe). Non-web ports just
+            // render whatever they serve.
+            const portList = $el('div', { class: 'port-scan-list' });
+            if (!data.ports.length) {
+                portList.appendChild($el('div', { class: 'kv', text: 'no listeners' }));
+            } else {
+                for (const p of data.ports) {
+                    const isConflict = data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port;
+                    portList.appendChild($el('button', {
+                        class: 'port-scan-row' + (isConflict ? ' warn' : ''),
+                        type: 'button',
+                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                        text: `:${p.port} — ${p.process}`,
+                        onclick: async () => {
+                            try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(null, String(p.port)); }
+                            catch (_) {}
+                        },
+                    }));
+                }
+            }
+            this.body.appendChild(portList);
 
             if (data.conflict) {
                 const actions = $el('div', { class: 'port-actions' });
