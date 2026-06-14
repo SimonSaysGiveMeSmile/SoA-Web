@@ -821,6 +821,11 @@ class Shell {
                 text: t.title || tr('tab.default', { id: t.id }),
                 ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
+            // Dim second line: a live peek at this tab's last output line so
+            // tabs with default / near-identical titles are still tellable
+            // apart. Updated in place by _updateTabPreview (no row rebuild).
+            const sub = el('span', { class: 'tab-sub', text: this._tabPreview(t.id) });
+            const main = el('span', { class: 'tab-main' }, [label, sub]);
             const dot = this._makePie(this._ctxPct.get(t.id) || 0, t.id);
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
@@ -833,7 +838,7 @@ class Shell {
                 draggable: 'true',
                 onclick: () => this._activate(t.id),
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
-            }, [dot, label, x]);
+            }, [dot, main, x]);
             this._attachTabDrag(root, t.id);
             this._attachTabLongPress(root, t.id);
             return root;
@@ -877,6 +882,77 @@ class Shell {
         const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-pie`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
         node.replaceWith(this._makePie(pct, id));
+    }
+
+    // One-line peek at what a tab last emitted, shown as the tab's dim subtitle.
+    // Prefers the live "Thinking…/Running…" status line while the agent works
+    // (that IS the latest output then); otherwise the last meaningful output
+    // line; otherwise the detector's activity label. Capped for the strip.
+    _tabPreview(id) {
+        const s = this._agentBuf && this._agentBuf.get(id);
+        if (this._agentStatus.get(id) === 'working' && s && s.statusLine) {
+            return s.statusLine.slice(0, 64);
+        }
+        const line = this._lastMeaningfulLine(id);
+        if (line) return line.slice(0, 64);
+        if (s && s.activity) return s.activity.slice(0, 64);
+        return '';
+    }
+
+    // Last non-blank, non-chrome line of a tab's output. Reads the real xterm
+    // buffer when the tab has been opened (gold source); falls back to the
+    // always-fed raw stream window so tabs never visited in this view still
+    // get a preview. Skips box frames, the empty input prompt, and CC footers.
+    _lastMeaningfulLine(id) {
+        const skip = (t) =>
+            !t ||
+            /^[\s│┃─━╭╮╰╯┄┈·•>]+$/.test(t) ||          // box frame / bare prompt marks
+            /^\?\s+for\s+shortcuts/i.test(t) ||         // Claude Code footer hint
+            /^│\s*>/.test(t);                            // Claude Code input prompt row
+        const rt = this.tabs.get(id);
+        if (rt && rt._opened) {
+            try {
+                const buf = rt.term.buffer.active;
+                const end = buf.baseY + rt.term.rows;
+                for (let row = end - 1; row >= 0 && row > end - 60; row--) {
+                    const ln = buf.getLine(row);
+                    if (!ln) continue;
+                    const t = ln.translateToString(true).replace(/\s+$/, '').trim();
+                    if (!skip(t)) return t;
+                }
+            } catch (_) {}
+        }
+        const sb = this._streamBuf && this._streamBuf.get(id);
+        if (sb && sb.recent) {
+            // Raw PTY bytes — strip ALL escape families before reading text, or
+            // window-title (OSC), keypad, and parameterized CSI sequences leak
+            // into the preview as garbage. xterm's buffer path above is already
+            // parsed; this fallback must parse here. OSC accepts BOTH the BEL
+            // and ST (ESC \) terminators — the same dual form the title reader
+            // elsewhere in this file handles.
+            const clean = sb.recent
+                .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')   // OSC … BEL | ST (titles)
+                .replace(/\x1b[P^_X][\s\S]*?\x1b\\/g, '')        // DCS / PM / APC / SOS … ST
+                .replace(/\x1b\[[0-9;?>=!]*[ -/]*[@-~]/g, '')    // CSI: params + intermediates + final
+                .replace(/\x1b[()*+#][0-9A-Za-z]/g, '')          // charset designation
+                .replace(/\x1b[=>78cMno|}~]/g, '')               // misc 2-char ESC (keypad, save/restore)
+                .replace(/\r/g, '\n')
+                .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''); // stray control bytes (keep \t \n)
+            const lines = clean.split('\n');
+            for (let i = lines.length - 1; i >= 0; i--) {
+                const t = lines[i].replace(/\s+$/, '').trim();
+                if (!skip(t)) return t;
+            }
+        }
+        return '';
+    }
+
+    // Refresh just the subtitle text for one tab, in place — no row rebuild.
+    _updateTabPreview(id) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .tab-sub`);
+        if (!node) return;
+        const text = this._tabPreview(id);
+        if (node.textContent !== text) node.textContent = text;
     }
 
     _showCtxModal(tabId, pct) {
@@ -939,6 +1015,8 @@ class Shell {
                 // Tiles mode / unopened xterm: re-run detection on the buffer.
                 this._detectAgentFromStream(id, '', true);
             }
+            // Keep the tab strip's subtitle in step with fresh output.
+            this._updateTabPreview(id);
         }
     }
 
@@ -1670,6 +1748,9 @@ class Shell {
         const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
         if (tabNode) tabNode.setAttribute('data-agent', status);
         else { this._tabsUISig = null; this._syncTabsUI(); }
+        // A status flip usually means new activity/status-line text — repaint the
+        // subtitle now rather than waiting for the next poll tick.
+        this._updateTabPreview(id);
         // Live-update the tile if in tiles mode without a full re-render.
         if (this.viewMode === 'tiles' && this._tilesGridEl) {
             const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);

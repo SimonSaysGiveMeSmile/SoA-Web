@@ -144,6 +144,29 @@ html, body {
 }
 .tab.active .ctx-pie { opacity: 1; }
 
+/* Two-line tab: title on top, a dim live peek at the tab's last output line
+   underneath so default / near-identical titles stay tellable apart. The row
+   stretches all tabs to equal height, so a one-line (no-output) tab still
+   lines up cleanly next to two-line ones. */
+.tab-main {
+  display: flex; flex-direction: column; align-items: flex-start;
+  justify-content: center; gap: 1px; min-width: 0; max-width: 168px;
+  /* Tight line-height keeps the two-line stack inside the fixed-height topbar
+     row (44px desktop / 40px mobile) — no border/glow bleed past the divider. */
+  line-height: 1.1;
+}
+.tab-label {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tab-sub {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10px; opacity: 0.5; font-weight: normal; letter-spacing: 0;
+}
+.tab-sub:empty { display: none; }
+/* On the filled active tab the dim status-colored text turns illegible —
+   switch to the deep-bg ink at reduced strength so the peek stays readable. */
+.tab.active .tab-sub { color: #05080d; opacity: 0.6; }
+
 /* Context popover */
 .ctx-popover {
   position: fixed; z-index: 9999;
@@ -399,8 +422,11 @@ html, body {
         -webkit-overflow-scrolling: touch;
         touch-action: pan-x;
     }
+    .tab-main { max-width: 132px; }
+    .tab-sub { font-size: 9px; }
     .tab {
-        padding: 7px 10px; font-size: 11px; letter-spacing: 0.05em;
+        /* Trimmed vertical padding so the two-line tab clears the 40px row. */
+        padding: 4px 10px; font-size: 11px; letter-spacing: 0.05em;
         min-height: 32px;
         -webkit-user-select: none; user-select: none;
         /* Native HTML5 drag doesn't fire on touch, so we implement long-press
