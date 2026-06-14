@@ -1460,6 +1460,8 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  max-height: 148px;
+  overflow-y: auto;
 }
 .dashboard-port-item {
   font-family: var(--font-mono);
@@ -1470,6 +1472,16 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   border: 1px solid var(--soa-line-soft);
   border-radius: 3px;
   letter-spacing: 0.05em;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.dashboard-port-item::after { content: ' ↗'; opacity: 0.5; }
+.dashboard-port-item:hover {
+  border-color: var(--soa-accent);
+  background: rgba(170,207,209,0.12);
+  color: var(--soa-accent);
 }
 
 /* ── Web preview panel ─────────────────────────────────────────── */

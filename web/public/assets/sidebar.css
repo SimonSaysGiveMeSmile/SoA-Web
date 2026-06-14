@@ -75,6 +75,19 @@
 .port-btn-kill { color: var(--soa-red); border-color: var(--soa-red); }
 .port-btn-kill:hover { background: rgba(255,80,80,0.08); }
 .port-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 9px; margin-top: 4px; }
+.port-scan-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; margin-top: 6px; }
+.port-scan-row {
+  display: block; width: 100%; text-align: left;
+  font-family: var(--font-mono); font-size: 10px; color: var(--soa-fg);
+  padding: 3px 8px; background: rgba(170,207,209,0.04);
+  border: 1px solid var(--soa-line-soft); border-radius: 3px;
+  cursor: pointer; appearance: none; -webkit-appearance: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.port-scan-row::after { content: ' ↗'; opacity: 0.45; }
+.port-scan-row:hover { border-color: var(--soa-accent); color: var(--soa-accent); background: rgba(170,207,209,0.1); }
+.port-scan-row.warn { border-color: rgba(241,250,140,0.4); color: var(--soa-yellow); }
 
 /* ── AutoPilot widget ──────────────────────────────────────────────── */
 .autopilot-actions { display: flex; gap: 6px; margin-top: 6px; }

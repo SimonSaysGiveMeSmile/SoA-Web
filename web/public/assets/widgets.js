@@ -84,15 +84,31 @@ async function jpost(url, body) {
 // also means far fewer in-flight requests to abort during a network change.
 const _liveWidgets = new Set();
 let _visBound = false;
+let _sidebarHidden = false;
+
+// Widgets run only when actually visible: the tab is foregrounded AND the
+// sidebar is open. Collapsing the sidebar (the common full-screen terminal
+// state) otherwise leaves ~14 widgets polling /api/* against an invisible pane.
+function _widgetsActive() { return !document.hidden && !_sidebarHidden; }
+function _applyWidgetActivity() {
+    const active = _widgetsActive();
+    for (const w of _liveWidgets) {
+        try { active ? w._resume() : w._suspend(); } catch (_) {}
+    }
+}
 function _bindWidgetVisibility() {
     if (_visBound) return;
     _visBound = true;
-    document.addEventListener('visibilitychange', () => {
-        const hidden = document.hidden;
-        for (const w of _liveWidgets) {
-            try { hidden ? w._suspend() : w._resume(); } catch (_) {}
-        }
-    });
+    document.addEventListener('visibilitychange', _applyWidgetActivity);
+}
+
+// Called by the shell when the sidebar collapses/expands so widgets pause while
+// hidden. Combines with document.hidden via _widgetsActive().
+export function setSidebarHidden(hidden) {
+    hidden = !!hidden;
+    if (hidden === _sidebarHidden) return;
+    _sidebarHidden = hidden;
+    _applyWidgetActivity();
 }
 
 class Widget {
@@ -130,7 +146,7 @@ class Widget {
         this.tick();
         // Don't arm a polling timer while the page is hidden — _resume starts it
         // when the tab is foregrounded again.
-        if (this.intervalMs && !this._timer && !document.hidden) {
+        if (this.intervalMs && !this._timer && _widgetsActive()) {
             this._timer = setInterval(() => this.tick(), this.intervalMs);
         }
     }
@@ -856,17 +872,31 @@ class PortScanWidget extends Widget {
                 summary.appendChild(conflictEl);
             }
 
-            const rows = data.ports.slice(0, 6).map(p => {
-                const label = `${p.port}`;
-                const val = `${p.process} (${p.pid})`;
-                const cls = (data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port) ? 'warn' : '';
-                return [label, val, cls];
-            });
-            if (!rows.length) rows.push(['SCAN', 'no listeners']);
-
             this.body.replaceChildren();
             this.body.appendChild(summary);
-            this.setRows(rows);
+
+            // Clickable list of EVERY port → opens it in the preview (proxied via
+            // /preview/<port>/, localhost-only so it's safe). Non-web ports just
+            // render whatever they serve.
+            const portList = $el('div', { class: 'port-scan-list' });
+            if (!data.ports.length) {
+                portList.appendChild($el('div', { class: 'kv', text: 'no listeners' }));
+            } else {
+                for (const p of data.ports) {
+                    const isConflict = data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port;
+                    portList.appendChild($el('button', {
+                        class: 'port-scan-row' + (isConflict ? ' warn' : ''),
+                        type: 'button',
+                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                        text: `:${p.port} — ${p.process}`,
+                        onclick: async () => {
+                            try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(null, String(p.port)); }
+                            catch (_) {}
+                        },
+                    }));
+                }
+            }
+            this.body.appendChild(portList);
 
             if (data.conflict) {
                 const actions = $el('div', { class: 'port-actions' });

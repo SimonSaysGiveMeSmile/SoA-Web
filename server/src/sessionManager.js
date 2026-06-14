@@ -64,14 +64,18 @@ const WORKING = [
     /✳/,
     /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i,
 ];
+// Attention = a genuine choice/permission prompt only. Kept NARROW so idle
+// input-box placeholders ("Try …") and prose mentioning approve/confirm don't
+// trip a false NEEDS-INPUT (mirrors the client detector in web/.../app.js).
 const ATTENTION = [
-    /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
-    /Do you want to (?:proceed|continue|make this change|accept)/i,
+    /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+    /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
+    /─{10,}[\s\S]{0,200}☐/,
+    /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
+    /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
     /\(y\/n\)/i, /\[Y\/n\]/i, /\(Y\)es\s*\/\s*\(N\)o/i,
-    /waiting\s+for\s+(?:your\s+)?input/i,
     /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
     /\bPermission\s+(?:required|needed)\b/i,
-    /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
 ];
 const DONE = [/╭─+╮/, /│\s*>\s*│/, /╰─+╯/, /│\s*>\s*$/m, /BYPASS PERMISSIONS\s+ON/i];
 const SHELL_PROMPT = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[$#%]\s*$)/m;

@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
-import { mountSidebar } from '/assets/widgets.js?v=18';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=20';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -270,9 +270,30 @@ class TabRuntime {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
             this.fit.fit();
+            // FitAddon subtracts a phantom ~15px scrollbar (xterm's Viewport
+            // falls back to 15 when our CSS hides the scrollbar), which strands
+            // a dead vertical strip on the right. Grow the grid into the real
+            // width — our viewport is overflow:hidden so no scrollbar takes space.
+            this._fillWidth();
             this._everFit = true;
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
+    }
+
+    // Recompute cols from the actual render width with NO scrollbar subtraction.
+    // Conservative floor() never overflows into a horizontal scroll; only grows
+    // past FitAddon's undercount, never shrinks. No-op if xterm internals or the
+    // measurement aren't available (falls back to FitAddon's result).
+    _fillWidth() {
+        try {
+            const core = this.term._core;
+            const dims = core && core._renderService && core._renderService.dimensions;
+            const cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            const elW = this.term.element && this.term.element.clientWidth;
+            if (!cellW || cellW < 1 || !elW) return;
+            const cols = Math.max(2, Math.floor(elW / cellW));
+            if (cols > this.term.cols) this.term.resize(cols, this.term.rows);
+        } catch (_) {}
     }
 
     // Pin the viewport to the bottom of the buffer. Used when activating a
@@ -304,7 +325,7 @@ class TabRuntime {
     applySettings(s) {
         try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
         try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
-        if (this._ensureOpen()) { try { this.fit.fit(); } catch (_) {} }
+        if (this._ensureOpen()) { try { this.fitNow(); } catch (_) {} }
     }
 
     dispose() {
@@ -449,8 +470,13 @@ class Shell {
         if (window.matchMedia('(max-width: 768px)').matches) {
             stageEl.classList.add('no-sidebar');
         }
+        // Pause the sidebar widgets whenever it's collapsed (its normal state on
+        // phones, and the common full-screen-terminal state on desktop) so they
+        // stop polling /api/* against an invisible pane.
+        setSidebarHidden(stageEl.classList.contains('no-sidebar'));
         sideBtn.addEventListener('click', () => {
             stageEl.classList.toggle('no-sidebar');
+            setSidebarHidden(stageEl.classList.contains('no-sidebar'));
             this.audio.play('panels');
             this._fitActive();
         });
@@ -460,6 +486,7 @@ class Shell {
             if (!window.matchMedia('(max-width: 768px)').matches) return;
             if (stageEl.classList.contains('no-sidebar')) return;
             stageEl.classList.add('no-sidebar');
+            setSidebarHidden(true);
             this._fitActive();
         });
 
@@ -1002,20 +1029,23 @@ class Shell {
 
         // Attention signals — permission prompts, interactive questions
         if (!next) {
+            // Attention = the agent genuinely needs a decision: an explicit
+            // choice/permission prompt. Deliberately NARROW — idle input-box
+            // placeholders ("Try …", "Type something", "Chat about this") and
+            // prose that merely mentions approve/confirm are NOT attention; they
+            // fall through to done/idle. (Old over-broad /\bApprove\b/, the
+            // placeholder strings, and /press .* to confirm/ caused false reds.)
             const attentionPatterns = [
-                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+                /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /─{10,}[\s\S]{0,200}☐/,
                 /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
-                /Type something\.\s*─/i,
-                /Chat about this\s*$/m,
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
-                /Permission\s+(?:required|needed)/i,
-                /\bApprove\b/i,
-                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
+                /\bPermission\s+(?:required|needed)\b/i,
             ];
             if (attentionPatterns.some(p => p.test(tail))) {
                 next = 'attention';
@@ -1128,21 +1158,20 @@ class Shell {
                 /│\s*>\s*$/m,
                 /BYPASS PERMISSIONS\s+ON/i,
             ],
+            // See the stream detector above: attention is narrow — only genuine
+            // choice/permission prompts. Idle placeholders and prose that just
+            // mentions approve/confirm must NOT trigger a red status.
             attention: [
-                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+                /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /─{10,}[\s\S]{0,200}☐/,
                 /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
-                /Type something\.\s*─/i,
-                /Chat about this\s*$/m,
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
-                /waiting\s+for\s+(?:your\s+)?input/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
-                /\bApprove\b/i,
-                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
@@ -2349,10 +2378,22 @@ class Shell {
 
             if (count > 0) {
                 const list = el('div', { class: 'dashboard-port-list' });
-                data.ports.slice(0, 5).forEach(p => {
-                    const item = el('div', {
+                // Every port is clickable → opens it in the preview (proxied
+                // through /preview/<port>/ so it's viewable here and on paired
+                // phones). It's always safe — the proxy only ever reaches your
+                // own localhost; non-web ports just render whatever they serve.
+                data.ports.forEach(p => {
+                    const item = el('button', {
                         class: 'dashboard-port-item',
-                        text: `:${p.port} — ${p.process}`
+                        type: 'button',
+                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                        text: `:${p.port} — ${p.process}`,
+                        onclick: async () => {
+                            try {
+                                const wp = await import('/assets/previewPanel.js?v=2');
+                                wp.openPreviewModal(this, String(p.port));
+                            } catch (err) { console.warn('[ports] preview open failed', err); }
+                        },
                     });
                     list.appendChild(item);
                 });
