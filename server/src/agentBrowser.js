@@ -40,6 +40,7 @@ const VIEW = { w: 1024, h: 768 };
 let _sessions = null;                 // SessionStore (unused directly; sinks carry .send)
 const _instances = new Map();         // key -> Instance
 const _usedPorts = new Set();
+const _watchAll = new Set();          // sinks watching EVERY instance (the monitor grid)
 
 function findChrome() {
     // Prefer real Chrome app bundles; the homebrew `chromium` symlink is often a
@@ -275,6 +276,10 @@ function _getOrCreate(tabId) {
         _reapIfNeeded();
         inst = new Instance(k);
         _instances.set(k, inst);
+        // A monitor watching "all" must pick up newly-created instances too;
+        // its screencast starts when the instance is first ensured (ensure()
+        // starts it whenever subscribers.size > 0).
+        for (const sink of _watchAll) inst.subscribers.add(sink);
     }
     return inst;
 }
@@ -297,8 +302,21 @@ async function unsubscribe(tabId, sink) {
     if (inst.subscribers.size === 0) await inst._stopScreencast().catch(() => {});
 }
 
-// Drop a sink from every instance (e.g. a socket/session disconnecting).
+// Watch EVERY instance (the monitor grid): subscribe to all current instances
+// and register so any later-created instance auto-includes this sink.
+async function subscribeAll(sink) {
+    if (!sink) return;
+    _watchAll.add(sink);
+    for (const inst of _instances.values()) {
+        inst.subscribers.add(sink);
+        await inst._startScreencast().catch(() => {});
+    }
+}
+
+// Drop a sink from every instance + the watch-all set (monitor left, or a
+// socket/session disconnecting).
 function unsubscribeAll(sink) {
+    _watchAll.delete(sink);
     for (const inst of _instances.values()) {
         if (inst.subscribers.delete(sink) && inst.subscribers.size === 0) {
             inst._stopScreencast().catch(() => {});
@@ -341,4 +359,4 @@ function mount(app, requireAuthed, sessions) {
     });
 }
 
-module.exports = { mount, command, subscribe, unsubscribe, unsubscribeAll, teardown, listInstances, ensure };
+module.exports = { mount, command, subscribe, subscribeAll, unsubscribe, unsubscribeAll, teardown, listInstances, ensure };

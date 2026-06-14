@@ -400,6 +400,12 @@ class Shell {
             this._updateViewBtn();
         }
 
+        const monBtn = $('#toggle-monitor');
+        if (monBtn) {
+            monBtn.addEventListener('click', () => this._toggleMonitor());
+            this._updateMonitorBtn();
+        }
+
         $('#new-tab').addEventListener('click', () => {
             this.audio.play('panels');
             this._openNewTabChooser();
@@ -520,6 +526,7 @@ class Shell {
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
         bridge.addEventListener('tts',       e => this._onTTS(e.detail));
         bridge.addEventListener('manager',   e => this._onManager(e.detail));
+        bridge.addEventListener('browser-frame', e => this._onBrowserFrame(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
 
@@ -1945,11 +1952,19 @@ class Shell {
 
     _applyViewMode() {
         const shell = $('#shell');
+        // Leaving the monitor → stop its stream + poll before switching away.
+        if (this.viewMode !== 'monitor') this._teardownMonitor();
         if (this.viewMode === 'tiles') {
             shell.setAttribute('data-view', 'tiles');
             this._closeTileTerminal();
             this._renderTiles();
             for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+        } else if (this.viewMode === 'monitor') {
+            shell.setAttribute('data-view', 'monitor');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterMonitor();
         } else {
             shell.removeAttribute('data-view');
             this._removeTilesGrid();
@@ -1962,6 +1977,135 @@ class Shell {
                 rt.focus();
             }
         }
+    }
+
+    // ── MONITOR view ────────────────────────────────────────────────────────
+    // One screen showing every agent's OWN live browser (per-tab isolated
+    // instances) plus every open localhost port. Browser frames arrive over the
+    // WS stamped with their tab id and get routed to the matching cell.
+    _toggleMonitor() {
+        this.viewMode = this.viewMode === 'monitor' ? 'tabs' : 'monitor';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this._updateMonitorBtn();
+        this.audio.play('panels');
+    }
+
+    _updateMonitorBtn() {
+        const btn = $('#toggle-monitor');
+        if (btn) btn.classList.toggle('active', this.viewMode === 'monitor');
+    }
+
+    _enterMonitor() {
+        if (!this._monitorEl) {
+            this._monitorGridEl = el('div', { class: 'monitor-grid', 'data-empty': 'Loading…' });
+            this._monitorPortsEl = el('div', { class: 'monitor-ports' });
+            this._monitorEl = el('div', { class: 'monitor-view' }, [
+                el('div', { class: 'monitor-head', text: '◉ AGENT BROWSERS' }),
+                this._monitorGridEl,
+                el('div', { class: 'monitor-head', text: '⊞ LOCALHOST PORTS' }),
+                this._monitorPortsEl,
+            ]);
+            this.termsEl.appendChild(this._monitorEl);
+        }
+        this._monitorEl.style.display = '';
+        // Watch every agent browser instance; the server streams each one's
+        // frames stamped with its tab id (routed by _onBrowserFrame).
+        try { this.bridge.input(INPUT_KIND.BROWSER_SUBSCRIBE, { id: '*' }); } catch (_) {}
+        this._monitorSubscribed = true;
+        this._renderMonitor();
+        if (this._monitorTimer) clearInterval(this._monitorTimer);
+        // Re-list instances/ports periodically so new browsers + ports appear.
+        this._monitorTimer = setInterval(() => { if (!document.hidden) this._renderMonitor(); }, 4000);
+    }
+
+    _teardownMonitor() {
+        if (this._monitorTimer) { clearInterval(this._monitorTimer); this._monitorTimer = null; }
+        if (this._monitorSubscribed) {
+            try { this.bridge.input(INPUT_KIND.BROWSER_UNSUBSCRIBE, { id: '*' }); } catch (_) {}
+            this._monitorSubscribed = false;
+        }
+        if (this._monitorEl) this._monitorEl.style.display = 'none';
+    }
+
+    _onBrowserFrame(d) {
+        if (!d || this.viewMode !== 'monitor' || !this._monitorGridEl) return;
+        const cell = this._monitorGridEl.querySelector(`[data-mon-tab="${CSS.escape(String(d.tabId))}"] .mon-frame`);
+        if (cell && d.data) cell.src = 'data:image/jpeg;base64,' + d.data;
+    }
+
+    async _fetchBrowserInstances() {
+        try {
+            const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+            const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+            const url = new URL(backend + '/api/agent-browser');
+            if (token) url.searchParams.set('t', token);
+            const res = await fetch(url.toString(), {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'list' }),
+            });
+            if (!res.ok) return [];
+            const j = await res.json();
+            return (j && j.instances) || [];
+        } catch (_) { return []; }
+    }
+
+    async _renderMonitor() {
+        if (this.viewMode !== 'monitor' || !this._monitorGridEl) return;
+        const instances = await this._fetchBrowserInstances();
+        if (this.viewMode !== 'monitor' || !this._monitorGridEl) return; // re-check post-await
+        const seen = new Set();
+        for (const inst of instances) {
+            const key = String(inst.tabId);
+            seen.add(key);
+            let cell = this._monitorGridEl.querySelector(`[data-mon-tab="${CSS.escape(key)}"]`);
+            if (!cell) {
+                cell = el('div', { class: 'mon-cell', 'data-mon-tab': key }, [
+                    el('div', { class: 'mon-bar' }, [
+                        el('span', { class: 'mon-title' }),
+                        el('span', { class: 'mon-url' }),
+                    ]),
+                    el('img', { class: 'mon-frame', alt: '' }),
+                ]);
+                this._monitorGridEl.appendChild(cell);
+            }
+            const tab = this.tabs.get(Number(inst.tabId));
+            cell.querySelector('.mon-title').textContent = (tab && tab.title) || ('tab ' + inst.tabId);
+            cell.querySelector('.mon-url').textContent = inst.url || '';
+        }
+        for (const node of [...this._monitorGridEl.querySelectorAll('.mon-cell')]) {
+            if (!seen.has(node.dataset.monTab)) node.remove();
+        }
+        this._monitorGridEl.dataset.empty = instances.length ? ''
+            : 'No agent browsers yet — when an agent runs `soa-browser open …` its session appears here.';
+        this._renderMonitorPorts();
+    }
+
+    async _renderMonitorPorts() {
+        if (!this._monitorPortsEl) return;
+        let ports = [];
+        try {
+            const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+            const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+            const url = new URL(backend + '/api/ports');
+            if (token) url.searchParams.set('t', token);
+            const res = await fetch(url.toString(), { credentials: 'include' });
+            if (res.ok) { const { data } = await res.json(); ports = (data && data.ports) || []; }
+        } catch (_) { return; }
+        if (this.viewMode !== 'monitor' || !this._monitorPortsEl) return;
+        this._monitorPortsEl.replaceChildren(...ports.map(p => el('button', {
+            class: 'mon-port', type: 'button',
+            title: `Open localhost:${p.port} (${p.process}) in the preview`,
+            text: `:${p.port} — ${p.process}`,
+            onclick: async () => {
+                try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(this, String(p.port)); }
+                catch (err) { console.warn('[monitor] preview open failed', err); }
+            },
+        })));
+        if (!ports.length) this._monitorPortsEl.dataset.empty = 'No open localhost ports.';
+        else this._monitorPortsEl.dataset.empty = '';
     }
 
     _renderTiles() {

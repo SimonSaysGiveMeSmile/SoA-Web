@@ -713,11 +713,14 @@ function handleInput(session, d, ws) {
             break;
         }
         case INPUT_KIND.BROWSER_SUBSCRIBE:
-            // Watch one tab's browser (d.id), defaulting to this device's active tab.
-            agentBrowser.subscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
+            // d.id '*' = the monitor grid (watch every instance); otherwise watch
+            // one tab's browser, defaulting to this device's active tab.
+            if (d.id === '*') agentBrowser.subscribeAll(ws).catch(() => {});
+            else agentBrowser.subscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
             break;
         case INPUT_KIND.BROWSER_UNSUBSCRIBE:
-            agentBrowser.unsubscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
+            if (d.id === '*') agentBrowser.unsubscribeAll(ws);
+            else agentBrowser.unsubscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
             break;
         case INPUT_KIND.BROWSER_CLICK:
             agentBrowser.command(d.id != null ? d.id : session.activeTab, 'click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
