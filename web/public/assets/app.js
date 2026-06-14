@@ -2107,6 +2107,7 @@ class Shell {
             this.termsEl.appendChild(this._monitorEl);
         }
         this._monitorEl.style.display = '';
+        if (!this._monitorFrames) this._monitorFrames = new Map();
         // Watch every agent browser instance; the server streams each one's
         // frames stamped with its tab id (routed by _onBrowserFrame).
         try { this.bridge.input(INPUT_KIND.BROWSER_SUBSCRIBE, { id: '*' }); } catch (_) {}
@@ -2127,9 +2128,45 @@ class Shell {
     }
 
     _onBrowserFrame(d) {
-        if (!d || this.viewMode !== 'monitor' || !this._monitorGridEl) return;
-        const cell = this._monitorGridEl.querySelector(`[data-mon-tab="${CSS.escape(String(d.tabId))}"] .mon-frame`);
-        if (cell && d.data) cell.src = 'data:image/jpeg;base64,' + d.data;
+        if (!d || d.tabId == null) return;
+        const key = String(d.tabId);
+        // Cache the latest frame for every instance, unconditionally. CDP emits
+        // the initial screencast frame the instant the cast starts — often the
+        // ONLY frame for an idle page — and it can land BEFORE the 4s instance
+        // poll has built this tab's grid cell. Without this cache that first
+        // frame was dropped and the cell stayed blank forever (the bug).
+        if (d.data) {
+            if (!this._monitorFrames) this._monitorFrames = new Map();
+            this._monitorFrames.set(key, d.data);
+        }
+        if (this.viewMode !== 'monitor' || !this._monitorGridEl) return;
+        // Build the cell on demand so the first frame paints immediately rather
+        // than waiting up to 4s for the next _renderMonitor poll to create it.
+        const cell = this._ensureMonitorCell(key);
+        const img = cell && cell.querySelector('.mon-frame');
+        if (img && d.data) img.src = 'data:image/jpeg;base64,' + d.data;
+    }
+
+    // Create (or fetch) the grid cell for an agent-browser instance, painting
+    // any cached frame so a cell is never blank while we already hold a frame.
+    _ensureMonitorCell(key) {
+        if (!this._monitorGridEl) return null;
+        let cell = this._monitorGridEl.querySelector(`[data-mon-tab="${CSS.escape(key)}"]`);
+        if (!cell) {
+            cell = el('div', { class: 'mon-cell', 'data-mon-tab': key }, [
+                el('div', { class: 'mon-bar' }, [
+                    el('span', { class: 'mon-title', text: 'tab ' + key }),
+                    el('span', { class: 'mon-url' }),
+                ]),
+                el('img', { class: 'mon-frame', alt: '' }),
+            ]);
+            this._monitorGridEl.appendChild(cell);
+            this._monitorGridEl.dataset.empty = '';
+        }
+        const cached = this._monitorFrames && this._monitorFrames.get(key);
+        const img = cell.querySelector('.mon-frame');
+        if (cached && img && !img.getAttribute('src')) img.src = 'data:image/jpeg;base64,' + cached;
+        return cell;
     }
 
     async _fetchBrowserInstances() {
@@ -2157,23 +2194,16 @@ class Shell {
         for (const inst of instances) {
             const key = String(inst.tabId);
             seen.add(key);
-            let cell = this._monitorGridEl.querySelector(`[data-mon-tab="${CSS.escape(key)}"]`);
-            if (!cell) {
-                cell = el('div', { class: 'mon-cell', 'data-mon-tab': key }, [
-                    el('div', { class: 'mon-bar' }, [
-                        el('span', { class: 'mon-title' }),
-                        el('span', { class: 'mon-url' }),
-                    ]),
-                    el('img', { class: 'mon-frame', alt: '' }),
-                ]);
-                this._monitorGridEl.appendChild(cell);
-            }
+            const cell = this._ensureMonitorCell(key);
             const tab = this.tabs.get(Number(inst.tabId));
             cell.querySelector('.mon-title').textContent = (tab && tab.title) || ('tab ' + inst.tabId);
             cell.querySelector('.mon-url').textContent = inst.url || '';
         }
         for (const node of [...this._monitorGridEl.querySelectorAll('.mon-cell')]) {
-            if (!seen.has(node.dataset.monTab)) node.remove();
+            if (!seen.has(node.dataset.monTab)) {
+                if (this._monitorFrames) this._monitorFrames.delete(node.dataset.monTab);
+                node.remove();
+            }
         }
         this._monitorGridEl.dataset.empty = instances.length ? ''
             : 'No agent browsers yet — when an agent runs `soa-browser open …` its session appears here.';

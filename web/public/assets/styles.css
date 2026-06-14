@@ -159,7 +159,13 @@ html, body {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tab-sub {
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* The preview text changes constantly; it must NOT drive the tab width or the
+     whole tab row reflows/shifts on every output. width:0 removes the preview
+     from the column's intrinsic-width calc (so width follows the stable title,
+     as before), while min-width:100% stretches it back to that title width for
+     the ellipsis. Net: tab width depends only on the title — no more shifting. */
+  width: 0; min-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 10px; opacity: 0.5; font-weight: normal; letter-spacing: 0;
 }
 .tab-sub:empty { display: none; }
