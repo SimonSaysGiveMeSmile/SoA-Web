@@ -910,7 +910,10 @@ class Shell {
             /^\?\s+for\s+shortcuts/i.test(t) ||         // Claude Code footer hint
             /^│\s*>/.test(t);                            // Claude Code input prompt row
         const rt = this.tabs.get(id);
-        if (rt && rt._opened) {
+        // Only the tab you're actually looking at pays the ~60-row buffer scan;
+        // back-tabs derive their preview from the cheap raw-stream window below.
+        // With many sessions this keeps the 500ms poll off the heavy path.
+        if (rt && rt._opened && id === this.activeId) {
             try {
                 const buf = rt.term.buffer.active;
                 const end = buf.baseY + rt.term.rows;
@@ -1074,9 +1077,13 @@ class Shell {
         sb.recent += data;
         if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
 
-        // Throttle: at most one detection per 200ms per tab
+        // Throttle: at most one detection per 200ms for the tab you're looking
+        // at; back-tabs run far less often (~700ms) since their status only
+        // feeds the strip colour, and the periodic full-sweep poll backstops
+        // them. With ~18 sessions this is the bulk of the saved regex work.
         const now = performance.now();
-        if (!forceNow && now - sb.lastDetect < 200) return;
+        const minGap = (id === this.activeId) ? 200 : 700;
+        if (!forceNow && now - sb.lastDetect < minGap) return;
         sb.lastDetect = now;
 
         // Strip ANSI escape sequences for pattern matching
