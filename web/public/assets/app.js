@@ -2015,8 +2015,12 @@ class Shell {
 
         // Recovery presets. A preset with `key` blasts a bare control key to all
         // tabs immediately; otherwise it just fills the input to review first.
+        // `claude --continue` resumes the most recent conversation in each tab's
+        // cwd in-place — the fix for "tabs reopened after a restart but Claude is
+        // a dead shell". (Bare `claude` would start fresh and lose context.)
         const presets = [
-            { label: 'claude --resume', text: 'claude --resume' },
+            { label: 'Resume ⟲ (claude -c)', text: 'claude --continue' },
+            { label: 'claude --resume (pick)', text: 'claude --resume' },
             { label: '/model opus', text: '/model opus' },
             { label: 'Enter ⏎ (retry)', key: '\r' },
             { label: 'Esc', key: '\x1b' },
@@ -2045,7 +2049,7 @@ class Shell {
 
         card.append(
             el('div', { class: 'bcast-title', text: 'BROADCAST TO ALL' }),
-            el('div', { class: 'bcast-sub', text: `Types into every one of the ${n} terminals at once — for model switches or post-disruption recovery.` }),
+            el('div', { class: 'bcast-sub', text: `Types into every one of the ${n} terminals at once — resume all Claude conversations after a restart (claude -c), switch model, or recover from a disruption. Use when Claude is dead in the tabs.` }),
             chips,
             input,
             enterLbl,
