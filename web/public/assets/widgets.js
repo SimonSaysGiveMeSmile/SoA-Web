@@ -436,8 +436,39 @@ class MobileQRWidget extends Widget {
             return u.toString();
         }
 
+        // "Simulate device" — opens the REAL mobile client (/m/) in a phone-sized
+        // popup window: a genuine browser context (WS, fetch, service worker, the
+        // lot) pointed at the same backend a phone would use, so the desktop↔mobile
+        // bridge can be tested live without a real phone or an Xcode simulator.
+        // Always available (the local bridge works even with the tunnel off); it
+        // only connects when the user clicks, so it never interferes on its own.
+        const simUrl = () => {
+            const backend = backendBase();
+            const token = (snap && snap.pairToken) || currentToken();
+            const u = new URL('/m/', backend);
+            u.searchParams.set('backend', backend);
+            if (token) u.searchParams.set('t', token);
+            return u.toString();
+        };
+        const openSim = () => {
+            const w = 390, h = 844; // iPhone-class CSS viewport
+            const screenW = (window.screen && window.screen.availWidth) || 1440;
+            const left = Math.max(0, screenW - w - 32), top = 56;
+            const win = window.open(simUrl(), 'soa-mobile-sim',
+                `width=${w},height=${h},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes`);
+            if (!win) { alert('Popup blocked — allow pop-ups for this site to launch the simulated device.'); return; }
+            try { win.focus(); } catch (_) {}
+        };
+        const simBtn = $el('button', {
+            class: 'mqr-toggle mqr-sim',
+            text: '📱 SIM',
+            title: 'Open the mobile client in a phone-sized window to test the bridge live',
+            onclick: openSim,
+        });
+
         const actions = state === 'online'
             ? [
+                simBtn,
                 $el('button', {
                     class: 'mqr-toggle mqr-restart',
                     text: tr('mqr.restart'),
@@ -450,6 +481,7 @@ class MobileQRWidget extends Widget {
                 }),
             ]
             : [
+                simBtn,
                 $el('button', {
                     class: 'mqr-toggle mqr-start',
                     text: state === 'starting' ? '…' : tr('mqr.start'),

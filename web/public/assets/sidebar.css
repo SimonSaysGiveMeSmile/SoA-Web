@@ -43,6 +43,8 @@
 .mqr-toggle[disabled] { opacity: 0.5; cursor: default; }
 .mqr-toggle.mqr-off { color: var(--soa-red); border-color: var(--soa-red); }
 .mqr-toggle.mqr-off:hover { background: rgba(255,80,80,0.08); }
+.mqr-toggle.mqr-sim { color: var(--soa-blue); border-color: var(--soa-blue); }
+.mqr-toggle.mqr-sim:hover { background: rgba(98,114,164,0.14); }
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
 
 /* ── Port scanner widget ───────────────────────────────────────────── */
