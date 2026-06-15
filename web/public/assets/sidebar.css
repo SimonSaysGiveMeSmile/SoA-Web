@@ -45,6 +45,22 @@
 .mqr-toggle.mqr-off:hover { background: rgba(255,80,80,0.08); }
 .mqr-toggle.mqr-sim { color: var(--soa-blue); border-color: var(--soa-blue); }
 .mqr-toggle.mqr-sim:hover { background: rgba(98,114,164,0.14); }
+
+/* Simulated mobile device — in-page phone frame wrapping the real /m/ client. */
+.msim-backdrop { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,0.72);
+  display: grid; place-items: center; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
+.msim-frame { width: 390px; max-width: 94vw; height: 844px; max-height: 92vh;
+  display: flex; flex-direction: column; background: #05080d;
+  border: 1px solid var(--soa-accent); border-radius: 22px; overflow: hidden;
+  box-shadow: 0 16px 70px rgba(0,0,0,0.65), 0 0 0 1px rgba(170,207,209,0.15); }
+.msim-bar { display: flex; align-items: center; gap: 8px; padding: 9px 14px; flex: 0 0 auto;
+  border-bottom: 1px solid var(--soa-line); font-family: var(--font-display);
+  font-size: 11px; letter-spacing: 0.18em; color: var(--soa-accent); }
+.msim-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msim-pop, .msim-x { background: transparent; border: none; color: var(--soa-accent);
+  cursor: pointer; font-size: 17px; line-height: 1; padding: 0 6px; text-decoration: none; }
+.msim-pop:hover, .msim-x:hover { color: #fff; }
+.msim-iframe { flex: 1 1 auto; width: 100%; border: 0; background: #05080d; }
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
 
 /* ── Port scanner widget ───────────────────────────────────────────── */

@@ -451,13 +451,33 @@ class MobileQRWidget extends Widget {
             return u.toString();
         };
         const openSim = () => {
-            const w = 390, h = 844; // iPhone-class CSS viewport
-            const screenW = (window.screen && window.screen.availWidth) || 1440;
-            const left = Math.max(0, screenW - w - 32), top = 56;
-            const win = window.open(simUrl(), 'soa-mobile-sim',
-                `width=${w},height=${h},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes`);
-            if (!win) { alert('Popup blocked — allow pop-ups for this site to launch the simulated device.'); return; }
-            try { win.focus(); } catch (_) {}
+            const url = simUrl();
+            // In-page phone modal (not window.open) — a popup can be silently
+            // blocked or opened off-screen / as a background tab depending on the
+            // browser, which is why "nothing happened". An iframe is same-origin,
+            // unblockable, and always visible; /m/ sends no X-Frame-Options and
+            // doesn't frame-bust, so it loads + connects exactly like a real phone.
+            const existing = document.getElementById('soa-mobile-sim-modal');
+            if (existing) existing.remove();
+            const close = () => document.getElementById('soa-mobile-sim-modal')?.remove();
+            const iframe = $el('iframe', { class: 'msim-iframe', src: url,
+                allow: 'microphone; camera; clipboard-read; clipboard-write; autoplay' });
+            const closeBtn = $el('button', { class: 'msim-x', text: '×', title: 'Close', onclick: close });
+            const popLink = $el('a', { class: 'msim-pop', text: '↗', href: url, target: '_blank',
+                rel: 'noopener', title: 'Open in a separate window instead' });
+            const frame = $el('div', { class: 'msim-frame' }, [
+                $el('div', { class: 'msim-bar' }, [
+                    $el('span', { class: 'msim-title', text: '📱 MOBILE · live bridge' }),
+                    popLink, closeBtn,
+                ]),
+                iframe,
+            ]);
+            const backdrop = $el('div', { class: 'msim-backdrop', id: 'soa-mobile-sim-modal' }, [frame]);
+            backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+            });
+            document.body.appendChild(backdrop);
         };
         const simBtn = $el('button', {
             class: 'mqr-toggle mqr-sim',
