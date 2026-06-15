@@ -248,6 +248,16 @@ class TabRuntime {
     queueReplay(data) {
         if (!data) return;
         this._pendingReplay += data;
+        // With virtualization this buffers a hidden tab's LIVE output (not just
+        // bounded scrollback), so cap it. Keep the tail and align to a newline so
+        // the replay never starts mid-escape-sequence; a full-screen TUI repaints
+        // itself shortly after, so a dropped prefix self-corrects on switch.
+        const CAP = 1 << 19; // 512 KB
+        if (this._pendingReplay.length > CAP) {
+            const tail = this._pendingReplay.slice(-CAP);
+            const nl = tail.indexOf('\n');
+            this._pendingReplay = nl >= 0 ? tail.slice(nl + 1) : tail;
+        }
     }
 
     flushPendingReplay() {
@@ -390,6 +400,12 @@ class Shell {
         // View mode: 'tabs' (classic) or 'tiles' (dashboard grid).
         this.viewMode = 'tabs';
         try { this.viewMode = localStorage.getItem('soa_web_view_mode') || 'tabs'; } catch (_) {}
+        // Virtualize background tabs: only the on-screen terminal parses live;
+        // hidden tabs buffer raw output and catch up on switch. Cuts ~N live
+        // ANSI parsers down to ~1 with many sessions. Escape hatch:
+        // localStorage.soa_no_virtualize='1' keeps every tab live-parsed.
+        this._noVirtualize = false;
+        try { this._noVirtualize = localStorage.getItem('soa_no_virtualize') === '1'; } catch (_) {}
         this._tileOverlayId = null; // id of the tab currently open in tile overlay
         this._tilesGridEl = null;
         this._tileOverlayEl = null;
@@ -687,9 +703,27 @@ class Shell {
         el.setAttribute('data-i18n-vars', JSON.stringify({ n: count }));
     }
 
+    // A tab is "live" (parses straight into xterm) only when its terminal is
+    // actually on screen — its container carries .active (the active tab in
+    // tabs view, or the expanded tile). Everything else buffers and replays on
+    // switch. The .active class is the single source of truth across all views.
+    _isLiveTab(id) {
+        if (this._noVirtualize) return true;
+        const rt = this.tabs.get(id);
+        return !!(rt && rt.container && rt.container.classList.contains('active'));
+    }
+
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
-        if (t) t.write(data);
+        if (t) {
+            // Virtualization: only the on-screen terminal parses live into xterm;
+            // hidden tabs buffer the raw bytes and catch up via flushPendingReplay
+            // on switch — so many sessions run ~1 live ANSI parser, not N. Status
+            // and ctx% still update from the raw stream (below), so background tab
+            // colours/preview stay live without parsing the full grid.
+            if (this._isLiveTab(id)) t.write(data);
+            else t.queueReplay(data);
+        }
         // Extract OSC 0/2 title sequences from the raw stream. xterm.js's
         // onTitleChange can miss titles when data arrives in chunks that split
         // the escape sequence, so always parse here as the primary source.
