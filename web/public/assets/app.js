@@ -2350,11 +2350,16 @@ class Shell {
         const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
         const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
 
-        // Which tabs receive the broadcast. Defaults to ALL — preserving the
-        // original behavior — but the per-tab checkboxes and quick-select chips
-        // below let you narrow it to a subset (one project, just the agents that
-        // need input, etc.) before sending.
-        const selected = new Set(ids);
+        // Which tabs receive the broadcast. Restore the LAST selection (persisted)
+        // so a 7-of-10 pick isn't reset to "all" each time — intersect with the
+        // tabs that still exist. Fall back to ALL when there's no usable saved set
+        // (first run, or every saved tab is gone). The chips + checkboxes below
+        // let you re-narrow it.
+        let _savedSel = null;
+        try { _savedSel = JSON.parse(localStorage.getItem('soa_bcast_selection') || 'null'); } catch (_) {}
+        const _savedSet = Array.isArray(_savedSel) ? new Set(_savedSel.filter(id => this.tabs.has(id))) : null;
+        const selected = (_savedSet && _savedSet.size) ? _savedSet : new Set(ids);
+        const persistSel = () => { try { localStorage.setItem('soa_bcast_selection', JSON.stringify([...selected])); } catch (_) {} };
 
         // ---- target selector: one checkbox row per tab --------------------
         const STATUS_LABELS = { working: 'Working', attention: 'Needs input', done: 'Done', idle: 'Idle' };
@@ -2364,7 +2369,7 @@ class Shell {
             const status = this._agentStatus.get(id) || 'idle';
             const pct = this._ctxPct.get(id) || 0;
             const chk = el('input', { type: 'checkbox', class: 'bcast-row-chk' });
-            chk.checked = true;
+            chk.checked = selected.has(id);
             const row = el('label', { class: 'bcast-row', 'data-agent': status }, [
                 chk,
                 el('span', { class: 'bcast-row-dot' }),
@@ -2373,7 +2378,7 @@ class Shell {
             ]);
             chk.addEventListener('change', () => {
                 if (chk.checked) selected.add(id); else selected.delete(id);
-                refresh();
+                refresh(); persistSel();
             });
             return { row, chk, id, status };
         });
@@ -2387,7 +2392,7 @@ class Shell {
                 r.chk.checked = predicate(r);
                 if (r.chk.checked) selected.add(r.id);
             }
-            refresh();
+            refresh(); persistSel();
         };
         const present = [...new Set(rows.map(r => r.status))].filter(s => STATUS_LABELS[s]);
         const quickEl = el('div', { class: 'bcast-quick-row' }, [
@@ -2427,6 +2432,7 @@ class Shell {
             onclick: () => {
                 if (p.key != null) {
                     if (!selected.size) { flashEmpty(); return; }
+                    persistSel();
                     this._broadcastRaw(p.key, [...selected]); this.audio.play('granted'); close();
                 } else { input.value = p.text; input.focus(); }
             },
@@ -2438,7 +2444,15 @@ class Shell {
             if (!selected.size) { flashEmpty(); return; }
             const text = input.value;
             if (!text.trim() && !enterChk.checked) { input.focus(); return; }
-            this._broadcastRaw(text + (enterChk.checked ? '\r' : ''), [...selected]);
+            const targets = [...selected];
+            persistSel();
+            // Send the command, THEN the Enter as a SEPARATE keystroke. Claude
+            // Code's TUI intermittently treats a command glued to its CR in one
+            // write as a pasted newline (inserts it, doesn't submit); a discrete
+            // CR after the text has landed submits reliably. Plain shells are
+            // fine with either form, so this is strictly safer.
+            if (text) this._broadcastRaw(text, targets);
+            if (enterChk.checked) setTimeout(() => this._broadcastRaw('\r', targets), text ? 90 : 0);
             this.audio.play('granted');
             close();
         };
