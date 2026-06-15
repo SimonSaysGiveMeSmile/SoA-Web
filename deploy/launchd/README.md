@@ -37,6 +37,18 @@ load can hit ~100 on 10 cores):
 - **Tunnel-preserving.** A hung daemon is recovered with **SIGTERM first** so the
   detached `cloudflared` survives and the restart re-adopts the **same** public
   URL (no re-pin). It escalates to `kickstart -k` only if SIGTERM is ignored.
+- **Tunnel zombie recovery.** Under heavy load `cloudflared` can lose its edge
+  connection while the process stays alive (hostname goes NXDOMAIN) — the daemon
+  only watches for the process *exiting*, so it never notices. When the daemon is
+  healthy the watchdog also re-checks tunnel routing and, if it's a zombie,
+  respawns `cloudflared` (rate-limited to once / 5 min) and texts the new URL via
+  `soa-msg`. Needs `AbandonProcessGroup` on the plist so the respawned tunnel
+  outlives the 60s watchdog run.
+
+> NOTE: quick (`trycloudflare`) tunnels get a **random URL** on each respawn, so a
+> recovery still means re-pinning (the `soa-msg` carries the link). A permanent
+> URL needs a Cloudflare **named tunnel** (`cloudflared tunnel login` + create),
+> which this box has no creds for yet.
 
 ## Install
 

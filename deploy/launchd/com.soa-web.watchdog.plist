@@ -21,6 +21,11 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!-- Don't kill the script's children when the 60s run finishes: the tunnel
+         respawn nohup-spawns a detached cloudflared that must outlive this job. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
     <key>StartInterval</key>
     <integer>60</integer>
 
