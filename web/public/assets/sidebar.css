@@ -60,7 +60,9 @@
 .msim-pop, .msim-x { background: transparent; border: none; color: var(--soa-accent);
   cursor: pointer; font-size: 17px; line-height: 1; padding: 0 6px; text-decoration: none; }
 .msim-pop:hover, .msim-x:hover { color: #fff; }
-.msim-iframe { flex: 1 1 auto; width: 100%; border: 0; background: #05080d; }
+.msim-iframe, .msim-shot { flex: 1 1 auto; width: 100%; min-height: 0; border: 0; background: #000; }
+.msim-shot { object-fit: contain; cursor: pointer; display: block; }
+.msim-status { font-size: 10px; opacity: 0.7; letter-spacing: 0.08em; white-space: nowrap; }
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
 
 /* ── Port scanner widget ───────────────────────────────────────────── */

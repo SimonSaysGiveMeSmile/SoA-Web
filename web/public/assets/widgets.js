@@ -451,35 +451,63 @@ class MobileQRWidget extends Widget {
             return u.toString();
         };
         const SIM_TAB = 'mobile-sim';
-        const openSim = async () => {
+        const SIM_VW = 1024, SIM_VH = 768; // the managed browser's CDP viewport
+        const callBrowser = (body) => fetch(api('/api/agent-browser'), {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }).then(r => r.json());
+
+        const openSim = () => {
             const url = simUrl();
-            const shell = (window.__SOA_WEB__ || {})._shell;
-            try {
-                // Run the mobile client in the AGENT's managed browser — a
-                // separate headless Chromium the agent drives directly
-                // (soa-browser / /api/agent-browser: navigate·click·type·key·
-                // eval·screenshot). It renders server-side and streams into the
-                // MONITOR panel, so it sidesteps the popup-block / mixed-content
-                // issues an in-page iframe hits ("nothing happened"), is a fully
-                // independent process, and never reshapes the shared PTY (the
-                // mobile client scales its font to the desktop grid, it doesn't
-                // resize). Keyed to its own tab id so it's isolated from the
-                // agent's other browsing.
-                const resp = await fetch(api('/api/agent-browser'), {
-                    method: 'POST', credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: 'navigate', tab: SIM_TAB, url }),
-                });
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                // Surface it: flip the IDE into MONITOR, where the agent-browser
-                // grid (with this sim cell) lives.
-                if (shell && shell.viewMode !== 'monitor' && typeof shell._toggleMonitor === 'function') {
-                    shell._toggleMonitor();
-                }
-            } catch (e) {
-                alert('Could not launch the simulated device: ' + (e && e.message || e) +
-                      '\nDirect URL: ' + url);
-            }
+            // Self-contained, always-visible modal. Clicking SIM ALWAYS shows
+            // this — it doesn't depend on the shell, the active view, the WS
+            // bridge, popups, or framing rules (the reasons earlier versions did
+            // "nothing"). It renders the AGENT's managed browser (a separate,
+            // independent Chromium the agent drives via soa-browser) by polling
+            // its screenshots over the SAME /api the dashboard already uses, and
+            // forwards taps as clicks — so it never touches the shared PTYs and
+            // it's the exact instance the agent controls.
+            document.getElementById('soa-mobile-sim-modal')?.remove();
+            let alive = true;
+            const shot = $el('img', { class: 'msim-shot', alt: 'mobile device' });
+            const statusEl = $el('span', { class: 'msim-status', text: 'launching…' });
+            const closeBtn = $el('button', { class: 'msim-x', text: '×', title: 'Close' });
+            const frame = $el('div', { class: 'msim-frame' }, [
+                $el('div', { class: 'msim-bar' }, [
+                    $el('span', { class: 'msim-title', text: '📱 MOBILE · agent-controlled' }),
+                    statusEl, closeBtn,
+                ]),
+                shot,
+            ]);
+            const backdrop = $el('div', { class: 'msim-backdrop', id: 'soa-mobile-sim-modal' }, [frame]);
+            const onEsc = (e) => { if (e.key === 'Escape') close(); };
+            function close() { alive = false; backdrop.remove(); document.removeEventListener('keydown', onEsc); }
+            closeBtn.onclick = close;
+            backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+            document.addEventListener('keydown', onEsc);
+            document.body.appendChild(backdrop);
+
+            // Tap → click in the managed browser, scaled from the rendered frame.
+            shot.addEventListener('click', (e) => {
+                const r = shot.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                const x = Math.round((e.clientX - r.left) / r.width * SIM_VW);
+                const y = Math.round((e.clientY - r.top) / r.height * SIM_VH);
+                callBrowser({ action: 'click', tab: SIM_TAB, x, y }).catch(() => {});
+            });
+
+            const poll = async () => {
+                if (!alive) return;
+                try {
+                    const j = await callBrowser({ action: 'screenshot', tab: SIM_TAB });
+                    if (alive && j && j.data) { shot.src = 'data:image/jpeg;base64,' + j.data; statusEl.textContent = 'live · tap to interact'; }
+                } catch (_) {}
+                if (alive) setTimeout(poll, 1200);
+            };
+            callBrowser({ action: 'navigate', tab: SIM_TAB, url })
+                .then(() => { statusEl.textContent = 'connecting…'; poll(); })
+                .catch((e) => { statusEl.textContent = 'launch failed — ' + (e && e.message || e); });
         };
         const simBtn = $el('button', {
             class: 'mqr-toggle mqr-sim',
