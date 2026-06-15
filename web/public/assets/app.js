@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=22';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=23';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
 import { pickFolder } from '/assets/folderPicker.js?v=1';

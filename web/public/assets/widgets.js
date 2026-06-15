@@ -450,34 +450,36 @@ class MobileQRWidget extends Widget {
             if (token) u.searchParams.set('t', token);
             return u.toString();
         };
-        const openSim = () => {
+        const SIM_TAB = 'mobile-sim';
+        const openSim = async () => {
             const url = simUrl();
-            // In-page phone modal (not window.open) — a popup can be silently
-            // blocked or opened off-screen / as a background tab depending on the
-            // browser, which is why "nothing happened". An iframe is same-origin,
-            // unblockable, and always visible; /m/ sends no X-Frame-Options and
-            // doesn't frame-bust, so it loads + connects exactly like a real phone.
-            const existing = document.getElementById('soa-mobile-sim-modal');
-            if (existing) existing.remove();
-            const close = () => document.getElementById('soa-mobile-sim-modal')?.remove();
-            const iframe = $el('iframe', { class: 'msim-iframe', src: url,
-                allow: 'microphone; camera; clipboard-read; clipboard-write; autoplay' });
-            const closeBtn = $el('button', { class: 'msim-x', text: '×', title: 'Close', onclick: close });
-            const popLink = $el('a', { class: 'msim-pop', text: '↗', href: url, target: '_blank',
-                rel: 'noopener', title: 'Open in a separate window instead' });
-            const frame = $el('div', { class: 'msim-frame' }, [
-                $el('div', { class: 'msim-bar' }, [
-                    $el('span', { class: 'msim-title', text: '📱 MOBILE · live bridge' }),
-                    popLink, closeBtn,
-                ]),
-                iframe,
-            ]);
-            const backdrop = $el('div', { class: 'msim-backdrop', id: 'soa-mobile-sim-modal' }, [frame]);
-            backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-            document.addEventListener('keydown', function esc(e) {
-                if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
-            });
-            document.body.appendChild(backdrop);
+            const shell = (window.__SOA_WEB__ || {})._shell;
+            try {
+                // Run the mobile client in the AGENT's managed browser — a
+                // separate headless Chromium the agent drives directly
+                // (soa-browser / /api/agent-browser: navigate·click·type·key·
+                // eval·screenshot). It renders server-side and streams into the
+                // MONITOR panel, so it sidesteps the popup-block / mixed-content
+                // issues an in-page iframe hits ("nothing happened"), is a fully
+                // independent process, and never reshapes the shared PTY (the
+                // mobile client scales its font to the desktop grid, it doesn't
+                // resize). Keyed to its own tab id so it's isolated from the
+                // agent's other browsing.
+                const resp = await fetch(api('/api/agent-browser'), {
+                    method: 'POST', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'navigate', tab: SIM_TAB, url }),
+                });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                // Surface it: flip the IDE into MONITOR, where the agent-browser
+                // grid (with this sim cell) lives.
+                if (shell && shell.viewMode !== 'monitor' && typeof shell._toggleMonitor === 'function') {
+                    shell._toggleMonitor();
+                }
+            } catch (e) {
+                alert('Could not launch the simulated device: ' + (e && e.message || e) +
+                      '\nDirect URL: ' + url);
+            }
         };
         const simBtn = $el('button', {
             class: 'mqr-toggle mqr-sim',
