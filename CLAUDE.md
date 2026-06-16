@@ -41,9 +41,56 @@ soa-sessions compact <id>         # run /compact on a session that's high on con
 
 A server-side supervisor watches every tab always-on (status + context + stuck
 detection) and feeds the dashboard's FLEET bar; `soa-sessions list` reads the
-same view. As a manager agent: poll `list`, `read` any session that needs
-attention, then `send` an answer, `compact` a high-context one, or `soa-msg` the
-user when a decision is needed. Keep your own running notes as your context.
+same view.
+
+### React, don't poll — the event loop
+
+A manager agent is **event-driven**, not a busy-poller. The supervisor emits a
+trigger whenever a session changes state, and the manager *blocks* on a
+long-poll until one arrives (≈0 CPU between events):
+
+```bash
+soa-sessions whoami               # confirm YOUR tab id (never command/stop your own id)
+soa-sessions events               # one-shot drain to reconcile current state
+soa-sessions watch [--kinds attention,stuck,done,limited] [--once]
+                                  # BLOCKS until the next event(s), then prints them
+```
+
+Event kinds: `attention` (needs input), `stuck` (working but silent >4m),
+`done`, `idle`, `working`, `highContext` (ctx ≥80%), `limited` (hit usage limit),
+`spawned`, `exited`. Each is a one-line wake-up like
+`[ev 142] #3 "api" attention (was working) ctx 41%`. **`list` is ground truth;
+events are advisory wake-ups** — if `watch` reports `dropped > 0` you slept
+through history, so reconcile with `list`.
+
+The loop: `whoami` → `events`+`list` (reconcile) → forever block on `watch` →
+for each event, `read` the offending session, decide, and act:
+
+```bash
+soa-sessions goal <id|cohort> <text>    # fan a /goal out to one tab or a cohort
+soa-sessions btw  <id|cohort> <note>    # /btw aside
+soa-sessions clear <id|cohort>          # /clear
+soa-sessions resume <id|all|limited>    # claude --resume … || claude --continue
+soa-sessions broadcast <cohort> <text>  # plain-text nudge to a cohort
+soa-sessions interrupt <id>             # Ctrl-C to unwedge a stuck agent
+soa-sessions spawn [<cwd>] [--title T] [--goal "…"] [--model m]   # START a new agent
+soa-sessions stop <id>                  # STOP an agent (refuses your own tab)
+```
+
+A **cohort** is `all` or a signal name — `attention`, `stuck`, `idle`, `done`,
+`working`, `highContext`, `limited` (or a comma-list of ids). Your own tab is
+auto-excluded from every fan-out and hidden from your own event stream, so you
+never trigger or command yourself.
+
+**Convert a user desire into per-session goals**: decompose it in *your* context
+into concrete per-project objectives; `spawn` a tab (with `--goal`) for each
+project that isn't open yet, `goal <cohort> …` the rest, and keep the mapping in
+your notes. On `attention` answer routine prompts with `send`/`goal`, else
+`soa-msg` the user **one** question. On `stuck` → `read`, then `btw`/`compact`,
+or `interrupt`+`resume` if wedged. On `done` → assign the next goal. On
+`highContext` → `compact`. On `limited` → it auto-resumes (or `resume-all`).
+Prefer `goal`/`btw` over raw `send` so the slash-prefix is correct; never bare
+`claude` after a restart (use `resume`). Keep your own running notes as context.
 
 ## Driving an isolated browser
 

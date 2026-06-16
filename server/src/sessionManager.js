@@ -19,6 +19,8 @@ const path = require('path');
 const os = require('os');
 const express = require('express');
 const { MSG, frame } = require('./protocol');
+const envStore = require('./envStore');
+const claudeSessions = require('./claudeSessions');
 
 // ── Manager config + pending resume schedules (persisted across restarts) ──
 const { STATE_DIR } = require('./stateDir');
@@ -113,14 +115,75 @@ function extractCtxPct(text) {
     return null;
 }
 
+// ── Reliable submit ─────────────────────────────────────────────────────────
+// A glued "text\r" written into a Claude TUI in one chunk is intermittently
+// swallowed as a *pasted* newline and never submits. Writing the text, then the
+// Enter as a SEPARATE write a beat later, submits reliably. node-pty serializes
+// writes per-PTY, so the ordering holds. This is the single chokepoint every
+// agent-driven submit (send / compact / goal / broadcast / scheduled resume /
+// claude launch) routes through.
+const SUBMIT_DELAY_MS = Math.max(0, parseInt(process.env.SOA_WEB_SUBMIT_DELAY_MS || '90', 10) || 90);
+// Per-tab FIFO so submit N's deferred '\r' lands before submit N+1's text.
+// Without this, two submits to one tab inside the delay window interleave as
+// "A B \r \r" (one garbled line) instead of "A \r B \r". WeakMap → entries drop
+// when the Tab is GC'd; node-pty has no per-tab write lock of its own.
+const _submitChain = new WeakMap();
+function submitToTab(tab, text) {
+    if (!tab) return;
+    const prev = _submitChain.get(tab) || Promise.resolve();
+    const next = prev.then(() => new Promise((resolve) => {
+        try { tab.write(String(text)); } catch (_) { return resolve(); }
+        const t = setTimeout(() => { try { tab.write('\r'); } catch (_) {} resolve(); }, SUBMIT_DELAY_MS);
+        if (t.unref) t.unref();
+    }));
+    _submitChain.set(tab, next.catch(() => {}));
+}
+
+// Launch (or resume) a Claude agent in a freshly-spawned tab. Shared by the
+// daemon's boot-restore auto-resume (index.js scheduleAutoResume) and the
+// manager-agent `spawn` action so the resume-vs-fresh decision + reliable
+// submit can never drift apart. When a recent transcript exists for the tab's
+// cwd we resume it, falling back through --continue to a cold start; otherwise
+// we cold-start. Returns the resumed sessionId (or null for a fresh start).
+// coldFallback: append a bare `claude` if BOTH --resume and --continue fail.
+// spawn wants this (cold-start a new agent); boot-restore does NOT — a bare
+// `claude` there starts a FRESH session, losing pre-restart context AND
+// poisoning future --continue (see feedback: never bare-claude after a restart),
+// so index.js passes coldFallback:false to keep the original 2-step chain.
+function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true } = {}) {
+    let sid = sessionId;
+    if (sid == null && resume && cwd) {
+        try { const hit = claudeSessions.latestSessionByCwd(72).get(cwd); if (hit) sid = hit.sessionId; }
+        catch (_) { /* no resume → cold start */ }
+    }
+    const flag = model ? ` --model ${model}` : '';
+    const tail = coldFallback ? ` || claude${flag}` : '';
+    const line = sid
+        ? `claude --resume ${sid}${flag} || claude --continue${flag}${tail}`
+        : `claude${flag}`;
+    submitToTab(tab, line);
+    return sid;
+}
+
 const STUCK_MS    = 4 * 60 * 1000;   // working but silent this long → stuck
 const HIGH_CTX    = 80;              // context % considered "high"
+const EVENT_CAP   = 500;             // depth of the in-memory manager event ring
 
 class SessionManager {
     constructor(session) {
         this.session = session;
         this.tabs = new Map();       // tabId → state
         this.state = loadManagerState();   // {autoResume, autoResumeText, schedules}
+        // ── Event ring: manager-agent triggers ──────────────────────────────
+        // In-memory, monotonic, transient. Events are WAKEUPS, not history —
+        // snapshot()/`list` is always ground truth. A daemon restart resets
+        // _seq; the watch cursor logic self-heals (cursor > head → synthetic
+        // 'daemon-restart' event → reconcile). Edge-triggered: one state change
+        // = one event (no level spam).
+        this._events = [];               // capped ring of emitted events
+        this._seq = 0;                   // monotonic sequence (head)
+        this._waiters = new Set();       // parked long-poll responders
+        this._stuckEmitted = new Map();  // tabId → true once per stuck episode
         // Fire due resume schedules even when no client is connected.
         this._schedTimer = setInterval(() => this._fireDue(), 15_000);
         if (this._schedTimer.unref) this._schedTimer.unref();
@@ -155,7 +218,7 @@ class SessionManager {
         for (const s of due) {
             const tab = mgr && mgr.get(s.tabId);
             if (!tab) continue;
-            try { tab.write(s.text + '\r'); } catch (_) {}
+            submitToTab(tab, s.text);
         }
         this.broadcast();
     }
@@ -169,19 +232,31 @@ class SessionManager {
         return s;
     }
 
-    // Fed from the PTY stream for every tab (see index.js onData).
+    // Fed from the PTY stream for every tab (see index.js onData). This is the
+    // chokepoint where status transitions are detected → the natural place to
+    // emit edge-triggered manager events.
     feed(id, data) {
         const s = this._state(id);
         s.lastOutputAt = Date.now();
         s.recent = (s.recent + data).slice(-6000);
         const next = classifyAgent(s.recent, s.status);
         if (next && next !== s.status) {
+            const prev = s.status;
             s.status = next; s.lastStatusAt = Date.now();
             // Output is flowing again as real work → the limit is behind us.
             if (next === 'working') s.limit = null;
+            // Leaving 'working' re-arms the stuck latch for the next episode.
+            if (next !== 'working') this._stuckEmitted.delete(id);
+            this._emit(next, id, { from: prev, to: next, ctxPct: s.ctxPct });
         }
+        const prevPct = s.ctxPct;
         const pct = extractCtxPct(s.recent);
         if (pct != null) s.ctxPct = pct;
+        // Edge-trigger high-context only on the UPWARD crossing of the threshold
+        // (was below/unknown, now at/above) so it fires once, not every chunk.
+        if (s.ctxPct != null && (prevPct == null || prevPct < HIGH_CTX) && s.ctxPct >= HIGH_CTX) {
+            this._emit('highContext', id, { ctxPct: s.ctxPct });
+        }
         // Usage-limit banner → remember when it lifts; optionally schedule an
         // automatic resume nudge shortly after the reset time.
         const lm = strip(s.recent).slice(-1000).match(LIMIT_RE);
@@ -189,6 +264,7 @@ class SessionManager {
             const resetAt = nextOccurrence(+lm[1], +(lm[2] || 0), lm[3]);
             if (!s.limit || s.limit.resetAt !== resetAt) {
                 s.limit = { resetAt, label: lm[0].slice(0, 120) };
+                this._emit('limited', id, { detail: s.limit.label });
                 if (this.state.autoResume) {
                     this.schedule(id, resetAt + 2 * 60_000, this.state.autoResumeText);
                 }
@@ -196,12 +272,108 @@ class SessionManager {
         }
     }
 
+    // ── Event ring internals ────────────────────────────────────────────────
+    // Push an event, evict beyond the cap, then synchronously wake any parked
+    // long-poll waiters whose filter now matches. Node's single thread means
+    // total ordering with no lock. Returns the event.
+    _emit(kind, id, extra = {}) {
+        const mgr = this.session.tabMgr;
+        const tab = mgr && mgr.get(id);
+        const e = {
+            seq: ++this._seq,
+            ts: Date.now(),
+            kind,
+            id,
+            title: (tab && tab.title) || (id ? `tab ${id}` : ''),
+            from: extra.from != null ? extra.from : null,
+            to: extra.to != null ? extra.to : null,
+            ctxPct: extra.ctxPct != null ? extra.ctxPct : null,
+            detail: extra.detail != null ? extra.detail : null,
+        };
+        this._events.push(e);
+        if (this._events.length > EVENT_CAP) this._events.splice(0, this._events.length - EVENT_CAP);
+        this._drainWaiters();
+        return e;
+    }
+
+    _drainWaiters() {
+        if (!this._waiters.size) return;
+        for (const w of Array.from(this._waiters)) {
+            let m = null;
+            try { m = this._eventsSince(w.cursor, w.filter); } catch (_) { m = null; }
+            if (m && m.events.length) {
+                this._waiters.delete(w);
+                clearTimeout(w.timer);
+                w.resolve(m);
+            }
+        }
+    }
+
+    // Events strictly after `cursor` passing `filter`. `dropped` reports how
+    // many seqs below the cursor were already evicted (so a long-asleep watcher
+    // knows to reconcile via list). A cursor above head means the ring was reset
+    // under the watcher (daemon restart) → one synthetic 'daemon-restart' event.
+    // Returned cursor is always the current head: every event up to head has
+    // been examined, so filtered-out events are never re-scanned next call.
+    _eventsSince(cursor, filter) {
+        const head = this._seq;
+        if (cursor != null && cursor > head) {
+            return {
+                events: [{ seq: head, ts: Date.now(), kind: 'daemon-restart', id: 0, title: '', from: null, to: null, ctxPct: null, detail: 'event ring reset — reconcile via list' }],
+                cursor: head, dropped: 0,
+            };
+        }
+        const floor = this._events.length ? this._events[0].seq : head;
+        let dropped = 0;
+        if (cursor != null && cursor + 1 < floor) dropped = floor - 1 - cursor;
+        const out = [];
+        for (const e of this._events) {
+            if (cursor != null && e.seq <= cursor) continue;
+            if (filter && !filter(e)) continue;
+            out.push(e);
+        }
+        return { events: out, cursor: head, dropped };
+    }
+
+    // Time-derived 'stuck' is not a feed transition — swept from the 3s tick.
+    // One event per stuck episode via the latch (cleared when the tab leaves
+    // 'working' in feed()).
+    emitStuckSweep() {
+        const mgr = this.session.tabMgr;
+        if (!mgr) return;
+        const now = Date.now();
+        for (const id of mgr.order) {
+            const s = this.tabs.get(id);
+            if (!s) continue;
+            const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS;
+            if (stuck && !this._stuckEmitted.get(id)) {
+                this._stuckEmitted.set(id, true);
+                this._emit('stuck', id, { ctxPct: s.ctxPct });
+            } else if (!stuck) {
+                // Output resumed (or left 'working') → re-arm so the NEXT stall
+                // fires a fresh wakeup, even within one continuous 'working' run.
+                // (lastOutputAt resets on every feed(), so !stuck flips back true
+                // the first sweep after output resumes.) This makes the latch
+                // episode-per-stall, not episode-per-working-run.
+                this._stuckEmitted.delete(id);
+            }
+        }
+    }
+
+    // Called from the TabManager onExit path (index.js): emit a clean 'exited'
+    // event with the tab's last status, then forget its state.
+    noteExit(id) {
+        const prev = this.tabs.get(id);
+        this._emit('exited', id, { from: prev ? prev.status : null });
+        this.forget(id);
+    }
+
     // Clients (desktop/mobile) can report an authoritative ctx reading.
     reportCtx(id, pct) {
         if (Number.isFinite(pct)) this._state(id).ctxPct = Math.min(100, Math.max(0, Math.round(pct)));
     }
 
-    forget(id) { this.tabs.delete(id); }
+    forget(id) { this.tabs.delete(id); this._stuckEmitted.delete(id); }
 
     // Build the supervisor view of every live tab.
     snapshot() {
@@ -298,6 +470,35 @@ function mount(app, requireAuthed, sessions) {
         const man = ensure(s);
         const body = req.body || {};
         const action = String(body.action || '');
+        // Resolve a target selector → tab ids. Accepts a number, a numeric
+        // array, 'all', or a signal name (working/attention/stuck/idle/done/
+        // highContext/limited) matched against the live snapshot flags.
+        const resolveTargets = (sel) => {
+            const snap = man.snapshot();
+            const byId = new Map(snap.sessions.map(x => [x.id, x]));
+            if (Array.isArray(sel)) return sel.map(Number).filter(n => byId.has(n));
+            if (typeof sel === 'number' || /^\d+$/.test(String(sel))) {
+                return byId.has(Number(sel)) ? [Number(sel)] : [];
+            }
+            if (sel === 'all') return snap.sessions.map(x => x.id);
+            const flag = {
+                working: x => x.status === 'working',
+                attention: x => x.attention,
+                stuck: x => x.stuck,
+                idle: x => x.idle,
+                done: x => x.status === 'done',
+                highContext: x => x.highContext,
+                limited: x => x.limited,
+            }[String(sel)];
+            return flag ? snap.sessions.filter(flag).map(x => x.id) : [];
+        };
+        // Build a manager-event filter from kinds[] + self-hide (so a manager
+        // never wakes on its own tab's output).
+        const eventFilter = (b) => {
+            const self = b.self != null ? Number(b.self) : null;
+            const kinds = Array.isArray(b.kinds) && b.kinds.length ? new Set(b.kinds.map(String)) : null;
+            return (e) => (self == null || e.id !== self) && (!kinds || kinds.has(e.kind));
+        };
         try {
             if (action === 'list') {
                 return res.json({ ok: true, ...man.snapshot() });
@@ -318,14 +519,15 @@ function mount(app, requireAuthed, sessions) {
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
                 const text = String(body.text || '');
                 const submit = body.submit !== false;   // default: press Enter
-                tab.write(text + (submit ? '\r' : ''));
-                return res.json({ ok: true, id, sent: text.length });
+                if (submit) submitToTab(tab, text);      // reliable split-write
+                else { try { tab.write(text); } catch (_) {} }
+                return res.json({ ok: true, id, sent: text.length, submitted: submit });
             }
             if (action === 'compact') {
                 const id = Number(body.id);
                 const tab = mgr.get(id);
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
-                tab.write('/compact\r');
+                submitToTab(tab, '/compact');
                 return res.json({ ok: true, id, compacted: true });
             }
             // schedule: queue text to be typed into tab(s) at a future time.
@@ -367,6 +569,156 @@ function mount(app, requireAuthed, sessions) {
                 man._saveState();
                 return res.json({ ok: true, autoResume: man.state.autoResume, autoResumeText: man.state.autoResumeText });
             }
+
+            // ── Manager-agent: event triggers ───────────────────────────────
+            // watch: BLOCKING long-poll. Returns matching events with seq>cursor
+            // immediately, else parks the response until one is emitted or the
+            // (clamped) timeout fires a heartbeat. First call with no cursor →
+            // start from 'now' (no replay storm); pass cursor:0 to drain backlog.
+            if (action === 'watch') {
+                const cursor = (body.cursor === undefined || body.cursor === null) ? null : Number(body.cursor);
+                const filter = eventFilter(body);
+                if (cursor == null) {
+                    return res.json({ ok: true, cursor: man._seq, events: [], dropped: 0, timedOut: false, now: Date.now() });
+                }
+                const immediate = man._eventsSince(cursor, filter);
+                if (immediate.events.length) {
+                    return res.json({ ok: true, cursor: immediate.cursor, events: immediate.events, dropped: immediate.dropped, timedOut: false, now: Date.now() });
+                }
+                let timeoutMs = Number(body.timeoutMs);
+                if (!Number.isFinite(timeoutMs)) timeoutMs = 25000;
+                timeoutMs = Math.max(1000, Math.min(55000, timeoutMs));
+                const waiter = {
+                    cursor, filter, timer: null,
+                    resolve: (m) => { if (res.headersSent) return; res.json({ ok: true, cursor: m.cursor, events: m.events, dropped: m.dropped, timedOut: false, now: Date.now() }); },
+                };
+                waiter.timer = setTimeout(() => {
+                    man._waiters.delete(waiter);
+                    if (res.headersSent) return;
+                    res.json({ ok: true, cursor, events: [], dropped: 0, timedOut: true, now: Date.now() });
+                }, timeoutMs);
+                if (waiter.timer.unref) waiter.timer.unref();
+                res.on('close', () => { man._waiters.delete(waiter); clearTimeout(waiter.timer); });
+                man._waiters.add(waiter);
+                return; // response deferred (long-poll)
+            }
+            // events: NON-blocking instant drain (startup reconciliation).
+            if (action === 'events') {
+                const since = body.since != null ? Number(body.since) : null;
+                const r = man._eventsSince(since, eventFilter(body));
+                let events = r.events;
+                const limit = Math.max(1, Math.min(500, Number(body.limit) || 500));
+                if (events.length > limit) events = events.slice(-limit);
+                return res.json({ ok: true, cursor: r.cursor, events, dropped: r.dropped, now: Date.now() });
+            }
+            // whoami: identity probe for bootstrap — echoes the caller's own tab.
+            if (action === 'whoami') {
+                const self = body.self != null ? Number(body.self) : null;
+                let title = null, status = null;
+                if (self != null) {
+                    const tab = mgr.get(self);
+                    if (tab) { title = tab.title; status = man._state(self).status; }
+                }
+                return res.json({ ok: true, self, title, status, cursor: man._seq });
+            }
+
+            // ── Manager-agent: mass / individual commands + Claude controls ──
+            // goal: fan a desire/control out to one tab or a cohort. verb picks
+            // the line: goal→/goal, btw→/btw, clear→/clear, continue/resume→
+            // claude relaunch, raw→verbatim. Excludes the caller's own tab.
+            if (action === 'goal') {
+                const self = body.self != null ? Number(body.self) : null;
+                const verb = String(body.verb || 'goal');
+                const text = String(body.text || '');
+                let ids = resolveTargets(body.id);
+                if (self != null) ids = ids.filter(x => x !== self);
+                const buildLine = (tab) => {
+                    switch (verb) {
+                        case 'goal': return '/goal ' + text;
+                        case 'btw': return '/btw ' + text;
+                        case 'clear': return '/clear';
+                        case 'continue': return 'claude --continue';
+                        case 'resume': {
+                            let sid = null;
+                            try { const hit = claudeSessions.latestSessionByCwd(72).get(tab.cwd); if (hit) sid = hit.sessionId; } catch (_) {}
+                            return sid ? `claude --resume ${sid} || claude --continue` : 'claude --continue';
+                        }
+                        case 'raw': default: return text;
+                    }
+                };
+                const targets = [];
+                ids.forEach((id, i) => {
+                    const tab = mgr.get(id);
+                    if (!tab || tab.exited) { targets.push({ id, ok: false, error: 'no live tab' }); return; }
+                    const line = buildLine(tab);
+                    const delay = i * 120; // stagger so N TUIs don't cold-start at once
+                    if (delay) { const tm = setTimeout(() => submitToTab(tab, line), delay); if (tm.unref) tm.unref(); }
+                    else submitToTab(tab, line);
+                    targets.push({ id, line, ok: true });
+                });
+                return res.json({ ok: true, verb, count: targets.filter(t => t.ok).length, targets });
+            }
+            // broadcast: fleet-wide plain-text nudge to a cohort (excludes self).
+            if (action === 'broadcast') {
+                const self = body.self != null ? Number(body.self) : null;
+                const text = String(body.text || '');
+                const submit = body.submit !== false;
+                let ids = resolveTargets(body.to);
+                if (self != null) ids = ids.filter(x => x !== self);
+                const hit = [];
+                ids.forEach((id, i) => {
+                    const tab = mgr.get(id);
+                    if (!tab || tab.exited) return;
+                    const fire = () => { if (submit) submitToTab(tab, text); else { try { tab.write(text); } catch (_) {} } };
+                    const delay = i * 120;
+                    if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); } else fire();
+                    hit.push(id);
+                });
+                return res.json({ ok: true, to: body.to, count: hit.length, ids: hit });
+            }
+
+            // ── Manager-agent: lifecycle ────────────────────────────────────
+            // spawn: open a new tab and (optionally) cold-start/resume a Claude
+            // agent in it, with the same env a human tab gets.
+            if (action === 'spawn') {
+                const cwd = (typeof body.cwd === 'string' && body.cwd && fs.existsSync(body.cwd)) ? body.cwd : undefined;
+                const title = (typeof body.title === 'string' && body.title) ? body.title.slice(0, 64) : undefined;
+                const wantClaude = body.claude !== false;
+                const resume = body.resume !== false;
+                const model = typeof body.model === 'string' ? body.model : '';
+                const goalText = typeof body.goal === 'string' ? body.goal : '';
+                let tab;
+                try { tab = mgr.open({ title, cwd, env: envStore.getEnvForShell(), silent: false }); }
+                catch (e) { return res.status(500).json({ ok: false, error: (e && e.message) || 'spawn failed' }); }
+                if (wantClaude) {
+                    const tm = setTimeout(() => {
+                        try { launchClaude(tab, tab.cwd, { resume, model }); } catch (_) {}
+                        if (goalText) { const g = setTimeout(() => submitToTab(tab, '/goal ' + goalText), 3000); if (g.unref) g.unref(); }
+                    }, 1200); // let the fresh shell print its prompt first
+                    if (tm.unref) tm.unref();
+                }
+                man._emit('spawned', tab.id, { detail: cwd || null });
+                return res.json({ ok: true, id: tab.id, title: tab.title, cwd: tab.cwd, claudeLaunched: wantClaude });
+            }
+            // stop: kill a tab/agent. Refuses the caller's own tab.
+            if (action === 'stop') {
+                const id = Number(body.id);
+                const self = body.self != null ? Number(body.self) : null;
+                if (self != null && id === self) return res.status(400).json({ ok: false, error: 'refusing to stop your own tab' });
+                const tab = mgr.get(id);
+                if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
+                const wasStatus = man._state(id).status;
+                mgr.close(id); // onExit → noteExit() emits 'exited' + forgets
+                return res.json({ ok: true, id, closed: true, wasStatus });
+            }
+            // interrupt: send Ctrl-C (no Enter) to unwedge a stuck agent.
+            if (action === 'interrupt') {
+                const id = Number(body.id);
+                const tab = mgr.get(id);
+                if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
+                try { tab.write('\x03'); } catch (_) {}
+                return res.json({ ok: true, id, interrupted: true });
+            }
             return res.status(400).json({ ok: false, error: 'unknown action: ' + action });
         } catch (err) {
             return res.status(500).json({ ok: false, error: (err && err.message) || 'failed' });
@@ -374,4 +726,4 @@ function mount(app, requireAuthed, sessions) {
     });
 }
 
-module.exports = { SessionManager, ensure, mount, classifyAgent, extractCtxPct };
+module.exports = { SessionManager, ensure, mount, classifyAgent, extractCtxPct, launchClaude, submitToTab };

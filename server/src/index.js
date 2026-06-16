@@ -446,7 +446,14 @@ function onWsConnect(ws, session, req) {
                 }));
                 tabPersist.save(session.tabMgr);
             },
-            onExit: (tabId, code) => { try { agentBrowser.teardown(tabId); } catch (_) {} session.send(frame(MSG.TERM_EXIT, { id: tabId, code })); },
+            onExit: (tabId, code) => {
+                try { agentBrowser.teardown(tabId); } catch (_) {}
+                // Emit a clean 'exited' manager event + forget stale tab state
+                // (status, stuck latch). forget() was never called before — a
+                // latent leak the event/stuck machinery would otherwise inherit.
+                try { sessionManager.ensure(session).noteExit(tabId); } catch (_) {}
+                session.send(frame(MSG.TERM_EXIT, { id: tabId, code }));
+            },
         });
 
         // Periodic cwd poll: catches directory changes from running programs
@@ -461,7 +468,11 @@ function onWsConnect(ws, session, req) {
         // Supervisor tick: refresh stuck/idle derivations and push a MANAGER
         // snapshot to the dashboard. Always-on (independent of connected clients).
         session._managerInterval = setInterval(() => {
-            try { sessionManager.ensure(session).broadcast(); } catch (_) {}
+            try {
+                const m = sessionManager.ensure(session);
+                m.emitStuckSweep();   // time-derived 'stuck' → manager event
+                m.broadcast();
+            } catch (_) {}
         }, 3000);
         if (session._managerInterval.unref) session._managerInterval.unref();
 
@@ -625,8 +636,11 @@ function scheduleAutoResume(restoredTabs) {
             const wait = n * 1500; // stagger cold-starts
             n++;
             setTimeout(() => {
-                // tab.write is a no-op if the PTY already exited.
-                try { tab.write(`claude --resume ${hit.sessionId} || claude --continue\r`); } catch (_) {}
+                // Shared launch helper: reliable split-write submit + the same
+                // resume-vs-fresh chain the manager's `spawn` action uses, so
+                // boot-restore and agent-spawn can't drift apart. No-op if the
+                // PTY already exited.
+                try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId: hit.sessionId, coldFallback: false }); } catch (_) {}
             }, wait);
         }
         if (n) dbg('auto-resume', `armed ${n}/${restoredTabs.length} restored tab(s)`);

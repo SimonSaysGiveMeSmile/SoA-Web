@@ -32,7 +32,7 @@ function base() {
     return 'http://127.0.0.1:' + (process.env.SOA_WEB_PORT || '7332');
 }
 
-function post(body) {
+function post(body, opts = {}) {
     return new Promise((resolve, reject) => {
         const data = JSON.stringify(body);
         const u = new URL(base() + '/api/sessions');
@@ -44,8 +44,47 @@ function post(body) {
             res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve({ ok: false, raw: b }); } });
         });
         req.on('error', reject);
+        // `watch` is a long-poll; hold the socket open past the server's
+        // heartbeat cap so we aren't cut off client-side mid-wait.
+        if (opts.timeoutMs) req.setTimeout(opts.timeoutMs, () => req.destroy(new Error('client timeout')));
         req.write(data); req.end();
     });
+}
+
+// ── Manager-agent helpers ────────────────────────────────────────────────────
+// The caller's own tab id (env-injected into every SoA shell). Forwarded as
+// `self` so a manager hides its own events and is excluded from cohort fan-outs.
+const SELF = process.env.SOA_WEB_TAB ? Number(process.env.SOA_WEB_TAB) : undefined;
+
+function argval(flag) { const i = process.argv.indexOf(flag); return i !== -1 ? process.argv[i + 1] : undefined; }
+function hasFlag(flag) { return process.argv.includes(flag); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Target selector: a number, a comma-list of numbers, or a cohort name.
+function cohort(arg) {
+    if (arg == null) return undefined;
+    if (/^\d+$/.test(arg)) return Number(arg);
+    if (/^\d+(,\d+)+$/.test(arg)) return arg.split(',').map(Number);
+    return arg; // all | working | attention | stuck | idle | done | highContext | limited
+}
+
+function stateDir() { return process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web'); }
+function cursorPath() {
+    const tab = process.env.SOA_WEB_TAB ? '-' + process.env.SOA_WEB_TAB : '';
+    return path.join(stateDir(), '.soa-mgr-cursor' + tab);
+}
+function readCursor() { try { const v = Number(fs.readFileSync(cursorPath(), 'utf8').trim()); return Number.isFinite(v) ? v : null; } catch (_) { return null; } }
+function writeCursor(v) { try { fs.mkdirSync(path.dirname(cursorPath()), { recursive: true }); fs.writeFileSync(cursorPath(), String(v)); } catch (_) {} }
+
+// One human-readable line per event: `[ev 142] #3 "api" attention (was working) ctx 41%`
+function renderEvent(e) {
+    const parts = [`[ev ${e.seq}]`, `#${e.id}`];
+    if (e.title) parts.push(`"${e.title}"`);
+    parts.push(e.kind);
+    if (e.from && e.to) parts.push(`(was ${e.from})`);
+    if (e.ctxPct != null) parts.push(`ctx ${e.ctxPct}%`);
+    if (e.detail) parts.push(`— ${e.detail}`);
+    return parts.join(' ');
 }
 
 function fmtList(snap) {
@@ -127,9 +166,134 @@ function fmtList(snap) {
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
+        // ── Manager-agent verbs ──────────────────────────────────────────────
+        // whoami — confirm the manager's own tab id/title/status + head cursor.
+        if (cmd === 'whoami') {
+            const r = await post({ action: 'whoami', self: SELF });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // events — non-blocking drain (startup reconciliation before watch).
+        if (cmd === 'events') {
+            const since = argval('--since') != null ? Number(argval('--since')) : undefined;
+            const kinds = argval('--kinds') ? argval('--kinds').split(',').map(s => s.trim()).filter(Boolean) : undefined;
+            const r = await post({ action: 'events', since, kinds, self: SELF });
+            if (r.ok) {
+                (r.events || []).forEach(e => console.log(renderEvent(e)));
+                if (!r.events || !r.events.length) console.log('(no events)');
+                if (r.dropped) console.log(`  … ${r.dropped} earlier event(s) dropped — run \`soa-sessions list\` to reconcile`);
+            } else console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // watch — BLOCKING long-poll loop. React, don't poll: this blocks inside
+        // the HTTP request between events (≈0 CPU). Persists its cursor so a
+        // re-run resumes where it left off. --once: block until events then exit.
+        if (cmd === 'watch') {
+            const kindsArg = argval('--kinds');
+            const kinds = kindsArg ? kindsArg.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+            const timeoutS = Number(argval('--timeout')) || 25;
+            const once = hasFlag('--once');
+            const raw = hasFlag('--raw');
+            let cursor = hasFlag('--catchup') ? 0 : readCursor();
+            let lastSeq = -1;
+            for (;;) {
+                let r;
+                try {
+                    r = await post(
+                        { action: 'watch', cursor, kinds, timeoutMs: timeoutS * 1000, self: SELF },
+                        { timeoutMs: (timeoutS + 30) * 1000 },
+                    );
+                } catch (_) { await sleep(1000); continue; }   // daemon bounce → retry
+                if (!r || !r.ok) { await sleep(1000); continue; }
+                if (typeof r.cursor === 'number') { cursor = r.cursor; writeCursor(cursor); }
+                const evs = r.events || [];
+                for (const e of evs) {
+                    // Dedup on the server's unique monotonic seq — NOT (id,kind),
+                    // which would collapse a genuinely-new second 'attention' from
+                    // the same tab (the intervening transition is filtered out by
+                    // --kinds and never seen here). seq guards only re-delivery.
+                    if (!raw && e.seq <= lastSeq) continue;
+                    lastSeq = e.seq;
+                    console.log(renderEvent(e));
+                }
+                if (r.dropped) console.log(`  … ${r.dropped} earlier event(s) dropped — run \`soa-sessions list\` to reconcile`);
+                // --once = exactly one *completed* long-poll cycle then exit
+                // (events OR a heartbeat). The instant no-cursor priming reply
+                // (timedOut:false, no events) doesn't count — loop once more so
+                // a fresh watcher actually waits for the next event.
+                if (once && (evs.length || r.timedOut)) break;
+            }
+            process.exit(0);
+        }
+        // goal / btw — fan a per-session goal (or aside) to one tab or a cohort.
+        if (cmd === 'goal' || cmd === 'btw') {
+            const id = cohort(rest[0]);
+            const text = rest.slice(1).join(' ');
+            const r = await post({ action: 'goal', verb: cmd, id, text, self: SELF });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // clear — send /clear to a tab or cohort.
+        if (cmd === 'clear') {
+            const r = await post({ action: 'goal', verb: 'clear', id: cohort(rest[0]), self: SELF });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // resume — type 'claude --resume <id> || claude --continue' into tab(s).
+        if (cmd === 'resume') {
+            const r = await post({ action: 'goal', verb: 'resume', id: cohort(rest[0]), self: SELF });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // broadcast — fleet-wide plain-text nudge to a cohort.
+        if (cmd === 'broadcast' || cmd === 'bcast') {
+            const to = cohort(rest[0]);
+            const text = rest.slice(1).join(' ');
+            const r = await post({ action: 'broadcast', to, text, self: SELF });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // spawn — open a new tab + start/resume a Claude agent in it.
+        if (cmd === 'spawn') {
+            const flagsWithVal = new Set(['--title', '--goal', '--model']);
+            const positional = [];
+            for (let i = 0; i < rest.length; i++) {
+                const a = rest[i];
+                if (a.startsWith('--')) { if (flagsWithVal.has(a)) i++; continue; }
+                positional.push(a);
+            }
+            const r = await post({
+                action: 'spawn',
+                cwd: positional[0],
+                title: argval('--title'),
+                resume: !hasFlag('--no-resume'),
+                claude: !hasFlag('--no-claude'),
+                goal: argval('--goal'),
+                model: argval('--model'),
+            });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // stop — kill a tab/agent (refuses your own tab).
+        if (cmd === 'stop') {
+            const r = await post({ action: 'stop', id: Number(rest[0]), self: SELF });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // interrupt — send Ctrl-C (no Enter) to unwedge a stuck agent.
+        if (cmd === 'interrupt') {
+            const r = await post({ action: 'interrupt', id: Number(rest[0]) });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
         console.error('usage: soa-sessions list | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>\n' +
                       '       schedule <id|all|limited> <+15m|2:30am|epochMs> [text] | resume-all [when] [text]\n' +
-                      '       schedules | unschedule <scheduleId> | config autoResume on|off | config text <text>');
+                      '       schedules | unschedule <scheduleId> | config autoResume on|off | config text <text>\n' +
+                      '   manager-agent:\n' +
+                      '       whoami | events [--since N] [--kinds a,b] | watch [--kinds a,b] [--timeout 25] [--once] [--catchup] [--raw]\n' +
+                      '       goal <id|all|attention|stuck|idle|done|highContext|limited> <text> | btw <id|cohort> <note> | clear <id|cohort>\n' +
+                      '       resume <id|all|limited> | broadcast <all|working|attention|idle|limited> <text>\n' +
+                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] | stop <id> | interrupt <id>');
         process.exit(1);
     } catch (e) {
         console.error('soa-sessions error:', e.message, '(is the SoA server running?)');
