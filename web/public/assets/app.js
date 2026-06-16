@@ -860,7 +860,7 @@ class Shell {
             // apart. Updated in place by _updateTabPreview (no row rebuild).
             const sub = el('span', { class: 'tab-sub', text: this._tabPreview(t.id) });
             const main = el('span', { class: 'tab-main' }, [label, sub]);
-            const dot = this._makePie(this._ctxPct.get(t.id) || 0, t.id);
+            const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
                 this._requestCloseTab(t.id);
@@ -899,23 +899,29 @@ class Shell {
         return pct >= 80 ? '#ff5555' : pct >= 50 ? '#f1c40f' : '#2ecc71';
     }
 
-    _makePie(pct, tabId) {
+    // Context as a vertical fuel-gauge: a thin full-height bar that fills from
+    // the bottom by consumption %, colored green→yellow→red. Narrower than the
+    // old circular pie (reclaims tab-row width) and uses the full tab height, so
+    // the reading is legible at a glance instead of a 10px dot.
+    _makeCtxBar(pct, tabId) {
         const color = this._ctxColor(pct);
         const span = el('span', {
-            class: 'ctx-pie',
+            class: 'ctx-bar',
             title: pct > 0 ? `Context: ${pct}%\nClick for details` : 'Context: —',
             onclick: (e) => { e.stopPropagation(); this._showCtxModal(tabId, pct); }
         });
+        // Fill the bottom pct% with the health color; hard stop so it reads as a
+        // bar level rather than a fade. Empty → just the faint track.
         span.style.background = pct <= 0
             ? 'rgba(255,255,255,0.15)'
-            : `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
+            : `linear-gradient(to top, ${color} ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
         return span;
     }
 
-    _updateCtxPie(id, pct) {
-        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-pie`);
+    _updateCtxBar(id, pct) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-bar`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
-        node.replaceWith(this._makePie(pct, id));
+        node.replaceWith(this._makeCtxBar(pct, id));
     }
 
     // One-line peek at what a tab last emitted, shown as the tab's dim subtitle.
@@ -996,7 +1002,7 @@ class Shell {
         // Remove any existing popover
         document.getElementById('ctx-popover')?.remove();
 
-        const pie = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(tabId))}"] .ctx-pie`);
+        const pie = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(tabId))}"] .ctx-bar`);
         if (!pie) return;
 
         const bar = pct > 0
@@ -1039,7 +1045,7 @@ class Shell {
                     const pct = this._extractCtxPct(rt);
                     if (pct !== null && pct !== this._ctxPct.get(id)) {
                         this._ctxPct.set(id, pct);
-                        this._updateCtxPie(id, pct);
+                        this._updateCtxBar(id, pct);
                         if (this.viewMode === 'tiles') {
                             const tnode = this._tilesGridEl && this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
                             if (tnode) this._paintTilePie(tnode, pct);

@@ -137,12 +137,16 @@ html, body {
   border-color: var(--soa-accent);
   box-shadow: 0 0 14px rgba(170,207,209,0.35), inset 0 0 0 1px rgba(255,255,255,0.06);
 }
-/* Context pie chart — replaces the old .dot indicator */
-.tab .ctx-pie {
-  flex-shrink: 0; width: 10px; height: 10px; border-radius: 50%;
-  opacity: 0.8; transition: background 0.3s; cursor: pointer;
+/* Context vertical bar — a thin full-height fuel-gauge per tab (replaces the
+   circular pie). align-self:stretch makes it span the tab's height (all tabs are
+   equal height via the row's stretch), so it fills bottom→top by context % and
+   uses far more of the available area than a 10px dot while taking LESS row
+   width. */
+.tab .ctx-bar {
+  flex-shrink: 0; width: 5px; align-self: stretch; min-height: 14px;
+  border-radius: 2px; opacity: 0.85; transition: background 0.3s; cursor: pointer;
 }
-.tab.active .ctx-pie { opacity: 1; }
+.tab.active .ctx-bar { opacity: 1; }
 
 /* Two-line tab: title on top, a dim live peek at the tab's last output line
    underneath so default / near-identical titles stay tellable apart. The row
@@ -226,9 +230,9 @@ html, body {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.55; }
 }
-.tab[data-agent="attention"] .ctx-pie { animation: soa-agent-pulse 1.1s ease-in-out infinite; }
-.tab[data-agent="done"] .ctx-pie { animation: soa-agent-pulse 2s ease-in-out infinite; }
-.tab[data-agent="error"] .ctx-pie { animation: soa-agent-pulse 0.7s ease-in-out infinite; }
+.tab[data-agent="attention"] .ctx-bar { animation: soa-agent-pulse 1.1s ease-in-out infinite; }
+.tab[data-agent="done"] .ctx-bar { animation: soa-agent-pulse 2s ease-in-out infinite; }
+.tab[data-agent="error"] .ctx-bar { animation: soa-agent-pulse 0.7s ease-in-out infinite; }
 .tab .x {
   width: 14px; height: 14px; display: grid; place-items: center;
   font-size: 12px; opacity: 0.55; margin-left: 2px;
