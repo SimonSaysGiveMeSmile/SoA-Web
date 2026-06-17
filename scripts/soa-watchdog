@@ -86,7 +86,10 @@ check_tunnel() {
     local newpid=$!
     local newurl=""
     for i in $(seq 1 20); do
-        newurl="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$cflog" 2>/dev/null | head -1)"
+        # -a: cloudflared writes control bytes to the log, so without it BSD grep
+        # reports "Binary file … matches" instead of the URL — that garbage string
+        # was landing in tunnel.json and breaking the mobile bridge re-pair.
+        newurl="$(grep -aoE 'https://[a-z0-9-]+\.trycloudflare\.com' "$cflog" 2>/dev/null | head -1)"
         [ -n "$newurl" ] && break
         sleep 2
     done

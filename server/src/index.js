@@ -785,10 +785,14 @@ const heartbeat = setInterval(() => {
 }, 5000);
 if (heartbeat.unref) heartbeat.unref();
 
-// Persist scrollback to disk every 5 minutes so a server restart doesn't
-// lose the on-screen context. Metadata (titles, cwds) is already saved on
-// every change; this captures the live PTY output for each tab.
-const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(5 * 60 * 1000), 10);
+// Persist scrollback to disk every 60s so even a *hard* crash (SIGKILL from
+// the watchdog's `kickstart -k`, OOM, panic — none of which run the graceful
+// shutdown flush below) loses at most ~1 min of on-screen context instead of
+// 5. Metadata (titles, cwds) is already saved on every change; this captures
+// the live PTY output — the actual session "memory" — for each tab. The write
+// is a capped (128 KiB/tab) atomic tmp+rename, ~a few MB total, so the more
+// frequent cadence is negligible I/O. Override with SOA_WEB_SCROLLBACK_FLUSH_MS.
+const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(60 * 1000), 10);
 // Flush only the session that actually owns tabs. Flushing every session
 // last-writer-wins into the same two files, so an empty tabMgr (e.g. a WS
 // client that bound while no session had tabs) iterated last would erase the
@@ -827,6 +831,37 @@ function shutdown(code = 0) {
 }
 process.on('SIGINT',  () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
+
+// Self-heal on an in-process crash. An uncaughtException / unhandledRejection
+// would otherwise tear the daemon down *without* running the flush above —
+// losing up to SCROLLBACK_FLUSH_MS of on-screen session memory — and leave no
+// trace of why it died. We can't safely keep serving from a corrupted state,
+// so on a detected crash we: (1) best-effort synchronous flush so the next
+// boot re-seeds every tab from what was on screen, (2) detach (not kill) the
+// tunnel so the same public URL survives the restart, (3) append the reason to
+// crash.log so the bounce is diagnosable, then (4) exit non-zero. launchd's
+// unconditional KeepAlive (with the soa-watchdog as backstop) restarts the
+// daemon in seconds, and tab/tunnel state is re-adopted on the way up.
+let _crashing = false;
+function crashFlush(kind, err) {
+    if (_crashing) { try { process.exit(1); } catch (_) {} return; } // never loop
+    _crashing = true;
+    try { clearInterval(scrollbackFlush); } catch (_) {}
+    try { clearInterval(heartbeat); } catch (_) {}
+    try {
+        const s = persistableSession();
+        if (s) tabPersist.saveAll(s.tabMgr);            // sync atomic tmp+rename
+    } catch (_) { /* already crashing — best effort */ }
+    try { pair.detach(); } catch (_) {}
+    try {
+        const line = `${new Date().toISOString()} ${kind}: ${(err && err.stack) || err}\n`;
+        fs.appendFileSync(path.join(STATE_DIR, 'logs', 'crash.log'), line);
+    } catch (_) {}
+    try { console.error(`SoA-Web ${kind} — flushed scrollback, exiting for supervised restart:`, err); } catch (_) {}
+    process.exit(1);
+}
+process.on('uncaughtException',  (err) => crashFlush('uncaughtException', err));
+process.on('unhandledRejection', (err) => crashFlush('unhandledRejection', err));
 
 function onListening() {
     activePort = server.address().port;
