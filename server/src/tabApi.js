@@ -6,6 +6,55 @@ const { MSG, frame } = require('./protocol');
 const tabPersist = require('./tabPersist');
 const envStore = require('./envStore');
 
+// ── Per-project icon (dashboard tile identification) ───────────────────────
+// If a project folder carries a recognizable icon/logo, the dashboard shows it
+// on that tab's tile so the fleet is scannable by sight, not just title. We
+// probe the project root plus a few conventional asset dirs in priority order
+// and serve the first match. Results — INCLUDING "no icon" (negative cache) —
+// are memoized per cwd so the tile grid never re-stats the disk on a repaint.
+const ICON_CANDIDATES = [
+    'icon.svg', 'icon.png', 'icon.webp', 'icon.jpg', 'icon.jpeg', 'icon.ico', 'icon.gif',
+    'logo.svg', 'logo.png', 'logo.webp', 'logo.jpg', 'logo.jpeg',
+    'favicon.svg', 'favicon.ico', 'favicon.png',
+    'app-icon.png', 'appicon.png', 'apple-touch-icon.png',
+    'public/favicon.ico', 'public/favicon.svg', 'public/favicon.png',
+    'public/icon.svg', 'public/icon.png', 'public/logo.svg', 'public/logo.png',
+    'public/apple-touch-icon.png',
+    'assets/icon.png', 'assets/icon.svg', 'assets/logo.png', 'assets/logo.svg',
+    'static/favicon.ico', 'static/icon.png', 'static/logo.png',
+    'src/favicon.ico', 'src/assets/logo.svg', 'src/assets/logo.png',
+    'web/public/favicon.ico', 'web/public/icon.png',
+    'assets/favicon.ico', 'assets/favicon.png',
+    'images/logo.png', 'images/icon.png', 'img/logo.png', 'img/icon.png',
+    'docs/logo.png', 'resources/icon.png',
+];
+const ICON_MIME = {
+    '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp',
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.ico': 'image/x-icon', '.gif': 'image/gif',
+};
+const _iconCache = new Map(); // cwd -> { file: string|null, at: number }
+const ICON_CACHE_MS = 60 * 1000;
+const ICON_MAX_BYTES = 2 * 1024 * 1024;
+
+function resolveProjectIcon(cwd) {
+    if (!cwd || typeof cwd !== 'string') return null;
+    const hit = _iconCache.get(cwd);
+    if (hit && (Date.now() - hit.at) < ICON_CACHE_MS) return hit.file;
+    let found = null;
+    for (const rel of ICON_CANDIDATES) {
+        const p = path.join(cwd, rel);
+        // Candidates are a fixed allowlist (no user input), but normalize anyway
+        // so nothing can resolve outside the project root.
+        if (p !== cwd && !p.startsWith(cwd + path.sep)) continue;
+        try {
+            const st = fs.statSync(p); // follows symlinks intentionally
+            if (st.isFile() && st.size > 0 && st.size <= ICON_MAX_BYTES) { found = p; break; }
+        } catch (_) { /* missing — try next candidate */ }
+    }
+    _iconCache.set(cwd, { file: found, at: Date.now() });
+    return found;
+}
+
 function mount(app, requireAuthed, sessions) {
     const router = express.Router();
 
@@ -70,6 +119,24 @@ function mount(app, requireAuthed, sessions) {
             },
             scrollback: tail,
         });
+    });
+
+    // Serve the project icon for a tab's cwd (or 404 if the folder has none).
+    // The dashboard renders <img src> against this and reveals it only on load,
+    // so a 404 is the normal, silent "this project has no icon" case.
+    router.get('/api/tabs/:id/icon', requireAuthed, (req, res) => {
+        const s = resolveSession(req);
+        if (!s) return res.status(404).end();
+        const id = parseInt(req.params.id, 10);
+        const tab = s.tabMgr.get(id);
+        if (!tab) return res.status(404).end();
+        const file = resolveProjectIcon(tab.cwd);
+        if (!file) return res.status(404).end();
+        const mime = ICON_MIME[path.extname(file).toLowerCase()];
+        if (!mime) return res.status(404).end();
+        res.type(mime);
+        res.set('Cache-Control', 'private, max-age=120');
+        res.sendFile(file, (err) => { if (err && !res.headersSent) res.status(404).end(); });
     });
 
     router.delete('/api/tabs/:id', requireAuthed, (req, res) => {

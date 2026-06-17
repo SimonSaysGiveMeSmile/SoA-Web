@@ -390,6 +390,17 @@ class Shell {
         // scanning the PTY stream because Ink re-renders in-place via cursor-up.
         this._ctxPollTimer = setInterval(() => this._pollCtxLines(), 500);
         this._tileElapsedTimer = setInterval(() => this._refreshTileElapsed(), 1000);
+        // Seed every tab's agent status + ctx% from the server supervisor —
+        // which classifies ALL tabs server-side from their PTY streams, not just
+        // the one on screen — so the fleet shows correct colours/context on load
+        // without opening each tab. Re-pulled on a slow cadence so unopened tabs
+        // stay live too; paused while the page is hidden. (Requirement: status
+        // loaded on startup, not tab-by-tab.)
+        this._serverStatusTimer = setInterval(() => { if (!document.hidden) this._pullServerStatus(); }, 4000);
+        this._statusSeeded = false;
+        // Request OS notification permission on the user's first interaction
+        // (some browsers require a gesture). Until granted, in-app toasts only.
+        this._armNotifications();
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -611,6 +622,8 @@ class Shell {
                     }
                 }
                 this._pollAgentStatus();
+                // Authoritative seed for every tab (incl. ones never opened).
+                this._pullServerStatus();
             }, 300);
         } else {
             // First connect with no existing tabs: this device is creating the
@@ -1280,6 +1293,50 @@ class Shell {
         }
     }
 
+    // Pull the server supervisor's view — status + ctx% for EVERY tab, derived
+    // from each PTY stream server-side — and apply it locally. This is what
+    // makes all tiles/tabs show correct status on startup instead of only the
+    // tabs you've opened. One authed in-memory GET; cheap to repeat.
+    async _pullServerStatus() {
+        let j;
+        try {
+            const r = await fetch('/api/manager', { credentials: 'same-origin', cache: 'no-store' });
+            if (!r.ok) return;
+            j = await r.json();
+        } catch (_) { return; }
+        if (!j || !Array.isArray(j.sessions)) return;
+        for (const sess of j.sessions) {
+            const id = sess.id;
+            const rt = this.tabs.get(id);
+            if (!rt) continue;
+            // The tab you're actively viewing is owned by live (sub-second)
+            // client-side detection — don't let the 4s pull fight it.
+            if (id === this.activeId && rt._opened && this.viewMode !== 'tiles') continue;
+            if (sess.status) this._setStatus(id, sess.status);
+            if (sess.ctxPct != null && sess.ctxPct !== this._ctxPct.get(id)) {
+                this._ctxPct.set(id, sess.ctxPct);
+                this._updateCtxBar(id, sess.ctxPct);
+                if (this.viewMode === 'tiles' && this._tilesGridEl) {
+                    const tnode = this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
+                    if (tnode) this._paintTilePie(tnode, sess.ctxPct);
+                }
+            }
+        }
+        this._statusSeeded = true;
+    }
+
+    // Ask for OS notification permission on the first user gesture (Safari and
+    // others reject requestPermission() without one). Non-intrusive: hooks the
+    // next pointerdown anywhere, once.
+    _armNotifications() {
+        if (typeof Notification === 'undefined' || Notification.permission !== 'default') return;
+        const ask = () => {
+            document.removeEventListener('pointerdown', ask);
+            try { Notification.requestPermission().catch(() => {}); } catch (_) {}
+        };
+        document.addEventListener('pointerdown', ask, { once: true });
+    }
+
     _getDetector() {
         return this._detector || (this._detector = {
             working: [
@@ -1803,20 +1860,21 @@ class Shell {
             const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);
             if (node) this._updateTileNode(node, id);
         }
-        if (status === 'attention' && prev !== 'attention') {
-            const tab = this.tabs.get(id);
-            const title = (tab && tab.title) || tr('tab.default', { id });
-            if (!this._attentionTimers) this._attentionTimers = new Map();
-            clearTimeout(this._attentionTimers.get(id));
-            this._attentionTimers.set(id, setTimeout(() => {
-                if (this._agentStatus.get(id) === 'attention') {
-                    this._notifyAttention(title);
-                }
-                this._attentionTimers.delete(id);
-            }, 2000));
-        } else if (status !== 'attention' && this._attentionTimers && this._attentionTimers.has(id)) {
-            clearTimeout(this._attentionTimers.get(id));
-            this._attentionTimers.delete(id);
+        // Notify on a *meaningful* status change (needs-input / finished / error).
+        // Never on the very first classification of a tab (prev === undefined):
+        // that's just the startup seed from the server supervisor and would fire
+        // a notification storm on load. Debounced so a brief working→done→working
+        // flicker stays quiet. Fires an OS-level notification (see _notifyStatus)
+        // when you're not already looking at that tab.
+        if (!this._statusTimers) this._statusTimers = new Map();
+        clearTimeout(this._statusTimers.get(id));
+        this._statusTimers.delete(id);
+        const meaningful = (status === 'attention' || status === 'done' || status === 'error');
+        if (meaningful && prev !== undefined && prev !== status) {
+            this._statusTimers.set(id, setTimeout(() => {
+                this._statusTimers.delete(id);
+                if (this._agentStatus.get(id) === status) this._notifyStatus(id, status);
+            }, status === 'attention' ? 2000 : 1200));
         }
         // Visual debug overlay — shows detected status on screen
         this._updateDebugOverlay(id, status, prev);
@@ -1839,22 +1897,43 @@ class Shell {
         overlay.innerHTML = entries.join(' | ') + `<br><span style="color:#888">last: tab${id} ${prev}→${status}</span>`;
     }
 
-    _notifyAttention(tabTitle) {
-        // Web Notification if permitted
-        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-            new Notification(`Tab ${tabTitle} needs your attention.`, { silent: true });
-        } else if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-            Notification.requestPermission().then(p => {
-                if (p === 'granted') new Notification(`Tab ${tabTitle} needs your attention.`, { silent: true });
+    // Route a meaningful status change to an OS notification (when you're not
+    // already looking at the tab) plus an in-app toast for the urgent ones.
+    _notifyStatus(id, status) {
+        const tab = this.tabs.get(id);
+        const title = (tab && tab.title) || tr('tab.default', { id });
+        const label = status === 'attention' ? 'needs your input'
+                    : status === 'error'     ? 'hit an error'
+                    :                          'finished — awaiting next prompt';
+        const msg = `${title} ${label}`;
+        // Skip the OS notification only when the window is focused AND this exact
+        // tab is the one on screen — anything else (backgrounded window, another
+        // tab open, tiles grid) means the user could miss it, so notify.
+        const focused = (typeof document.hasFocus === 'function') ? document.hasFocus() : !document.hidden;
+        const lookingRightAtIt = focused && this.activeId === id && this.viewMode !== 'tiles';
+        if (!lookingRightAtIt) this._osNotify(msg, id);
+        if (status === 'attention' || status === 'error') this._showStatusToast(msg);
+    }
+
+    // Fire an OS-level (browser) notification. tag+renotify so repeated alerts
+    // for the same tab replace rather than stack; click focuses + opens the tab.
+    _osNotify(body, id) {
+        if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+        try {
+            const n = new Notification('Son of Anton', {
+                body, tag: 'soa-tab-' + id, renotify: true, silent: false,
             });
-        }
-        // In-app toast as fallback / supplement
+            n.onclick = () => { try { window.focus(); } catch (_) {} this._activate(id); n.close(); };
+        } catch (_) {}
+    }
+
+    _showStatusToast(text) {
         const existing = document.getElementById('soa-agent-toast');
         if (existing) existing.remove();
         const toast = el('div', { id: 'soa-agent-toast', class: 'soa-toast soa-toast--agent', role: 'alert', 'aria-live': 'assertive' }, [
             el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '!' }),
             el('div', { class: 'soa-toast-body' }, [
-                el('p', { class: 'soa-toast-title', text: `Tab ${tabTitle} needs your attention.` }),
+                el('p', { class: 'soa-toast-title', text }),
             ]),
         ]);
         document.body.appendChild(toast);
@@ -2557,6 +2636,22 @@ class Shell {
         } catch (_) { return ''; }
     }
 
+    // Tile header: optional per-project icon + title. The icon is hidden until
+    // it actually loads — a 404 (project has no icon) removes the <img>, so
+    // icon-less tiles look exactly as before with no broken-image glyph.
+    _tileHead(id, title) {
+        const icon = el('img', {
+            class: 'tile-icon', alt: '', loading: 'lazy', decoding: 'async',
+            src: `/api/tabs/${id}/icon`,
+            onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
+            onerror: () => icon.remove(),
+        });
+        return el('div', { class: 'tile-head' }, [
+            icon,
+            el('span', { class: 'tile-title', text: title }),
+        ]);
+    }
+
     _createTileNode(id) {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || tr('tab.default', { id });
@@ -2588,7 +2683,7 @@ class Shell {
         }, [
             closeBtn,
             pie,
-            el('span', { class: 'tile-title', text: title }),
+            this._tileHead(id, title),
             el('span', { class: 'tile-status-line', text: statusLine }),
             el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
             el('pre', { class: 'tile-preview', text: tail }),
