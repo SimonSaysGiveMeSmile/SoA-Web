@@ -32,12 +32,20 @@ const ATTENTION = [
     /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
 ];
 
+// done = finished, waiting for the user (orange). Legacy boxed prompt + modern
+// Claude Code footer, matched whitespace-flexibly (\s*) so the cursor-positioned,
+// space-collapsed status line ("bypasspermissionson") still registers — else a
+// waiting agent falls through to the idle shell-prompt and shows blue.
 const DONE = [
     /╭─+╮/,
     /│\s*>\s*│/,
     /╰─+╯/,
     /│\s*>\s*$/m,
-    /BYPASS PERMISSIONS\s+ON/i,
+    /bypass\s*permissions\s*on/i,
+    /accept\s*edits\s*on/i,
+    /plan\s*mode\s*on/i,
+    /shift\s*\+?\s*tab\s*to\s*cycle/i,
+    /⏵⏵/,
 ];
 
 const SHELL_PROMPT = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[$#%]\s*$)/m;

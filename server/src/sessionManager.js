@@ -79,7 +79,12 @@ const ATTENTION = [
     /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
     /\bPermission\s+(?:required|needed)\b/i,
 ];
-const DONE = [/╭─+╮/, /│\s*>\s*│/, /╰─+╯/, /│\s*>\s*$/m, /BYPASS PERMISSIONS\s+ON/i];
+// done = agent finished its turn, idle at its input box, waiting for the user
+// (orange). Whitespace-flexible (\s*) so modern Claude Code's cursor-positioned
+// footer ("bypass permissions on" → "bypasspermissionson" after the strip) still
+// matches — otherwise a waiting agent reads as a plain idle shell. Keep in sync
+// with web/public/assets/app.js + web/public/m/agentDetect.js.
+const DONE = [/╭─+╮/, /│\s*>\s*│/, /╰─+╯/, /│\s*>\s*$/m, /bypass\s*permissions\s*on/i, /accept\s*edits\s*on/i, /plan\s*mode\s*on/i, /shift\s*\+?\s*tab\s*to\s*cycle/i, /⏵⏵/];
 const SHELL_PROMPT = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[$#%]\s*$)/m;
 
 function strip(s) {

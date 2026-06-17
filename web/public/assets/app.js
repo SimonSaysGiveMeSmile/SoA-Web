@@ -1214,14 +1214,25 @@ class Shell {
             }
         }
 
-        // Done signals — the boxed input prompt or bypass-mode idle
+        // Done signals — a Claude agent finished its turn and is idle at its
+        // input box, waiting for YOU (orange). Covers the legacy boxed prompt AND
+        // modern Claude Code, whose footer ("bypass permissions on" / "shift+tab
+        // to cycle" / mode line) is rendered with cursor-positioning codes that
+        // the ANSI strip collapses to NO spaces ("bypasspermissionson") — so we
+        // match whitespace-flexibly (\s*). Without this, a finished agent misses
+        // every done signal, the bare ❯ matches the shell-prompt rule below, and
+        // it wrongly reads as a plain idle shell (BLUE instead of orange).
         if (!next) {
             const donePatterns = [
                 /╭─+╮/,
                 /│\s*>\s*│/,
                 /╰─+╯/,
                 /│\s*>\s*$/m,
-                /BYPASS PERMISSIONS\s+ON/i,
+                /bypass\s*permissions\s*on/i,
+                /accept\s*edits\s*on/i,
+                /plan\s*mode\s*on/i,
+                /shift\s*\+?\s*tab\s*to\s*cycle/i,
+                /⏵⏵/,
             ];
             if (donePatterns.some(p => p.test(tail))) {
                 next = 'done';
@@ -1356,12 +1367,21 @@ class Shell {
                 /\bfetch failed\b/i,
                 /\boverloaded_error\b/i,
             ],
+            // done = finished, waiting for the user (orange). Legacy boxed prompt
+            // + modern Claude Code footer, matched whitespace-flexibly so the
+            // cursor-positioned (space-collapsed) status line still registers —
+            // else a waiting agent falls through to the idle shell-prompt rule
+            // and shows BLUE. Keep in sync with the stream detector above.
             done: [
                 /╭─+╮[\s\S]*│\s*>/,
                 /╰─+╯/,
                 /│\s*>\s*│/,
                 /│\s*>\s*$/m,
-                /BYPASS PERMISSIONS\s+ON/i,
+                /bypass\s*permissions\s*on/i,
+                /accept\s*edits\s*on/i,
+                /plan\s*mode\s*on/i,
+                /shift\s*\+?\s*tab\s*to\s*cycle/i,
+                /⏵⏵/,
             ],
             // See the stream detector above: attention is narrow — only genuine
             // choice/permission prompts. Idle placeholders and prose that just

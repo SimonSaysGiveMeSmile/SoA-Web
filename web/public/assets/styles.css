@@ -143,8 +143,15 @@ html, body {
    uses far more of the available area than a 10px dot while taking LESS row
    width. */
 .tab .ctx-bar {
-  flex-shrink: 0; width: 5px; align-self: stretch; min-height: 14px;
-  border-radius: 2px; opacity: 0.85; transition: background 0.3s; cursor: pointer;
+  flex-shrink: 0; width: 6px; align-self: stretch; min-height: 14px;
+  margin: 3px 0;                 /* inset from the tab edges so it reads as a contained pill */
+  border-radius: 3px; opacity: 0.9; transition: background 0.3s; cursor: pointer;
+  /* Pill outline — keeps the thin gauge legible on ANY tab background: a dark
+     inset edge so it doesn't wash out against the active tab's light accent fill,
+     plus a faint light halo so it stays visible on the dark inactive tabs. */
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.28);
 }
 .tab.active .ctx-bar { opacity: 1; }
 
