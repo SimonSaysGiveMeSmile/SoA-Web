@@ -2493,7 +2493,7 @@ class Shell {
         const input = el('input', { class: 'bcast-input', type: 'text', spellcheck: 'false',
             placeholder: 'Command to send to the selected terminals…' });
         const enterChk = el('input', { type: 'checkbox', id: 'bcast-enter', checked: 'checked' });
-        const enterLbl = el('label', { class: 'bcast-chk', for: 'bcast-enter' }, [enterChk, ' press Enter after']);
+        const enterLbl = el('label', { class: 'bcast-chk', for: 'bcast-enter' }, [enterChk, ' auto-press Enter to submit']);
 
         // Briefly highlight the selector when the user tries to send with nothing
         // selected — cheaper than a disabled-button explanation.
@@ -2531,13 +2531,18 @@ class Shell {
             if (!text.trim() && !enterChk.checked) { input.focus(); return; }
             const targets = [...selected];
             persistSel();
-            // Send the command, THEN the Enter as a SEPARATE keystroke. Claude
-            // Code's TUI intermittently treats a command glued to its CR in one
-            // write as a pasted newline (inserts it, doesn't submit); a discrete
-            // CR after the text has landed submits reliably. Plain shells are
-            // fine with either form, so this is strictly safer.
+            // Auto-submit: after the command text lands, send a DISCRETE Enter
+            // (CR) so every selected agent actually RUNS the command — the user
+            // shouldn't have to press Enter in each tab. Claude Code's TUI can
+            // treat a CR glued to the text (or arriving too fast) as a pasted
+            // newline that inserts instead of submits, so the CR goes as its own
+            // keystroke a beat later. Under a many-tab fan-out the slowest PTY
+            // needs more headroom than the single-tab case, so 160ms (was 90ms,
+            // which left commands typed-but-unsubmitted on big broadcasts).
             if (text) this._broadcastRaw(text, targets);
-            if (enterChk.checked) setTimeout(() => this._broadcastRaw('\r', targets), text ? 90 : 0);
+            if (enterChk.checked) {
+                setTimeout(() => this._broadcastRaw('\r', targets), text ? 160 : 0);
+            }
             this.audio.play('granted');
             close();
         };
