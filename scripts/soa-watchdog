@@ -35,6 +35,8 @@ TUNJSON="$HOME/.soa-web/tunnel.json"
 LOG="$HOME/.soa-web/logs/watchdog.log"
 RESPAWN_MARK="$HOME/.soa-web/logs/.tunnel-respawn"
 RESPAWN_MIN_GAP=300   # at most one tunnel respawn / 5 min (avoid URL-churn storms)
+STRIKE_MARK="$HOME/.soa-web/logs/.tunnel-strike"   # consecutive failing cycles while cloudflared is alive
+STRIKE_THRESHOLD=2    # demand this many consecutive failures before blaming a LIVE tunnel (kills load false-positives)
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
@@ -59,24 +61,48 @@ check_tunnel() {
     [ -z "$url" ] && return 0                       # no tunnel configured
 
     # Routing? Retry — under heavy host load DNS/curl flake without the tunnel
-    # actually being dead.
+    # actually being dead. Generous timeout so a loaded host (a full fleet of
+    # agents) doesn't false-trip a respawn and churn the public URL.
     local i
     for i in 1 2 3; do
-        curl -fsS --max-time 10 "${url}/api/ping" >/dev/null 2>&1 && return 0
+        if curl -fsS --max-time 15 "${url}/api/ping" >/dev/null 2>&1; then
+            rm -f "$STRIKE_MARK" 2>/dev/null          # healthy → clear the strike count
+            return 0
+        fi
         sleep 3
     done
 
-    # Not routing. Rate-limit respawns so a flapping tunnel doesn't churn URLs
-    # every minute.
+    # Routing failed. Distinguish a REAL zombie from a transient load blip: only
+    # respawn immediately when cloudflared is actually DEAD. While it is alive
+    # (and the daemon is healthy — we only reach here after ping_ok), a failed
+    # curl is far more likely host load than a dead edge, so demand
+    # STRIKE_THRESHOLD consecutive failing cycles before churning the URL.
+    local tpid; tpid="$(tunnel_pid)"
+    if [ -n "$tpid" ] && kill -0 "$tpid" 2>/dev/null; then
+        local strikes=0
+        [ -f "$STRIKE_MARK" ] && strikes="$(cat "$STRIKE_MARK" 2>/dev/null || echo 0)"
+        strikes=$((strikes + 1))
+        echo "$strikes" > "$STRIKE_MARK"
+        if [ "$strikes" -lt "$STRIKE_THRESHOLD" ]; then
+            log "tunnel ${url} unreachable but cloudflared (pid ${tpid}) alive — strike ${strikes}/${STRIKE_THRESHOLD}, deferring respawn (no URL churn)"
+            return 0
+        fi
+        log "tunnel ${url} unreachable ${strikes} cycles though cloudflared alive — treating as zombie"
+    else
+        log "tunnel ${url} cloudflared process dead — respawning immediately"
+    fi
+    rm -f "$STRIKE_MARK" 2>/dev/null
+
+    # Rate-limit respawns so a flapping tunnel doesn't churn URLs every minute.
     local n last; n="$(now)"; last=0
     [ -f "$RESPAWN_MARK" ] && last="$(cat "$RESPAWN_MARK" 2>/dev/null || echo 0)"
     if [ $((n - last)) -lt "$RESPAWN_MIN_GAP" ]; then
-        log "tunnel ${url} not routing, but respawned <${RESPAWN_MIN_GAP}s ago — waiting"
+        log "tunnel ${url} respawn suppressed — last respawn <${RESPAWN_MIN_GAP}s ago"
         return 0
     fi
     echo "$n" > "$RESPAWN_MARK"
 
-    log "tunnel ${url} not routing (zombie) — respawning cloudflared"
+    log "tunnel ${url} — respawning cloudflared"
     local oldpid; oldpid="$(tunnel_pid)"
     [ -n "$oldpid" ] && kill "$oldpid" 2>/dev/null
 
@@ -89,7 +115,11 @@ check_tunnel() {
         # -a: cloudflared writes control bytes to the log, so without it BSD grep
         # reports "Binary file … matches" instead of the URL — that garbage string
         # was landing in tunnel.json and breaking the mobile bridge re-pair.
-        newurl="$(grep -aoE 'https://[a-z0-9-]+\.trycloudflare\.com' "$cflog" 2>/dev/null | head -1)"
+        # Exclude api.trycloudflare.com — cloudflared prints that control-plane
+        # host ("Requesting new quick Tunnel on trycloudflare.com…") BEFORE the
+        # real quick-tunnel hostname, and a bare head -1 was capturing the API
+        # host as the URL → garbage written to tunnel.json (dead backend).
+        newurl="$(grep -aoE 'https://[a-z0-9-]+\.trycloudflare\.com' "$cflog" 2>/dev/null | grep -v '://api\.' | head -1)"
         [ -n "$newurl" ] && break
         sleep 2
     done
@@ -98,6 +128,13 @@ check_tunnel() {
         printf '{"provider":"cloudflared","url":"%s","pid":%s,"port":%s,"startedAt":%s}\n' \
             "$newurl" "$newpid" "$PORT" "${n}000" > "$TUNJSON"
         log "tunnel respawned → ${newurl} (pid ${newpid})"
+        # Tell the LIVE daemon to trust the new tunnel origin for /ws upgrades,
+        # in-place — no restart, no PTY/agent loss. Without this the fresh
+        # *.trycloudflare.com host 403s every WebSocket and the browser shows a
+        # dead terminal even though the fleet is fine (the recurring breakage).
+        dpid="$(live_owner)"
+        [ -n "$dpid" ] && kill -HUP "$dpid" 2>/dev/null && \
+            log "signaled daemon ($dpid) SIGHUP → register origin ${newurl}"
         command -v soa-msg >/dev/null 2>&1 && \
             soa-msg "🔁 Tunnel auto-recovered: https://s0a.app/?backend=${newurl}" >/dev/null 2>&1
     else

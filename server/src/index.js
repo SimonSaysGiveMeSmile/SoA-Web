@@ -846,6 +846,28 @@ function shutdown(code = 0) {
 process.on('SIGINT',  () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
+// SIGHUP — re-read the persisted tunnel state and trust its CURRENT public URL
+// for WS origin checks, WITHOUT a restart (which would kill every PTY). The
+// soa-watchdog respawns cloudflared out-of-band when the tunnel zombies, minting
+// a new random *.trycloudflare.com host each time; it then signals us so browsers
+// on the new host stop getting 403'd on the /ws upgrade (the recurring "I only
+// see a dead terminal after the URL changed"). Cheap + idempotent — safe to send
+// on every watchdog cycle.
+process.on('SIGHUP', () => {
+    try {
+        const f = require('./stateDir').stateFile('tunnel.json');
+        const url = JSON.parse(fs.readFileSync(f, 'utf8')).url;
+        if (url && !ALLOWED_ORIGINS.includes(url)) {
+            ALLOWED_ORIGINS.push(url);
+            console.log('SIGHUP: registered current tunnel origin for WS', url);
+        } else {
+            console.log('SIGHUP: tunnel origin already trusted', url || '(none)');
+        }
+    } catch (e) {
+        console.log('SIGHUP: could not read tunnel.json:', e && e.message);
+    }
+});
+
 // Self-heal on an in-process crash. An uncaughtException / unhandledRejection
 // would otherwise tear the daemon down *without* running the flush above —
 // losing up to SCROLLBACK_FLUSH_MS of on-screen session memory — and leave no

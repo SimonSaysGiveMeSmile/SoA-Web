@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+#
+# soa-channels — multi-channel self-healing PUBLIC ACCESS for the SoA fleet.
+#
+# Problem this solves: the fleet (your tabs/agents) lives in the daemon on
+# :7332 and survives everything, but the *front door* keeps dying — Cloudflare
+# quick-tunnels go NXDOMAIN, hostnames churn, providers throttle. When the door
+# dies the fleet looks gone even though it isn't. This script keeps a WORKING
+# door open at all times by failing over across channels, and tells you the
+# exact URL to use whenever it changes.
+#
+# CONTEXT IS NEVER LOST: this script only manages the access layer (cloudflared /
+# ngrok processes + tunnel.json) and sends you a message. It NEVER restarts the
+# daemon, never closes a tab, never resumes/kills an agent. The fleet keeps
+# running untouched while the door is swapped underneath it.
+#
+# SAVED AT EVERY MOMENT (the user's rule: "worst case the session stops, but
+# everything is saved at any given time"): every pass first writes a timestamped,
+# rotating, clobber-RESISTANT snapshot of the live fleet manifest (tab id/title/
+# status/ctx, plus cwds for resume) under ~/.soa-web/fleet-snapshots/. It refuses
+# to overwrite a good snapshot with a transient empty read — the exact failure
+# that once wiped tabs.json to 0. Combined with the agent transcripts Claude Code
+# writes continuously to ~/.claude/projects, recovery via `soa-relaunch` is always
+# possible even if EVERY door is closed. So the worst case is "no public door
+# right now" — never lost work.
+#
+# Channel priority (best UX first — first one that VERIFIES wins):
+#   1. cloudflare  quick tunnel   → works with s0a.app/?backend=<url> (no warning page)
+#   2. ngrok       http tunnel    → DIRECT url only (free-tier interstitial blocks
+#                                   s0a.app's cross-origin call; same-origin is fine)
+#   3. lan         http://<ip>:PORT → same-network direct access, no tunnel at all
+#
+# A channel is only adopted after it's verified END-TO-END: the URL must reach
+# OUR daemon AND report a live fleet (tabs > 0) — so we never hand you a dead or
+# wrong-daemon link (the recurring "please reconnect" failure).
+#
+# Run it every ~60s from launchd (deploy/launchd/com.soa-web.channels.plist) or
+# by hand. Safe to run concurrently with com.soa-web.watchdog: while a channel is
+# healthy this script keeps tunnel.json pointed at it (pings 200), so the watchdog
+# sees a healthy tunnel and stays out of the way.
+#
+# Usage:
+#   soa-channels                 # one self-heal pass (the launchd entrypoint)
+#   soa-channels status          # print the current channel + user URL, do nothing
+#   soa-channels force <ch>      # force a specific channel: cloudflare|ngrok|lan
+#   soa-channels --port 7332     # daemon port (default 7332 / $SOA_WEB_PORT)
+
+set -uo pipefail
+
+PORT="${SOA_WEB_PORT:-7332}"
+ACTION="pass"
+FORCE_CH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port) PORT="$2"; shift 2;;
+        status) ACTION="status"; shift;;
+        force)  ACTION="force"; FORCE_CH="${2:-}"; shift 2;;
+        *) shift;;
+    esac
+done
+
+STATE_DIR="$HOME/.soa-web"
+TUNJSON="$STATE_DIR/tunnel.json"
+CHJSON="$STATE_DIR/channels.json"
+SNAP_DIR="$STATE_DIR/fleet-snapshots"
+LOG="$STATE_DIR/logs/channels.log"
+NGROK_LOG="$STATE_DIR/logs/ngrok-${PORT}.log"
+CF_BACKOFF="$STATE_DIR/logs/.cf-backoff"   # epoch of last failed cloudflare probe
+CF_BACKOFF_SECS=600                        # don't re-probe a dead cloudflare for 10m
+LOCK="$STATE_DIR/logs/.channels.lock"
+S0A="https://s0a.app"
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+now() { date +%s; }
+log() { echo "$(ts) $*" >> "$LOG" 2>/dev/null; }
+
+# Single-flight: a slow cloudflare probe must not overlap the next launchd tick.
+exec 9>"$LOCK" 2>/dev/null
+if command -v flock >/dev/null 2>&1; then flock -n 9 || { exit 0; }; fi
+
+# JSON field read without jq.
+jget() { python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('$1',''))
+except: pass" 2>/dev/null; }
+
+daemon_ok() { curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; }
+
+jget_total() { python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
+except: print(0)" 2>/dev/null; }
+
+# Continuous save: capture the live fleet manifest every pass. NEVER overwrites a
+# good snapshot with an empty/transient read (the tabs.json-clobber guard). Keeps
+# the last 30 + a stable latest.json so recovery is instant and clobber-proof.
+snapshot_fleet() {
+    mkdir -p "$SNAP_DIR" 2>/dev/null
+    curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/manager" -o "$SNAP_DIR/.mgr.tmp" 2>/dev/null || return 0
+    local total; total="$(jget_total < "$SNAP_DIR/.mgr.tmp")"; [ -z "$total" ] && total=0
+    if ! [ "$total" -gt 0 ] 2>/dev/null; then
+        rm -f "$SNAP_DIR/.mgr.tmp" 2>/dev/null
+        log "snapshot SKIPPED (manager total=${total}) — keeping last good record"
+        return 0
+    fi
+    local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+    mv "$SNAP_DIR/.mgr.tmp" "$SNAP_DIR/fleet-${stamp}.json"
+    cp "$SNAP_DIR/fleet-${stamp}.json" "$SNAP_DIR/latest.json"
+    # cwds (needed for `claude --resume`) when /api/tabs is non-empty.
+    curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/tabs" -o "$SNAP_DIR/.tabs.tmp" 2>/dev/null
+    if [ -s "$SNAP_DIR/.tabs.tmp" ] && grep -q '"cwd"' "$SNAP_DIR/.tabs.tmp" 2>/dev/null; then
+        mv "$SNAP_DIR/.tabs.tmp" "$SNAP_DIR/tabs-latest.json"
+    else
+        rm -f "$SNAP_DIR/.tabs.tmp" 2>/dev/null
+    fi
+    ls -1t "$SNAP_DIR"/fleet-*.json 2>/dev/null | tail -n +31 | xargs rm -f 2>/dev/null
+    log "snapshot saved: ${total} tabs → fleet-${stamp}.json"
+}
+
+# Tab count reachable THROUGH a url (proves it hits OUR live fleet, not a dead
+# host or the wrong daemon). $2 = optional extra header (ngrok skip).
+fleet_tabs() {
+    local url="$1" hdr="${2:-}"
+    curl -fsS --max-time 12 ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null \
+        | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
+except: print(0)" 2>/dev/null
+}
+
+# A url is GOOD only if it reaches our daemon AND the fleet has tabs.
+verify() {
+    local n; n="$(fleet_tabs "$1" "${2:-}")"
+    [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null
+}
+
+skip_hdr_for() { [ "$1" = "ngrok" ] && echo "ngrok-skip-browser-warning: 1"; }
+
+# The URL we actually tell the user, per channel (ngrok must be the DIRECT url).
+user_url_for() {
+    case "$1" in
+        cloudflare) echo "${S0A}/?backend=$2";;
+        *)          echo "$2";;
+    esac
+}
+note_for() {
+    case "$1" in
+        cloudflare) echo "open on any device (works on s0a.app)";;
+        ngrok)      echo "open this link DIRECTLY (not s0a.app) and click 'Visit Site' once";;
+        lan)        echo "same-wifi only — open this http link directly";;
+    esac
+}
+
+adopt() {
+    local ch="$1" url="$2" uurl note
+    uurl="$(user_url_for "$ch" "$url")"; note="$(note_for "$ch")"
+    printf '{"channel":"%s","url":"%s","userUrl":"%s","note":"%s","verifiedAt":"%s"}\n' \
+        "$ch" "$url" "$uurl" "$note" "$(ts)" > "$CHJSON"
+    # Keep tunnel.json pointed at the live channel so the watchdog pings a 200 and
+    # leaves it alone. (LAN has no tunnel process to record.)
+    if [ "$ch" != "lan" ]; then
+        printf '{"provider":"%s","url":"%s","port":%s,"startedAt":0}\n' "$ch" "$url" "$PORT" > "$TUNJSON"
+    fi
+    log "ADOPTED ${ch} → ${url}  (user: ${uurl})"
+    if command -v soa-msg >/dev/null 2>&1; then
+        soa-msg "🔁 Fleet access restored via ${ch} — your tabs are reachable (nothing lost). ${note}: ${uurl}" >/dev/null 2>&1
+    fi
+}
+
+# ── Channel providers — each prints a verified url on success, else returns 1 ──
+
+# 1. Cloudflare quick tunnel, minted THROUGH the daemon so it also registers the
+#    origin in ALLOWED_ORIGINS (onTunnelUp). Cleans up a dead cloudflared so a
+#    Cloudflare outage doesn't leave a zombie behind.
+ch_cloudflare() {
+    local url i
+    url="$(curl -fsS --max-time 45 -X POST "http://127.0.0.1:${PORT}/api/pair/start" 2>/dev/null | jget publicUrl)"
+    # /api/pair/start returns {ok,data:{publicUrl}} — re-read from data if needed.
+    if [ -z "$url" ]; then
+        url="$(curl -fsS --max-time 6 "http://127.0.0.1:${PORT}/api/pair/status" 2>/dev/null \
+              | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('publicUrl',''))" 2>/dev/null)"
+    fi
+    [ -z "$url" ] && return 1
+    for i in 1 2 3 4 5 6 7 8; do
+        verify "$url" && { echo "$url"; return 0; }
+        sleep 4
+    done
+    # Dead (Cloudflare throttling / outage) — stop the zombie cloudflared.
+    curl -fsS --max-time 6 -X POST "http://127.0.0.1:${PORT}/api/pair/stop" >/dev/null 2>&1
+    return 1
+}
+
+# 2. ngrok — reuse a running agent pointed at our port, else (re)start one.
+ch_ngrok() {
+    command -v ngrok >/dev/null 2>&1 || return 1
+    if ! curl -fsS --max-time 4 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null | grep -q "localhost:${PORT}\|:${PORT}\""; then
+        pkill -f "ngrok http" 2>/dev/null; sleep 1
+        nohup ngrok http "${PORT}" --log="$NGROK_LOG" >/dev/null 2>&1 &
+        sleep 6
+    fi
+    local url i hdr; hdr="$(skip_hdr_for ngrok)"
+    for i in 1 2 3 4 5 6 7 8; do
+        url="$(curl -fsS --max-time 5 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null \
+              | python3 -c "import sys,json
+d=json.load(sys.stdin)
+for t in d.get('tunnels',[]):
+    if t.get('config',{}).get('addr','').endswith(':${PORT}') and t.get('public_url','').startswith('https'):
+        print(t['public_url']); break" 2>/dev/null)"
+        [ -n "$url" ] && verify "$url" "$hdr" && { echo "$url"; return 0; }
+        sleep 3
+    done
+    return 1
+}
+
+# 3. LAN — first private IPv4 the daemon (bound 0.0.0.0) is reachable on.
+ch_lan() {
+    local ip url
+    ip="$(ipconfig getifaddr en0 2>/dev/null)"; [ -z "$ip" ] && ip="$(ipconfig getifaddr en1 2>/dev/null)"
+    [ -z "$ip" ] && ip="$(ifconfig 2>/dev/null | awk '/inet (192|10|172)\./{print $2; exit}')"
+    [ -z "$ip" ] && return 1
+    url="http://${ip}:${PORT}"
+    verify "$url" && { echo "$url"; return 0; }
+    return 1
+}
+
+failover() {
+    local ch url
+    for ch in cloudflare ngrok lan; do
+        # Skip a recently-failed cloudflare so a multi-hour CF outage doesn't burn
+        # ~70s of every cycle re-minting dead tunnels.
+        if [ "$ch" = "cloudflare" ] && [ -f "$CF_BACKOFF" ]; then
+            local last; last="$(cat "$CF_BACKOFF" 2>/dev/null || echo 0)"
+            if [ "$(( $(now) - last ))" -lt "$CF_BACKOFF_SECS" ]; then
+                log "skip cloudflare (in ${CF_BACKOFF_SECS}s backoff)"; continue
+            fi
+        fi
+        if url="$(ch_${ch})"; then
+            [ "$ch" = "cloudflare" ] && rm -f "$CF_BACKOFF" 2>/dev/null
+            adopt "$ch" "$url"; return 0
+        fi
+        [ "$ch" = "cloudflare" ] && echo "$(now)" > "$CF_BACKOFF"
+        log "channel ${ch} unavailable"
+    done
+    # No public door right now — the ACCEPTABLE worst case. The fleet is still
+    # running on :${PORT} and just got snapshotted, so nothing is lost; access
+    # resumes automatically the moment any channel recovers.
+    log "NO channel available — fleet alive + snapshotted on :${PORT}, no public door (will retry next pass)"
+    if command -v soa-msg >/dev/null 2>&1; then
+        soa-msg "⚠️ No public door available right now (all tunnels down). Your fleet is ALIVE and saved on :${PORT} — nothing lost. I'll auto-reconnect and send the link the moment a channel recovers. (On the Mac: open http://127.0.0.1:${PORT}.)" >/dev/null 2>&1
+    fi
+    return 1
+}
+
+# ── Entry points ──────────────────────────────────────────────────────────────
+if [ "$ACTION" = "status" ]; then
+    [ -f "$CHJSON" ] && cat "$CHJSON" || echo '{"channel":null}'
+    exit 0
+fi
+
+if ! daemon_ok; then
+    log "daemon :${PORT} not responding — access self-heal deferred to KeepAlive/watchdog"
+    exit 0
+fi
+
+# Save FIRST, always — before touching any door. Guarantees a fresh, clobber-proof
+# record of the fleet exists at this instant regardless of what happens next.
+snapshot_fleet
+
+if [ "$ACTION" = "force" ]; then
+    case "$FORCE_CH" in
+        cloudflare|ngrok|lan)
+            if url="$(ch_${FORCE_CH})"; then adopt "$FORCE_CH" "$url"; exit 0; fi
+            log "forced channel ${FORCE_CH} failed to verify"; exit 1;;
+        *) echo "usage: soa-channels force cloudflare|ngrok|lan" >&2; exit 2;;
+    esac
+fi
+
+# Normal self-heal pass.
+cur_ch="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget channel )"
+cur_url="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget url )"
+
+if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
+    # Current door still works. If we're on a lesser channel, try to UPGRADE back
+    # to cloudflare (nicer: s0a.app works, no interstitial) — but only outside the
+    # CF backoff, and only adopt it if it truly verifies.
+    if [ "$cur_ch" != "cloudflare" ]; then
+        last=0; [ -f "$CF_BACKOFF" ] && last="$(cat "$CF_BACKOFF" 2>/dev/null || echo 0)"
+        if [ "$(( $(now) - last ))" -ge "$CF_BACKOFF_SECS" ]; then
+            if url="$(ch_cloudflare)"; then
+                rm -f "$CF_BACKOFF" 2>/dev/null
+                log "upgraded ${cur_ch} → cloudflare"
+                adopt cloudflare "$url"; exit 0
+            fi
+            echo "$(now)" > "$CF_BACKOFF"
+        fi
+    fi
+    log "channel healthy: ${cur_ch} ${cur_url}"
+    exit 0
+fi
+
+[ -n "$cur_url" ] && log "channel DOWN: ${cur_ch:-none} ${cur_url} — failing over"
+failover
