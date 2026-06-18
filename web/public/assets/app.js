@@ -82,7 +82,11 @@ async function probePing(backend, token, timeoutMs = 2500) {
         // cross-site fetches — we only want to know whether the backend is
         // reachable. Credentials get added back once we switch to the chosen
         // backend in bootServerMode.
-        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'omit', cache: 'no-store' });
+        // ngrok-skip-browser-warning: bypass the ngrok-free abuse interstitial so a
+        // cross-origin probe (e.g. s0a.app → an ngrok backend) gets JSON instead of
+        // the warning HTML — without it the probe fails and s0a.app drops to sandbox.
+        // Harmless on non-ngrok backends (just an ignored header).
+        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'omit', cache: 'no-store', headers: { 'ngrok-skip-browser-warning': 'true' } });
         if (!res.ok) return null;
         const body = await res.json().catch(() => null);
         if (!body || !body.ok) return null;
@@ -106,7 +110,7 @@ function wsUrl(backend, token) {
     return u.toString();
 }
 
-const FETCH_INIT = { credentials: 'include' };
+const FETCH_INIT = { credentials: 'include', headers: { 'ngrok-skip-browser-warning': 'true' } };
 
 function wireLangSelector() {
     const sel = document.querySelector('#lang');
