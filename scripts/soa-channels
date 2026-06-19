@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-STATE_DIR="$HOME/.soa-web"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web}"
 TUNJSON="$STATE_DIR/tunnel.json"
 CHJSON="$STATE_DIR/channels.json"
 SNAP_DIR="$STATE_DIR/fleet-snapshots"
@@ -116,6 +116,69 @@ snapshot_fleet() {
     log "snapshot saved: ${total} tabs → fleet-${stamp}.json"
 }
 
+# FLEET CLOBBER RECOVERY (self-heal). If the live daemon reports zero tabs but
+# this wasn't an intentional close-all (the daemon stamps "closedByUser" in
+# tabs.json), rebuild its tabs.json from the last good snapshot so the daemon's
+# restore-on-connect + auto-resume rehydrate the fleet on the next open. This is
+# the access layer's backstop to the daemon's own scrollback-based reconcile —
+# it covers the case where even scrollback.json was lost. Conservative: a no-op
+# when tabs are present or the user cleared them; one attempt per cooldown; and
+# the daemon's write guard keeps the repaired list from being re-clobbered. It
+# only repairs metadata — it never restarts the daemon or kills a tab.
+RECOVER_COOLDOWN="$STATE_DIR/logs/.fleet-recover"
+restore_fleet_if_lost() {
+    local total; total="$(curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/manager" 2>/dev/null | jget_total)"
+    [ -z "$total" ] && total=0
+    [ "$total" -gt 0 ] 2>/dev/null && return 0    # fleet healthy — nothing to do
+
+    # Respect an intentional close-all (the daemon's intent marker).
+    if [ -f "$STATE_DIR/tabs.json" ] && grep -q '"closedByUser"[[:space:]]*:[[:space:]]*true' "$STATE_DIR/tabs.json" 2>/dev/null; then
+        return 0
+    fi
+    # Need a good snapshot with cwds to recover from.
+    local snap="$SNAP_DIR/tabs-latest.json"
+    { [ -f "$snap" ] && grep -q '"cwd"' "$snap" 2>/dev/null; } || return 0
+
+    # Don't thrash: at most one recovery per 5 min.
+    local now_s; now_s="$(now)"
+    if [ -f "$RECOVER_COOLDOWN" ]; then
+        local last; last="$(cat "$RECOVER_COOLDOWN" 2>/dev/null || echo 0)"
+        [ "$(( now_s - last ))" -lt 300 ] && return 0
+    fi
+
+    # Convert the /api/tabs snapshot → tabs.json shape, atomically, where the
+    # daemon reads it.
+    local n
+    n="$(python3 - "$snap" "$STATE_DIR/tabs.json" <<'PY'
+import sys, os, json
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(src))
+    rows = data.get('tabs', data) if isinstance(data, dict) else data
+    out = []
+    for t in rows:
+        cwd = t.get('cwd')
+        if not cwd:
+            continue
+        title = t.get('title')
+        renamed = bool(title and title != os.path.basename(cwd))
+        out.append({'title': title if renamed else None, 'cwd': cwd, 'userRenamed': renamed})
+    if not out:
+        print(0); sys.exit(0)
+    json.dump({'savedAt': '', 'tabs': out, 'recoveredFrom': 'snapshot'}, open(dst + '.tmp', 'w'))
+    os.replace(dst + '.tmp', dst)
+    print(len(out))
+except Exception:
+    print(0)
+PY
+)"
+    if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+        echo "$now_s" > "$RECOVER_COOLDOWN"
+        log "FLEET RECOVERED: tabs.json repaired from snapshot (${n} tabs) — reconnect to rehydrate"
+        command -v soa-msg >/dev/null 2>&1 && soa-msg "🛟 Fleet tab list was lost and auto-restored (${n} tabs) from the last snapshot — reopen the link to rehydrate (agents auto-resume)." >/dev/null 2>&1
+    fi
+}
+
 # Tab count reachable THROUGH a url (proves it hits OUR live fleet, not a dead
 # host or the wrong daemon). $2 = optional extra header (ngrok skip).
 fleet_tabs() {
@@ -158,6 +221,14 @@ adopt() {
     # leaves it alone. (LAN has no tunnel process to record.)
     if [ "$ch" != "lan" ]; then
         printf '{"provider":"%s","url":"%s","port":%s,"startedAt":0}\n' "$ch" "$url" "$PORT" > "$TUNJSON"
+        # Register the new origin with the LIVE daemon (no restart) so browsers on
+        # the new tunnel host clear the WS origin gate immediately. The daemon's
+        # SIGHUP handler re-reads tunnel.json from its own state dir — idempotent,
+        # so harmless even when the watchdog also signals. Covers ngrok/lan-less
+        # channels where onTunnelUp didn't fire, and fresh URLs after a rotation.
+        for _pid in $(lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null); do
+            kill -HUP "$_pid" 2>/dev/null && log "SIGHUP → pid ${_pid} (trust ${url})"
+        done
     fi
     log "ADOPTED ${ch} → ${url}  (user: ${uurl})"
     if command -v soa-msg >/dev/null 2>&1; then
@@ -263,6 +334,10 @@ fi
 # Save FIRST, always — before touching any door. Guarantees a fresh, clobber-proof
 # record of the fleet exists at this instant regardless of what happens next.
 snapshot_fleet
+
+# Then heal a clobbered fleet (tab list lost but not user-closed) from the last
+# good snapshot, before we worry about the public door.
+restore_fleet_if_lost
 
 if [ "$ACTION" = "force" ]; then
     case "$FORCE_CH" in

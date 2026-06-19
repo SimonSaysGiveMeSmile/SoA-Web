@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   SoA-Web channel self-healer. Runs scripts/soa-channels every 60s to keep the
-  fleet (com.soa-web.server, :7332) reachable through the best working public
+  fleet (app.s0a.web.local, :4010) reachable through the best working public
   channel (cloudflare → ngrok → lan), and to write a clobber-proof fleet snapshot
   every pass so nothing is ever lost. It NEVER restarts the daemon or touches a
   tab — only the access layer + a save. Install to ~/Library/LaunchAgents/ and
@@ -40,7 +40,9 @@
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>SOA_WEB_PORT</key>
-        <string>7332</string>
+        <string>4010</string>
+        <key>SOA_WEB_STATE_DIR</key>
+        <string>/Users/test/.soa-web-local</string>
     </dict>
 </dict>
 </plist>
