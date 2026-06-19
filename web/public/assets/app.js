@@ -527,6 +527,30 @@ class Shell {
             this._fitActive();
         });
 
+        // Collapsible action tray — slide the toolbar icons in/out to reclaim
+        // topbar width. Markup defaults to collapsed; restore the saved
+        // preference (no animation on first paint), then wire the toggle.
+        const actionsBar = $('#topbar-actions');
+        const actionsToggle = $('#toggle-actions');
+        if (actionsBar && actionsToggle) {
+            let actionsCollapsed = true;
+            try { if (localStorage.getItem('soa_actions_collapsed') === '0') actionsCollapsed = false; } catch (_) {}
+            const applyActions = (animate) => {
+                if (!animate) actionsBar.classList.add('no-anim');
+                actionsBar.classList.toggle('actions-collapsed', actionsCollapsed);
+                actionsToggle.setAttribute('aria-expanded', actionsCollapsed ? 'false' : 'true');
+                if (!animate) requestAnimationFrame(() => actionsBar.classList.remove('no-anim'));
+            };
+            applyActions(false);
+            this._toggleActions = () => {
+                actionsCollapsed = !actionsCollapsed;
+                try { localStorage.setItem('soa_actions_collapsed', actionsCollapsed ? '1' : '0'); } catch (_) {}
+                applyActions(true);
+                this.audio.play('panels');
+            };
+            actionsToggle.addEventListener('click', () => this._toggleActions());
+        }
+
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
@@ -2157,6 +2181,10 @@ class Shell {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
             e.preventDefault();
             this._toggleViewMode();
+        }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'h') {
+            e.preventDefault();
+            if (this._toggleActions) this._toggleActions();
         }
     }
 

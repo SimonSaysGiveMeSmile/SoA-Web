@@ -261,7 +261,43 @@ html, body {
 .tab.drop-before::before { left: -4px; }
 .tab.drop-after::after   { right: -4px; }
 
-.topbar-actions { display: flex; gap: 8px; justify-self: end; }
+.topbar-actions { display: flex; align-items: center; gap: 8px; justify-self: end; }
+
+/* ── Collapsible action tray ──────────────────────────────────────────────
+   Slide the toolbar icons in/out horizontally to reclaim topbar width. The
+   toggle (#toggle-actions) stays pinned at the right edge; the tray collapses
+   to zero width with a transform slide so the freed space returns to the tabs
+   strip. Default state is collapsed (set in markup); JS restores the saved
+   preference + handles Ctrl+Shift+H. */
+.actions-tray {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  max-width: 70vw;
+  opacity: 1;
+  transform: translateX(0);
+  transition: max-width .3s cubic-bezier(.4,0,.2,1),
+              opacity .2s ease,
+              transform .3s cubic-bezier(.4,0,.2,1),
+              margin-right .3s cubic-bezier(.4,0,.2,1);
+}
+.topbar-actions.actions-collapsed .actions-tray {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(14px);
+  margin-right: -8px;   /* swallow the flex gap to the left of the toggle */
+  pointer-events: none;
+}
+/* The toggle's chevron flips 180° when the tray is open. */
+.actions-toggle[data-icon]::before { transition: transform .3s cubic-bezier(.4,0,.2,1); }
+.topbar-actions:not(.actions-collapsed) .actions-toggle[data-icon]::before { transform: rotate(180deg); }
+/* Suppress the transition while JS applies the saved state on first paint. */
+.topbar-actions.no-anim .actions-tray,
+.topbar-actions.no-anim .actions-toggle[data-icon]::before { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .actions-tray, .actions-toggle[data-icon]::before { transition: none; }
+}
 .topbar-actions button,
 .topbar-actions .release-btn {
   background: transparent; color: var(--soa-accent);
