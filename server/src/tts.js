@@ -18,6 +18,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { MSG, frame } = require('./protocol');
+const localKey = require('./localKey');
 
 let _port = null;
 
@@ -45,10 +46,21 @@ function envFor(tabId) {
     return {
         SOA_WEB_TAB: String(tabId),
         SOA_WEB_TTS_URL: `http://127.0.0.1:${_port}/api/tts`,
+        // Per-daemon local secret — proves to /api/sessions + /api/tts that a
+        // request came from a tab this daemon spawned (see localKey.js).
+        SOA_WEB_LOCAL_KEY: localKey.LOCAL_KEY,
     };
 }
 
 function isLoopback(req) {
+    // The public tunnel re-originates from localhost (cloudflared dials 127.0.0.1),
+    // so a socket-IP-only check is bypassable by any internet caller — same class as
+    // the /api/sessions fix. Accept positive proof first (the per-daemon secret the
+    // local hook/CLI carries), else require a loopback socket with NO tunnel/proxy
+    // forwarding header (absent on a genuine local POST). Fail closed.
+    const h = req.headers || {};
+    if (localKey.matches(h['x-soa-local-key'])) return true;
+    if (h['cf-connecting-ip'] || h['x-forwarded-for'] || h['x-real-ip'] || h['forwarded']) return false;
     const ip = (req.ip || (req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
     return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
 }

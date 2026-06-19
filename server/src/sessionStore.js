@@ -78,6 +78,11 @@ class SessionStore {
         if (session._cwdInterval) clearInterval(session._cwdInterval);
         if (session._managerInterval) clearInterval(session._managerInterval);
         if (session._scrollbackInterval) clearInterval(session._scrollbackInterval);
+        // The SessionManager owns its own 15s schedule timer (and parked watch
+        // waiters) — tear it down too, else it fires forever and pins this session.
+        if (session._manager && typeof session._manager.destroy === 'function') {
+            try { session._manager.destroy(); } catch (_) {}
+        }
         if (session.tabMgr && typeof session.tabMgr.killAll === 'function') {
             try { session.tabMgr.killAll(); } catch (_) {}
         }

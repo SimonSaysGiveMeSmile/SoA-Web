@@ -36,9 +36,13 @@ function post(body, opts = {}) {
     return new Promise((resolve, reject) => {
         const data = JSON.stringify(body);
         const u = new URL(base() + '/api/sessions');
+        const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) };
+        // Positive proof of local origin (per-daemon secret injected into our tab's
+        // env) so the loopback gate trusts us even behind a local reverse proxy.
+        if (process.env.SOA_WEB_LOCAL_KEY) headers['x-soa-local-key'] = process.env.SOA_WEB_LOCAL_KEY;
         const req = http.request({
             hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+            headers,
         }, (res) => {
             let b = ''; res.on('data', d => b += d);
             res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve({ ok: false, raw: b }); } });
@@ -136,14 +140,14 @@ function fmtList(snap) {
         if (cmd === 'schedule') {
             const id = (rest[0] === 'all' || rest[0] === 'limited') ? rest[0] : Number(rest[0]);
             const at = /^\d{10,}$/.test(rest[1] || '') ? Number(rest[1]) : rest[1];
-            const r = await post({ action: 'schedule', id, at, text: rest.slice(2).join(' ') || 'continue' });
+            const r = await post({ action: 'schedule', id, at, text: rest.slice(2).join(' ') || 'continue', self: SELF });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
         // resume-all [when] [text…] — nudge every limit-hit session (default: 2 min from now)
         if (cmd === 'resume-all') {
             const at = rest[0] || '+2m';
-            const r = await post({ action: 'schedule', id: 'limited', at, text: rest.slice(1).join(' ') || 'continue' });
+            const r = await post({ action: 'schedule', id: 'limited', at, text: rest.slice(1).join(' ') || 'continue', self: SELF });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
@@ -196,6 +200,7 @@ function fmtList(snap) {
             const raw = hasFlag('--raw');
             let cursor = hasFlag('--catchup') ? 0 : readCursor();
             let lastSeq = -1;
+            let lastEpoch = null;
             for (;;) {
                 let r;
                 try {
@@ -205,9 +210,25 @@ function fmtList(snap) {
                     );
                 } catch (_) { await sleep(1000); continue; }   // daemon bounce → retry
                 if (!r || !r.ok) { await sleep(1000); continue; }
+                // A daemon restart resets the server's _seq to 0. Our stale cursor
+                // (from the dead epoch) would make the SERVER filter out low-seq
+                // post-restart events (e.seq <= cursor), and our in-memory lastSeq
+                // would swallow the rest. The server stamps a per-boot `epoch` on
+                // every reply; the instant it changes, re-read the NEW epoch from
+                // seq 0 and re-accept from scratch. This fully closes the restart
+                // event-loss — including the "busy restart" case where the new _seq
+                // already climbed past our cursor (so cursor>head never triggers).
+                if (r.epoch && lastEpoch !== null && r.epoch !== lastEpoch) {
+                    lastEpoch = r.epoch; lastSeq = -1; cursor = 0; writeCursor(0);
+                    console.log('  … daemon restarted — reconcile via `soa-sessions list`');
+                    continue; // re-poll immediately from the start of the new epoch
+                }
+                if (lastEpoch === null) lastEpoch = r.epoch;   // first reply: adopt epoch, keep cursor
                 if (typeof r.cursor === 'number') { cursor = r.cursor; writeCursor(cursor); }
                 const evs = r.events || [];
                 for (const e of evs) {
+                    // The synthetic daemon-restart marker is a user-visible reconcile hint.
+                    if (e.kind === 'daemon-restart') { lastSeq = -1; console.log(renderEvent(e)); continue; }
                     // Dedup on the server's unique monotonic seq — NOT (id,kind),
                     // which would collapse a genuinely-new second 'attention' from
                     // the same tab (the intervening transition is filtered out by

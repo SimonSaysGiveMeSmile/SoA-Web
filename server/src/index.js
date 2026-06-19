@@ -110,6 +110,20 @@ const CROSS_SITE = ALLOWED_ORIGINS.some(o => !/^https?:\/\/(localhost|127\.0\.0\
 
 const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
 
+// Self-heal a clobbered fleet BEFORE anything reads tabs.json: if the tab list
+// was lost (empty/missing, and not an intentional close-all) but scrollback.json
+// still holds the per-tab cwds, rebuild tabs.json from it. restore-on-connect +
+// auto-resume below then rehydrate the fleet automatically — no manual
+// soa-relaunch. No-op when tabs are intact or the user cleared them.
+try {
+    const _rec = tabPersist.reconcileTabsFromScrollback();
+    if (_rec.action === 'recovered') {
+        console.log(`tabPersist: RECOVERED ${_rec.count} tab(s) from scrollback.json — tabs.json was lost (clobber self-heal)`);
+    } else if (_rec.action === 'error') {
+        console.log('tabPersist: fleet reconcile failed:', _rec.reason);
+    }
+} catch (_) { /* best-effort — never block boot on recovery */ }
+
 // Boot-time restore: re-seat the previously persisted session under its
 // original token so any browser cookie still in the wild keeps working
 // after a server restart. Tab cwds and scrollback are restored lazily on
@@ -141,7 +155,11 @@ app.use((req, res, next) => {
         res.setHeader('Vary', 'Origin');
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'content-type');
+        // Echo the preflight's requested headers (credentialed CORS can't use '*')
+        // so custom headers the SPA adds — e.g. `ngrok-skip-browser-warning` on the
+        // backend probe — pass preflight instead of being rejected (which dropped the
+        // deployed s0a.app into sandbox mode). Falls back to the known set off-preflight.
+        res.setHeader('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'content-type, ngrok-skip-browser-warning');
         res.setHeader('Access-Control-Max-Age', '600');
         // Send on every allowed response (not just preflight) — Chrome requires
         // the PNA header on the actual response too, not only on OPTIONS.
@@ -161,6 +179,12 @@ app.use((req, res, next) => {
     if (!SESSION_TOKEN) return next();
     if (!req.path.startsWith('/api/')) return next();
     if (req.path === '/api/ping') return next();
+    // Loopback-trusted endpoints (/api/sessions, /api/tts) carry their OWN
+    // tunnel-aware local-only gate and are driven by local CLIs (soa-sessions /
+    // soa-msg) that don't know the session token. Exempt them ONLY for genuinely
+    // local callers — a tunneled request still fails the endpoint's loopback gate.
+    // Without this, token mode (selfhost) would 401 the manager + the TTS hook.
+    if ((req.path === '/api/sessions' || req.path === '/api/tts') && sessionManager.isLocalRequest(req)) return next();
     const presented = extractPresentedToken(req);
     if (!constantTimeEq(presented, SESSION_TOKEN)) {
         return res.status(401).json({ ok: false, error: 'invalid session token' });

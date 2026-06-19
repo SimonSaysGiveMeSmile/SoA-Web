@@ -21,6 +21,7 @@ const express = require('express');
 const { MSG, frame } = require('./protocol');
 const envStore = require('./envStore');
 const claudeSessions = require('./claudeSessions');
+const localKey = require('./localKey');
 
 // ── Manager config + pending resume schedules (persisted across restarts) ──
 const { STATE_DIR } = require('./stateDir');
@@ -100,6 +101,23 @@ function classifyAgent(recent, current) {
     if (SHELL_PROMPT.test(tail.slice(-200))) return (current && current !== 'idle') ? 'idle' : null;
     return null;
 }
+
+// Live-work markers: a spinner / "esc to interrupt" that Claude renders ONLY
+// while a turn is actively running (unlike the input box + footer, which the
+// modern TUI draws persistently even mid-work).
+const WORK_LIVE = [/esc to interrupt/i, /\(esc\s+to\s+cancel\)/i, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, /✳/];
+
+// A tab is "finished, idle at its input box" only when its recent output shows the
+// DONE chrome AND NO live-work marker. Used to suppress a FALSE 'stuck': a finished
+// agent can stay classified 'working' (a trailing gerund-verb status line outranks
+// the box in classifyAgent), go silent, then trip 'stuck' after STUCK_MS though it's
+// simply idle at its prompt. CRITICAL: the box+footer coexist with the spinner during
+// active work, so the box ALONE is not "done" — requiring the absence of a live-work
+// marker keeps a genuinely hung agent (frozen spinner still in view) detectable as stuck.
+function looksDone(recent) {
+    const tail = strip(recent || '').slice(-600);
+    return DONE.some(p => p.test(tail)) && !WORK_LIVE.some(p => p.test(tail));
+}
 function extractCtxPct(text) {
     if (!text) return null;
     const clamp = n => Math.min(100, Math.max(0, Math.round(n)));
@@ -144,6 +162,18 @@ function submitToTab(tab, text) {
     _submitChain.set(tab, next.catch(() => {}));
 }
 
+// Chain-aware raw write (NO trailing Enter). Shares the per-tab FIFO with
+// submitToTab so a submit:false write ('say' / non-submit broadcast) can't land
+// BETWEEN a pending submit's text and its deferred '\r' — which would glue them
+// into one garbled auto-submitted line. Use for every agent-driven text write
+// that must order against pending submits; raw interactive keystrokes stay direct.
+function writeToTab(tab, text) {
+    if (!tab) return;
+    const prev = _submitChain.get(tab) || Promise.resolve();
+    const next = prev.then(() => { try { tab.write(String(text)); } catch (_) {} });
+    _submitChain.set(tab, next.catch(() => {}));
+}
+
 // Launch (or resume) a Claude agent in a freshly-spawned tab. Shared by the
 // daemon's boot-restore auto-resume (index.js scheduleAutoResume) and the
 // manager-agent `spawn` action so the resume-vs-fresh decision + reliable
@@ -170,9 +200,70 @@ function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, c
     return sid;
 }
 
+// ── Loopback trust gate for /api/sessions (the ONLY auth on that surface) ──────
+// CRITICAL: a request relayed through the public tunnel re-originates from
+// localhost (cloudflared dials 127.0.0.1), so the socket peer is loopback even
+// for an internet caller — making a naive socket-IP check trivially bypassable
+// (remote fleet control / RCE). Forwarding headers (cf-connecting-ip /
+// x-forwarded-for / x-real-ip / forwarded) are injected by the tunnel/any proxy
+// and are ABSENT on a genuine local CLI call, so their presence means "not a true
+// local caller". Fail closed. (Mirrors index.js's real-client-IP recovery.)
+function isLocalRequest(req) {
+    const h = (req && req.headers) || {};
+    // POSITIVE proof first: the per-daemon secret injected into every spawned tab's
+    // env (SOA_WEB_LOCAL_KEY) and echoed by the local CLIs. Robust to any proxy
+    // header behavior and to a local reverse proxy in front of the daemon.
+    if (localKey.matches(h['x-soa-local-key'])) return true;
+    // Fallback for keyless callers (e.g. manual curl): a loopback socket AND no
+    // tunnel/proxy forwarding header (which a tunneled internet caller always
+    // carries — cloudflared dials localhost so the socket IP alone is not enough).
+    if (h['cf-connecting-ip'] || h['x-forwarded-for'] || h['x-real-ip'] || h['forwarded']) return false;
+    const ip = (req.ip || (req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+    return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
+}
+
+// Resolve a target selector → tab ids against a snapshot. Pure (exported for
+// tests). number / numeric-string → that id if live; numeric array → those live
+// ids; 'all' → every id; a known signal name → tabs with that flag. ANY unknown /
+// empty / whitespace selector → [] — never an accidental fleet-wide fan-out.
+function resolveCohort(snapshot, sel) {
+    const byId = new Map(snapshot.sessions.map(x => [x.id, x]));
+    if (Array.isArray(sel)) return sel.map(Number).filter(n => byId.has(n));
+    const str = String(sel == null ? '' : sel).trim();
+    if (typeof sel === 'number' || /^\d+$/.test(str)) {
+        const n = Number(str);
+        return byId.has(n) ? [n] : [];
+    }
+    if (str === 'all') return snapshot.sessions.map(x => x.id);
+    const flag = {
+        working: x => x.status === 'working',
+        attention: x => x.attention,
+        stuck: x => x.stuck,
+        idle: x => x.idle,
+        done: x => x.status === 'done',
+        highContext: x => x.highContext,
+        limited: x => x.limited,
+    }[str];
+    return flag ? snapshot.sessions.filter(flag).map(x => x.id) : [];
+}
+
+// Build a manager-event filter from {self, kinds}. Hides the caller's own tab (so
+// a manager never wakes on its own output) and optionally restricts to kinds.
+function makeEventFilter(body) {
+    const self = body && body.self != null ? Number(body.self) : null;
+    const kinds = body && Array.isArray(body.kinds) && body.kinds.length ? new Set(body.kinds.map(String)) : null;
+    return (e) => (self == null || e.id !== self) && (!kinds || kinds.has(e.kind));
+}
+
 const STUCK_MS    = 4 * 60 * 1000;   // working but silent this long → stuck
 const HIGH_CTX    = 80;              // context % considered "high"
 const EVENT_CAP   = 500;             // depth of the in-memory manager event ring
+// Per-process identity stamped on every watch/events reply. A daemon restart
+// resets _seq to 0; a long-lived CLI watcher compares this epoch and re-baselines
+// its dedup the instant it changes — so NO post-restart event is lost even when
+// the new _seq has already climbed past the watcher's stale cursor (the "busy
+// restart" gap a bare cursor>head check misses).
+const BOOT_EPOCH  = `${process.pid}.${Date.now()}`;
 
 class SessionManager {
     constructor(session) {
@@ -199,9 +290,13 @@ class SessionManager {
     // ── One-shot "send text to tab at time" schedules ──
     schedule(tabId, at, text) {
         const id = Math.random().toString(36).slice(2, 10);
+        // Capture the cwd: tab ids are reassigned on a daemon restart, so cwd is
+        // the only stable identity for resolving the target when the schedule fires.
+        const tab = this.session.tabMgr && this.session.tabMgr.get(tabId);
+        const cwd = tab && tab.cwd ? tab.cwd : null;
         // One pending auto/manual resume per tab — newest wins.
         this.state.schedules = this.state.schedules.filter(s => s.tabId !== tabId);
-        this.state.schedules.push({ id, tabId, at, text: String(text).slice(0, 500) });
+        this.state.schedules.push({ id, tabId, cwd, at, text: String(text).slice(0, 500) });
         this._saveState();
         return id;
     }
@@ -220,8 +315,20 @@ class SessionManager {
         this.state.schedules = this.state.schedules.filter(s => s.at > now);
         this._saveState();
         const mgr = this.session.tabMgr;
+        if (!mgr) { this.broadcast(); return; }
         for (const s of due) {
-            const tab = mgr && mgr.get(s.tabId);
+            // Prefer the original tab id when it still maps to the SAME project
+            // (live cwd unchanged) — the common no-restart case, and unambiguous
+            // even when two tabs share a dir. Only when the id is gone OR now points
+            // at a DIFFERENT cwd (ids are reassigned across a daemon restart) fall
+            // back to a live tab whose cwd matches the one captured at schedule time.
+            // If neither resolves cleanly, SKIP — a missed nudge is far safer than
+            // firing a resume into the wrong agent.
+            let tab = mgr.get(s.tabId);
+            if (s.cwd && (!tab || tab.cwd !== s.cwd)) {
+                tab = null;
+                for (const tid of mgr.order) { const t = mgr.get(tid); if (t && t.cwd === s.cwd) { tab = t; break; } }
+            }
             if (!tab) continue;
             submitToTab(tab, s.text);
         }
@@ -350,7 +457,7 @@ class SessionManager {
         for (const id of mgr.order) {
             const s = this.tabs.get(id);
             if (!s) continue;
-            const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS;
+            const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS && !looksDone(s.recent);
             if (stuck && !this._stuckEmitted.get(id)) {
                 this._stuckEmitted.set(id, true);
                 this._emit('stuck', id, { ctxPct: s.ctxPct });
@@ -380,6 +487,16 @@ class SessionManager {
 
     forget(id) { this.tabs.delete(id); this._stuckEmitted.delete(id); }
 
+    // Stop background timers + release parked waiters when the owning session is
+    // destroyed (GC'd past idle TTL). Without this the 15s _schedTimer keeps
+    // firing forever and its closure pins the whole SessionManager — the Session,
+    // the tabs Map, the event ring — long after the session is gone.
+    destroy() {
+        if (this._schedTimer) { clearInterval(this._schedTimer); this._schedTimer = null; }
+        for (const w of this._waiters) { try { clearTimeout(w.timer); } catch (_) {} }
+        this._waiters.clear();
+    }
+
     // Build the supervisor view of every live tab.
     snapshot() {
         const mgr = this.session.tabMgr;
@@ -388,8 +505,19 @@ class SessionManager {
         const sessions = order.map(id => {
             const tab = mgr.get(id);
             const s = this._state(id);
-            const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS;
-            const sched = this.state.schedules.find(x => x.tabId === id);
+            const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS && !looksDone(s.recent);
+            // Match the schedule the way _fireDue resolves it (prefer the exact id
+            // when its cwd still matches, else the cwd) so resumeAt shows on the tab
+            // that will actually receive the nudge — even after a restart reassigned ids.
+            const sched = this.state.schedules.find(x => x.tabId === id && (!x.cwd || (tab && x.cwd === tab.cwd)))
+                || (tab ? this.state.schedules.find(x => {
+                    // cwd fallback applies ONLY when the schedule's own tab is gone or
+                    // reassigned (restart) — never to a live sibling sharing the cwd,
+                    // which would falsely show RESUME@ on the unscheduled sibling.
+                    if (!x.cwd || x.cwd !== tab.cwd) return false;
+                    const orig = mgr.get(x.tabId);
+                    return !orig || orig.cwd !== x.cwd;
+                }) : undefined);
             return {
                 id,
                 title: (tab && tab.title) || `tab ${id}`,
@@ -438,10 +566,8 @@ function mount(app, requireAuthed, sessions) {
         }
         return null;
     }
-    function isLoopback(req) {
-        const ip = (req.ip || (req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
-        return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
-    }
+    // Loopback trust gate is module-level + tunnel-aware (see isLocalRequest).
+    const isLoopback = isLocalRequest;
 
     // Read-only fleet view (authed; powers the dashboard too).
     // Authed config (the mobile Settings sheet) — same knobs as the loopback
@@ -466,8 +592,10 @@ function mount(app, requireAuthed, sessions) {
     });
 
     // Action surface for the manager agent (loopback only — same trust model as
-    // /api/tts). list | read | send | compact.
-    app.post('/api/sessions', express.json({ limit: '64kb' }), (req, res) => {
+    // /api/tts). The global express.json({limit:'16kb'}) in index.js runs first
+    // and short-circuits any per-route parser, so 16kb is the real (ample) limit —
+    // no misleading per-route override here.
+    app.post('/api/sessions', (req, res) => {
         if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'loopback only' });
         const s = primary();
         if (!s || !s.tabMgr) return res.status(503).json({ ok: false, error: 'no active session' });
@@ -475,35 +603,9 @@ function mount(app, requireAuthed, sessions) {
         const man = ensure(s);
         const body = req.body || {};
         const action = String(body.action || '');
-        // Resolve a target selector → tab ids. Accepts a number, a numeric
-        // array, 'all', or a signal name (working/attention/stuck/idle/done/
-        // highContext/limited) matched against the live snapshot flags.
-        const resolveTargets = (sel) => {
-            const snap = man.snapshot();
-            const byId = new Map(snap.sessions.map(x => [x.id, x]));
-            if (Array.isArray(sel)) return sel.map(Number).filter(n => byId.has(n));
-            if (typeof sel === 'number' || /^\d+$/.test(String(sel))) {
-                return byId.has(Number(sel)) ? [Number(sel)] : [];
-            }
-            if (sel === 'all') return snap.sessions.map(x => x.id);
-            const flag = {
-                working: x => x.status === 'working',
-                attention: x => x.attention,
-                stuck: x => x.stuck,
-                idle: x => x.idle,
-                done: x => x.status === 'done',
-                highContext: x => x.highContext,
-                limited: x => x.limited,
-            }[String(sel)];
-            return flag ? snap.sessions.filter(flag).map(x => x.id) : [];
-        };
-        // Build a manager-event filter from kinds[] + self-hide (so a manager
-        // never wakes on its own tab's output).
-        const eventFilter = (b) => {
-            const self = b.self != null ? Number(b.self) : null;
-            const kinds = Array.isArray(b.kinds) && b.kinds.length ? new Set(b.kinds.map(String)) : null;
-            return (e) => (self == null || e.id !== self) && (!kinds || kinds.has(e.kind));
-        };
+        // Cohort resolution + event filtering are module-level pure fns (tested).
+        const resolveTargets = (sel) => resolveCohort(man.snapshot(), sel);
+        const eventFilter = makeEventFilter;
         try {
             if (action === 'list') {
                 return res.json({ ok: true, ...man.snapshot() });
@@ -525,7 +627,7 @@ function mount(app, requireAuthed, sessions) {
                 const text = String(body.text || '');
                 const submit = body.submit !== false;   // default: press Enter
                 if (submit) submitToTab(tab, text);      // reliable split-write
-                else { try { tab.write(text); } catch (_) {} }
+                else writeToTab(tab, text);              // FIFO-ordered, no Enter
                 return res.json({ ok: true, id, sent: text.length, submitted: submit });
             }
             if (action === 'compact') {
@@ -548,14 +650,19 @@ function mount(app, requireAuthed, sessions) {
                     else if ((m = when.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i))) at = nextOccurrence(+m[1], +(m[2] || 0), m[3]);
                 }
                 if (!at) return res.status(400).json({ ok: false, error: 'bad time — use epochMs, "+15m", or "2:30am"' });
+                const self = body.self != null ? Number(body.self) : null;
                 let targets;
                 if (body.id === 'all') targets = mgr.order.slice();
                 else if (body.id === 'limited') targets = mgr.order.filter(tid => man._state(tid).limit);
                 else {
                     const id = Number(body.id);
+                    if (self != null && id === self) return res.status(400).json({ ok: false, error: 'refusing to schedule into your own tab' });
                     if (!mgr.get(id)) return res.status(404).json({ ok: false, error: 'tab not found' });
                     targets = [id];
                 }
+                // For a cohort ('all'/'limited') silently exclude self — schedule the
+                // rest of the fleet, just never a self-nudge into the manager's own tab.
+                if (self != null) targets = targets.filter(tid => tid !== self);
                 const scheduled = targets.map(tid => ({ tabId: tid, scheduleId: man.schedule(tid, at, text) }));
                 return res.json({ ok: true, at, text, scheduled });
             }
@@ -584,23 +691,23 @@ function mount(app, requireAuthed, sessions) {
                 const cursor = (body.cursor === undefined || body.cursor === null) ? null : Number(body.cursor);
                 const filter = eventFilter(body);
                 if (cursor == null) {
-                    return res.json({ ok: true, cursor: man._seq, events: [], dropped: 0, timedOut: false, now: Date.now() });
+                    return res.json({ ok: true, epoch: BOOT_EPOCH, cursor: man._seq, events: [], dropped: 0, timedOut: false, now: Date.now() });
                 }
                 const immediate = man._eventsSince(cursor, filter);
                 if (immediate.events.length) {
-                    return res.json({ ok: true, cursor: immediate.cursor, events: immediate.events, dropped: immediate.dropped, timedOut: false, now: Date.now() });
+                    return res.json({ ok: true, epoch: BOOT_EPOCH, cursor: immediate.cursor, events: immediate.events, dropped: immediate.dropped, timedOut: false, now: Date.now() });
                 }
                 let timeoutMs = Number(body.timeoutMs);
                 if (!Number.isFinite(timeoutMs)) timeoutMs = 25000;
                 timeoutMs = Math.max(1000, Math.min(55000, timeoutMs));
                 const waiter = {
                     cursor, filter, timer: null,
-                    resolve: (m) => { if (res.headersSent) return; res.json({ ok: true, cursor: m.cursor, events: m.events, dropped: m.dropped, timedOut: false, now: Date.now() }); },
+                    resolve: (m) => { if (res.headersSent) return; res.json({ ok: true, epoch: BOOT_EPOCH, cursor: m.cursor, events: m.events, dropped: m.dropped, timedOut: false, now: Date.now() }); },
                 };
                 waiter.timer = setTimeout(() => {
                     man._waiters.delete(waiter);
                     if (res.headersSent) return;
-                    res.json({ ok: true, cursor, events: [], dropped: 0, timedOut: true, now: Date.now() });
+                    res.json({ ok: true, epoch: BOOT_EPOCH, cursor, events: [], dropped: 0, timedOut: true, now: Date.now() });
                 }, timeoutMs);
                 if (waiter.timer.unref) waiter.timer.unref();
                 res.on('close', () => { man._waiters.delete(waiter); clearTimeout(waiter.timer); });
@@ -614,7 +721,7 @@ function mount(app, requireAuthed, sessions) {
                 let events = r.events;
                 const limit = Math.max(1, Math.min(500, Number(body.limit) || 500));
                 if (events.length > limit) events = events.slice(-limit);
-                return res.json({ ok: true, cursor: r.cursor, events, dropped: r.dropped, now: Date.now() });
+                return res.json({ ok: true, epoch: BOOT_EPOCH, cursor: r.cursor, events, dropped: r.dropped, now: Date.now() });
             }
             // whoami: identity probe for bootstrap — echoes the caller's own tab.
             if (action === 'whoami') {
@@ -624,7 +731,7 @@ function mount(app, requireAuthed, sessions) {
                     const tab = mgr.get(self);
                     if (tab) { title = tab.title; status = man._state(self).status; }
                 }
-                return res.json({ ok: true, self, title, status, cursor: man._seq });
+                return res.json({ ok: true, epoch: BOOT_EPOCH, self, title, status, cursor: man._seq });
             }
 
             // ── Manager-agent: mass / individual commands + Claude controls ──
@@ -674,7 +781,7 @@ function mount(app, requireAuthed, sessions) {
                 ids.forEach((id, i) => {
                     const tab = mgr.get(id);
                     if (!tab || tab.exited) return;
-                    const fire = () => { if (submit) submitToTab(tab, text); else { try { tab.write(text); } catch (_) {} } };
+                    const fire = () => { if (submit) submitToTab(tab, text); else writeToTab(tab, text); };
                     const delay = i * 120;
                     if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); } else fire();
                     hit.push(id);
@@ -731,4 +838,8 @@ function mount(app, requireAuthed, sessions) {
     });
 }
 
-module.exports = { SessionManager, ensure, mount, classifyAgent, extractCtxPct, launchClaude, submitToTab };
+module.exports = {
+    SessionManager, ensure, mount,
+    classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
+    resolveCohort, makeEventFilter, isLocalRequest,
+};
