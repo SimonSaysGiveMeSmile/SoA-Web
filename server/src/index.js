@@ -823,14 +823,15 @@ const heartbeat = setInterval(() => {
 }, 5000);
 if (heartbeat.unref) heartbeat.unref();
 
-// Persist scrollback to disk every 60s so even a *hard* crash (SIGKILL from
+// Persist scrollback to disk every 30s so even a *hard* crash (SIGKILL from
 // the watchdog's `kickstart -k`, OOM, panic — none of which run the graceful
-// shutdown flush below) loses at most ~1 min of on-screen context instead of
-// 5. Metadata (titles, cwds) is already saved on every change; this captures
-// the live PTY output — the actual session "memory" — for each tab. The write
-// is a capped (128 KiB/tab) atomic tmp+rename, ~a few MB total, so the more
-// frequent cadence is negligible I/O. Override with SOA_WEB_SCROLLBACK_FLUSH_MS.
-const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(60 * 1000), 10);
+// shutdown flush below) loses at most ~30s of on-screen context. Metadata
+// (titles, cwds) is already saved on every change; this captures the live PTY
+// output — the actual session "memory" — for each tab. The write is a capped
+// (128 KiB/tab) atomic tmp+rename, ~a few MB total (measured ~50ms p99 on a
+// 30-tab fleet), so the tighter cadence is negligible I/O. Bump it up on slow
+// network storage (e.g. SOA_WEB_SCROLLBACK_FLUSH_MS=120000) to reduce churn.
+const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(30 * 1000), 10);
 // Flush only the session that actually owns tabs. Flushing every session
 // last-writer-wins into the same two files, so an empty tabMgr (e.g. a WS
 // client that bound while no session had tabs) iterated last would erase the
@@ -923,6 +924,44 @@ function crashFlush(kind, err) {
 process.on('uncaughtException',  (err) => crashFlush('uncaughtException', err));
 process.on('unhandledRejection', (err) => crashFlush('unhandledRejection', err));
 
+// Boot-time self-heal: a daemon restart only rehydrates the fleet (respawn PTYs
+// + claude --resume) when a client connects to the primary session — so a restart
+// with NO browser leaves the saved tabs dead on disk until someone connects (the
+// "self-heal recovered tabs.json but the fleet is still down" gap). Here the
+// daemon connects an internal loopback WS to ITSELF a few seconds after boot,
+// carrying the persisted session's own cookie so it binds to THAT exact session,
+// which drives the SAME battle-tested restore-on-connect path (open tabs, arm
+// auto-resume). It then closes — tabs/PTYs live on the session, not the socket,
+// so they persist. No-op if a real client already rehydrated, tabs.json is empty,
+// or SOA_WEB_NO_BOOT_RESUME=1. Cookie targeting is what prevents a double-restore:
+// a later browser using the same cookie binds to the same (now non-empty) session
+// and skips restore.
+function scheduleBootResume() {
+    if (process.env.SOA_WEB_NO_BOOT_RESUME === '1') return;
+    if (!_persistedSession || !_persistedSession.token) return;
+    const delay = parseInt(process.env.SOA_WEB_BOOT_RESUME_DELAY_MS || '4000', 10);
+    const t = setTimeout(() => {
+        try {
+            const s = sessions.getByToken(_persistedSession.token);
+            if (s && s.tabMgr && s.tabMgr.order.length > 0) return; // a client already rehydrated
+            if (!s) console.log('boot-resume: persisted session not re-seated in store; will rehydrate into a fresh primary session');
+            const saved = tabPersist.load();
+            if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) return;
+            console.log(`boot-resume: no client ${delay}ms after boot — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
+            const cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+            const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
+            const probe = new WebSocket(url, { headers: { Cookie: cookie } });
+            probe.on('open', () => {
+                // restore-on-connect runs synchronously inside onWsConnect; hold the
+                // socket open briefly so the first auto-resume tick can fire, then close.
+                setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
+            });
+            probe.on('error', e => console.log('boot-resume self-connect failed:', e && e.message));
+        } catch (e) { console.log('boot-resume failed:', e && e.message); }
+    }, delay);
+    if (t.unref) t.unref();
+}
+
 function onListening() {
     activePort = server.address().port;
     sysinfo.setSoaPort(activePort);
@@ -930,6 +969,9 @@ function onListening() {
     // Refresh the lock with the port we actually bound (may have hopped).
     instanceLock.acquireOrExit(activePort);
     console.log(`SoA-Web ready: http://${HOST}:${activePort}  [${MODE} · state: ${STATE_DIR}]`);
+
+    // Headless self-heal: rehydrate the fleet even if no browser reconnects.
+    scheduleBootResume();
 
     if (process.env.SOA_WEB_AUTOPAIR !== '0') {
         const registerTunnel = (url) => {

@@ -150,6 +150,15 @@ function _writeMetaSync(tabMgr) {
         } else {
             // _liveTabsSeen && empty → genuine user close-all. Record intent so
             // boot/self-heal recovery won't resurrect a fleet the user retired.
+            // EXCEPT: never tombstone a tabs.json that was just recovered from
+            // scrollback and not yet re-persisted by a real tab — a transient
+            // empty in that window (e.g. a probe/second session) would wrongly
+            // mark the fleet user-closed and block self-heal on the next boot.
+            const prior = load();
+            if (prior && prior.recoveredFrom === 'scrollback') {
+                console.log('tabPersist: refused close-all tombstone over a scrollback-recovered tabs.json (transient empty post-recovery)');
+                return;
+            }
             data.closedByUser = true;
         }
         const tmp = STATE_FILE + '.tmp';
@@ -196,7 +205,13 @@ function reconcileTabsFromScrollback() {
         const tmp = STATE_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
         fs.renameSync(tmp, STATE_FILE);
-        _liveTabsSeen = true; // we now hold a real list; protect it from here on
+        // NOTE: deliberately do NOT set _liveTabsSeen here. Recovery already
+        // rewrote tabs.json on disk (now non-empty + recoveredFrom), which the
+        // existing clobber guard protects via load(). Latching the process-global
+        // _liveTabsSeen at boot would let a LATER transient-empty session write a
+        // closedByUser tombstone over this recovered fleet (cross-session poison)
+        // — the recurring "self-heal recovered but the next boot won't". The latch
+        // is earned legitimately the first time a real tab is persisted.
         return { action: 'recovered', count: tabs.length };
     } catch (e) {
         return { action: 'error', reason: (e && e.message) || String(e) };
@@ -215,6 +230,22 @@ function _writeScrollbackSync(tabMgr) {
                 snap = snap.slice(snap.length - MAX_SCROLLBACK_PER_TAB);
             }
             tabs.push({ title: tab.title, cwd: tab.cwd, scrollback: snap });
+        }
+        // ANTI-CLOBBER (symmetric to _writeMetaSync's guard): scrollback.json is
+        // the self-heal recovery source — reconcileTabsFromScrollback() rebuilds
+        // the whole fleet from it — so a transient empty list must NEVER overwrite
+        // a good one. If we've never held real tabs this process AND the on-disk
+        // file still has tabs, refuse: the empty is a pristine / pre-restore bind,
+        // not a real close-all. (Once _liveTabsSeen, a genuine close-all IS
+        // written, mirroring the metadata path.) Without this guard a periodic
+        // saveAll() on an empty session could orphan tabs.json beside an emptied
+        // scrollback.json — the exact "fleet lost, nothing to recover from" state.
+        if (tabs.length === 0 && !_liveTabsSeen) {
+            const prior = loadScrollback();
+            if (prior && Array.isArray(prior.tabs) && prior.tabs.length > 0) {
+                console.log('tabPersist: refused empty scrollback.json write over', prior.tabs.length, 'saved tab(s) (transient empty, no live tabs seen) — clobber guard');
+                return;
+            }
         }
         const data = { savedAt: new Date().toISOString(), tabs };
         const tmp = SCROLLBACK_FILE + '.tmp';
