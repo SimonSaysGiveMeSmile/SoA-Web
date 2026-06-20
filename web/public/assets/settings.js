@@ -21,6 +21,7 @@ const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
+    theme: 'auto',
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,
@@ -31,6 +32,9 @@ export const DEFAULTS = Object.freeze({
     clockHours: 24,
 });
 
+const THEMES = ['auto', 'dark', 'light', 'dim'];
+function asTheme(v) { return THEMES.includes(v) ? v : DEFAULTS.theme; }
+
 function clampFont(n)   { n = Number(n); return Number.isFinite(n) ? Math.max(8, Math.min(28, Math.round(n))) : DEFAULTS.termFontSize; }
 function clampVol(n)    { n = Number(n); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : DEFAULTS.audioVolume; }
 function asBool(v, dflt){ return typeof v === 'boolean' ? v : dflt; }
@@ -39,6 +43,7 @@ function asHours(n)     { n = Number(n); return n === 12 ? 12 : 24; }
 function normalize(raw) {
     const s = raw && typeof raw === 'object' ? raw : {};
     return {
+        theme: asTheme(s.theme ?? DEFAULTS.theme),
         termFontSize: clampFont(s.termFontSize ?? DEFAULTS.termFontSize),
         cursorBlink: asBool(s.cursorBlink, DEFAULTS.cursorBlink),
         nocursor: asBool(s.nocursor, DEFAULTS.nocursor),
@@ -171,6 +176,28 @@ function langSelect(id) {
     return s;
 }
 
+function themeSelect(id, value) {
+    const sel = el('select', { id });
+    for (const [v, label] of [['auto', 'Auto (system)'], ['dark', 'Dark'], ['light', 'Light'], ['dim', 'Dim']]) {
+        const o = el('option', { value: v, text: label });
+        if (v === value) o.selected = true;
+        sel.appendChild(o);
+    }
+    // Instant apply: changing the dropdown re-themes the whole UI immediately
+    // (saveSettings → 'soa:settings' → app.js _applySettings → _applyTheme).
+    sel.addEventListener('change', () => saveSettings({ theme: asTheme(sel.value) }));
+    return sel;
+}
+
+// A read-only settings row (label / description / static value).
+function staticRow(label, desc, valueText) {
+    return el('tr', {}, [
+        el('td', { class: 'k' }, [el('code', { text: label })]),
+        el('td', { class: 'd', text: desc }),
+        el('td', { class: 'v' }, [el('span', { text: valueText })]),
+    ]);
+}
+
 function buildAppearancePane(s) {
     return el('table', { class: 'settings-table' }, [
         el('thead', {}, [el('tr', {}, [
@@ -179,10 +206,16 @@ function buildAppearancePane(s) {
             el('th', { text: tr('settings.col.value') }),
         ])]),
         el('tbody', {}, [
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'theme' })]),
+                el('td', { class: 'd', text: 'Color theme — Auto follows your system; Light/Dim are bright variants. Applies instantly.' }),
+                el('td', { class: 'v' }, [themeSelect('set-theme', s.theme)]),
+            ]),
             kvRow('termFontSize', 'settings.desc.termFontSize', numInput('set-termFontSize', s.termFontSize, 8, 28, 1)),
             kvRow('cursorBlink',  'settings.desc.cursorBlink',  boolSelect('set-cursorBlink', s.cursorBlink)),
             kvRow('nocursor',     'settings.desc.nocursor',     boolSelect('set-nocursor', s.nocursor)),
             kvRow('nointro',      'settings.desc.nointro',      boolSelect('set-nointro', s.nointro)),
+            staticRow('version', 'SoA-Web build', 'v' + ((window.__SOA_WEB__ || {}).version || 'dev')),
         ]),
     ]);
 }
@@ -471,7 +504,9 @@ function buildAutomationPane() {
 
 function collectFromDOM(prev) {
     const get = id => document.getElementById(id);
+    const themeEl = get('set-theme');
     return {
+        theme:                themeEl ? asTheme(themeEl.value) : (prev && prev.theme) || DEFAULTS.theme,
         termFontSize:         Number(get('set-termFontSize').value),
         cursorBlink:          get('set-cursorBlink').value === 'true',
         nocursor:             get('set-nocursor').value === 'true',

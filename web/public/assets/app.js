@@ -20,8 +20,9 @@ import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=24';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
+import { getSettings, onSettings, openSettingsModal, saveSettings } from '/assets/settings.js?v=18';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
+import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=1';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -180,7 +181,7 @@ class TabRuntime {
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
             fontSize,
-            theme: TRON_THEME,
+            theme: xtermTheme(resolveTheme(s.theme)),
             cursorBlink: s.cursorBlink,
             scrollback: 5000,
             convertEol: false,
@@ -550,6 +551,18 @@ class Shell {
             };
             actionsToggle.addEventListener('click', () => this._toggleActions());
         }
+
+        // Theme toggle (toolbar): flip between dark and light. The full set
+        // (Auto/Dark/Light/Dim) lives in Settings; this is the quick switch.
+        const themeBtn = $('#toggle-theme');
+        if (themeBtn) {
+            themeBtn.addEventListener('click', () => this._toggleTheme());
+        }
+        // Apply the saved theme now (the inline <head> script already set the
+        // attribute pre-paint; this syncs terminals + the toggle icon) and keep
+        // 'auto' in step with the OS.
+        this._applyTheme();
+        onSystemThemeChange(() => { if (getSettings().theme === 'auto') this._applyTheme(); });
 
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
@@ -2188,8 +2201,34 @@ class Shell {
         }
     }
 
+    // Resolve the saved theme setting, set <html data-theme> (re-themes the CSS
+    // chrome instantly), and swap every live terminal's xterm palette to match.
+    _applyTheme() {
+        const resolved = applyThemeAttr(getSettings().theme);
+        const xt = xtermTheme(resolved);
+        for (const rt of this.tabs.values()) {
+            try { if (rt.term) rt.term.options.theme = xt; } catch (_) {}
+        }
+        const tb = $('#toggle-theme');
+        if (tb) {
+            const dark = resolved === 'dark';
+            tb.dataset.icon = dark ? '☀' : '☾';   // show what a click switches TO
+            tb.setAttribute('aria-pressed', dark ? 'false' : 'true');
+            tb.title = dark ? 'Switch to light theme' : 'Switch to dark theme';
+        }
+        return resolved;
+    }
+
+    // Toolbar quick-toggle: dark <-> light (Settings has the full Auto/Dark/Light/Dim).
+    _toggleTheme() {
+        const next = resolveTheme(getSettings().theme) === 'dark' ? 'light' : 'dark';
+        saveSettings({ theme: next });   // → 'soa:settings' → _applySettings → _applyTheme
+        if (this.audio) this.audio.play('panels');
+    }
+
     _applySettings(s) {
         for (const rt of this.tabs.values()) rt.applySettings(s);
+        this._applyTheme();
         this._fitActive();
         if (this.audio) {
             if (typeof this.audio.setEnabled === 'function') this.audio.setEnabled(!!s.audio);

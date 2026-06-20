@@ -3,8 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#05080d">
+  <script>
+    /* Apply the saved theme BEFORE first paint to avoid a flash. Mirrors
+       theme.js resolveTheme(); the full module takes over once app.js loads. */
+    (function () {
+      try {
+        var s = JSON.parse(localStorage.getItem('soa-web:settings') || '{}');
+        var t = s && s.theme;
+        document.documentElement.dataset.theme =
+          (t === 'dark' || t === 'light' || t === 'dim') ? t
+          : ((window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark');
+      } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+    })();
+  </script>
   <title>Son of Anton · Browser Terminal, Claude Code, and Desktop Pairing</title>
   <meta name="description" content="Son of Anton (SoA) is a browser-native terminal that streams real shell sessions over WebSocket. Run Claude Code in any browser, pair your phone to your desktop via QR, and skip the Electron install.">
   <meta name="keywords" content="browser terminal, web terminal, WebSocket PTY, Claude Code web, xterm.js, SSH alternative, self-hosted terminal, phone to desktop pairing, QR code terminal, son of anton">
@@ -134,8 +147,8 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=56">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=18">
+  <link rel="stylesheet" href="/assets/styles.css?v=57">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=19">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -617,7 +630,6 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <button id="toggle-sidebar" data-icon="◨" data-i18n="topbar.sidebar" data-i18n-title="topbar.sidebar_title" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
         <span class="soa-brand-name">
           <a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a>
-          <span class="soa-version" id="soa-version" aria-hidden="true"></span>
         </span>
         <button id="tile-back" class="tile-back-btn" style="display:none" title="Back to tiles">← BACK</button>
       </div>
@@ -631,6 +643,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <button id="toggle-monitor" data-icon="⊡" title="Monitor — every agent's browser + localhost ports in one view">⊡ MON</button>
         <button id="toggle-audio" data-icon="♬" data-i18n="topbar.audio_on" data-i18n-title="topbar.audio_title" title="Mute / unmute sound FX" data-state="on">♬ FX</button>
         <button id="toggle-tts" data-icon="🔊" title="Speak Claude's replies aloud (text-to-speech)" data-state="off">🔊 SPEAK</button>
+        <button id="toggle-theme" data-icon="☀" title="Switch light / dark theme (full options in Settings)" aria-pressed="false" aria-label="Toggle light or dark theme">☀ THEME</button>
         <a id="release-link" class="release-btn release-btn--cta" data-icon="⤓" href="https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases" target="_blank" rel="noopener" data-i18n="topbar.release" data-i18n-title="topbar.release_title" title="Download the desktop app">⤓ DOWNLOAD APP</a>
         <button id="open-settings" data-icon="⚙" data-i18n="topbar.settings" data-i18n-title="topbar.settings_title" title="Settings (Ctrl+Shift+S)">⚙ SET</button>
         </div>
@@ -653,7 +666,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=87"></script>
+  <script type="module" src="/assets/app.js?v=88"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost
