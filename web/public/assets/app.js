@@ -183,7 +183,11 @@ class TabRuntime {
             fontSize,
             theme: xtermTheme(resolveTheme(s.theme)),
             cursorBlink: s.cursorBlink,
-            scrollback: 5000,
+            // Minimal per-tab browser memory: each xterm buffer is the dominant
+            // client-side cost, and with ~20 tabs a 5000-line buffer per tab was
+            // bloating the page until it crashed. 1000 lines keeps useful
+            // scrollback while cutting per-tab memory ~5×. Tunable knob.
+            scrollback: 1000,
             convertEol: false,
         });
         this.fit = new FitAddon.FitAddon();
@@ -257,7 +261,7 @@ class TabRuntime {
         // bounded scrollback), so cap it. Keep the tail and align to a newline so
         // the replay never starts mid-escape-sequence; a full-screen TUI repaints
         // itself shortly after, so a dropped prefix self-corrects on switch.
-        const CAP = 1 << 19; // 512 KB
+        const CAP = 1 << 17; // 128 KB — minimal buffered streaming history per hidden tab
         if (this._pendingReplay.length > CAP) {
             const tail = this._pendingReplay.slice(-CAP);
             const nl = tail.indexOf('\n');
