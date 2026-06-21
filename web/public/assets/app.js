@@ -382,6 +382,7 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
+        this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
         // Tabs whose PTY emitted output since the last status scan. The 500ms
         // poll re-scans only dirty tabs (idle tabs cost nothing), with a full
         // sweep every ~8s as a backstop so a missed seed can't strand a tab's
@@ -634,6 +635,7 @@ class Shell {
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
         bridge.addEventListener('tts',       e => this._onTTS(e.detail));
         bridge.addEventListener('manager',   e => this._onManager(e.detail));
+        bridge.addEventListener('tab-mem',   e => this._onTabMem(e.detail));
         bridge.addEventListener('browser-frame', e => this._onBrowserFrame(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
@@ -734,7 +736,7 @@ class Shell {
         if (!Array.isArray(tabs)) return;
         const known = new Set(tabs.map(t => t.id));
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
-        for (const t of tabs) this._ensureTab(t.id, t.title);
+        for (const t of tabs) { this._ensureTab(t.id, t.title); if (t.mem != null) this._tabMem.set(t.id, t.mem); }
         // Snapshot is the authoritative order: a MOVE_TAB from this client, or
         // from another device sharing the session, must reorder the local tab
         // bar. _ensureTab only appends new ids, so adopt the snapshot order.
@@ -943,8 +945,9 @@ class Shell {
         const savedScrollLeft = this.tabsEl.scrollLeft;
         this.tabsEl.replaceChildren(...tabs.map(t => {
             const label = el('span', {
+                // No own title: hovering the label falls through to the tab
+                // button's richer tooltip (memory + context + rename hint).
                 class: 'tab-label',
-                title: tr('tab.rename_hint') || 'Double-click to rename',
                 text: t.title || tr('tab.default', { id: t.id }),
                 ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
@@ -960,6 +963,7 @@ class Shell {
             }});
             const root = el('button', {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
+                title: this._tabTooltip(t.id, t.title),
                 'data-agent': this._agentStatus.get(t.id) || '',
                 'data-tab-id': String(t.id),
                 draggable: 'true',
@@ -1015,6 +1019,47 @@ class Shell {
         const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-bar`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
         node.replaceWith(this._makeCtxBar(pct, id));
+    }
+
+    // ── Per-tab memory occupation (hover tooltip) ───────────────────────────
+    // The daemon samples each tab's process-tree RSS every ~10s and pushes a
+    // {id:bytes} frame; we patch the tab button's title in place (no row
+    // rebuild — mirrors _updateCtxBar). The tooltip doubles as a one-stop peek:
+    // memory + context % + the rename hint.
+    _onTabMem(detail) {
+        const mem = detail && detail.mem;
+        if (!mem) return;
+        for (const k of Object.keys(mem)) {
+            const id = Number(k);
+            this._tabMem.set(id, mem[k]);
+            this._refreshTabTitle(id);
+        }
+    }
+
+    _refreshTabTitle(id) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (!node) return;
+        const rt = this.tabs.get(id);
+        node.title = this._tabTooltip(id, rt ? rt.title : '');
+    }
+
+    _tabTooltip(id, title) {
+        const lines = [];
+        if (title) lines.push(title);
+        const bytes = this._tabMem.get(id);
+        lines.push('Memory: ' + (bytes != null ? this._fmtBytes(bytes) : '—'));
+        const pct = this._ctxPct.get(id);
+        if (pct) lines.push('Context: ' + pct + '%');
+        lines.push('Double-click to rename');
+        return lines.join('\n');
+    }
+
+    _fmtBytes(b) {
+        if (!(b > 0)) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let n = b, i = 0;
+        while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+        return (n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)) + ' ' + units[i];
     }
 
     // One-line peek at what a tab last emitted, shown as the tab's dim subtitle.

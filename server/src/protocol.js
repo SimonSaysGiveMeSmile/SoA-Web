@@ -24,6 +24,7 @@ const MSG = Object.freeze({
     TTS:        'tts',
     BROWSER_FRAME: 'browser-frame',
     MANAGER:    'manager',
+    TAB_MEM:    'tab-mem',   // {mem:{[id]:bytes}} — per-tab process-tree RSS, pushed every ~10s
 
     AUTH:       'auth',
     INPUT:      'input',

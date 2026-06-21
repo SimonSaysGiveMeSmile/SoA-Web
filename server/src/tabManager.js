@@ -219,7 +219,13 @@ class TabManager {
             const t = this.tabs.get(id);
             // cwd lets clients dedup by project — soa-relaunch skips tabs whose
             // cwd is already open instead of duplicating the whole fleet.
-            return { id: t.id, title: t.title, cols: t.cols, rows: t.rows, exited: t.exited, cwd: t.cwd || null };
+            return {
+                id: t.id, title: t.title, cols: t.cols, rows: t.rows,
+                exited: t.exited, cwd: t.cwd || null,
+                // Per-tab process-tree memory (bytes), refreshed ~10s by the
+                // daemon's memory sampler. null until the first sample.
+                mem: (typeof t.memBytes === 'number' ? t.memBytes : null),
+            };
         });
     }
 

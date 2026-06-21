@@ -41,6 +41,7 @@ const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
+const procMem          = require('./procMem');
 const claudeSessions   = require('./claudeSessions');
 const tabApi           = require('./tabApi');
 const envStore         = require('./envStore');
@@ -851,10 +852,46 @@ const scrollbackFlush = setInterval(() => {
 }, SCROLLBACK_FLUSH_MS);
 if (scrollbackFlush.unref) scrollbackFlush.unref();
 
+// Per-tab memory sampler. Every ~10s take ONE `ps` snapshot of all processes
+// and sum each tab's process-tree RSS from its PTY pid (the shell + the agent
+// running under it), then push a compact {id:bytes} frame to that session's
+// clients for the tab hover tooltip. Resource-frugal by design: skip the ps
+// call entirely when NO client is connected (nobody to show it to), and one
+// snapshot serves every tab/session. memBytes is also stamped on each tab so a
+// fresh HELLO/SNAPSHOT carries the last value immediately (tabManager.list).
+const MEM_SAMPLE_MS = parseInt(process.env.SOA_WEB_MEM_SAMPLE_MS || String(10 * 1000), 10);
+const memSample = setInterval(() => {
+    try {
+        let anyClients = false;
+        for (const s of sessions.sessions.values()) {
+            if (s.sockets && s.sockets.size) { anyClients = true; break; }
+        }
+        if (!anyClients) return; // nobody watching → don't spend a ps
+        const snap = procMem.snapshot();
+        for (const s of sessions.sessions.values()) {
+            const mgr = s.tabMgr;
+            if (!mgr || mgr.order.length === 0) continue;
+            const mem = {};
+            for (const id of mgr.order) {
+                const t = mgr.tabs.get(id);
+                if (!t || t.exited || !t.pty || !t.pty.pid) continue;
+                const bytes = procMem.subtreeBytes(t.pty.pid, snap);
+                t.memBytes = bytes;
+                mem[id] = bytes;
+            }
+            if (s.sockets && s.sockets.size && Object.keys(mem).length) {
+                try { s.send(frame(MSG.TAB_MEM, { mem })); } catch (_) {}
+            }
+        }
+    } catch (_) { /* sampling is best-effort; never crash the daemon */ }
+}, MEM_SAMPLE_MS);
+if (memSample.unref) memSample.unref();
+
 function shutdown(code = 0) {
     console.log('\nshutting down…');
     clearInterval(heartbeat);
     clearInterval(scrollbackFlush);
+    clearInterval(memSample);
     // Persist tabs + scrollback before killing PTYs so the next boot can
     // seed each tab with what was on screen.
     const flushS = persistableSession();
@@ -909,6 +946,7 @@ function crashFlush(kind, err) {
     _crashing = true;
     try { clearInterval(scrollbackFlush); } catch (_) {}
     try { clearInterval(heartbeat); } catch (_) {}
+    try { clearInterval(memSample); } catch (_) {}
     try {
         const s = persistableSession();
         if (s) tabPersist.saveAll(s.tabMgr);            // sync atomic tmp+rename
