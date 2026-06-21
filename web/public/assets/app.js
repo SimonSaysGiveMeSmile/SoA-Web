@@ -552,6 +552,41 @@ class Shell {
             actionsToggle.addEventListener('click', () => this._toggleActions());
         }
 
+        // "More" overflow submenu — holds the secondary actions (download,
+        // mute, speak, monitor, time machine) so the bar stays uncluttered.
+        // The items keep their own ids/handlers (wired above); this only opens
+        // and closes the popover and dismisses it on outside-click / Escape.
+        const moreBtn = $('#toggle-more');
+        const moreMenu = $('#more-menu');
+        if (moreBtn && moreMenu) {
+            const onDocClick = (e) => {
+                if (moreMenu.contains(e.target) || moreBtn.contains(e.target)) return;
+                closeMore();
+            };
+            const onKey = (e) => { if (e.key === 'Escape') { closeMore(); moreBtn.focus(); } };
+            const closeMore = () => {
+                moreMenu.hidden = true;
+                moreBtn.setAttribute('aria-expanded', 'false');
+                document.removeEventListener('click', onDocClick, true);
+                document.removeEventListener('keydown', onKey, true);
+            };
+            const openMore = () => {
+                moreMenu.hidden = false;
+                moreBtn.setAttribute('aria-expanded', 'true');
+                document.addEventListener('click', onDocClick, true);
+                document.addEventListener('keydown', onKey, true);
+            };
+            moreBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (moreMenu.hidden) { this.audio.play('panels'); openMore(); }
+                else closeMore();
+            });
+            // Picking an action runs its own handler, then the menu dismisses.
+            moreMenu.addEventListener('click', (e) => {
+                if (e.target.closest('.more-item')) setTimeout(closeMore, 0);
+            });
+        }
+
         // Theme toggle (toolbar): flip between dark and light. The full set
         // (Auto/Dark/Light/Dim) lives in Settings; this is the quick switch.
         const themeBtn = $('#toggle-theme');
