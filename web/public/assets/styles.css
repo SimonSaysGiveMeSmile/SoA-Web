@@ -1897,3 +1897,107 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .soa-tm-row-actions .soa-tm-del { padding: 4px 8px; }
 .soa-tm-foot { margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(var(--soa-accent-rgb), 0.18); color: rgba(var(--soa-accent-rgb), 0.5); }
 .soa-tm-foot small { font-size: 10px; line-height: 1.4; }
+
+/* ── Localhost preview split pane ───────────────────────────────────────── */
+
+/* Preview pane: absolutely positioned over the right half of #terms.
+   The terminal stays full-width underneath; the pane floats on top so we
+   don't have to re-flex #terms or move any .term containers. */
+.preview-split-pane {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: var(--preview-split-w, 50%);
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  background: var(--soa-bg, #05080d);
+  border-left: 1px solid var(--soa-line, rgba(170,207,209,0.18));
+  z-index: 10;
+}
+/* Make #terms a positioned container so the pane can anchor to it */
+#terms { position: relative; overflow: hidden; }
+
+.preview-split-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  height: 28px;
+  background: var(--soa-bg-panel, rgba(0,0,0,0.35));
+  border-bottom: 1px solid var(--soa-line, rgba(170,207,209,0.18));
+  font-size: 11px;
+  color: var(--soa-fg-dim, rgba(170,207,209,0.55));
+  flex-shrink: 0;
+}
+.psb-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, 'Fira Mono', monospace);
+  font-size: 10px;
+  opacity: 0.8;
+}
+.psb-btn {
+  background: none;
+  border: none;
+  color: var(--soa-fg-dim, rgba(170,207,209,0.55));
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 13px;
+  line-height: 1;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.psb-btn:hover { background: var(--soa-accent-dim, rgba(170,207,209,0.12)); color: var(--soa-accent, #aacfd1); }
+
+.preview-split-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  display: block;
+  background: #fff;
+}
+
+/* Tab strip preview toggle button */
+.tab-preview-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  margin-left: 3px;
+  border-radius: 3px;
+  border: 1px solid var(--soa-line, rgba(170,207,209,0.25));
+  background: none;
+  color: var(--soa-accent, #aacfd1);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.65;
+  transition: opacity 0.15s, background 0.15s;
+  line-height: 1;
+  padding: 0;
+  font-family: inherit;
+}
+.tab-preview-btn:hover { opacity: 1; background: var(--soa-accent-dim, rgba(170,207,209,0.12)); }
+.tab-preview-btn.preview-on {
+  background: var(--soa-accent, #aacfd1);
+  color: var(--soa-bg, #05080d);
+  border-color: var(--soa-accent, #aacfd1);
+  opacity: 1;
+}
+/* Only show the button when a dev server has been detected */
+[data-has-preview="1"] .tab-preview-btn { display: inline-flex; }
+
+/* Brief pulse animation when a dev server is first detected */
+@keyframes preview-btn-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(170,207,209,0.7); opacity: 1; }
+  50%  { box-shadow: 0 0 0 5px rgba(170,207,209,0);   opacity: 1; }
+  100% { box-shadow: 0 0 0 0   rgba(170,207,209,0);   opacity: 0.65; }
+}
+.tab-preview-btn.preview-btn-pulse {
+  animation: preview-btn-pulse 1s ease-out 2;
+  opacity: 1;
+}

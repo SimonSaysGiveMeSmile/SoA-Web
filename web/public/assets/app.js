@@ -431,6 +431,14 @@ class Shell {
         this._tilesGridEl = null;
         this._tileOverlayEl = null;
 
+        // ── Localhost preview ───────────────────────────────────────────────
+        // Detects dev-server URLs from PTY output and surfaces a per-tab
+        // preview toggle button in the tab strip. Clicking shows/hides a
+        // split pane with an iframe pointing at /preview/<port>/.
+        this._previewUrls = new Map();       // tabId → detected URL string
+        this._previewVisible = new Map();    // tabId → boolean (pane open?)
+        this._ownPort = parseInt(location.port, 10) || 7332;
+
         const viewBtn = $('#toggle-view');
         if (viewBtn) {
             viewBtn.addEventListener('click', () => this._toggleViewMode());
@@ -838,6 +846,7 @@ class Shell {
             this._oscBuf.set(id, partial ? partial[0] : '');
         }
         this._detectAgentFromStream(id, data);
+        this._detectDevServer(id, data);
         this._pollDirty.add(id);   // new output → re-scan status/context next tick
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
@@ -895,6 +904,8 @@ class Shell {
         this._agentStatus.delete(id);
         this._lastStdoutCue.delete(id);
         this._ctxPct.delete(id);
+        this._previewUrls.delete(id);
+        this._previewVisible.delete(id);
         if (this.activeId === id) {
             const next = this.order[0];
             if (next) this._activate(next); else this.activeId = null;
@@ -903,6 +914,7 @@ class Shell {
 
     _activate(id) {
         const switching = this.activeId !== id && this.activeId != null;
+        const prevId = this.activeId;
         const sameTab = this.activeId === id;
         this.activeId = id;
         if (this.viewMode === 'tiles') {
@@ -926,6 +938,9 @@ class Shell {
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
         this._syncTabsUI();
         if (switching && this.viewMode !== 'tiles') this.audio.play('panels');
+        // Sync preview pane: hide the previous tab's pane, show new tab's if open.
+        if (switching && prevId != null) this._syncPreviewPaneVisibility(prevId, false);
+        if (!sameTab) this._syncPreviewPaneVisibility(id, !!this._previewVisible.get(id));
     }
 
     _syncTabsUI(list) {
@@ -955,7 +970,17 @@ class Shell {
             // tabs with default / near-identical titles are still tellable
             // apart. Updated in place by _updateTabPreview (no row rebuild).
             const sub = el('span', { class: 'tab-sub', text: this._tabPreview(t.id) });
-            const main = el('span', { class: 'tab-main' }, [label, sub]);
+            // Preview toggle button — only visible when a dev-server URL has
+            // been detected for this tab (CSS gates on [data-has-preview]).
+            const previewUrl = this._previewUrls.get(t.id);
+            const previewActive = !!this._previewVisible.get(t.id);
+            const pvBtn = el('button', {
+                class: 'tab-preview-btn' + (previewActive ? ' preview-on' : ''),
+                title: previewUrl ? `Toggle preview  ${previewUrl}` : 'Toggle preview',
+                'data-preview-id': String(t.id),
+                onclick: (e) => { e.stopPropagation(); this._togglePreviewPane(t.id); },
+            }, ['⧉']);
+            const main = el('span', { class: 'tab-main' }, [label, sub, pvBtn]);
             const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
@@ -966,6 +991,7 @@ class Shell {
                 title: this._tabTooltip(t.id, t.title),
                 'data-agent': this._agentStatus.get(t.id) || '',
                 'data-tab-id': String(t.id),
+                'data-has-preview': previewUrl ? '1' : null,
                 draggable: 'true',
                 onclick: () => this._activate(t.id),
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
@@ -2087,6 +2113,182 @@ class Shell {
         toast.addEventListener('click', dismiss);
         setTimeout(dismiss, 4000);
     }
+
+    // ── Localhost preview detection ─────────────────────────────────────────
+
+    // Scan a raw PTY chunk for dev-server URL patterns. Called on every
+    // TERM_DATA chunk (and replay). When a new URL is found for a tab the
+    // toggle button appears in the strip.
+    _detectDevServer(id, data) {
+        // Only scan if we don't already have a URL for this tab (first-wins,
+        // avoids repeated regex work on busy streams). To reset, the tab must
+        // be closed. The "most recent" strategy could be added later if needed.
+        if (this._previewUrls.has(id)) return;
+        if (!data) return;
+
+        // Strip ANSI escape sequences before matching.
+        const clean = data
+            .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+            .replace(/\x1b\][^\x07]*\x07/g, '')
+            .replace(/\x1b[()][AB012]/g, '')
+            .replace(/\x1b\x5b[0-9;]*[mGHJKfsu]/g, '');
+
+        // Patterns ordered by specificity (most specific first).
+        const patterns = [
+            // Direct URL patterns — capture group 1 is the full URL.
+            /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // "Local:  http://..." (Vite, Next.js, SvelteKit, Astro…)
+            /[Ll]ocal:\s+https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/g,
+            // "running at http://…", "started server on …:N", "ready on http://…"
+            /running at https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/gi,
+            /started server on[^:]*:(\d+)/gi,
+            /ready on https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/gi,
+            // Generic: "listening on [port] N" / "listening on :N"
+            /listening on.*?:(\d+)/gi,
+            // Flask/Django/Python: "Running on http://127.0.0.1:5000"
+            /Running on https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // Django devserver: "Starting development server at http://…"
+            /Starting development server at https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/gi,
+            // python -m http.server: "Serving HTTP on … port N"
+            /Serving HTTP on .+ port (\d+)/gi,
+        ];
+
+        // Well-known non-dev-server ports to skip.
+        const SKIP_PORTS = new Set([22, 25, 53, 80, 443, 3306, 5432, this._ownPort]);
+
+        for (const pat of patterns) {
+            pat.lastIndex = 0;
+            let m;
+            while ((m = pat.exec(clean)) !== null) {
+                const port = parseInt(m[1], 10);
+                if (!port || port < 1024 || port > 65535) continue;
+                if (SKIP_PORTS.has(port)) continue;
+                const url = `http://localhost:${port}/`;
+                this._setPreviewUrl(id, url);
+                return;
+            }
+        }
+    }
+
+    // Store a detected preview URL for a tab and update the tab strip UI.
+    _setPreviewUrl(id, url) {
+        this._previewUrls.set(id, url);
+        this._updatePreviewToggle(id, url);
+    }
+
+    // Show/update the preview toggle button for a tab without rebuilding the
+    // whole tab row. Adds data-has-preview and updates the button title.
+    _updatePreviewToggle(id, url) {
+        const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (!tabNode) {
+            // Tab button not yet in DOM (or just rebuilt) — null the cache so
+            // the next _syncTabsUI call picks up the URL.
+            this._tabsUISig = null;
+            this._syncTabsUI();
+            return;
+        }
+        tabNode.setAttribute('data-has-preview', '1');
+        const pvBtn = tabNode.querySelector('.tab-preview-btn');
+        if (pvBtn) {
+            pvBtn.title = `Toggle preview  ${url}`;
+            pvBtn.setAttribute('data-preview-id', String(id));
+            // Flash the button briefly to draw attention.
+            pvBtn.classList.add('preview-btn-pulse');
+            setTimeout(() => pvBtn.classList.remove('preview-btn-pulse'), 2000);
+        }
+    }
+
+    // Toggle the preview pane for a tab: off → visible → off.
+    _togglePreviewPane(id) {
+        const wasVisible = !!this._previewVisible.get(id);
+        const nowVisible = !wasVisible;
+        this._previewVisible.set(id, nowVisible);
+        // Update the toggle button state immediately.
+        const pvBtn = this.tabsEl.querySelector(`[data-preview-id="${CSS.escape(String(id))}"]`);
+        if (pvBtn) pvBtn.classList.toggle('preview-on', nowVisible);
+        // Only manipulate the DOM for the active tab.
+        if (id === this.activeId) {
+            this._syncPreviewPaneVisibility(id, nowVisible);
+        }
+    }
+
+    // Create or destroy the preview pane DOM for `id`. `show` controls whether
+    // to display it. Safe to call repeatedly — idempotent.
+    _syncPreviewPaneVisibility(id, show) {
+        const PANE_ID = 'preview-pane-' + id;
+
+        if (!show) {
+            const existing = document.getElementById(PANE_ID);
+            if (existing) existing.remove();
+            return;
+        }
+
+        const url = this._previewUrls.get(id);
+        if (!url) return;
+
+        // Derive the proxy path so the iframe stays same-origin (avoids mixed
+        // content and CORS issues when the dashboard is served over HTTPS).
+        let iframeSrc;
+        try {
+            const parsed = new URL(url);
+            const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+            iframeSrc = `/preview/${port}/`;
+        } catch (_) {
+            iframeSrc = url;
+        }
+
+        // Reuse an existing pane (e.g. switching back to this tab).
+        let pane = document.getElementById(PANE_ID);
+        if (pane) {
+            pane.style.display = '';
+            return;
+        }
+
+        // Build the pane.
+        const bar = el('div', { class: 'preview-split-bar' }, [
+            el('span', { class: 'psb-url', text: url, title: url }),
+            el('button', {
+                class: 'psb-btn', type: 'button', title: 'Reload preview',
+                text: '↺',
+                onclick: () => {
+                    const iframe = pane.querySelector('.preview-split-frame');
+                    if (iframe) { try { iframe.contentWindow.location.reload(); } catch (_) { iframe.src = iframe.src; } }
+                },
+            }),
+            el('button', {
+                class: 'psb-btn', type: 'button', title: 'Open in new tab',
+                text: '⧉',
+                onclick: () => window.open(iframeSrc, '_blank'),
+            }),
+            el('button', {
+                class: 'psb-btn', type: 'button', title: 'Close preview',
+                text: '×',
+                onclick: () => this._togglePreviewPane(id),
+            }),
+        ]);
+        const iframe = el('iframe', {
+            class: 'preview-split-frame',
+            src: iframeSrc,
+            sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals',
+            // allow: 'fullscreen',  -- not in el() props; set manually below
+        });
+        try { iframe.allow = 'fullscreen'; } catch (_) {}
+
+        pane = el('div', {
+            id: PANE_ID,
+            class: 'preview-split-pane',
+        }, [bar, iframe]);
+
+        this.termsEl.appendChild(pane);
+        // Trigger reflow of the active terminal after the pane appears so
+        // xterm fills the updated (narrower) container.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            const rt = this.tabs.get(id);
+            if (rt) rt.fitNow();
+        }));
+    }
+
+    // ── end localhost preview ───────────────────────────────────────────────
 
     _promptRename(id, current) {
         const next = window.prompt(
