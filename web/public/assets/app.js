@@ -1019,7 +1019,13 @@ class Shell {
 
     // Context consumption at a glance: green (healthy) → yellow → red (near full).
     _ctxColor(pct) {
-        return pct >= 80 ? '#ff5555' : pct >= 50 ? '#f1c40f' : '#2ecc71';
+        // Use the teal accent palette so context% is visually distinct from
+        // agent-status colors (green=working, orange=done, red=attention).
+        // Orange and red still signal "getting full" but don't clash.
+        if (pct >= 90) return 'var(--soa-red)';
+        if (pct >= 70) return 'var(--soa-orange)';
+        if (pct >= 40) return 'var(--soa-accent)';
+        return 'var(--soa-accent-dim)';
     }
 
     // Context as a vertical fuel-gauge: a thin full-height bar that fills from
@@ -1036,7 +1042,7 @@ class Shell {
         // Fill the bottom pct% with the health color; hard stop so it reads as a
         // bar level rather than a fade. Empty → just the faint track.
         span.style.background = pct <= 0
-            ? 'rgba(255,255,255,0.15)'
+            ? 'var(--soa-line-soft)'
             : `linear-gradient(to top, ${color} ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
         return span;
     }
@@ -3183,11 +3189,12 @@ class Shell {
     }
 
     _paintTilePie(pie, pct) {
+        const empty = 'var(--soa-line-soft)';
         if (pct <= 0) {
-            pie.style.background = 'rgba(255,255,255,0.15)';
+            pie.style.background = empty;
         } else {
             const color = this._ctxColor(pct);
-            pie.style.background = `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
+            pie.style.background = `conic-gradient(${color} ${pct}%, ${empty} 0%)`;
         }
         pie.title = pct > 0 ? `Context: ${pct}%` : '';
     }
