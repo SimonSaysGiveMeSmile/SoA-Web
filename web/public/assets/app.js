@@ -2261,8 +2261,8 @@ class Shell {
                 onclick: () => window.open(iframeSrc, '_blank'),
             }),
             el('button', {
-                class: 'psb-btn', type: 'button', title: 'Close preview',
-                text: '×',
+                class: 'psb-btn psb-back', type: 'button', title: 'Back to terminal',
+                text: '← Terminal',
                 onclick: () => this._togglePreviewPane(id),
             }),
         ]);

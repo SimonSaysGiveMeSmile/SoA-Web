@@ -1951,6 +1951,15 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   flex-shrink: 0;
 }
 .psb-btn:hover { background: var(--soa-accent-dim, rgba(170,207,209,0.12)); color: var(--soa-accent, #aacfd1); }
+.psb-back {
+  color: var(--soa-accent, #aacfd1);
+  border: 1px solid var(--soa-accent-dim, rgba(170,207,209,0.3));
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  margin-left: auto;
+}
+.psb-back:hover { background: var(--soa-accent-dim, rgba(170,207,209,0.18)); border-color: var(--soa-accent, #aacfd1); }
 
 .preview-split-frame {
   flex: 1;
