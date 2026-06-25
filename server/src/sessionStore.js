@@ -50,11 +50,15 @@ class Session {
 }
 
 class SessionStore {
-    constructor({ idleTtlMs = DEFAULT_IDLE_TTL_MS } = {}) {
+    constructor({ idleTtlMs = DEFAULT_IDLE_TTL_MS, sweepMs } = {}) {
         this.sessions = new Map();   // id -> Session
         this.byToken  = new Map();   // token -> Session
         this.idleTtlMs = idleTtlMs;
-        this._sweep = setInterval(() => this.gc(), 60_000);
+        // Sweep cadence is configurable so the stress harness can exercise the
+        // idle-GC path in seconds instead of waiting the 60s production default
+        // (SOA_WEB_GC_SWEEP_MS). No behavioural change in prod.
+        const sweep = sweepMs || parseInt(process.env.SOA_WEB_GC_SWEEP_MS || '60000', 10);
+        this._sweep = setInterval(() => this.gc(), sweep);
         if (this._sweep.unref) this._sweep.unref();
     }
 
@@ -96,8 +100,21 @@ class SessionStore {
     }
 
     gc(now = Date.now()) {
+        // Test-only: SOA_WEB_GC_REAP_LIVE=1 reproduces the pre-fix idle-GC
+        // clobber (reaps live fleets) so the stress harness can A/B the fix.
+        // Never set in production.
+        const reapLive = process.env.SOA_WEB_GC_REAP_LIVE === '1';
         for (const s of this.sessions.values()) {
-            if (now - s.lastSeen > this.idleTtlMs) this.destroy(s);
+            if (now - s.lastSeen <= this.idleTtlMs) continue;
+            // Never idle-reap a session that still owns live tabs. Those PTYs are
+            // a running fleet (often unattended agents working on their own), not
+            // an abandoned browser tab. Reaping it would killAll() every PTY and
+            // the next empty persist then clobbers tabs.json — the recurring
+            // "came back and all my tabs were gone" loss after the fleet ran a
+            // while with no browser attached. A fleet only goes away on an
+            // explicit close, never on idle.
+            if (!reapLive && s.tabMgr && s.tabMgr.order && s.tabMgr.order.length > 0) continue;
+            this.destroy(s);
         }
     }
 

@@ -58,6 +58,27 @@ test('sessions: gc evicts stale sessions', () => {
     store.shutdown();
 });
 
+test('sessions: gc never reaps a stale session that still owns live tabs', () => {
+    // Regression: an unattended fleet (no browser for > idleTtl) must NOT be
+    // idle-GC'd — reaping killAll()s every PTY and the empty persist then
+    // clobbers tabs.json (the recurring "all my tabs vanished" loss).
+    const store = new SessionStore({ idleTtlMs: 1 });
+    const s = store.create();
+    s.lastSeen = Date.now() - 1000;          // long past the idle TTL
+    let killed = false;
+    s.tabMgr = { order: [1, 2, 3], killAll() { killed = true; } };
+    store.gc();
+    assert.equal(store.get(s.id), s, 'tab-bearing fleet session must survive idle-GC');
+    assert.equal(killed, false, 'gc must not killAll() a live fleet');
+    // An empty session that IS stale still gets reaped.
+    const empty = store.create();
+    empty.lastSeen = Date.now() - 1000;
+    empty.tabMgr = { order: [], killAll() {} };
+    store.gc();
+    assert.equal(store.get(empty.id), null, 'empty stale session is still evicted');
+    store.shutdown();
+});
+
 test('ringbuffer: keeps content under cap', () => {
     const rb = new RingBuffer(1024);
     rb.push('hello ');
