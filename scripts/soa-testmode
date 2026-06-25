@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# soa-testmode — run a fully ISOLATED SoA-Web instance for stress testing.
+#
+# It can NEVER touch the real fleet: its own port, its own STATE_DIR, its own
+# HOME, no tunnel auto-pair, no claude auto-resume (mock tabs only). Runs the
+# current DEV working tree (so it carries un-deployed fixes under test).
+#
+#   soa-testmode up        # launch (idempotent) → prints local URL
+#   soa-testmode down      # stop
+#   soa-testmode restart   # stop + start (exercises boot-resume rehydrate)
+#   soa-testmode status    # pid + live tab count
+#   soa-testmode logs      # tail the daemon log
+#   soa-testmode tunnel    # expose via ngrok → prints s0a.app/?backend=… URL
+#   soa-testmode nuke      # stop + wipe the test state dir (fresh slate)
+#
+# Env overrides: TEST_PORT (7799), SOA_WEB_SESSION_TTL_MS, SOA_WEB_GC_SWEEP_MS.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PORT="${TEST_PORT:-7799}"
+ROOT="$HOME/.soa-web-test"
+STATE="$ROOT/state"
+THOME="$ROOT/home"
+LOG="$STATE/logs/daemon.log"
+NODE="$(command -v node)"
+
+mkdir -p "$STATE/logs" "$THOME"
+
+pid_on_port() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1; }
+ping_ok() { curl -fsS --max-time 4 "http://127.0.0.1:$PORT/api/ping" >/dev/null 2>&1; }
+
+up() {
+  if ping_ok; then echo "test instance already up → http://127.0.0.1:$PORT (pid $(pid_on_port))"; return 0; fi
+  echo "launching isolated test daemon on :$PORT (state=$STATE)…"
+  HOME="$THOME" \
+  SOA_WEB_HOST=127.0.0.1 \
+  SOA_WEB_PORT="$PORT" \
+  SOA_WEB_STATE_DIR="$STATE" \
+  SOA_WEB_AUTOPAIR=0 \
+  SOA_WEB_NO_AUTO_RESUME=1 \
+  SOA_WEB_DEV=1 \
+  ${SOA_WEB_SESSION_TTL_MS:+SOA_WEB_SESSION_TTL_MS=$SOA_WEB_SESSION_TTL_MS} \
+  ${SOA_WEB_GC_SWEEP_MS:+SOA_WEB_GC_SWEEP_MS=$SOA_WEB_GC_SWEEP_MS} \
+  nohup "$NODE" "$REPO/server/src/index.js" >"$LOG" 2>&1 &
+  for _ in $(seq 1 40); do ping_ok && break; sleep 0.25; done
+  ping_ok && echo "✅ up → http://127.0.0.1:$PORT  (pid $(pid_on_port), log: $LOG)" || { echo "❌ failed to start; tail $LOG:"; tail -20 "$LOG"; exit 1; }
+}
+
+down() {
+  local p; p="$(pid_on_port)"
+  if [ -z "$p" ]; then echo "not running on :$PORT"; return 0; fi
+  echo "stopping test daemon pid $p…"; kill -TERM "$p" 2>/dev/null || true
+  for _ in $(seq 1 20); do ping_ok || break; sleep 0.25; done
+  ping_ok && { kill -KILL "$p" 2>/dev/null || true; }
+  echo "stopped."
+}
+
+status() {
+  if ping_ok; then
+    local n; n="$(curl -fsS --max-time 4 "http://127.0.0.1:$PORT/api/tabs" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).tabs.length)}catch{console.log("?")}})')"
+    echo "UP  :$PORT  pid=$(pid_on_port)  tabs=$n  state=$STATE"
+  else echo "DOWN :$PORT"; fi
+}
+
+case "${1:-status}" in
+  up) up ;;
+  down) down ;;
+  restart) down; sleep 0.5; up ;;
+  status) status ;;
+  logs) tail -f "$LOG" ;;
+  nuke) down; rm -rf "$STATE" "$THOME"; mkdir -p "$STATE/logs" "$THOME"; echo "wiped $ROOT" ;;
+  tunnel)
+    up
+    echo "starting ngrok → :$PORT …"
+    pkill -f "ngrok http $PORT" 2>/dev/null || true
+    nohup ngrok http "$PORT" --log="$STATE/logs/ngrok.log" >/dev/null 2>&1 &
+    for _ in $(seq 1 40); do
+      url="$(curl -fsS --max-time 3 http://127.0.0.1:4040/api/tunnels 2>/dev/null | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=JSON.parse(s).tunnels.find(x=>x.public_url.startsWith("https"));console.log(t?t.public_url:"")}catch{console.log("")}})')"
+      [ -n "$url" ] && break; sleep 0.5
+    done
+    if [ -n "${url:-}" ]; then echo "✅ test instance public at:"; echo "   $url"; echo "   open: https://www.s0a.app/?backend=$url"; else echo "❌ ngrok URL not ready; see $STATE/logs/ngrok.log"; fi ;;
+  *) echo "usage: soa-testmode {up|down|restart|status|logs|tunnel|nuke}"; exit 2 ;;
+esac
