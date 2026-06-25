@@ -2134,27 +2134,48 @@ class Shell {
             .replace(/\x1b\x5b[0-9;]*[mGHJKfsu]/g, '');
 
         // Patterns ordered by specificity (most specific first).
+        // IMPORTANT: each pattern must require startup-message context so a
+        // stray localhost URL in logs / curl output / error text doesn't trigger
+        // detection. The old first-pass generic URL pattern was removed because
+        // it matched every http://localhost:PORT occurrence, including the SoA
+        // server's own port in scrollback and tool output.
         const patterns = [
-            // Direct URL patterns — capture group 1 is the full URL.
-            /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
-            // "Local:  http://..." (Vite, Next.js, SvelteKit, Astro…)
-            /[Ll]ocal:\s+https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/g,
-            // "running at http://…", "started server on …:N", "ready on http://…"
+            // "Local:  http://…" (Vite, Next.js, SvelteKit, Astro, Nuxt…)
+            /[Ll]ocal[:\s]+https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/g,
+            // "Network: http://…" companion line (Vite)
+            /[Nn]etwork[:\s]+https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // "running at http://…" / "ready on http://…"
             /running at https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/gi,
-            /started server on[^:]*:(\d+)/gi,
             /ready on https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/gi,
-            // Generic: "listening on [port] N" / "listening on :N"
-            /listening on.*?:(\d+)/gi,
-            // Flask/Django/Python: "Running on http://127.0.0.1:5000"
+            // "started server on …:N" / "started on …:N"
+            /started(?: server| on)[^:]*:(\d+)/gi,
+            // "Listening on http://…" (Deno, Fastify, Hono…)
+            /[Ll]istening on https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // Generic "listening on :N" / "listening on port N"
+            /[Ll]istening on (?:port )?:?(\d{4,5})\b/g,
+            // Flask/Django: "Running on http://127.0.0.1:5000"
             /Running on https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
-            // Django devserver: "Starting development server at http://…"
+            // Django: "Starting development server at http://…"
             /Starting development server at https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/gi,
             // python -m http.server: "Serving HTTP on … port N"
             /Serving HTTP on .+ port (\d+)/gi,
+            // "Server running at http://…" / "Server listening on http://…"
+            /[Ss]erver (?:running|listening) (?:at|on) https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
         ];
 
+        // Derive the backend port from the actual configured backend URL so
+        // both :7332 (personal fleet) and :4010 (product instance) are always
+        // skipped — whichever one this page is connected to AND the other one.
+        let backendPort = this._ownPort;
+        try {
+            const beUrl = new URL((window.__SOA_WEB__ || {})._resolvedBackend || location.origin);
+            backendPort = parseInt(beUrl.port, 10) || (beUrl.protocol === 'https:' ? 443 : 80);
+        } catch (_) {}
         // Well-known non-dev-server ports to skip.
-        const SKIP_PORTS = new Set([22, 25, 53, 80, 443, 3306, 5432, this._ownPort]);
+        const SKIP_PORTS = new Set([22, 25, 53, 80, 443, 3306, 5432, 27017,
+            this._ownPort, backendPort,
+            4010, 7332,   // both SoA instance ports, always
+        ]);
 
         for (const pat of patterns) {
             pat.lastIndex = 0;
