@@ -499,6 +499,14 @@ html, body {
 .user-avatar::after { content: attr(data-initial); }
 .user-chip-name { max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-chip-name:empty { display: none; }
+/* Gear affordance — the chip is now the single settings entry point. Dim by
+   default, brightens with the chip on hover so it reads as "opens settings". */
+.user-chip-gear {
+    font-size: 11px; line-height: 1; color: var(--soa-accent-dim);
+    opacity: 0.7; transition: opacity 0.15s, color 0.15s; flex: 0 0 auto;
+    margin-left: 1px;
+}
+.user-chip:hover .user-chip-gear { opacity: 1; color: var(--soa-accent); }
 
 /* Profile settings pane */
 .profile-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }

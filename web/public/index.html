@@ -640,7 +640,6 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <button id="broadcast" data-icon="⇶" title="Broadcast a command to selected terminals — pick targets, or send to all (model switch / recovery)">⇶ SEND</button>
         <button id="toggle-view" data-icon="▦" data-i18n="topbar.tiles" data-i18n-title="topbar.tiles_title" title="Toggle tiles / tabs view">▦ TILES</button>
         <button id="toggle-theme" data-icon="☀" title="Switch light / dark theme (full options in Settings)" aria-pressed="false" aria-label="Toggle light or dark theme">☀ THEME</button>
-        <button id="open-settings" data-icon="⚙" data-i18n="topbar.settings" data-i18n-title="topbar.settings_title" title="Settings (Ctrl+Shift+S)">⚙ SET</button>
         <button id="toggle-more" class="more-toggle" data-icon="⋯" title="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" aria-label="More actions">⋯ MORE</button>
         </div>
         <!-- Secondary actions live in a labeled submenu so the bar stays clear.
@@ -653,9 +652,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <button id="toggle-monitor" class="more-item mi-monitor" role="menuitem" data-label="Monitor agents" title="Monitor — every agent's browser + localhost ports in one view">⊡ MON</button>
           <button id="timemachine" class="more-item mi-clock" role="menuitem" data-label="Time machine" title="Time machine — restore a prior IDE snapshot" aria-label="Time machine">TIME</button>
         </div>
-        <button id="user-chip" class="user-chip" title="Your profile — click to edit">
+        <button id="user-chip" class="user-chip" title="Profile &amp; settings (Ctrl+Shift+S)" aria-label="Profile and settings">
           <span class="user-avatar" data-initial="U"></span>
           <span class="user-chip-name"></span>
+          <span class="user-chip-gear" aria-hidden="true">⚙</span>
         </button>
         <button id="toggle-actions" class="actions-toggle" data-icon="‹" title="Show/hide toolbar (Ctrl+Shift+H)" aria-controls="actions-tray" aria-expanded="false" aria-label="Show or hide toolbar actions">‹ BAR</button>
       </div>

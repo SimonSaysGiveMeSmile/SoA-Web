@@ -17,7 +17,7 @@
 import { AudioFX } from '/assets/audiofx.js?v=17';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { mountSandboxSidebar } from '/assets/widgets.js?v=17';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=17';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=19';
 // The WebContainer API is vendored into /assets/vendor (was esm.sh, but a
 // cross-origin static import makes the whole module graph — and therefore
 // the dynamic import of this file — fail whenever the CDN is slow, blocked,
@@ -138,10 +138,12 @@ class WCShell {
             audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
         });
 
-        const settingsBtn = $('#open-settings');
+        // Settings merged into the user-chip (the standalone ⚙ button was removed);
+        // fall back to #open-settings for any legacy markup. Ctrl+Shift+S still works.
+        const settingsBtn = $('#user-chip') || $('#open-settings');
         if (settingsBtn) settingsBtn.addEventListener('click', () => {
             this.audio.play('panels');
-            openSettingsModal();
+            openSettingsModal({ tab: 'profile' });
         });
         onSettings(s => this._applySettings(s));
 

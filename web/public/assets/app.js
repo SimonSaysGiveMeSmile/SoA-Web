@@ -505,11 +505,8 @@ class Shell {
             });
         }
 
-        const settingsBtn = $('#open-settings');
-        if (settingsBtn) settingsBtn.addEventListener('click', () => {
-            this.audio.play('panels');
-            openSettingsModal();
-        });
+        // Settings are reached via the user-chip (merged to save topbar space) and
+        // the Ctrl+Shift+S shortcut — the standalone ⚙ button was removed.
 
         // User profile chip — loads display name / avatar, starts geo watcher if permitted
         this._initUserProfile();
