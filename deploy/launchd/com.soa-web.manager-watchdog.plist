@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SoA-Web manager-agent watchdog. Runs scripts/soa-manager-watchdog every 90s
+  to keep the fleet's manager agent alive. The manager watches all other tabs;
+  this job watches the manager so the entire fleet self-sustains indefinitely.
+
+  Install order (after com.soa-web.watchdog is already running):
+    cp <repo>/deploy/launchd/com.soa-web.manager-watchdog.plist ~/Library/LaunchAgents/
+    cp <repo>/scripts/soa-manager-watchdog ~/.soa-web/scripts/
+    chmod +x ~/.soa-web/scripts/soa-manager-watchdog
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.manager-watchdog.plist
+
+  To stop: bootout manager-watchdog FIRST, then you can stop the daemon.
+    launchctl bootout gui/$(id -u)/com.soa-web.manager-watchdog
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.manager-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-manager-watchdog</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>90</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/manager-watchdog.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/manager-watchdog.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SOA_WEB_PORT</key>
+        <string>7332</string>
+    </dict>
+</dict>
+</plist>

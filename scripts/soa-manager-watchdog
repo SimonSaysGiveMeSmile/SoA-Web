@@ -1,0 +1,166 @@
+#!/bin/bash
+#
+# soa-manager-watchdog — keeps the manager agent alive so the fleet self-sustains
+# indefinitely. Run every 90s via com.soa-web.manager-watchdog launchd job.
+#
+# The manager agent is a dedicated SoA tab whose job is to watch all other sessions
+# via `soa-sessions watch/goal/resume` and keep them productive. Without a watchdog
+# the manager itself is the single point of failure: if it exits (context limit,
+# usage limit, crash) the whole fleet goes unsupervised.
+#
+# This script closes that gap:
+#   1. HEALTHY  — manager tab is working/idle/attention — do nothing.
+#   2. STUCK    — manager silent >4m → interrupt + resume in-place.
+#   3. LIMITED  — hit usage limit → resume in-place (claude --continue).
+#   4. HIGH-CTX — context ≥ 80% → /compact so it doesn't run out mid-shift.
+#   5. MISSING  — tab gone (exited, crashed, never spawned) → spawn fresh manager.
+#
+# Manager identity: stored in ~/.soa-web/manager-id (written on first spawn).
+# Falls back to scanning for a tab titled "manager" if the stored ID is stale.
+#
+# SAFETY: never touches :4010 / ~/.soa-web-local (product instance).
+
+set -euo pipefail
+
+LOG="$HOME/.soa-web/logs/manager-watchdog.log"
+ID_FILE="$HOME/.soa-web/manager-id"
+PORT="${SOA_WEB_PORT:-7332}"
+
+MANAGER_GOAL="You are the fleet manager. Run the event loop: soa-sessions whoami, then events+list to reconcile, then forever block on: soa-sessions watch — for each event, read the offending session and act (goal/resume/compact/interrupt as needed). Keep agents unblocked and productive. Never command your own tab id."
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(ts) $*" >> "$LOG" 2>/dev/null; }
+
+# ── Daemon must be up first ────────────────────────────────────────────────────
+if ! curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; then
+    log "daemon not responding on :${PORT} — skipping (soa-watchdog handles daemon restart)"
+    exit 0
+fi
+
+# ── Snapshot live sessions ─────────────────────────────────────────────────────
+SESSION_LIST="$(soa-sessions list 2>/dev/null || true)"
+
+# Look up a field for a given tab id.
+# Line format: "  #<id>  <title>  <status>  ctx  <pct>%  [FLAGS...]"
+tab_field() {
+    local id="$1" field="$2"  # field: 3=status 4=ctx_pct
+    echo "$SESSION_LIST" | awk -v id="$id" -v f="$field" '
+        /^[[:space:]]*#[0-9]+/ {
+            gsub(/^[[:space:]]*#/, "", $1)
+            if ($1 == id) { print $f; exit }
+        }'
+}
+
+tab_flags() {
+    local id="$1"
+    echo "$SESSION_LIST" | awk -v id="$id" '
+        /^[[:space:]]*#[0-9]+/ {
+            gsub(/^[[:space:]]*#/, "", $1)
+            if ($1 == id) { for(i=6;i<=NF;i++) printf "%s ", $i; print ""; exit }
+        }'
+}
+
+tab_exists() {
+    local id="$1"
+    echo "$SESSION_LIST" | grep -q "^[[:space:]]*#${id}[[:space:]]"
+}
+
+# Find a tab by title; print its id or nothing.
+find_by_title() {
+    local title="$1"
+    echo "$SESSION_LIST" | awk -v t="$title" '
+        /^[[:space:]]*#[0-9]+/ {
+            gsub(/^[[:space:]]*#/, "", $1)
+            if ($2 == t) { print $1; exit }
+        }'
+}
+
+spawn_manager() {
+    local result
+    result="$(soa-sessions spawn --title manager --goal "$MANAGER_GOAL" 2>&1 || true)"
+    log "spawn result: $result"
+    local new_id=""
+    if [[ "$result" =~ \"id\":([0-9]+) ]]; then
+        new_id="${BASH_REMATCH[1]}"
+    elif [[ "$result" =~ tab[[:space:]]#([0-9]+) ]]; then
+        new_id="${BASH_REMATCH[1]}"
+    fi
+    if [ -n "$new_id" ]; then
+        echo "$new_id" > "$ID_FILE"
+        log "manager spawned as tab #$new_id"
+        command -v soa-msg >/dev/null 2>&1 && \
+            soa-msg "Manager agent spawned (tab #$new_id) — fleet is now self-supervised." 2>/dev/null || true
+    else
+        log "spawn succeeded but couldn't parse tab ID from output"
+    fi
+}
+
+# ── Identify manager tab ───────────────────────────────────────────────────────
+MGR_ID=""
+
+if [ -f "$ID_FILE" ]; then
+    stored="$(cat "$ID_FILE" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$stored" ] && tab_exists "$stored"; then
+        MGR_ID="$stored"
+    else
+        log "stored manager-id '$stored' not in live sessions — scanning by title"
+    fi
+fi
+
+if [ -z "$MGR_ID" ]; then
+    MGR_ID="$(find_by_title manager)"
+    if [ -n "$MGR_ID" ]; then
+        log "found manager tab by title: #$MGR_ID"
+        echo "$MGR_ID" > "$ID_FILE"
+    fi
+fi
+
+# ── Spawn if not found ────────────────────────────────────────────────────────
+if [ -z "$MGR_ID" ]; then
+    log "no manager tab found — spawning fresh"
+    spawn_manager
+    exit 0
+fi
+
+# ── Manager tab found — evaluate state ────────────────────────────────────────
+STATUS="$(tab_field "$MGR_ID" 3)"
+CTX_PCT="$(tab_field "$MGR_ID" 4 | tr -d '%')"
+FLAGS="$(tab_flags "$MGR_ID")"
+log "manager tab #$MGR_ID — status=${STATUS:-?} ctx=${CTX_PCT:-0}% flags='${FLAGS:-}'"
+
+case "${STATUS:-}" in
+    working|idle|attention)
+        if [ "${CTX_PCT:-0}" -ge 80 ] || echo "$FLAGS" | grep -q "HIGH-CTX"; then
+            log "manager #$MGR_ID ctx=${CTX_PCT}% HIGH — compacting"
+            soa-sessions compact "$MGR_ID" 2>/dev/null || true
+        fi
+        ;;
+    limited)
+        log "manager #$MGR_ID hit usage limit — resuming in-place"
+        soa-sessions resume "$MGR_ID" 2>/dev/null || true
+        command -v soa-msg >/dev/null 2>&1 && \
+            soa-msg "Manager (tab #$MGR_ID) resumed after usage limit." 2>/dev/null || true
+        ;;
+    done)
+        log "manager #$MGR_ID exited (done) — respawning"
+        rm -f "$ID_FILE"
+        spawn_manager
+        ;;
+    "")
+        log "manager #$MGR_ID returned empty status — skipping"
+        ;;
+    *)
+        if echo "$FLAGS" | grep -q "STUCK" || [ "$STATUS" = "stuck" ]; then
+            log "manager #$MGR_ID STUCK — interrupt + resume"
+            soa-sessions interrupt "$MGR_ID" 2>/dev/null || true
+            sleep 2
+            soa-sessions resume "$MGR_ID" 2>/dev/null || true
+        else
+            log "manager #$MGR_ID status='$STATUS' — no action"
+        fi
+        ;;
+esac
+
+exit 0
