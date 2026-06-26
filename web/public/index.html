@@ -653,6 +653,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <button id="toggle-monitor" class="more-item mi-monitor" role="menuitem" data-label="Monitor agents" title="Monitor — every agent's browser + localhost ports in one view">⊡ MON</button>
           <button id="timemachine" class="more-item mi-clock" role="menuitem" data-label="Time machine" title="Time machine — restore a prior IDE snapshot" aria-label="Time machine">TIME</button>
         </div>
+        <button id="user-chip" class="user-chip" title="Your profile — click to edit">
+          <span class="user-avatar" data-initial="U"></span>
+          <span class="user-chip-name"></span>
+        </button>
         <button id="toggle-actions" class="actions-toggle" data-icon="‹" title="Show/hide toolbar (Ctrl+Shift+H)" aria-controls="actions-tray" aria-expanded="false" aria-label="Show or hide toolbar actions">‹ BAR</button>
       </div>
     </header>
@@ -672,7 +676,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=95"></script>
+  <script type="module" src="/assets/app.js?v=96"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

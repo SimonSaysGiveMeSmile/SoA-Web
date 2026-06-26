@@ -373,6 +373,137 @@ function buildEnvPane() {
     return pane;
 }
 
+const AVATAR_COLORS = [
+    { color: '#4a6566', name: 'Slate' },
+    { color: '#aacfd1', name: 'Teal' },
+    { color: '#ffb86c', name: 'Orange' },
+    { color: '#50fa7b', name: 'Green' },
+    { color: '#ff5555', name: 'Red' },
+    { color: '#6272a4', name: 'Blue' },
+    { color: '#bd93f9', name: 'Purple' },
+];
+
+function buildProfilePane() {
+    const pane = el('div', { class: 'settings-pane-body' });
+
+    const nameInput = el('input', { class: 'profile-input', type: 'text', maxlength: '50', placeholder: 'Your display name' });
+    let selectedColor = '#4a6566';
+
+    const swatches = el('div', { class: 'profile-avatar-swatches' });
+    for (const { color, name: cname } of AVATAR_COLORS) {
+        const s = el('button', { class: 'profile-avatar-swatch', title: cname, style: `background:${color}` });
+        s.addEventListener('click', () => {
+            swatches.querySelectorAll('.profile-avatar-swatch').forEach(x => x.classList.remove('selected'));
+            s.classList.add('selected');
+            selectedColor = color;
+        });
+        swatches.appendChild(s);
+    }
+
+    const locToggle = el('input', { class: 'profile-loc-toggle', type: 'checkbox', id: 'set-loc-toggle' });
+    const locLabel  = el('label', { class: 'profile-loc-label', for: 'set-loc-toggle', text: 'Show my location on the globe' });
+    const locStatus = el('div', { class: 'profile-loc-status' });
+
+    locToggle.addEventListener('change', () => {
+        if (!locToggle.checked) { locStatus.textContent = ''; return; }
+        if (!navigator.geolocation) {
+            locToggle.checked = false;
+            locStatus.textContent = 'GPS not available in this browser.';
+            return;
+        }
+        locStatus.textContent = 'Requesting location permission…';
+        navigator.geolocation.getCurrentPosition(
+            pos => {
+                locStatus.textContent = `Permission granted ✓  (${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)})`;
+                window.dispatchEvent(new CustomEvent('soa:user-location', {
+                    detail: { lat: pos.coords.latitude, lon: pos.coords.longitude, name: nameInput.value.trim() || 'You' },
+                }));
+            },
+            err => {
+                locToggle.checked = false;
+                locStatus.textContent = err.code === 1 ? 'Location permission denied.' : 'Could not get location.';
+            },
+            { timeout: 10_000, maximumAge: 10 * 60_000 },
+        );
+    });
+
+    const saveBtn   = el('button', { class: 'soa-modal-copy', text: 'Save profile' });
+    const saveStatus = el('p', { class: 'settings-status' });
+
+    saveBtn.addEventListener('click', async () => {
+        try {
+            const body = {
+                displayName: nameInput.value.trim() || 'User',
+                avatarColor: selectedColor,
+                locationPermission: locToggle.checked,
+            };
+            const res = await _apiFetch('/api/user/profile', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                saveStatus.textContent = 'Saved at ' + new Date().toTimeString().slice(0, 8);
+                window.dispatchEvent(new CustomEvent('soa:profile-updated', { detail: data.profile }));
+            } else {
+                saveStatus.textContent = 'Error: ' + (data.error || 'unknown');
+            }
+        } catch (e) { saveStatus.textContent = 'Error: ' + e.message; }
+    });
+
+    // Load existing profile
+    (async () => {
+        try {
+            const res = await _apiFetch('/api/user/profile');
+            const { ok, profile } = await res.json();
+            if (!ok) return;
+            nameInput.value = profile.displayName || '';
+            selectedColor = profile.avatarColor || '#4a6566';
+            swatches.querySelectorAll('.profile-avatar-swatch').forEach(s => {
+                if (s.style.backgroundColor === selectedColor ||
+                    s.style.background === selectedColor ||
+                    s.title === AVATAR_COLORS.find(c => c.color === selectedColor)?.name) {
+                    s.classList.add('selected');
+                }
+            });
+            // Match by background style
+            swatches.querySelectorAll('.profile-avatar-swatch').forEach(s => {
+                const hex = rgbToHex(s.style.background || s.style.backgroundColor);
+                if (hex && hex.toLowerCase() === selectedColor.toLowerCase()) s.classList.add('selected');
+            });
+            locToggle.checked = !!profile.locationPermission;
+        } catch (_) {}
+    })();
+
+    pane.append(
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Display Name' }),
+            nameInput,
+        ]),
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Avatar Color' }),
+            swatches,
+        ]),
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Location' }),
+            el('div', { class: 'profile-loc-row' }, [locToggle, locLabel]),
+            locStatus,
+        ]),
+        el('div', { class: 'settings-row-actions' }, [saveBtn]),
+        saveStatus,
+        el('p', { class: 'settings-hint', text: 'Location is shared only with this device\'s globe widget — never sent to any server.' }),
+    );
+    return pane;
+}
+
+// Convert CSS rgb(...) string to hex for comparison
+function rgbToHex(rgb) {
+    const m = String(rgb).match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (!m) return rgb; // already hex or empty
+    return '#' + [m[1], m[2], m[3]].map(n => parseInt(n, 10).toString(16).padStart(2, '0')).join('');
+}
+
 function buildAutomationPane() {
     const pane = el('div', { class: 'settings-pane-body settings-auto-pane' });
     const enableCompact = el('select', { id: 'set-auto-compact-enabled' });
@@ -519,7 +650,7 @@ function collectFromDOM(prev) {
     };
 }
 
-export function openSettingsModal() {
+export function openSettingsModal({ tab: openTab } = {}) {
     if (document.getElementById('settings-modal')) return;
 
     const backdrop = el('div', { class: 'soa-modal-backdrop', id: 'settings-modal' });
@@ -530,7 +661,9 @@ export function openSettingsModal() {
     backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
 
     const s = getSettings();
+    const defaultTab = openTab || 'appearance';
     const panes = {
+        profile:    buildProfilePane(),
         appearance: buildAppearancePane(s),
         audio:      buildAudioPane(s),
         misc:       buildMiscPane(s),
@@ -539,9 +672,10 @@ export function openSettingsModal() {
         automation: buildAutomationPane(),
     };
     Object.values(panes).forEach(p => p.classList.add('settings-pane'));
-    panes.appearance.classList.add('settings-pane--active');
+    (panes[defaultTab] || panes.appearance).classList.add('settings-pane--active');
 
     const tabDefs = [
+        ['profile',    'Profile'],
         ['appearance', tr('settings.tab.appearance')],
         ['audio',      tr('settings.tab.audio')],
         ['misc',       tr('settings.tab.misc')],
@@ -550,7 +684,8 @@ export function openSettingsModal() {
         ['automation', tr('settings.tab.automation')],
     ];
     const tabs = tabDefs.map(([k, label]) => {
-        const t = el('div', { class: 'settings-tab' + (k === 'appearance' ? ' settings-tab--active' : ''), text: label });
+        const isActive = k === defaultTab;
+        const t = el('div', { class: 'settings-tab' + (isActive ? ' settings-tab--active' : ''), text: label });
         t.addEventListener('click', () => {
             card.querySelectorAll('.settings-tab').forEach(x => x.classList.remove('settings-tab--active'));
             card.querySelectorAll('.settings-pane').forEach(x => x.classList.remove('settings-pane--active'));

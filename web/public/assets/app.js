@@ -18,9 +18,9 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=24';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=25';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
-import { getSettings, onSettings, openSettingsModal, saveSettings } from '/assets/settings.js?v=18';
+import { getSettings, onSettings, openSettingsModal, saveSettings } from '/assets/settings.js?v=19';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=1';
 
@@ -510,6 +510,9 @@ class Shell {
             this.audio.play('panels');
             openSettingsModal();
         });
+
+        // User profile chip — loads display name / avatar, starts geo watcher if permitted
+        this._initUserProfile();
 
         onSettings(s => this._applySettings(s));
 
@@ -2553,6 +2556,68 @@ class Shell {
             audioBtn.dataset.state = s.audio ? 'on' : 'off';
             audioBtn.textContent = s.audio ? tr('topbar.audio_on') : tr('topbar.audio_off');
         }
+    }
+
+    // ── User profile chip ──────────────────────────────────────────────────
+
+    async _initUserProfile() {
+        const chip = $('#user-chip');
+        if (!chip) return;
+
+        // Open Settings → Profile tab on click
+        chip.addEventListener('click', () => {
+            this.audio.play('panels');
+            openSettingsModal({ tab: 'profile' });
+        });
+
+        // Refresh chip whenever profile is saved from settings
+        window.addEventListener('soa:profile-updated', e => this._updateUserChip(e.detail));
+
+        // Load current profile from server
+        try {
+            const cfg = window.__SOA_WEB__ || {};
+            const base = cfg._resolvedBackend || '';
+            const token = cfg._resolvedToken || '';
+            const url = new URL(base + '/api/user/profile');
+            if (token) url.searchParams.set('t', token);
+            const res = await fetch(url.toString(), { credentials: 'include' });
+            const { ok, profile } = await res.json();
+            if (ok && profile) {
+                this._updateUserChip(profile);
+                // Start GPS watcher if user previously permitted
+                if (profile.locationPermission && navigator.geolocation) {
+                    this._startGeoWatch(profile.displayName || 'You');
+                }
+            }
+        } catch (_) {}
+    }
+
+    _updateUserChip(profile) {
+        const chip = $('#user-chip');
+        if (!chip) return;
+        const avatar = chip.querySelector('.user-avatar');
+        const nameEl = chip.querySelector('.user-chip-name');
+        const name = (profile.displayName || 'User').trim();
+        const color = profile.avatarColor || '#4a6566';
+        if (avatar) {
+            avatar.dataset.initial = name.charAt(0).toUpperCase();
+            avatar.style.background = color;
+        }
+        if (nameEl) nameEl.textContent = name;
+        chip.title = `${name} — click to edit profile`;
+    }
+
+    _startGeoWatch(displayName) {
+        if (this._geoWatchId != null) return; // already watching
+        this._geoWatchId = navigator.geolocation.watchPosition(
+            pos => {
+                window.dispatchEvent(new CustomEvent('soa:user-location', {
+                    detail: { lat: pos.coords.latitude, lon: pos.coords.longitude, name: displayName },
+                }));
+            },
+            () => {},
+            { timeout: 15_000, maximumAge: 5 * 60_000 },
+        );
     }
 
     // ── Tiles view ──────────────────────────────────────────────────────

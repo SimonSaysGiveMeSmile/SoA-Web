@@ -468,6 +468,63 @@ html, body {
 #more-menu .mi-monitor  { --mi-icon: var(--soa-icon-monitor); }
 #more-menu .mi-clock    { --mi-icon: var(--soa-icon-clock); }
 
+/* ── User profile chip ────────────────────────────────────────────────────── */
+.user-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: transparent;
+    border: 1px solid var(--soa-line) !important;  /* override generic topbar btn */
+    border-radius: 14px !important;
+    padding: 3px 8px 3px 3px !important;
+    color: var(--soa-fg) !important;
+    font-family: var(--font-mono) !important; font-size: 11px !important;
+    letter-spacing: 0.04em !important;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    white-space: nowrap;
+    width: auto !important; height: auto !important;  /* undo icon-only square */
+}
+.user-chip:hover {
+    border-color: var(--soa-accent) !important;
+    background: rgba(var(--soa-accent-rgb), 0.08) !important;
+}
+.user-chip::before { display: none !important; } /* suppress data-icon pseudo */
+.user-avatar {
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--soa-accent-dim);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--font-display); font-size: 10px; font-weight: 700;
+    color: var(--soa-bg); flex: 0 0 20px;
+    letter-spacing: 0; line-height: 1;
+}
+.user-avatar::after { content: attr(data-initial); }
+.user-chip-name { max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-chip-name:empty { display: none; }
+
+/* Profile settings pane */
+.profile-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+.profile-label { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); letter-spacing: 0.1em; text-transform: uppercase; }
+.profile-input {
+    background: var(--soa-bg-deep); color: var(--soa-fg);
+    border: 1px solid var(--soa-line);
+    padding: 6px 10px; font-family: var(--font-mono); font-size: 13px; outline: none;
+    border-radius: 3px;
+}
+.profile-input:focus { border-color: var(--soa-accent); }
+.profile-avatar-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+.profile-avatar-swatch {
+    width: 24px; height: 24px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: border-color 0.12s, transform 0.12s;
+    outline: none;
+}
+.profile-avatar-swatch:hover { transform: scale(1.18); }
+.profile-avatar-swatch.selected { border-color: var(--soa-fg); }
+.profile-loc-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.profile-loc-toggle { accent-color: var(--soa-accent); width: 16px; height: 16px; cursor: pointer; }
+.profile-loc-label { font-family: var(--font-mono); font-size: 12px; color: var(--soa-fg); cursor: pointer; }
+.profile-loc-status { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); flex: 0 0 100%; margin-top: 2px; min-height: 1em; }
+
 /* Primary CTA: make the desktop-app download read as the promoted action
    without drowning the rest of the topbar. Solid accent fill, subtle
    breathing glow, icon nudge on hover. */

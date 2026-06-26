@@ -680,10 +680,14 @@ class LocationGlobeWidget extends Widget {
         this._meta = $el('div', { class: 'globe-meta', text: '—' });
         this.body.append(this._canvasHost, this._meta);
         this._pin = null;
+        this._userPin = null;
         this._lastLoc = null;
+        this._lastUserLoc = null;
         this._offscreen = false;  // set by IntersectionObserver in _boot
         this._geoFails = 0;       // consecutive /api/geo failures (backoff)
         this._geoNextAt = 0;      // epoch ms before which tick() skips the fetch
+        this._onUserLocation = e => this.setUserLocation(e.detail.lat, e.detail.lon, e.detail.name || 'You');
+        window.addEventListener('soa:user-location', this._onUserLocation);
         this._bootPromise = this._boot();
     }
 
@@ -849,6 +853,31 @@ class LocationGlobeWidget extends Widget {
         } catch (_) { /* globe not fully ready yet */ }
     }
 
+    setUserLocation(lat, lon, name) {
+        if (lat == null || lon == null || !isFinite(lat) || !isFinite(lon)) return;
+        const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+        if (this._lastUserLoc === key) return;
+        this._lastUserLoc = key;
+        // Update meta text below the globe with user location
+        const coord = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+        const label = name ? `${name}  ·  ${coord}` : coord;
+        if (!this.globe) {
+            // Globe still booting — place the pin once boot resolves
+            this._bootPromise.then(() => this._placeUserPin(lat, lon, name)).catch(() => {});
+            return;
+        }
+        this._placeUserPin(lat, lon, name);
+    }
+
+    _placeUserPin(lat, lon, name) {
+        if (!this.globe) return;
+        try {
+            if (this._userPin && typeof this._userPin.remove === 'function') this._userPin.remove();
+            // Slightly larger pin than server location so it's visually distinct
+            this._userPin = this.globe.addPin(lat, lon, `▲ ${name || 'You'}`, 1.8);
+        } catch (_) {}
+    }
+
     _refreshMeta(geo) {
         if (!geo) { this._meta.textContent = '—'; return; }
         const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
@@ -862,6 +891,7 @@ class LocationGlobeWidget extends Widget {
         if (this._rafId) cancelAnimationFrame(this._rafId);
         if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
         if (this._onResize) window.removeEventListener('resize', this._onResize);
+        if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);
         try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
         super.destroy();
     }

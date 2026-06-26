@@ -53,6 +53,7 @@ const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
+const userProfile      = require('./userProfile');
 const { dbg, agg }     = require('./debug');
 const { STATE_DIR, MODE } = require('./stateDir');
 const instanceLock     = require('./instanceLock');
@@ -269,6 +270,7 @@ pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
+userProfile.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
