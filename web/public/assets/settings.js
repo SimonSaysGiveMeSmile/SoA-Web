@@ -452,6 +452,39 @@ function buildProfilePane() {
         } catch (e) { saveStatus.textContent = 'Error: ' + e.message; }
     });
 
+    // Press Enter in the name field to save (name is freely editable/modifiable).
+    nameInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); saveBtn.click(); }
+    });
+
+    // ── Live account stats (polled only while this pane is on screen) ───────────
+    const statClients = el('span', { class: 'profile-stat-val', text: '—' });
+    const statTokens  = el('span', { class: 'profile-stat-val', text: '—' });
+    const statFlag    = el('span', { class: 'profile-stat-flag', text: '🌍' });
+    const statPlace   = el('span', { class: 'profile-stat-val', text: '—' });
+
+    async function refreshStats() {
+        try {
+            const res = await _apiFetch('/api/user/stats');
+            const d = await res.json();
+            if (!d || !d.ok) return;
+            statClients.textContent = String(d.connectedClients ?? 0)
+                + (d.connectedClients === 1 ? ' client' : ' clients');
+            statTokens.textContent = formatTokens(d.estTokens) + ' ctx'
+                + (d.activeTabs ? `  ·  ${d.activeTabs} tab${d.activeTabs === 1 ? '' : 's'}` : '');
+            const flag = iso2ToFlagEmoji(d.country);
+            statFlag.textContent = flag;
+            statPlace.textContent = [d.city, d.country].filter(Boolean).join(', ') || 'Unknown';
+            // Mirror the flag onto the always-visible topbar chip.
+            window.dispatchEvent(new CustomEvent('soa:user-geo', { detail: { country: d.country, flag } }));
+        } catch (_) { /* transient — keep last values */ }
+    }
+    refreshStats();
+    const statsTimer = setInterval(() => {
+        if (!pane.isConnected) { clearInterval(statsTimer); return; }
+        refreshStats();
+    }, 3000);
+
     // Load existing profile
     (async () => {
         try {
@@ -478,6 +511,21 @@ function buildProfilePane() {
 
     pane.append(
         el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Live Account' }),
+            el('div', { class: 'profile-stats' }, [
+                el('div', { class: 'profile-stat-row' }, [
+                    el('span', { class: 'profile-stat-key', text: 'Connected' }), statClients,
+                ]),
+                el('div', { class: 'profile-stat-row' }, [
+                    el('span', { class: 'profile-stat-key', text: 'Tokens (fleet)' }), statTokens,
+                ]),
+                el('div', { class: 'profile-stat-row' }, [
+                    el('span', { class: 'profile-stat-key', text: 'Location (IP)' }),
+                    el('span', { class: 'profile-stat-loc' }, [statFlag, statPlace]),
+                ]),
+            ]),
+        ]),
+        el('div', { class: 'profile-field' }, [
             el('div', { class: 'profile-label', text: 'Display Name' }),
             nameInput,
         ]),
@@ -492,7 +540,7 @@ function buildProfilePane() {
         ]),
         el('div', { class: 'settings-row-actions' }, [saveBtn]),
         saveStatus,
-        el('p', { class: 'settings-hint', text: 'Location is shared only with this device\'s globe widget — never sent to any server.' }),
+        el('p', { class: 'settings-hint', text: 'Browser GPS is shared only with this device\'s globe widget — never sent to any server. The IP location/flag above is the server\'s egress.' }),
     );
     return pane;
 }
@@ -502,6 +550,22 @@ function rgbToHex(rgb) {
     const m = String(rgb).match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
     if (!m) return rgb; // already hex or empty
     return '#' + [m[1], m[2], m[3]].map(n => parseInt(n, 10).toString(16).padStart(2, '0')).join('');
+}
+
+// ISO-3166-1 alpha-2 (e.g. 'US') → flag emoji via regional-indicator symbols.
+// Returns a globe for missing/invalid codes so the UI never shows a broken glyph.
+export function iso2ToFlagEmoji(iso2) {
+    if (!iso2 || typeof iso2 !== 'string' || iso2.length !== 2 || !/^[a-z]{2}$/i.test(iso2)) return '🌍';
+    const cps = iso2.toUpperCase().split('').map(c => 127397 + c.charCodeAt(0));
+    return String.fromCodePoint(...cps);
+}
+
+// Compact token formatting: 850 → "850", 12300 → "12k", 1_250_000 → "1.3M".
+function formatTokens(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k';
+    return (n / 1_000_000).toFixed(1) + 'M';
 }
 
 function buildAutomationPane() {

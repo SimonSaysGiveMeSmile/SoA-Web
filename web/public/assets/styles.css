@@ -507,8 +507,24 @@ html, body {
     margin-left: 1px;
 }
 .user-chip:hover .user-chip-gear { opacity: 1; color: var(--soa-accent); }
+/* Country flag (egress IP) — sits between avatar and name; hidden until known. */
+.user-chip-flag { font-size: 13px; line-height: 1; flex: 0 0 auto; }
+.user-chip-flag:empty { display: none; }
 
 /* Profile settings pane */
+.profile-stats {
+    display: flex; flex-direction: column; gap: 5px;
+    border: 1px solid var(--soa-line); border-radius: 4px;
+    padding: 9px 11px; background: rgba(var(--soa-accent-rgb), 0.04);
+}
+.profile-stat-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    font-family: var(--font-mono); font-size: 12px;
+}
+.profile-stat-key { color: var(--soa-accent-dim); }
+.profile-stat-val { color: var(--soa-fg); }
+.profile-stat-loc { display: inline-flex; align-items: center; gap: 6px; color: var(--soa-fg); }
+.profile-stat-flag { font-size: 15px; line-height: 1; }
 .profile-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
 .profile-label { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); letter-spacing: 0.1em; text-transform: uppercase; }
 .profile-input {

@@ -20,7 +20,7 @@ import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=17';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=25';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
-import { getSettings, onSettings, openSettingsModal, saveSettings } from '/assets/settings.js?v=19';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=20';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=1';
 
@@ -2569,16 +2569,13 @@ class Shell {
 
         // Refresh chip whenever profile is saved from settings
         window.addEventListener('soa:profile-updated', e => this._updateUserChip(e.detail));
+        // The profile pane broadcasts the egress country as it polls — mirror its
+        // flag onto the always-visible chip.
+        window.addEventListener('soa:user-geo', e => this._setChipFlag(e.detail && e.detail.flag));
 
         // Load current profile from server
         try {
-            const cfg = window.__SOA_WEB__ || {};
-            const base = cfg._resolvedBackend || '';
-            const token = cfg._resolvedToken || '';
-            const url = new URL(base + '/api/user/profile');
-            if (token) url.searchParams.set('t', token);
-            const res = await fetch(url.toString(), { credentials: 'include' });
-            const { ok, profile } = await res.json();
+            const { ok, profile } = await this._apiJson('/api/user/profile');
             if (ok && profile) {
                 this._updateUserChip(profile);
                 // Start GPS watcher if user previously permitted
@@ -2587,6 +2584,29 @@ class Shell {
                 }
             }
         } catch (_) {}
+
+        // Seed the chip's country flag immediately (don't wait for the pane to open).
+        try {
+            const stats = await this._apiJson('/api/user/stats');
+            if (stats && stats.ok) this._setChipFlag(iso2ToFlagEmoji(stats.country));
+        } catch (_) {}
+    }
+
+    // Small same-origin JSON GET that carries the resolved backend + token.
+    async _apiJson(path) {
+        const cfg = window.__SOA_WEB__ || {};
+        const url = new URL((cfg._resolvedBackend || '') + path);
+        if (cfg._resolvedToken) url.searchParams.set('t', cfg._resolvedToken);
+        const res = await fetch(url.toString(), { credentials: 'include' });
+        return res.json();
+    }
+
+    _setChipFlag(flag) {
+        const el = $('#user-chip .user-chip-flag');
+        if (!el) return;
+        // Hide the generic globe so the chip stays clean until we know the country.
+        if (!flag || flag === '🌍') { el.textContent = ''; return; }
+        el.textContent = flag;
     }
 
     _updateUserChip(profile) {

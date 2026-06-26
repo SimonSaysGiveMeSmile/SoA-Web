@@ -252,6 +252,51 @@ app.get('/api/devices', requireAuthed, (req, res) => {
     res.json({ ok: true, count: devices.length, devices });
 });
 
+// Aggregate per-user stats for the profile panel. /api/devices only ever sees
+// the CALLER's own session sockets (and a browser's WS may bind to the primary
+// session, not its cookie session — so that endpoint reads 0 for an API caller).
+// This one reports the GLOBAL live client count, a fleet token estimate (sum of
+// each tab's context% × the context window), and the egress country for a flag.
+// Cheap enough to be polled by the open profile pane for a live readout.
+app.get('/api/user/stats', requireAuthed, async (req, res) => {
+    let connectedClients = 0;
+    for (const s of sessions.sessions.values()) {
+        for (const ws of s.sockets) {
+            if (ws && ws.readyState === 1) connectedClients++;
+        }
+    }
+    const CONTEXT_WINDOW = parseInt(process.env.SOA_WEB_CONTEXT_WINDOW || '200000', 10);
+    let estTokens = 0, activeTabs = 0, ctxSum = 0, ctxTabs = 0;
+    try {
+        const primary = _findPrimarySession() || req.session;
+        if (primary) {
+            const snap = sessionManager.ensure(primary).snapshot();
+            activeTabs = snap.sessions.length;
+            for (const t of snap.sessions) {
+                if (typeof t.ctxPct === 'number') {
+                    estTokens += Math.round((t.ctxPct / 100) * CONTEXT_WINDOW);
+                    ctxSum += t.ctxPct; ctxTabs++;
+                }
+            }
+        }
+    } catch (_) { /* supervisor not ready — return zeros */ }
+    let country = null, city = null;
+    try {
+        const g = await sysinfo.geoInfo();
+        if (g) { country = g.country || null; city = g.city || null; }
+    } catch (_) { /* geo unavailable — flag falls back client-side */ }
+    res.json({
+        ok: true,
+        connectedClients,
+        estTokens,
+        activeTabs,
+        avgCtxPct: ctxTabs ? Math.round(ctxSum / ctxTabs) : 0,
+        contextWindow: CONTEXT_WINDOW,
+        country,
+        city,
+    });
+});
+
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
 consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
