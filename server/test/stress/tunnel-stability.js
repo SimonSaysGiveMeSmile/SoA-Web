@@ -67,13 +67,35 @@ function record(name, pass, detail, metrics) {
 }
 function pct(arr, p) { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p / 100 * s.length))]; }
 
+// DoH (DNS-over-HTTPS, port 443) resolver — unaffected by the broken local UDP/53
+// path, so we can pin a real edge IP and probe a door that's genuinely up even
+// when getaddrinfo NXDOMAINs the fresh host. Returns the first A record, or null.
+function dohResolve4(host) {
+    return new Promise(res => {
+        const req = https.get(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`,
+            { headers: { accept: 'application/dns-json' }, timeout: 6000 }, r => {
+                let s = ''; r.on('data', d => s += d);
+                r.on('end', () => { try { const a = (JSON.parse(s).Answer || []).find(x => x.type === 1); res(a ? a.data : null); } catch { res(null); } });
+            });
+        req.on('error', () => res(null));
+        req.on('timeout', () => { req.destroy(); res(null); });
+    });
+}
+// A Node dns.lookup-compatible fn that always returns the pinned IP, so https
+// still uses the real hostname for SNI/Host (like curl --resolve).
+function pinnedLookup(ip) {
+    return (hostname, options, cb) => { if (typeof options === 'function') cb = options; cb(null, ip, 4); };
+}
+
 // ── one HTTP GET, returns {code, ms, errCode, err} ──────────────────────────
-function getOnce(urlStr, { headers = {}, timeout = 10000 } = {}) {
+function getOnce(urlStr, { headers = {}, timeout = 10000, lookup = null } = {}) {
     return new Promise(res => {
         let u; try { u = new URL(urlStr); } catch (e) { return res({ code: 0, ms: 0, err: 'bad-url' }); }
         const lib = u.protocol === 'https:' ? https : http;
         const t0 = process.hrtime.bigint();
-        const req = lib.get(u, { headers, timeout }, r => {
+        const reqOpts = { headers, timeout };
+        if (lookup) reqOpts.lookup = lookup;
+        const req = lib.get(u, reqOpts, r => {
             const errCode = r.headers['ngrok-error-code'] || r.headers['cf-mitigated'] || '';
             r.resume();
             r.on('end', () => res({ code: r.statusCode, ms: Number(process.hrtime.bigint() - t0) / 1e6, errCode }));
@@ -172,10 +194,23 @@ async function scDiscover() {
 async function scTunnelHttp() {
     if (!CHOSEN) { record('tunnel-http', false, 'no URL to probe'); return; }
     const url = `${CHOSEN.replace(/\/$/, '')}${CFG.path}`;
-    const r = await httpBurst(url, CFG.http, { headers: SKIP_HDR, timeout: 10000 });
+    let r = await httpBurst(url, CFG.http, { headers: SKIP_HDR, timeout: 10000 });
+    let via = '';
+    // If every probe failed purely because the LOCAL resolver couldn't resolve the
+    // host (not an edge/HTTP error), retry pinning a DoH-resolved edge IP — a door
+    // that's up for real clients must not read as "down" just because this box's
+    // getaddrinfo is flaky. Mirrors the soa-channels verify() DoH fallback.
+    const dnsErr = Object.keys(r.errs).some(e => /ENOTFOUND|EAI_AGAIN|ENODATA/.test(e));
+    if (r.ok === 0 && dnsErr) {
+        const ip = await dohResolve4(new URL(CHOSEN).hostname);
+        if (ip) {
+            r = await httpBurst(url, CFG.http, { headers: SKIP_HDR, timeout: 10000, lookup: pinnedLookup(ip) });
+            via = ` ${C.d('(via DoH-pinned ' + ip + ' — local resolver couldn\'t resolve)')}`;
+        }
+    }
     const edge = Object.keys(r.errCodes);
     const quota = edge.some(e => /727|728|729/.test(e)); // ngrok account/quota family
-    let detail = `${url} → ${r.ok}/${r.count} ok · codes=[${fmtMap(r.codes)}]`;
+    let detail = `${url} → ${r.ok}/${r.count} ok${via} · codes=[${fmtMap(r.codes)}]`;
     if (edge.length) detail += ` · ${C.r('edge-err=[' + fmtMap(r.errCodes) + ']')}`;
     if (Object.keys(r.errs).length) detail += ` · neterr=[${fmtMap(r.errs)}]`;
     if (r.ok) detail += ` · p50=${pct(r.lat, 50).toFixed(0)}ms p95=${pct(r.lat, 95).toFixed(0)}ms`;
@@ -213,7 +248,10 @@ async function scDnsResolver() {
         if (split && h !== 'cloudflare.com') broken = true;
         lines.push(`${h}: getaddrinfo=${gaOk ? ga.join(',') : C.r(Array.isArray(ga) ? 'empty' : ga.err)} dig@1.1.1.1=${dgOk ? dg.join(',') : 'none'}${split ? C.r(' ←SPLIT') : ''}`);
     }
-    record('dns-resolver', broken ? false : true, lines.join('  |  ') + (broken ? `  ${C.r('← OS resolver drops A records the network DNS is failing — fix: set 1.1.1.1/8.8.8.8 + flush cache')}` : ''), { broken });
+    // A SPLIT is a real LOCAL-resolver problem worth flagging, but it does NOT
+    // mean the door is down (real clients use their own resolvers, and tunnel-http
+    // has a DoH fallback) — so warn, don't hard-fail the verdict.
+    record('dns-resolver', broken ? 'warn' : true, lines.join('  |  ') + (broken ? `  ${C.y('← local OS resolver drops A records (network DNS flaky) — door still reachable via DoH; fix at source: set 1.1.1.1/8.8.8.8 + flush cache')}` : ''), { broken });
     return broken;
 }
 
