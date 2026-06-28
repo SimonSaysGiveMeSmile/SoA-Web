@@ -14,7 +14,7 @@ try {
     localtunnel = null;
 }
 
-const { execFile, spawn } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const os = require('os');
@@ -95,23 +95,40 @@ async function _probe(url) {
     return (await _probeOnce(url, ip)).ok;
 }
 
-// Re-adopt a tunnel that outlived a previous daemon process. Returns a handle
-// shaped like _tryCloudflared's so callers can't tell the difference, or null
-// if there's nothing healthy to adopt. A process that's alive but no longer
-// routing to us is killed so we don't leak orphans or run two tunnels.
+// Find the surviving cloudflared quick-tunnel for this port by its command line.
+// Needed because the channel self-healer (soa-channels) rewrites tunnel.json
+// WITHOUT the pid (provider:"cloudflare"), so the saved pid is often absent —
+// but the detached cloudflared is still running and adoptable.
+function _findCloudflaredPid(port) {
+    try {
+        const out = execFileSync('pgrep', ['-f', `cloudflared tunnel --url http://localhost:${port}`], { encoding: 'utf8', timeout: 3000 });
+        const pid = parseInt((out || '').split('\n').filter(Boolean)[0], 10);
+        return Number.isInteger(pid) ? pid : null;
+    } catch (_) { return null; }
+}
+
+// Re-adopt a tunnel that outlived a previous daemon process (same URL), so a
+// restart/redeploy never breaks remote/mobile clients. Accepts both the
+// tunnel.js-written state (provider:"cloudflared" + pid) AND the self-healer's
+// (provider:"cloudflare", no pid) — in the latter case it finds the surviving
+// process by port. Returns a handle shaped like _tryCloudflared's, or null.
 async function adopt(port) {
     const st = _loadState();
-    if (!st || st.provider !== 'cloudflared' || st.port !== port || !st.pid || !st.url) return null;
-    if (!_alive(st.pid)) { dbg('tunnel', 'adopt: saved pid', st.pid, 'is gone'); _clearState(); return null; }
-    const ok = await _probe(st.url);
+    if (!st || !st.url || st.port !== port || !/^cloudflared?$/.test(st.provider || '')) return null;
+    let pid = (st.pid && _alive(st.pid)) ? st.pid : null;
+    const fromSaved = pid !== null;
+    if (!pid) pid = _findCloudflaredPid(port);   // healer-rewritten tunnel.json: no pid → find the survivor
+    if (!pid || !_alive(pid)) { dbg('tunnel', 'adopt: no live cloudflared survivor for', st.url); return null; }
+    const ok = await _probe(st.url);             // DoH-aware: a flaky local resolver won't false-kill a live tunnel
     if (!ok) {
-        dbg('tunnel', 'adopt: pid', st.pid, 'alive but', st.url, 'not routing — killing stale tunnel');
-        try { process.kill(st.pid); } catch (_) {}
-        _clearState();
+        dbg('tunnel', 'adopt: pid', pid, st.url, 'not routing');
+        // Only reap a process WE recorded — never a pgrep-discovered one (could be
+        // a healthy tunnel the local probe simply couldn't resolve).
+        if (fromSaved) { try { process.kill(pid); } catch (_) {} _clearState(); }
         return null;
     }
-    dbg('tunnel', 'adopt: re-using surviving cloudflared pid', st.pid, st.url);
-    return _wrapAdopted(st);
+    dbg('tunnel', 'adopt: re-using surviving cloudflared pid', pid, st.url);
+    return _wrapAdopted({ ...st, pid, provider: 'cloudflared' });
 }
 
 function _wrapAdopted(st) {
