@@ -95,6 +95,19 @@ function openTabs(n) {
     const watch = await api({ action: 'watch', cursor: head, timeoutMs: 1200 });
     ok('watch long-poll times out cleanly', watch.json && watch.json.timedOut === true, JSON.stringify(watch.json));
 
+    // Watch WAKE path: park a watch, fire an event while it's parked, assert it
+    // returns the event (not a timeout) — the core of the manager event loop.
+    const head2 = (await api({ action: 'events', since: 0 })).json.cursor;
+    const wakeP = api({ action: 'watch', cursor: head2, timeoutMs: 6000 });
+    await new Promise((r) => setTimeout(r, 300)); // let the watch park before the event
+    const wk = await api({ action: 'spawn', claude: false, title: 'smoke-watch-wake' });
+    const D = wk.json && wk.json.id;
+    const woke = await wakeP;
+    ok('watch WAKES on a new event (not just timeout)',
+        woke.json && woke.json.timedOut === false && (woke.json.events || []).some((e) => e.id === D && e.kind === 'spawned'),
+        JSON.stringify(woke.json));
+    if (Number.isInteger(D)) await api({ action: 'stop', id: D });
+
     const spawn = await api({ action: 'spawn', claude: false, title: 'smoke-spawn' });
     const C = spawn.json && spawn.json.id;
     ok('spawn (claude:false) creates a tab', Number.isInteger(C));
