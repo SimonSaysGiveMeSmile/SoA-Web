@@ -56,6 +56,9 @@ const CFG = {
     ws: flag('ws'),
 };
 const STATE_DIRS = [process.env.SOA_WEB_STATE_DIR, `${os.homedir()}/.soa-web-local`, `${os.homedir()}/.soa-web`].filter(Boolean);
+// The state dir of the instance UNDER TEST (port-scoped) — so a dormant sibling's
+// stale channels.json doesn't pollute the staleness check for the door we probe.
+const PRIMARY_STATE_DIR = process.env.SOA_WEB_STATE_DIR || (CFG.port === 4010 ? `${os.homedir()}/.soa-web-local` : `${os.homedir()}/.soa-web`);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const C = { g: s => `\x1b[32m${s}\x1b[0m`, r: s => `\x1b[31m${s}\x1b[0m`, y: s => `\x1b[33m${s}\x1b[0m`, d: s => `\x1b[2m${s}\x1b[0m`, b: s => `\x1b[1m${s}\x1b[0m`, c: s => `\x1b[36m${s}\x1b[0m` };
@@ -146,14 +149,27 @@ function cloudflaredLogUrl() {
     }
     return null;
 }
+// The daemon's CURRENT adopted cloudflare door (quick tunnels are minted via
+// /api/pair/start, so they're NOT in ngrok :4040 or any log we scan — ask the
+// daemon directly so a live cloudflare door isn't mis-flagged as a stale link).
+function pairPublicUrl() {
+    return new Promise(res => {
+        http.get(`http://127.0.0.1:${CFG.port}/api/pair/status`, { timeout: 4000 }, resp => {
+            let s = ''; resp.on('data', d => s += d);
+            resp.on('end', () => { try { res((JSON.parse(s).data || {}).publicUrl || null); } catch { res(null); } });
+        }).on('error', () => res(null)).on('timeout', function () { this.destroy(); res(null); });
+    });
+}
 async function discover() {
     const live = [];
     const ngs = await ngrokTunnels();
     for (const t of ngs) if (/^https/.test(t.url || '')) live.push({ url: t.url, via: 'ngrok', addr: t.addr });
     const cf = cloudflaredLogUrl();
     if (cf) live.push({ url: cf, via: 'cloudflared(log)' });
+    const pu = await pairPublicUrl();
+    if (pu && /^https/.test(pu)) live.push({ url: pu, via: 'pair' });
     const advertised = [];
-    for (const d of STATE_DIRS) {
+    for (const d of [PRIMARY_STATE_DIR]) {
         const ch = readJson(path.join(d, 'channels.json'));
         if (ch && ch.url) advertised.push({ url: ch.url, src: `${path.basename(d)}/channels.json`, channel: ch.channel, verifiedAt: ch.verifiedAt });
         const tj = readJson(path.join(d, 'tunnel.json'));
@@ -176,7 +192,12 @@ async function scBackend() {
 let CHOSEN = null;
 async function scDiscover() {
     const d = await discover();
+    // Prefer the door the daemon has ADOPTED (the channels.json url mobile actually
+    // uses) over an arbitrary live tunnel — the quota-dead ngrok process is still
+    // "live" but isn't the door, so live[0] would test the wrong thing.
+    const adopted = d.advertised.find(a => /channels\.json$/.test(a.src) && a.url);
     if (CFG.url) CHOSEN = CFG.url;
+    else if (adopted) CHOSEN = adopted.url;
     else if (d.live.length) CHOSEN = d.live[0].url;
     else if (d.advertised.length) CHOSEN = d.advertised[0].url;
     const liveStr = d.live.map(l => `${l.url} ${C.d('(' + l.via + ')')}`).join(', ') || C.r('NONE running');
