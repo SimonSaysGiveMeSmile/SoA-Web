@@ -179,20 +179,46 @@ PY
     fi
 }
 
-# Tab count reachable THROUGH a url (proves it hits OUR live fleet, not a dead
-# host or the wrong daemon). $2 = optional extra header (ngrok skip).
-fleet_tabs() {
-    local url="$1" hdr="${2:-}"
-    curl -fsS --max-time 12 ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null \
+# Resolve a hostname to an IPv4 via DoH (HTTPS:443). This network's UDP/53
+# resolver intermittently NXDOMAINs live tunnel hosts (950+ ngrok "no such host"
+# errors on a STABLE host), which used to tear down tunnels that were actually
+# reachable for external clients. DoH over 443 is unaffected, so we can pin the
+# real edge IP and probe the tunnel even while getaddrinfo is briefly broken.
+doh_a() {
+    curl -fsS --max-time 6 -H 'accept: application/dns-json' \
+        "https://1.1.1.1/dns-query?name=$1&type=A" 2>/dev/null \
         | python3 -c "import sys,json
+try: print(next(a['data'] for a in json.load(sys.stdin).get('Answer',[]) if a.get('type')==1))
+except Exception: pass" 2>/dev/null
+}
+
+# Tab count reachable THROUGH a url (proves it hits OUR live fleet, not a dead
+# host or the wrong daemon). $2 = optional extra header (ngrok skip). If the local
+# resolver fails the name, retry once pinning the DoH-resolved IP via --resolve.
+fleet_tabs() {
+    local url="$1" hdr="${2:-}" host ip out
+    out="$(curl -fsS --max-time 12 ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
+    if [ -z "$out" ]; then
+        host="$(printf '%s' "$url" | sed -E 's#^https?://##; s#[:/].*$##')"
+        ip="$(doh_a "$host")"
+        [ -n "$ip" ] && out="$(curl -fsS --max-time 12 --resolve "${host}:443:${ip}" ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
+    fi
+    printf '%s' "$out" | python3 -c "import sys,json
 try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
 except: print(0)" 2>/dev/null
 }
 
-# A url is GOOD only if it reaches our daemon AND the fleet has tabs.
+# A url is GOOD only if it reaches our daemon AND the fleet has tabs. Retries so a
+# SINGLE transient DNS/network blip never tears down a tunnel that is actually
+# live for external clients (the recurring "no door" false alarm).
 verify() {
-    local n; n="$(fleet_tabs "$1" "${2:-}")"
-    [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null
+    local url="$1" hdr="${2:-}" i n
+    for i in 1 2 3; do
+        n="$(fleet_tabs "$url" "$hdr")"
+        [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null && return 0
+        [ "$i" -lt 3 ] && sleep 3
+    done
+    return 1
 }
 
 skip_hdr_for() { [ "$1" = "ngrok" ] && echo "ngrok-skip-browser-warning: 1"; }
