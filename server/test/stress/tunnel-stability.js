@@ -41,6 +41,7 @@ const dns = require('dns').promises;
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFile } = require('child_process');
 let WebSocket; try { WebSocket = require('ws'); } catch (_) { try { WebSocket = require(path.resolve(__dirname, '../../../node_modules/ws')); } catch (_2) { WebSocket = null; } }
 
 function arg(name, def) { const i = process.argv.indexOf('--' + name); return i > -1 ? process.argv[i + 1] : def; }
@@ -183,6 +184,39 @@ async function scTunnelHttp() {
     return r;
 }
 
+// getaddrinfo (the path curl/node/ngrok/cloudflared actually use) vs raw DNS.
+// A split — getaddrinfo fails or returns no IPv4 while `dig` resolves fine — is
+// the macOS resolver dropping A records / negative-caching a flaky network DNS,
+// which is what makes tunnels flap with "no such host" even though DNS is fine.
+function digA(host) {
+    return new Promise(res => {
+        execFile('dig', ['+short', 'A', host, '@1.1.1.1'], { timeout: 6000 }, (err, out) => {
+            if (err) return res([]);
+            res((out || '').split('\n').map(s => s.trim()).filter(s => /^\d+\.\d+\.\d+\.\d+$/.test(s)));
+        });
+    });
+}
+async function getaddr4(host) {
+    try { const r = await dns.lookup(host, { all: true, family: 4 }); return r.map(a => a.address); }
+    catch (e) { return { err: e.code || e.message }; }
+}
+async function scDnsResolver() {
+    const hosts = [];
+    if (CHOSEN) { try { hosts.push(new URL(CHOSEN).hostname); } catch (_) {} }
+    hosts.push('cloudflare.com'); // control: a well-known host should always resolve
+    let broken = false; const lines = [];
+    for (const h of hosts) {
+        const [ga, dg] = await Promise.all([getaddr4(h), digA(h)]);
+        const gaOk = Array.isArray(ga) && ga.length > 0;
+        const dgOk = dg.length > 0;
+        const split = !gaOk && dgOk; // resolver fails what real DNS answers
+        if (split && h !== 'cloudflare.com') broken = true;
+        lines.push(`${h}: getaddrinfo=${gaOk ? ga.join(',') : C.r(Array.isArray(ga) ? 'empty' : ga.err)} dig@1.1.1.1=${dgOk ? dg.join(',') : 'none'}${split ? C.r(' ←SPLIT') : ''}`);
+    }
+    record('dns-resolver', broken ? false : true, lines.join('  |  ') + (broken ? `  ${C.r('← OS resolver drops A records the network DNS is failing — fix: set 1.1.1.1/8.8.8.8 + flush cache')}` : ''), { broken });
+    return broken;
+}
+
 async function scDnsFlap() {
     const hosts = ['connect.ngrok-agent.com', 'api.trycloudflare.com', 'google.com'];
     const per = {}; hosts.forEach(h => per[h] = { ok: 0, fail: 0 });
@@ -237,6 +271,7 @@ async function scTunnelWs() {
     await scBackend();
     await scDiscover();
     await scTunnelHttp();
+    await scDnsResolver();
     console.log(C.d(`  … monitoring DNS + URL rotation for ${CFG.windowS}s …`));
     await Promise.all([scDnsFlap(), scUrlRotate()]);
     if (CFG.ws) await scTunnelWs();
