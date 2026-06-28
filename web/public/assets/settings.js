@@ -29,6 +29,7 @@ export const DEFAULTS = Object.freeze({
     audio: true,
     audioVolume: 1.0,
     disableFeedbackAudio: false,
+    agentDoneSound: true,
     clockHours: 24,
 });
 
@@ -51,6 +52,7 @@ function normalize(raw) {
         audio: asBool(s.audio, DEFAULTS.audio),
         audioVolume: clampVol(s.audioVolume ?? DEFAULTS.audioVolume),
         disableFeedbackAudio: asBool(s.disableFeedbackAudio, DEFAULTS.disableFeedbackAudio),
+        agentDoneSound: asBool(s.agentDoneSound, DEFAULTS.agentDoneSound),
         clockHours: asHours(s.clockHours ?? DEFAULTS.clockHours),
     };
 }
@@ -231,6 +233,11 @@ function buildAudioPane(s) {
             kvRow('audio',               'settings.desc.audio',               boolSelect('set-audio', s.audio)),
             kvRow('audioVolume',         'settings.desc.audioVolume',         numInput('set-audioVolume', s.audioVolume, 0, 1, 0.05)),
             kvRow('disableFeedbackAudio','settings.desc.disableFeedbackAudio',boolSelect('set-disableFeedbackAudio', s.disableFeedbackAudio)),
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'agentDoneSound' })]),
+                el('td', { class: 'd', text: 'Play a chime when a fleet agent finishes a turn (working → done).' }),
+                el('td', { class: 'v' }, [boolSelect('set-agentDoneSound', s.agentDoneSound)]),
+            ]),
         ]),
     ]);
 }
@@ -709,6 +716,7 @@ function collectFromDOM(prev) {
         audio:                get('set-audio').value === 'true',
         audioVolume:          Number(get('set-audioVolume').value),
         disableFeedbackAudio: get('set-disableFeedbackAudio').value === 'true',
+        agentDoneSound:       get('set-agentDoneSound') ? get('set-agentDoneSound').value === 'true' : (prev && prev.agentDoneSound),
         clockHours:           Number(get('set-clockHours').value),
         _lang:                get('set-lang').value,
     };

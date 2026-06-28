@@ -17,10 +17,10 @@
  */
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
-import { AudioFX } from '/assets/audiofx.js?v=17';
+import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=25';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=20';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=21';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=1';
 
@@ -2017,6 +2017,12 @@ class Shell {
         const prev = this._agentStatus.get(id);
         if (prev === status) return;
         this._agentStatus.set(id, status);
+        // Audible cue when an agent FINISHES a turn (working → done). Gated on the
+        // agentDoneSound setting and on prev === 'working' so loading a fleet of
+        // already-done tabs (prev === undefined) stays silent — no chime storm.
+        if (status === 'done' && prev === 'working' && getSettings().agentDoneSound) {
+            this.audio.play('agentdone', 'tab' + id);
+        }
         // Track when this status started for elapsed time display
         const s = this._agentBuf.get(id);
         if (s) s.lastChange = Date.now();
@@ -3649,7 +3655,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=14');
+        await import('/assets/app-wc.js?v=15');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
