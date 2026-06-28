@@ -45,7 +45,7 @@ SESSION_LIST="$(soa-sessions list 2>/dev/null || true)"
 # Look up a field for a given tab id.
 # Line format: "  #<id>  <title>  <status>  ctx  <pct>%  [FLAGS...]"
 tab_field() {
-    local id="$1" field="$2"  # field: 3=status 4=ctx_pct
+    local id="$1" field="$2"  # field: 3=status 5=ctx_pct ("ctx" label is field 4)
     echo "$SESSION_LIST" | awk -v id="$id" -v f="$field" '
         /^[[:space:]]*#[0-9]+/ {
             gsub(/^[[:space:]]*#/, "", $1)
@@ -70,11 +70,18 @@ tab_exists() {
 # Find a tab by title; print its id or nothing.
 find_by_title() {
     local title="$1"
+    # Prefer a LIVE (non-done) manager tab; fall back to any manager tab.
+    # Picking the lowest-id tab blindly used to select a stale "done" duplicate,
+    # which then re-triggered the done→respawn path (manager proliferation).
     echo "$SESSION_LIST" | awk -v t="$title" '
         /^[[:space:]]*#[0-9]+/ {
             gsub(/^[[:space:]]*#/, "", $1)
-            if ($2 == t) { print $1; exit }
-        }'
+            if ($2 == t) {
+                if ($3 != "done" && live == "") live = $1
+                if (any == "") any = $1
+            }
+        }
+        END { print (live != "" ? live : any) }'
 }
 
 spawn_manager() {
@@ -126,12 +133,13 @@ fi
 
 # ── Manager tab found — evaluate state ────────────────────────────────────────
 STATUS="$(tab_field "$MGR_ID" 3)"
-CTX_PCT="$(tab_field "$MGR_ID" 4 | tr -d '%')"
+CTX_PCT="$(tab_field "$MGR_ID" 5 | tr -d '%')"
 FLAGS="$(tab_flags "$MGR_ID")"
 log "manager tab #$MGR_ID — status=${STATUS:-?} ctx=${CTX_PCT:-0}% flags='${FLAGS:-}'"
 
 case "${STATUS:-}" in
     working|idle|attention)
+        rm -f "$HOME/.soa-web/.manager-done-count"   # alive — clear any done streak
         if [ "${CTX_PCT:-0}" -ge 80 ] || echo "$FLAGS" | grep -q "HIGH-CTX"; then
             log "manager #$MGR_ID ctx=${CTX_PCT}% HIGH — compacting"
             soa-sessions compact "$MGR_ID" 2>/dev/null || true
@@ -144,9 +152,22 @@ case "${STATUS:-}" in
             soa-msg "Manager (tab #$MGR_ID) resumed after usage limit." 2>/dev/null || true
         ;;
     done)
-        log "manager #$MGR_ID exited (done) — respawning"
-        rm -f "$ID_FILE"
-        spawn_manager
+        # A manager that just finished a turn briefly shows "done" but is STILL
+        # ALIVE — its /goal Stop hook revives the event loop. Respawning on a
+        # single transient "done" caused new manager tabs to pile up every turn
+        # boundary. Only respawn if "done" PERSISTS across consecutive checks
+        # (~3 runs ≈ 4.5m); a truly-exited tab is caught by the MISSING path above.
+        DONE_FILE="$HOME/.soa-web/.manager-done-count"
+        prev_done="$(cat "$DONE_FILE" 2>/dev/null | tr -d '[:space:]')"
+        cur_done=$(( ${prev_done:-0} + 1 ))
+        if [ "$cur_done" -ge 3 ]; then
+            log "manager #$MGR_ID 'done' persisted ${cur_done}x — treating as exited, respawning"
+            rm -f "$ID_FILE" "$DONE_FILE"
+            spawn_manager
+        else
+            echo "$cur_done" > "$DONE_FILE"
+            log "manager #$MGR_ID transient 'done' (${cur_done}/3) — alive, not respawning"
+        fi
         ;;
     "")
         log "manager #$MGR_ID returned empty status — skipping"
