@@ -46,23 +46,53 @@ function _alive(pid) {
     try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-// Probe a tunnel URL end-to-end (through Cloudflare, back to our own origin).
-// 200 from /api/ping means the tunnel is alive AND routing to a live daemon.
-function _probe(url) {
+// DoH (DNS-over-HTTPS, port 443) resolve — unaffected by a flaky local UDP/53
+// resolver. Lets _probe reach a tunnel that's genuinely alive even when
+// getaddrinfo NXDOMAINs its fresh *.trycloudflare.com host. First A, or null.
+function _dohResolve4(host) {
+    return new Promise(resolve => {
+        const req = https.get(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`,
+            { headers: { accept: 'application/dns-json' } }, res => {
+                let s = ''; res.on('data', d => s += d);
+                res.on('end', () => { try { const a = (JSON.parse(s).Answer || []).find(x => x.type === 1); resolve(a ? a.data : null); } catch (_) { resolve(null); } });
+            });
+        req.on('error', () => resolve(null));
+        req.setTimeout(5000, () => { try { req.destroy(); } catch (_) {} resolve(null); });
+    });
+}
+
+// One GET to url/api/ping. opts.ip pins a resolved IP via a custom lookup (the
+// real hostname is still used for SNI/Host). Resolves { ok, dnsErr }.
+function _probeOnce(url, ip) {
     return new Promise(resolve => {
         let done = false;
-        const finish = v => { if (!done) { done = true; resolve(v); } };
+        const finish = (ok, dnsErr) => { if (!done) { done = true; resolve({ ok, dnsErr: !!dnsErr }); } };
         try {
             const u = new URL(url.replace(/\/$/, '') + '/api/ping');
             const lib = u.protocol === 'https:' ? https : http;
-            const req = lib.get(u, res => {
-                res.resume();
-                finish(res.statusCode === 200);
-            });
-            req.on('error', () => finish(false));
-            req.setTimeout(6000, () => { try { req.destroy(); } catch (_) {} finish(false); });
-        } catch (_) { finish(false); }
+            const opts = ip ? { lookup: (h, o, cb) => { if (typeof o === 'function') cb = o; cb(null, ip, 4); } } : {};
+            const req = lib.get(u, opts, res => { res.resume(); finish(res.statusCode === 200, false); });
+            req.on('error', e => finish(false, e && /ENOTFOUND|EAI_AGAIN|ENODATA/.test(e.code || '')));
+            req.setTimeout(6000, () => { try { req.destroy(); } catch (_) {} finish(false, false); });
+        } catch (_) { finish(false, false); }
     });
+}
+
+// Probe a tunnel URL end-to-end (through Cloudflare, back to our own origin).
+// 200 from /api/ping means the tunnel is alive AND routing to a live daemon.
+// CRITICAL for restart survival: if the local resolver can't resolve the host
+// (NXDOMAIN on a flaky network), retry via a DoH-pinned IP rather than declaring
+// the tunnel dead — otherwise adopt() kills a healthy surviving tunnel on every
+// daemon restart and mints a NEW url, breaking remote clients' saved link.
+async function _probe(url) {
+    const first = await _probeOnce(url, null);
+    if (first.ok) return true;
+    if (!first.dnsErr) return false;
+    let host; try { host = new URL(url).hostname; } catch (_) { return false; }
+    const ip = await _dohResolve4(host);
+    if (!ip) return false;
+    dbg('tunnel', 'probe: local resolver failed for', host, '— retrying via DoH-pinned', ip);
+    return (await _probeOnce(url, ip)).ok;
 }
 
 // Re-adopt a tunnel that outlived a previous daemon process. Returns a handle
