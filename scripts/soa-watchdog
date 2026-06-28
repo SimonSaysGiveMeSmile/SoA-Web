@@ -20,22 +20,31 @@
 # 10 cores). A busy daemon is not a dead daemon — never kill one that's merely
 # slow, and retry tunnel probes before concluding the tunnel is gone.
 #
-# SAFETY: only ever touches com.soa-web.server / :7332 / its tunnel. NEVER the
-# product instance (:4010 / ~/.soa-web-local). To stop by hand, bootout the
-# watchdog FIRST, then the daemon.
+# SAFETY: only ever touches the ONE daemon it is pointed at (SOA_WEB_LABEL /
+# SOA_WEB_PORT / SOA_WEB_STATE_DIR). To stop by hand, bootout the watchdog
+# FIRST, then the daemon.
+#
+# Instance-parameterized via env (defaults keep the legacy :7332 behaviour):
+#   SOA_WEB_LABEL         launchd job to recover    (default com.soa-web.server)
+#   SOA_WEB_PORT          health port               (default 7332)
+#   SOA_WEB_STATE_DIR     lock/tunnel/logs root     (default ~/.soa-web)
+#   SOA_WEB_MANAGE_TUNNEL 1 = also heal the tunnel  (default 1; set 0 when the
+#                         channels self-healer owns the tunnel, e.g. :4010)
 
 set -u
 
-LABEL="com.soa-web.server"
+LABEL="${SOA_WEB_LABEL:-com.soa-web.server}"
 PORT="${SOA_WEB_PORT:-7332}"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web}"
+MANAGE_TUNNEL="${SOA_WEB_MANAGE_TUNNEL:-1}"
 UID_="$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-LOCK="$HOME/.soa-web/daemon.lock"
-TUNJSON="$HOME/.soa-web/tunnel.json"
-LOG="$HOME/.soa-web/logs/watchdog.log"
-RESPAWN_MARK="$HOME/.soa-web/logs/.tunnel-respawn"
+LOCK="$STATE_DIR/daemon.lock"
+TUNJSON="$STATE_DIR/tunnel.json"
+LOG="$STATE_DIR/logs/watchdog.log"
+RESPAWN_MARK="$STATE_DIR/logs/.tunnel-respawn"
 RESPAWN_MIN_GAP=300   # at most one tunnel respawn / 5 min (avoid URL-churn storms)
-STRIKE_MARK="$HOME/.soa-web/logs/.tunnel-strike"   # consecutive failing cycles while cloudflared is alive
+STRIKE_MARK="$STATE_DIR/logs/.tunnel-strike"   # consecutive failing cycles while cloudflared is alive
 STRIKE_THRESHOLD=2    # demand this many consecutive failures before blaming a LIVE tunnel (kills load false-positives)
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -106,7 +115,7 @@ check_tunnel() {
     local oldpid; oldpid="$(tunnel_pid)"
     [ -n "$oldpid" ] && kill "$oldpid" 2>/dev/null
 
-    local cflog="$HOME/.soa-web/logs/cf-respawn.log"
+    local cflog="$STATE_DIR/logs/cf-respawn.log"
     : > "$cflog"
     nohup cloudflared tunnel --url "http://localhost:${PORT}" >"$cflog" 2>&1 &
     local newpid=$!
@@ -144,7 +153,7 @@ check_tunnel() {
 
 # ── Daemon health ─────────────────────────────────────────────────────────────
 if ping_ok; then
-    check_tunnel          # daemon fine — make sure the tunnel is too
+    [ "$MANAGE_TUNNEL" = 1 ] && check_tunnel   # daemon fine — heal tunnel unless the channels self-healer owns it
     exit 0
 fi
 

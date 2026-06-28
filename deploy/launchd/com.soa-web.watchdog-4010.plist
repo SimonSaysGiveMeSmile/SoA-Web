@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Health watchdog for the CONSOLIDATED product daemon (app.s0a.web.local, :4010,
+  state ~/.soa-web-local). Runs scripts/soa-watchdog every 60s. Recovers a HUNG
+  daemon (the case KeepAlive can't see); tunnel healing is left OFF here because
+  com.soa-web.channels already owns :4010's public channel. Install to
+  ~/Library/LaunchAgents/ and `launchctl bootstrap gui/$(id -u) <plist>`.
+  Adjust the absolute paths to the install user's home.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.watchdog-4010</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-watchdog</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web-local/logs/watchdog.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web-local/logs/watchdog.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SOA_WEB_LABEL</key>
+        <string>app.s0a.web.local</string>
+        <key>SOA_WEB_PORT</key>
+        <string>4010</string>
+        <key>SOA_WEB_STATE_DIR</key>
+        <string>/Users/test/.soa-web-local</string>
+        <key>SOA_WEB_MANAGE_TUNNEL</key>
+        <string>0</string>
+    </dict>
+</dict>
+</plist>
