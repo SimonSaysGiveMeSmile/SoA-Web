@@ -92,7 +92,11 @@ find_by_title() {
 
 spawn_manager() {
     local result
-    result="$(soa-sessions spawn --title manager --goal "$MANAGER_GOAL" 2>&1 || true)"
+    # --no-resume: a manager is spawned only when NONE is live, so start FRESH.
+    # Resuming the "latest" session in this cwd grabbed a stale cross-instance
+    # manager transcript (referenced a retired fleet's tab ids) — start clean and
+    # let the event loop re-baseline from soa-sessions whoami/list.
+    result="$(soa-sessions spawn --no-resume --title manager --goal "$MANAGER_GOAL" 2>&1 || true)"
     log "spawn result: $result"
     local new_id=""
     if [[ "$result" =~ \"id\":([0-9]+) ]]; then
