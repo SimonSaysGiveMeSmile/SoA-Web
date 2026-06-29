@@ -632,6 +632,11 @@ function onWsConnect(ws, session, req) {
 
     ws.on('message', raw => {
         session.touch();
+        // Any inbound frame proves the peer is alive — credit it the same way a
+        // WS pong does. The mobile client app-pings every 4s, so a live socket
+        // stays marked alive even when the browser's automatic control-frame
+        // pong is momentarily queued behind a burst of terminal output.
+        ws.isAlive = true;
         const msg = parse(raw.toString());
         if (!msg) return;
         switch (msg.t) {
@@ -862,13 +867,28 @@ function handleInput(session, d, ws) {
     }
 }
 
+// Liveness watchdog. A socket is reaped only after it stays SILENT across
+// several cycles — not after a single missed pong. On a high-latency mobile/
+// tunnel link a pong can lag many seconds behind a burst of terminal output
+// without the socket being dead; terminating on the first miss false-killed
+// those laggy-but-live mobile sockets, which then reconnected and re-replayed
+// every tab's scrollback — the "streaming is unstable, try again" symptom.
+// `isAlive` is reset to true by EITHER a WS pong (ws.on('pong')) or any inbound
+// message (ws.on('message')), so a genuinely live peer never accrues misses.
+const HEARTBEAT_MS = 5000;
+const MAX_MISSED_BEATS = 3; // ~15s of unbroken silence before we give up
 const heartbeat = setInterval(() => {
     wss.clients.forEach(ws => {
-        if (ws.isAlive === false) { try { ws.terminate(); } catch (_) {} return; }
+        if (ws.isAlive === false) {
+            ws._missedBeats = (ws._missedBeats || 0) + 1;
+            if (ws._missedBeats >= MAX_MISSED_BEATS) { try { ws.terminate(); } catch (_) {} return; }
+        } else {
+            ws._missedBeats = 0;
+        }
         ws.isAlive = false;
         try { ws.ping(); } catch (_) {}
     });
-}, 5000);
+}, HEARTBEAT_MS);
 if (heartbeat.unref) heartbeat.unref();
 
 // Persist scrollback to disk every 30s so even a *hard* crash (SIGKILL from
