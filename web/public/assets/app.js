@@ -3601,8 +3601,17 @@ async function resolveBackend() {
         // Use localhost (not 127.0.0.1) when on HTTPS — browsers treat localhost
         // as a secure origin but block http://IP as mixed content.
         const local = location.protocol === 'https:' ? 'http://localhost:4010' : 'http://127.0.0.1:4010';
-        const probed = await probePing(local, '', 1000);
-        if (probed && probed.ok) return { backend: local, token: '' };
+        // A single 1s probe here was the #1 "cannot find backend after
+        // installing" cause: immediately after install.sh the daemon is cold
+        // (node start + restoring any saved tabs) and its first /api/ping can
+        // exceed 1s — the probe timed out and we fell SILENTLY into the sandbox.
+        // Give it a generous first budget, and one longer retry, so a freshly
+        // installed local backend is reliably found. (Only the failure path pays
+        // the extra wait, so pure sandbox visitors aren't penalised much.)
+        for (const ms of [2500, 4000]) {
+            const probed = await probePing(local, '', ms);
+            if (probed && probed.ok) return { backend: local, token: '' };
+        }
     }
     return null;
 }

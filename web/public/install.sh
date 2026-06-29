@@ -77,6 +77,26 @@ need npm
 # without it a perfectly healthy install would be reported as FAILED.
 need curl
 
+# Mobile bridge needs a public tunnel. localtunnel is bundled as an npm
+# dependency (always-available fallback), but cloudflared is preferred — free,
+# fast, no account. Best-effort install it when absent; NEVER fatal, since a
+# missing tunnel only affects remote/phone access, not the local shell. Without
+# this, a fresh machine hit "no tunnel provider available" on first pair.
+ensure_tunnel_provider() {
+    if command -v cloudflared >/dev/null 2>&1 || command -v ngrok >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$PLATFORM" = darwin ] && command -v brew >/dev/null 2>&1; then
+        log "no tunnel provider found — installing cloudflared via brew (for mobile access)…"
+        brew install cloudflared >/dev/null 2>&1 \
+            && log "cloudflared installed" \
+            || log "cloudflared install skipped — mobile will use the bundled localtunnel fallback"
+    else
+        log "no cloudflared/ngrok — mobile will use the bundled localtunnel fallback"
+    fi
+}
+ensure_tunnel_provider
+
 ping_ok() {
     # $1 = port. True only if a healthy *SoA* backend answers there — match
     # the service name, not just {"ok":true}, so we never "adopt" some

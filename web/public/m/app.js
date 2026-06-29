@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v54 · providers + auto-resume · 2026-06-11';
+const MOBILE_BUILD = 'v55 · agent-browser first-start subscribe fix · 2026-06-28';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -1124,6 +1124,15 @@ class App {
                     this._hideReconnect();
                     this._acquireWakeLock();        // keep the screen on while streaming
                     if (this._prevSocketState !== SocketState.CONNECTED) sounds.play('connect');
+                    // Re-arm the agent-browser stream on (re)connect. A
+                    // `browser-subscribe` sent before the WS reached OPEN — e.g.
+                    // tapping the top-right 🤖 toggle right after launch — is
+                    // dropped SILENTLY by socket.send() (readyState !== 1), so
+                    // the agent browser never "pops out" on first start. Resend
+                    // it here whenever the web view + agent mode are active.
+                    if (this._agentMode && this._currentView === 'web-view') {
+                        this.socket.sendInput('browser-subscribe');
+                    }
                     break;
                 case SocketState.DISCONNECTED:
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
