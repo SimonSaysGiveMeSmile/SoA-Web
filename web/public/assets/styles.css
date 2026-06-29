@@ -978,7 +978,9 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .wiz-p {
     margin: 0 0 20px; font-size: 13px; line-height: 1.6;
-    color: rgba(230, 244, 246, 0.82);
+    /* Theme-aware: accent-rgb adapts (light teal on dark, dark teal on light).
+       A hard-coded near-white was invisible in light mode. */
+    color: rgba(var(--soa-accent-rgb), 0.92);
 }
 .wiz-meta {
     margin: 12px 0 0; font-size: 11px; letter-spacing: 0.08em;
