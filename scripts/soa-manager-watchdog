@@ -15,18 +15,24 @@
 #   4. HIGH-CTX — context ≥ 80% → /compact so it doesn't run out mid-shift.
 #   5. MISSING  — tab gone (exited, crashed, never spawned) → spawn fresh manager.
 #
-# Manager identity: stored in ~/.soa-web/manager-id (written on first spawn).
-# Falls back to scanning for a tab titled "manager" if the stored ID is stale.
+# Manager identity: stored in $SOA_WEB_STATE_DIR/manager-id (written on first
+# spawn). Falls back to scanning for a tab titled "manager" if the ID is stale.
 #
-# SAFETY: never touches :4010 / ~/.soa-web-local (product instance).
+# Instance-parameterized via env (defaults to the legacy :7332/~.soa-web):
+#   SOA_WEB_PORT       daemon health port  (default 7332)
+#   SOA_WEB_STATE_DIR  logs + identity     (default ~/.soa-web)
+# soa-sessions reaches the daemon via its own bridge.json / SOA_WEB_TTS_URL.
 
 set -euo pipefail
 
-LOG="$HOME/.soa-web/logs/manager-watchdog.log"
-ID_FILE="$HOME/.soa-web/manager-id"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web}"
+LOG="$STATE_DIR/logs/manager-watchdog.log"
+ID_FILE="$STATE_DIR/manager-id"
 PORT="${SOA_WEB_PORT:-7332}"
 
-MANAGER_GOAL="You are the fleet manager. Run the event loop: soa-sessions whoami, then events+list to reconcile, then forever block on: soa-sessions watch — for each event, read the offending session and act (goal/resume/compact/interrupt as needed). Keep agents unblocked and productive. Never command your own tab id."
+# The manager's standing mandate: fully own running the fleet so the user doesn't
+# have to (open / modify / pause / stop / kill any agent, at any time).
+MANAGER_GOAL="You are the fleet manager — you fully own running the fleet so the user does not have to. Run the event loop: soa-sessions whoami, then events+list to reconcile, then forever block on: soa-sessions watch — for each event, read the offending session and act. You may OPEN (spawn), MODIFY (goal/btw), PAUSE (interrupt), and STOP/KILL (stop) any agent at any time to keep the fleet unblocked and productive. Be decisive, but conservative about destroying in-progress work: prefer interrupt+resume over stop unless an agent is truly dead or finished. Never command your own tab id. Only soa-msg the user when a decision is genuinely theirs."
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
@@ -139,7 +145,7 @@ log "manager tab #$MGR_ID — status=${STATUS:-?} ctx=${CTX_PCT:-0}% flags='${FL
 
 case "${STATUS:-}" in
     working|idle|attention)
-        rm -f "$HOME/.soa-web/.manager-done-count"   # alive — clear any done streak
+        rm -f "$STATE_DIR/.manager-done-count"   # alive — clear any done streak
         if [ "${CTX_PCT:-0}" -ge 80 ] || echo "$FLAGS" | grep -q "HIGH-CTX"; then
             log "manager #$MGR_ID ctx=${CTX_PCT}% HIGH — compacting"
             soa-sessions compact "$MGR_ID" 2>/dev/null || true
@@ -157,7 +163,7 @@ case "${STATUS:-}" in
         # single transient "done" caused new manager tabs to pile up every turn
         # boundary. Only respawn if "done" PERSISTS across consecutive checks
         # (~3 runs ≈ 4.5m); a truly-exited tab is caught by the MISSING path above.
-        DONE_FILE="$HOME/.soa-web/.manager-done-count"
+        DONE_FILE="$STATE_DIR/.manager-done-count"
         prev_done="$(cat "$DONE_FILE" 2>/dev/null | tr -d '[:space:]')"
         cur_done=$(( ${prev_done:-0} + 1 ))
         if [ "$cur_done" -ge 3 ]; then

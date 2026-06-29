@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps a fleet-MANAGER agent alive on the consolidated product daemon
+  (app.s0a.web.local, :4010, state ~/.soa-web-local). Runs scripts/soa-manager-watchdog
+  every 90s: spawn the manager if missing, resume if stuck/limited, compact if
+  high-context. The manager itself runs the soa-sessions event loop and owns the
+  fleet's lifecycle (open/modify/pause/stop/kill). SOA_WEB_TTS_URL pins soa-sessions
+  to :4010 regardless of bridge.json. Install to ~/Library/LaunchAgents/ and
+  `launchctl bootstrap gui/$(id -u) <plist>`. Adjust paths to the install user's home.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.manager-watchdog-4010</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-manager-watchdog</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>90</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web-local/logs/manager-watchdog.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web-local/logs/manager-watchdog.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SOA_WEB_PORT</key>
+        <string>4010</string>
+        <key>SOA_WEB_STATE_DIR</key>
+        <string>/Users/test/.soa-web-local</string>
+        <key>SOA_WEB_TTS_URL</key>
+        <string>http://127.0.0.1:4010/api/tts</string>
+    </dict>
+</dict>
+</plist>
