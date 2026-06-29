@@ -147,7 +147,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=58">
+  <link rel="stylesheet" href="/assets/styles.css?v=59">
   <link rel="stylesheet" href="/assets/sidebar.css?v=19">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
@@ -189,95 +189,136 @@
         <p class="welcome-sub">WEB TERMINAL · PROTOCOL v1</p>
       </header>
 
-      <section class="welcome-intro">
-        <p class="welcome-intro-p" data-w="intro_p1">A real terminal that runs in your browser. Open a tab on your laptop, scan the QR on your phone, keep typing in the same shell.</p>
-      </section>
+      <!-- Guided setup wizard — the primary, low-overwhelm first-run path.
+           One focused step at a time; the rich content lives in #wiz-more,
+           hidden until "What is this?". -->
+      <section class="wiz" id="wiz" data-step="1">
+        <ol class="wiz-progress" aria-hidden="true">
+          <li class="wiz-dot"></li>
+          <li class="wiz-dot"></li>
+          <li class="wiz-dot"></li>
+        </ol>
 
-      <section class="welcome-compare welcome-compare--three">
-        <article class="welcome-col">
-          <h3 class="welcome-h3" data-w="col_web_title">Web <span class="welcome-tag" data-w="col_web_sub">this page</span></h3>
-          <ul class="welcome-list">
-            <li data-w="web_b1">Try it now — no install</li>
-            <li data-w="web_b2">Connects to a local backend once installed</li>
-            <li data-w="web_b4">5-language UI</li>
-            <li class="no" data-w="web_b3">Limited to a sandbox shell</li>
-          </ul>
-        </article>
-        <article class="welcome-col welcome-col--accent">
-          <h3 class="welcome-h3" data-w="col_desk_title">Desktop <span class="welcome-tag" data-w="col_desk_sub">installed</span></h3>
-          <ul class="welcome-list">
-            <li data-w="desk_b1">Real shells on your computer</li>
-            <li data-w="desk_b2">Phone pairing via QR code</li>
-            <li data-w="desk_b3">Live CPU, memory, and network</li>
-            <li data-w="desk_b4">Tabs survive restarts</li>
-          </ul>
-        </article>
-        <article class="welcome-col">
-          <h3 class="welcome-h3" data-w="col_phone_title">Phone <span class="welcome-tag" data-w="col_phone_sub">paired</span></h3>
-          <ul class="welcome-list">
-            <li data-w="phone_b1">Scan the QR — no app needed</li>
-            <li data-w="phone_b2">Type into your laptop from anywhere</li>
-            <li data-w="phone_b3">Touch-friendly tabs</li>
-            <li data-w="phone_b4">Encrypted by default</li>
-          </ul>
-        </article>
-      </section>
-
-      <section class="welcome-setup">
-        <h3 class="welcome-section-title" data-w="setup_title">Setup · pick one</h3>
-        <div class="welcome-setup-grid">
-          <article class="welcome-step">
-            <header class="welcome-step-head">
-              <span class="welcome-step-num">1A</span>
-              <span class="welcome-step-label" data-w="setup_a_label">Install script</span>
-            </header>
-            <p class="welcome-step-desc" data-w="setup_a_desc">Easiest. Works on macOS and Linux.</p>
+        <!-- Step 1 · Install -->
+        <div class="wiz-step wiz-step--1">
+          <h2 class="wiz-h" data-w="wiz1_title">Install the backend</h2>
+          <p class="wiz-p" data-w="wiz1_sub">One file. Double-click it. That’s the whole install.</p>
+          <button type="button" class="wiz-primary" id="welcome-run" data-w="wiz_download">⬇ Download installer</button>
+          <p class="wiz-meta" data-w="wiz1_meta">macOS / Linux · ~30 seconds · no account</p>
+          <p class="welcome-run-hint" id="welcome-run-hint" hidden></p>
+          <details class="wiz-alt">
+            <summary data-w="wiz_or_copy">Prefer to paste a command?</summary>
             <div class="welcome-cmdwrap">
               <pre class="welcome-cmd" id="welcome-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
-              <button class="welcome-copy" id="welcome-copy" data-w="copy">COPY</button>
-              <button class="welcome-run" id="welcome-run" data-w="run" title="Download a one-click installer">RUN</button>
+              <button type="button" class="welcome-copy" id="welcome-copy" data-w="copy">COPY</button>
             </div>
-            <p class="welcome-run-hint" id="welcome-run-hint" hidden></p>
-          </article>
-          <article class="welcome-step">
-            <header class="welcome-step-head">
-              <span class="welcome-step-num">1B</span>
-              <span class="welcome-step-label" data-w="setup_b_label">Self-host</span>
-            </header>
-            <p class="welcome-step-desc" data-w="setup_b_desc">For tinkerers. Clone, set a password, run.</p>
-            <div class="welcome-cmdwrap">
-              <pre class="welcome-cmd" id="welcome-cmd-2">git clone https://github.com/SimonSaysGiveMeSmile/SoA-Web &amp;&amp; cd SoA-Web
-SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
-              <button class="welcome-copy" id="welcome-copy-2" data-w="copy">COPY</button>
-            </div>
-          </article>
+          </details>
         </div>
-        <p class="welcome-step-after" data-w="setup_after">Then open <code>http://127.0.0.1:7332</code> — or scan the QR from your phone.</p>
+
+        <!-- Step 2 · Run -->
+        <div class="wiz-step wiz-step--2">
+          <h2 class="wiz-h" data-w="wiz2_title">Run the installer</h2>
+          <p class="wiz-p">
+            <span data-w="wiz2_a">Double-click</span>
+            <code class="wiz-file" id="wiz-file">soa-web-install.command</code>
+            <span data-w="wiz2_b">in your Downloads — Terminal opens and installs it for you.</span>
+          </p>
+          <p class="wiz-wait" id="welcome-wait">
+            <span class="wiz-spin" aria-hidden="true"></span>
+            <span data-w="wiz2_wait">Waiting for your backend to come online…</span>
+          </p>
+          <button type="button" class="wiz-link" id="wiz-back" data-w="wiz_back">← back</button>
+        </div>
+
+        <!-- Step 3 · Connected -->
+        <div class="wiz-step wiz-step--3">
+          <h2 class="wiz-h wiz-ok" data-w="wiz3_title">✓ Connected</h2>
+          <p class="wiz-p" data-w="wiz3_sub">Your backend is online. Opening your terminal…</p>
+          <button type="button" class="wiz-primary" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
+        </div>
       </section>
 
-      <section class="welcome-faq">
-        <details class="welcome-faq-item">
-          <summary data-w="faq_q1">Why does it use Cloudflare Tunnel?</summary>
-          <p data-w="faq_a1">So your phone can reach your laptop without LAN setup. The tunnel auto-starts and gives you an HTTPS URL. Disable with <code>SOA_WEB_AUTOPAIR=0</code>.</p>
-        </details>
-        <details class="welcome-faq-item">
-          <summary data-w="faq_q2">Is it safe to expose on the internet?</summary>
-          <p data-w="faq_a2">Only with a password. The server refuses to start in open mode on a public host. Set <code>SOA_WEB_PASSWORD</code> before exposing it.</p>
-        </details>
-        <details class="welcome-faq-item">
-          <summary data-w="faq_q3">Where do my tabs live?</summary>
-          <p data-w="faq_a3">In <code>~/.soa-web/tabs.json</code> on the machine running the server. Scrollback stays in memory and replays on reconnect.</p>
-        </details>
-        <details class="welcome-faq-item">
-          <summary data-w="faq_q4">Can I deploy on Vercel?</summary>
-          <p data-w="faq_a4">Vercel can host the page, but the server needs a long-running Node process. Run it on your own box and point <code>SOA_WEB_BACKEND</code> at the tunnel URL.</p>
-        </details>
-      </section>
+      <nav class="wiz-foot">
+        <button type="button" class="wiz-link" id="wiz-learn" data-w="wiz_learn">What is this?</button>
+        <span class="wiz-foot-sep" aria-hidden="true">·</span>
+        <button type="button" class="wiz-link" id="wiz-sandbox" data-w="wiz_sandbox">Try the sandbox</button>
+        <span class="wiz-foot-sep" aria-hidden="true">·</span>
+        <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">github</a>
+      </nav>
 
-      <footer class="welcome-foot">
-        <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">source · github</a>
-        <button class="welcome-enter" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
-      </footer>
+      <!-- Hidden until "What is this?" so the first-run screen stays calm. -->
+      <div class="wiz-more" id="wiz-more" hidden>
+        <section class="welcome-intro">
+          <p class="welcome-intro-p" data-w="intro_p1">A real terminal that runs in your browser. Open a tab on your laptop, scan the QR on your phone, keep typing in the same shell.</p>
+        </section>
+
+        <section class="welcome-compare welcome-compare--three">
+          <article class="welcome-col">
+            <h3 class="welcome-h3" data-w="col_web_title">Web <span class="welcome-tag" data-w="col_web_sub">this page</span></h3>
+            <ul class="welcome-list">
+              <li data-w="web_b1">Try it now — no install</li>
+              <li data-w="web_b2">Connects to a local backend once installed</li>
+              <li data-w="web_b4">5-language UI</li>
+              <li class="no" data-w="web_b3">Limited to a sandbox shell</li>
+            </ul>
+          </article>
+          <article class="welcome-col welcome-col--accent">
+            <h3 class="welcome-h3" data-w="col_desk_title">Desktop <span class="welcome-tag" data-w="col_desk_sub">installed</span></h3>
+            <ul class="welcome-list">
+              <li data-w="desk_b1">Real shells on your computer</li>
+              <li data-w="desk_b2">Phone pairing via QR code</li>
+              <li data-w="desk_b3">Live CPU, memory, and network</li>
+              <li data-w="desk_b4">Tabs survive restarts</li>
+            </ul>
+          </article>
+          <article class="welcome-col">
+            <h3 class="welcome-h3" data-w="col_phone_title">Phone <span class="welcome-tag" data-w="col_phone_sub">paired</span></h3>
+            <ul class="welcome-list">
+              <li data-w="phone_b1">Scan the QR — no app needed</li>
+              <li data-w="phone_b2">Type into your laptop from anywhere</li>
+              <li data-w="phone_b3">Touch-friendly tabs</li>
+              <li data-w="phone_b4">Encrypted by default</li>
+            </ul>
+          </article>
+        </section>
+
+        <section class="welcome-setup">
+          <h3 class="welcome-section-title" data-w="setup_title">Other ways to install</h3>
+          <div class="welcome-setup-grid">
+            <article class="welcome-step">
+              <header class="welcome-step-head">
+                <span class="welcome-step-num">B</span>
+                <span class="welcome-step-label" data-w="setup_b_label">Self-host</span>
+              </header>
+              <p class="welcome-step-desc" data-w="setup_b_desc">For tinkerers. Clone, set a password, run.</p>
+              <div class="welcome-cmdwrap">
+                <pre class="welcome-cmd" id="welcome-cmd-2">git clone https://github.com/SimonSaysGiveMeSmile/SoA-Web &amp;&amp; cd SoA-Web
+SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
+                <button type="button" class="welcome-copy" id="welcome-copy-2" data-w="copy">COPY</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="welcome-faq">
+          <details class="welcome-faq-item">
+            <summary data-w="faq_q1">Why does it use Cloudflare Tunnel?</summary>
+            <p data-w="faq_a1">So your phone can reach your laptop without LAN setup. The tunnel auto-starts and gives you an HTTPS URL. Disable with <code>SOA_WEB_AUTOPAIR=0</code>.</p>
+          </details>
+          <details class="welcome-faq-item">
+            <summary data-w="faq_q2">Is it safe to expose on the internet?</summary>
+            <p data-w="faq_a2">Only with a password. The server refuses to start in open mode on a public host. Set <code>SOA_WEB_PASSWORD</code> before exposing it.</p>
+          </details>
+          <details class="welcome-faq-item">
+            <summary data-w="faq_q3">Where do my tabs live?</summary>
+            <p data-w="faq_a3">In <code>~/.soa-web/tabs.json</code> on the machine running the server. Scrollback stays in memory and replays on reconnect.</p>
+          </details>
+          <details class="welcome-faq-item">
+            <summary data-w="faq_q4">Can I deploy on Vercel?</summary>
+            <p data-w="faq_a4">Vercel can host the page, but the server needs a long-running Node process. Run it on your own box and point <code>SOA_WEB_BACKEND</code> at the tunnel URL.</p>
+          </details>
+        </section>
+      </div>
     </div>
   </div>
   <script>
@@ -329,6 +370,20 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 run_hint_win: 'Windows isn’t supported by the installer. Use WSL: open Ubuntu, then run the copied command.',
                 run_hint_nix: 'Open a terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — then reload this tab.',
                 github: 'source · github',
+                wiz1_title: 'Install the backend',
+                wiz1_sub: 'One file. Double-click it. That’s the whole install.',
+                wiz_download: '⬇ Download installer',
+                wiz1_meta: 'macOS / Linux · ~30 seconds · no account',
+                wiz_or_copy: 'Prefer to paste a command?',
+                wiz2_title: 'Run the installer',
+                wiz2_a: 'Double-click',
+                wiz2_b: 'in your Downloads — Terminal opens and installs it for you.',
+                wiz2_wait: 'Waiting for your backend to come online…',
+                wiz_back: '← back',
+                wiz3_title: '✓ Connected',
+                wiz3_sub: 'Your backend is online. Opening your terminal…',
+                wiz_learn: 'What is this?',
+                wiz_sandbox: 'Try the sandbox',
             },
             zh: {
                 col_web_title: '网页', col_web_sub: '本页面',
@@ -599,20 +654,88 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                     runHint.hidden = false;
                 }
                 runBtn.textContent = strings.downloaded;
-                setTimeout(function () { runBtn.textContent = strings.run; }, 4000);
+                var wf = document.getElementById('wiz-file');
+                if (wf) wf.textContent = fileName;
+                setTimeout(function () { runBtn.textContent = strings.wiz_download; }, 4000);
+                // Advance to "run it" and watch for the backend to appear —
+                // turns the manual "reload when done" into an automatic hand-off
+                // the moment install.sh finishes.
+                gotoStep(2);
+                startPoll();
             });
         }
-        if (enter) {
-            enter.addEventListener('click', function () {
-                try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
-                if (window.__soaBootNow) {
-                    html.removeAttribute('data-welcome');
-                    window.__soaBootNow();
-                    return;
-                }
-                location.reload();
+        // ── Wizard controller ────────────────────────────────────────────
+        // Step state, the backend auto-detector, and the footer links. Function
+        // declarations (hoisted) so the download handler above can call
+        // gotoStep()/startPoll() even though they're defined here.
+        var wizEl = document.getElementById('wiz');
+        var pollTimer = null;
+
+        function gotoStep(n) {
+            if (wizEl) wizEl.setAttribute('data-step', String(n));
+            var dots = document.querySelectorAll('.wiz-progress .wiz-dot');
+            for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('is-on', i < n);
+        }
+
+        function backendProbeUrl() {
+            // https page → http://localhost (browsers treat localhost as secure);
+            // http page → http://127.0.0.1. Same target resolveBackend() probes.
+            var base = location.protocol === 'https:' ? 'http://localhost:4010' : 'http://127.0.0.1:4010';
+            return base + '/api/ping';
+        }
+
+        function pingBackend() {
+            var ctl = ('AbortController' in window) ? new AbortController() : null;
+            var t = ctl ? setTimeout(function () { try { ctl.abort(); } catch (_) {} }, 2500) : null;
+            return fetch(backendProbeUrl(), {
+                credentials: 'omit', cache: 'no-store',
+                headers: { 'ngrok-skip-browser-warning': 'true' },
+                signal: ctl ? ctl.signal : undefined,
+            }).then(function (r) { if (t) clearTimeout(t); return r && r.ok ? r.json() : null; })
+              .then(function (b) { return !!(b && b.ok); })
+              .catch(function () { if (t) clearTimeout(t); return false; });
+        }
+
+        function startPoll() {
+            if (pollTimer) return;
+            var tick = function () { pingBackend().then(function (up) { if (up) onBackendUp(); }); };
+            tick();
+            pollTimer = setInterval(tick, 2500);
+        }
+        function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+        function onBackendUp() { stopPoll(); gotoStep(3); setTimeout(doEnter, 1200); }
+
+        function doEnter() {
+            try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
+            stopPoll();
+            if (window.__soaBootNow) {
+                html.removeAttribute('data-welcome');
+                window.__soaBootNow();
+                return;
+            }
+            location.reload();
+        }
+
+        if (enter) enter.addEventListener('click', doEnter);            // step 3 · enter
+        var sandboxBtn = document.getElementById('wiz-sandbox');
+        if (sandboxBtn) sandboxBtn.addEventListener('click', doEnter);  // skip into sandbox
+        var backBtn = document.getElementById('wiz-back');
+        if (backBtn) backBtn.addEventListener('click', function () { stopPoll(); gotoStep(1); });
+
+        var learnBtn = document.getElementById('wiz-learn');
+        var moreEl = document.getElementById('wiz-more');
+        if (learnBtn && moreEl) {
+            learnBtn.addEventListener('click', function () {
+                moreEl.hidden = !moreEl.hidden;
+                if (!moreEl.hidden) { try { moreEl.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {} }
             });
         }
+
+        // Init: light up step 1, and a one-shot probe so a returning user who
+        // already installed jumps straight to "Connected" with no clicks.
+        gotoStep(1);
+        pingBackend().then(function (up) { if (up) onBackendUp(); });
     })();
   </script>
   <div id="boot" class="boot">
