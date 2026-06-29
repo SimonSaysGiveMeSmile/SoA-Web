@@ -3653,7 +3653,21 @@ async function _doBoot() {
     wireReleaseLink();
     wireVersion();
     applyStatic();
-    const backend = await resolveBackend();
+    let backend = await resolveBackend();
+    // Establish-on-init resilience: if we have a SAVED/pinned backend but it
+    // wasn't reachable on the first pass, it's almost always just starting (cold
+    // daemon after install/restart) or briefly flaky (tunnel re-adopting). Retry
+    // the full resolution a few times before dead-ending to the sandbox, so the
+    // connection reliably comes up at boot instead of silently downgrading.
+    // Pure sandbox visitors (no saved backend) skip this entirely — no extra wait.
+    if (!backend && loadSaved()) {
+        for (let attempt = 1; attempt <= 3 && !backend; attempt++) {
+            const bs = $('#boot-status');
+            if (bs) bs.textContent = tr('boot.negotiating') + ` (reconnecting… ${attempt}/3)`;
+            await new Promise(r => setTimeout(r, 1500));
+            backend = await resolveBackend();
+        }
+    }
     if (backend) {
         await bootServerMode(backend);
         return;
