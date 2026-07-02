@@ -464,8 +464,14 @@ class App {
         this._idleTimer = null;
         this._chromeHidden = false;
 
-        this._minFontSize = 5;
-        this._maxFontSize = 15;
+        // Readability floor: on a phone, fitting the desktop's ~80 cols would
+        // push the auto-fit down to ~8px, which is painful to read. Hold a
+        // legible minimum instead — content wider than the screen pans
+        // horizontally (#term is overflow-x:auto / white-space:pre), which is a
+        // better trade than unreadable text. Users can still fine-tune via the
+        // font-scale control (_fontScale).
+        this._minFontSize = 12;
+        this._maxFontSize = 20;
         // User font preference: a multiplier over the auto-fit size. 1.0 = the
         // default auto-fit; >1 enlarges (terminal scrolls horizontally), <1 shrinks.
         this._fontScale = 1;
