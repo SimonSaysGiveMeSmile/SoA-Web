@@ -725,7 +725,10 @@ function collectFromDOM(prev) {
 export function openSettingsModal({ tab: openTab } = {}) {
     if (document.getElementById('settings-modal')) return;
 
-    const backdrop = el('div', { class: 'soa-modal-backdrop', id: 'settings-modal' });
+    // Anchored dropdown (not a full-screen dimmed modal) so opening settings is
+    // low-interruption — see .soa-settings-drop in styles.css. The backdrop is a
+    // transparent click-catcher that still closes on an outside click / Escape.
+    const backdrop = el('div', { class: 'soa-modal-backdrop soa-settings-drop', id: 'settings-modal' });
     const card = el('div', { class: 'soa-modal soa-settings' });
     const close = () => { backdrop.remove(); document.removeEventListener('keydown', escHandler); };
     const escHandler = e => { if (e.key === 'Escape') close(); };

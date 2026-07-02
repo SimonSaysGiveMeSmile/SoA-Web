@@ -813,6 +813,41 @@ html, body {
 body.nocursor, body.nocursor * { cursor: none !important; }
 
 .soa-modal.soa-settings { width: min(720px, calc(100vw - 32px)); }
+
+/* ── Settings as an anchored dropdown (low-interruption) ─────────────────
+   Opened from the top-right user-chip. No screen dimming/blur, no centering —
+   a compact popover tucked under the chip. Tabs run horizontally so the panel
+   stays narrow. Other modals keep the full-screen treatment. */
+.soa-modal-backdrop.soa-settings-drop {
+    background: transparent;
+    backdrop-filter: none;
+    display: block;
+    animation: none;
+}
+.soa-settings-drop .soa-modal.soa-settings {
+    position: fixed;
+    top: 50px;
+    right: 12px;
+    width: min(460px, calc(100vw - 20px));
+    max-height: calc(100vh - 66px);
+    overflow-y: auto;
+    padding: 14px 16px 14px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.66), 0 0 0 1px rgba(var(--soa-accent-rgb), 0.06);
+    animation: soaDrop 130ms ease-out;
+}
+@keyframes soaDrop { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+/* Stack tabs above the content instead of a left rail — fits the narrow width. */
+.soa-settings-drop .settings-tabbed { grid-template-columns: 1fr; gap: 10px; min-height: 0; }
+.soa-settings-drop .settings-sidebar {
+    flex-direction: row; flex-wrap: wrap; gap: 4px;
+    border-right: none;
+    border-bottom: 1px dashed rgba(var(--soa-accent-rgb), 0.16);
+    padding-right: 0; padding-bottom: 8px;
+}
+.soa-settings-drop .settings-tab { padding: 5px 9px; }
+@media (max-width: 520px) {
+    .soa-settings-drop .soa-modal.soa-settings { top: 46px; right: 8px; left: 8px; width: auto; }
+}
 .settings-tabbed {
     display: grid;
     grid-template-columns: 150px 1fr;
