@@ -3199,25 +3199,38 @@ class Shell {
                 flags.push(el('span', { class: 'mgrv-fl mgrv-fl-limit', text: '⏾ ' + when }));
             }
             const idle = (s.idleMs != null && (s.status === 'idle' || s.status === 'done')) ? ` · idle ${ago(s.idleMs)}` : '';
-            const ctx = s.ctxPct != null ? el('span', { class: 'mgrv-ctx', title: `Context ${s.ctxPct}% used` }, [
-                el('span', { class: 'mgrv-ctx-bar' }, [
-                    el('span', { style: `width:${s.ctxPct}%;background:${ctxColor(s.ctxPct)}` }),
-                ]),
-                el('span', { class: 'mgrv-ctx-pct', text: s.ctxPct + '%' }),
-            ]) : null;
+            // Dashboard-style tile: reuse the dashboard tile's rich data (status,
+            // activity, live output preview, context pie) which is populated for
+            // the local fleet, falling back to the manager snapshot fields.
+            const status = this._agentStatus.get(s.id) || s.status || 'idle';
+            const pct = (this._ctxPct.get(s.id) != null ? this._ctxPct.get(s.id) : s.ctxPct) || 0;
+            const buf = this._agentBuf.get(s.id);
+            const activity = (buf && buf.activity) || (statusLabel(s.status) + idle);
+            const statusLine = (buf && buf.statusLine) || '';
+            const actionLine = (buf && buf.actionLine) || '';
+            const tail = this._tileTailText(s.id);
+            const pie = el('span', { class: 'tile-pie', title: `Context ${pct}% used` });
+            this._paintTilePie(pie, pct);
+            const icon = el('img', {
+                class: 'tile-icon', alt: '', loading: 'lazy', decoding: 'async',
+                src: `/api/tabs/${s.id}/icon`,
+                onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
+                onerror: () => icon.remove(),
+            });
             const act = (label, fn, title) => el('button', {
                 class: 'mgrv-act', type: 'button', text: label, title: title || '',
                 onclick: (e) => { e.stopPropagation(); fn(); } });
-            return el('div', { class: 'mgrv-card', 'data-status': s.status || 'idle' }, [
-                el('div', { class: 'mgrv-card-top', onclick: () => this._openFromManager(s.id) }, [
-                    el('span', { class: 'mgrv-dot' }),
-                    el('span', { class: 'mgrv-name', text: `#${s.id} ${s.title}` }),
+            return el('div', { class: 'tile mgrv-tile', 'data-agent': status, 'data-status': s.status || 'idle' }, [
+                pie,
+                el('div', { class: 'tile-head', onclick: () => this._openFromManager(s.id) }, [
+                    icon,
+                    el('span', { class: 'tile-title', text: `#${s.id} ${s.title}` }),
                 ]),
                 flags.length ? el('div', { class: 'mgrv-flags' }, flags) : null,
-                el('div', { class: 'mgrv-card-meta' }, [
-                    el('span', { class: 'mgrv-meta', text: statusLabel(s.status) + idle }),
-                    ctx,
-                ]),
+                el('span', { class: 'tile-status-line', text: statusLine }),
+                el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
+                el('pre', { class: 'tile-preview', text: tail }),
+                el('span', { class: 'tile-activity', text: activity }),
                 el('div', { class: 'mgrv-acts' }, [
                     act('OPEN', () => this._openFromManager(s.id), 'Jump into this terminal'),
                     act('STOP', () => {
