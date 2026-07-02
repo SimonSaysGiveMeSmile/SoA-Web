@@ -3084,7 +3084,7 @@ class Shell {
         ]);
 
         // Panes.
-        this._mgrvSessionsEl = el('div', { class: 'mgrv-pane mgrv-list' });
+        this._mgrvSessionsEl = el('div', { class: 'mgrv-pane mgrv-cards' });
         this._mgrvMonitorEl = el('div', { class: 'mgrv-pane', hidden: '' });
         this._mgrvTodoListEl = el('div', { class: 'mgrv-todo-list' });
         this._mgrvTodoInput = el('input', {
@@ -3208,21 +3208,19 @@ class Shell {
             const act = (label, fn, title) => el('button', {
                 class: 'mgrv-act', type: 'button', text: label, title: title || '',
                 onclick: (e) => { e.stopPropagation(); fn(); } });
-            return el('div', { class: 'mgrv-row', 'data-status': s.status || 'idle' }, [
-                el('span', { class: 'mgrv-dot' }),
-                el('div', { class: 'mgrv-body', onclick: () => this._openFromManager(s.id) }, [
-                    el('div', { class: 'mgrv-line1' }, [
-                        el('span', { class: 'mgrv-name', text: `#${s.id} ${s.title}` }),
-                        ...flags,
-                    ]),
-                    el('div', { class: 'mgrv-line2' }, [
-                        el('span', { class: 'mgrv-meta', text: statusLabel(s.status) + idle }),
-                        ctx,
-                    ]),
+            return el('div', { class: 'mgrv-card', 'data-status': s.status || 'idle' }, [
+                el('div', { class: 'mgrv-card-top', onclick: () => this._openFromManager(s.id) }, [
+                    el('span', { class: 'mgrv-dot' }),
+                    el('span', { class: 'mgrv-name', text: `#${s.id} ${s.title}` }),
+                ]),
+                flags.length ? el('div', { class: 'mgrv-flags' }, flags) : null,
+                el('div', { class: 'mgrv-card-meta' }, [
+                    el('span', { class: 'mgrv-meta', text: statusLabel(s.status) + idle }),
+                    ctx,
                 ]),
                 el('div', { class: 'mgrv-acts' }, [
                     act('OPEN', () => this._openFromManager(s.id), 'Jump into this terminal'),
-                    act('INT', () => {
+                    act('STOP', () => {
                         this.bridge.input(INPUT_KIND.HOTKEY, { id: s.id, combo: 'ctrl+c' });
                         this._mgrvToast('Ctrl-C → #' + s.id);
                     }, 'Interrupt (Ctrl-C)'),

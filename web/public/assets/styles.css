@@ -2484,6 +2484,32 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .mgrv-act:hover { border-color: var(--soa-accent); color: var(--soa-accent); }
 
+/* Session cards (grid) — keeps each session's identity, status and actions
+   grouped together instead of stretched across a full-width row. */
+.mgrv-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px; align-content: start;
+}
+.mgrv-card {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--soa-line-soft); border-radius: 6px;
+  background: rgba(var(--soa-bg-panel-rgb), 0.85);
+  transition: border-color 0.15s, background 0.15s;
+}
+.mgrv-card:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.05); }
+.mgrv-card-top { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
+.mgrv-card .mgrv-name { font-size: 13px; }
+.mgrv-flags { display: flex; flex-wrap: wrap; gap: 4px; }
+.mgrv-card-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 14px; }
+.mgrv-card .mgrv-acts { margin-top: auto; display: flex; gap: 4px; }
+.mgrv-card .mgrv-act { flex: 1 1 auto; text-align: center; }
+.mgrv-card[data-status="working"]   .mgrv-dot { background: #00e676; box-shadow: 0 0 6px rgba(0,230,118,0.7); }
+.mgrv-card[data-status="attention"] .mgrv-dot { background: #ff9800; box-shadow: 0 0 6px rgba(255,152,0,0.7); }
+.mgrv-card[data-status="done"]      .mgrv-dot { background: #4fc3f7; }
+.mgrv-card[data-status="idle"]      .mgrv-dot { background: #607d8b; }
+
 /* To-dos */
 .mgrv-todo-form { display: flex; gap: 8px; margin-bottom: 10px; }
 .mgrv-todo {
