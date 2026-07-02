@@ -19,7 +19,7 @@ const fs = require('node:fs');
 const sm = require('../src/sessionManager');
 const {
     classifyAgent, extractCtxPct, submitToTab, writeToTab, SessionManager,
-    resolveCohort, makeEventFilter, isLocalRequest,
+    resolveCohort, makeEventFilter, isLocalRequest, autoGroupFromCwd,
 } = sm;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -279,6 +279,29 @@ test('resolveCohort: unknown/empty/whitespace/null → [] (never an accidental f
     assert.deepEqual(resolveCohort(SNAP, '   '), []);
     assert.deepEqual(resolveCohort(SNAP, undefined), []);
     assert.deepEqual(resolveCohort(SNAP, null), []);
+});
+// ── user-defined groups: `group:<name>` selector + cwd auto-group ─────────────
+const GSNAP = {
+    sessions: [
+        { id: 1, group: 'frontend' },
+        { id: 2, group: 'api' },
+        { id: 3, group: 'frontend' },
+        { id: 4, group: 'ungrouped' },
+    ],
+};
+test('resolveCohort: group:<name> selects that group; missing/empty group fails closed', () => {
+    assert.deepEqual(resolveCohort(GSNAP, 'group:frontend'), [1, 3]);
+    assert.deepEqual(resolveCohort(GSNAP, 'group:api'), [2]);
+    assert.deepEqual(resolveCohort(GSNAP, 'group:GHOST'), []);   // no members → []
+    assert.deepEqual(resolveCohort(GSNAP, 'group:'), []);         // no name → []
+    assert.deepEqual(resolveCohort(GSNAP, 'group'), []);          // not a group selector
+});
+test('autoGroupFromCwd: project folder name, trailing-slash & null tolerant', () => {
+    assert.equal(autoGroupFromCwd('/Users/x/proj/frontend'), 'frontend');
+    assert.equal(autoGroupFromCwd('/Users/x/proj/api/'), 'api');   // trailing slash
+    assert.equal(autoGroupFromCwd(''), 'ungrouped');
+    assert.equal(autoGroupFromCwd(null), 'ungrouped');
+    assert.equal(autoGroupFromCwd(undefined), 'ungrouped');
 });
 
 // ── makeEventFilter: self-hide + kind restriction ────────────────────────────

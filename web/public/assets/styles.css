@@ -107,9 +107,9 @@ html, body {
 
 .topbar {
   display: grid;
-  /* First column == sidebar width so the brand/back-button right edge lines up
-     with the sidebar's right edge. */
-  grid-template-columns: var(--soa-sidebar-w) 1fr auto;
+  /* First column hugs the brand's content (logo + name) so the section ends
+     right after the text instead of padding out to the full sidebar width. */
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 16px;
   padding: 0 14px 0 0;
@@ -118,7 +118,7 @@ html, body {
 }
 .brand {
   display: flex; align-items: center; gap: 12px;
-  min-width: 226px;
+  min-width: 0;
   padding-left: 0;
   color: var(--soa-accent);
   font-size: 12px; letter-spacing: 0.3em;
@@ -1601,6 +1601,45 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   align-content: start;
   z-index: 1;
 }
+
+/* ── Agent groups: full-width section headers + chips ───────────────── */
+.tile-group-header {
+  grid-column: 1 / -1;             /* one row per group across the grid */
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 0 -2px; padding: 5px 10px;
+  border: 1px solid var(--soa-line-soft);
+  border-left: 2px solid var(--soa-accent);
+  background: rgba(var(--soa-accent-rgb), 0.05);
+  border-radius: 2px; cursor: pointer; user-select: none;
+  font-family: var(--font-display); letter-spacing: 0.2em;
+}
+.tile-group-header:first-child { margin-top: 0; }
+.tile-group-header:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.09); }
+.tile-group-header.collapsed { opacity: 0.72; }
+.tile-group-caret { color: var(--soa-accent); font-size: 10px; width: 10px; text-align: center; }
+.tile-group-name { color: var(--soa-accent); font-size: 11px; text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-group-count {
+  color: var(--soa-accent-dim); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0;
+  padding: 0 6px; border: 1px solid var(--soa-line-soft); border-radius: 8px;
+}
+.tile-group-edit {
+  margin-left: auto; background: transparent; border: none; color: var(--soa-accent-dim);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 0 4px;
+}
+.tile-group-edit:hover { color: var(--soa-accent); }
+
+/* Group chip on tiles + tabs — click to reassign. */
+.tile-group-chip, .tab-group {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.06em;
+  color: var(--soa-accent-dim); background: rgba(var(--soa-accent-rgb), 0.04);
+  padding: 1px 6px; border: 1px solid var(--soa-line-soft); border-radius: 8px;
+  cursor: pointer; white-space: nowrap; flex: 0 0 auto;
+  max-width: 92px; overflow: hidden; text-overflow: ellipsis;
+}
+.tile-group-chip { margin-left: 2px; }
+.tile-group-chip:hover, .tab-group:hover { color: var(--soa-accent); border-color: var(--soa-accent); }
+.tab.active .tab-group { color: var(--soa-bg); border-color: rgba(0,0,0,0.25); background: rgba(0,0,0,0.12); }
 
 /* ── MONITOR view — every agent's browser + open ports ─────────────── */
 .monitor-view { position: absolute; inset: 0; overflow-y: auto; padding: 14px; z-index: 1; }

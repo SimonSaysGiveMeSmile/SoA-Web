@@ -34,10 +34,23 @@ function loadManagerState() {
             autoResume: d.autoResume === true,
             autoResumeText: typeof d.autoResumeText === 'string' && d.autoResumeText ? d.autoResumeText.slice(0, 200) : 'continue',
             schedules: Array.isArray(d.schedules) ? d.schedules.filter(s => s && Number(s.at) > 0) : [],
+            // User-defined agent groups: manual overrides keyed by cwd
+            // ({ "<cwd>": "<groupName>" }). Absent a match, a session's group is
+            // auto-derived from its cwd (the project folder name). Keyed by cwd
+            // because tab ids are reassigned on every daemon restart.
+            groups: (d.groups && typeof d.groups === 'object' && !Array.isArray(d.groups)) ? d.groups : {},
         };
     } catch (_) {
-        return { autoResume: false, autoResumeText: 'continue', schedules: [] };
+        return { autoResume: false, autoResumeText: 'continue', schedules: [], groups: {} };
     }
+}
+
+// Auto-group name for a cwd = its project folder (basename). Pure + exported so
+// snapshot(), resolveCohort tests, and the CLI all derive the same default.
+function autoGroupFromCwd(cwd) {
+    if (!cwd || typeof cwd !== 'string') return 'ungrouped';
+    const base = path.basename(cwd.replace(/[\\/]+$/, ''));
+    return base || 'ungrouped';
 }
 function saveManagerState(st) {
     try {
@@ -235,6 +248,12 @@ function resolveCohort(snapshot, sel) {
         return byId.has(n) ? [n] : [];
     }
     if (str === 'all') return snapshot.sessions.map(x => x.id);
+    // Static user-defined group: `group:<name>` → every session in that group.
+    const gm = /^group:(.+)$/i.exec(str);
+    if (gm) {
+        const g = gm[1].trim();
+        return g ? snapshot.sessions.filter(x => x.group === g).map(x => x.id) : [];
+    }
     const flag = {
         working: x => x.status === 'working',
         attention: x => x.attention,
@@ -286,6 +305,23 @@ class SessionManager {
     }
 
     _saveState() { saveManagerState(this.state); }
+
+    // Resolved group for a cwd: manual override (manager.json) else cwd auto-group.
+    _groupFor(cwd) {
+        const overrides = this.state.groups || {};
+        if (cwd && overrides[cwd]) return overrides[cwd];
+        return autoGroupFromCwd(cwd);
+    }
+
+    // Set/clear a manual group override for a cwd. Empty group → revert to auto.
+    setGroup(cwd, group) {
+        if (!cwd) return null;
+        if (!this.state.groups) this.state.groups = {};
+        const g = (typeof group === 'string' ? group.trim() : '').slice(0, 40);
+        if (g) this.state.groups[cwd] = g; else delete this.state.groups[cwd];
+        this._saveState();
+        return g || autoGroupFromCwd(cwd);
+    }
 
     // ── One-shot "send text to tab at time" schedules ──
     schedule(tabId, at, text) {
@@ -521,6 +557,8 @@ class SessionManager {
             return {
                 id,
                 title: (tab && tab.title) || `tab ${id}`,
+                cwd: (tab && tab.cwd) || null,
+                group: this._groupFor(tab && tab.cwd),
                 status: s.status,
                 ctxPct: s.ctxPct,
                 attention: s.status === 'attention',
@@ -589,6 +627,23 @@ function mount(app, requireAuthed, sessions) {
         const s = req.session && req.session.tabMgr ? req.session : primary();
         if (!s) return res.json({ ok: true, sessions: [], counts: {} });
         res.json({ ok: true, ...ensure(s).snapshot() });
+    });
+
+    // Assign/clear an agent's group (authed → reachable from the dashboard and
+    // the phone). Keyed by cwd; {id} is resolved to its cwd. Empty group reverts
+    // that cwd to its auto (project-folder) group. Pushes a fresh snapshot so
+    // every connected client re-renders immediately.
+    app.post('/api/manager/group', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+        const s = (req.session && req.session.tabMgr) ? req.session : primary();
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        const man = ensure(s);
+        const body = req.body || {};
+        let cwd = (typeof body.cwd === 'string' && body.cwd) ? body.cwd : null;
+        if (!cwd && body.id != null) { const tab = s.tabMgr.get(Number(body.id)); if (tab) cwd = tab.cwd; }
+        if (!cwd) return res.status(400).json({ ok: false, error: 'need id or cwd' });
+        const group = man.setGroup(cwd, body.group);
+        man.broadcast();
+        res.json({ ok: true, cwd, group });
     });
 
     // Action surface for the manager agent (loopback only — same trust model as
@@ -831,6 +886,17 @@ function mount(app, requireAuthed, sessions) {
                 try { tab.write('\x03'); } catch (_) {}
                 return res.json({ ok: true, id, interrupted: true });
             }
+            // setGroup: assign/clear an agent's group (keyed by cwd). Lets the
+            // manager agent organize the fleet; empty group reverts to auto.
+            // {action:'setGroup', id?|cwd?, group: string|''}
+            if (action === 'setGroup') {
+                let cwd = (typeof body.cwd === 'string' && body.cwd) ? body.cwd : null;
+                if (!cwd && body.id != null) { const tab = mgr.get(Number(body.id)); if (tab) cwd = tab.cwd; }
+                if (!cwd) return res.status(400).json({ ok: false, error: 'need id or cwd' });
+                const group = man.setGroup(cwd, body.group);
+                man.broadcast();
+                return res.json({ ok: true, cwd, group });
+            }
             return res.status(400).json({ ok: false, error: 'unknown action: ' + action });
         } catch (err) {
             return res.status(500).json({ ok: false, error: (err && err.message) || 'failed' });
@@ -841,5 +907,5 @@ function mount(app, requireAuthed, sessions) {
 module.exports = {
     SessionManager, ensure, mount,
     classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
-    resolveCohort, makeEventFilter, isLocalRequest,
+    resolveCohort, makeEventFilter, isLocalRequest, autoGroupFromCwd,
 };

@@ -382,6 +382,8 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
+        this._agentGroup = new Map();  // tabId → group name (from the manager snapshot)
+        this._collapsedGroups = new Set(); // group names collapsed in the tiles view
         this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
         // Tabs whose PTY emitted output since the last status scan. The 500ms
         // poll re-scans only dirty tabs (idle tabs cost nothing), with a full
@@ -950,7 +952,7 @@ class Shell {
         // _setStatus, so including it here would rebuild all N tab buttons on
         // every working↔done flip. Only structural changes (set/title/active)
         // bust the row cache.
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0);
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentGroup.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         // replaceChildren destroys the old tab buttons, which resets the
@@ -982,6 +984,11 @@ class Shell {
             }, ['⧉']);
             const main = el('span', { class: 'tab-main' }, [label, sub, pvBtn]);
             const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
+            const gName = this._agentGroup.get(t.id);
+            const gchip = (gName && gName !== 'ungrouped') ? el('span', {
+                class: 'tab-group', text: gName, title: `Group: ${gName} — click to change`,
+                onclick: (e) => { e.stopPropagation(); this._promptSetGroup(t.id); },
+            }) : null;
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
                 this._requestCloseTab(t.id);
@@ -995,7 +1002,7 @@ class Shell {
                 draggable: 'true',
                 onclick: () => this._activate(t.id),
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
-            }, [dot, main, x]);
+            }, gchip ? [dot, main, gchip, x] : [dot, main, x]);
             this._attachTabDrag(root, t.id);
             this._attachTabLongPress(root, t.id);
             return root;
@@ -2339,6 +2346,59 @@ class Shell {
         this.bridge.input(INPUT_KIND.RENAME_TAB, { id, title });
     }
 
+    // ── Agent groups ────────────────────────────────────────────────────────
+    // Assign one agent to a group. Empty reverts it to the auto project group
+    // (the cwd folder name). Membership is server-persisted, keyed by cwd.
+    _promptSetGroup(id) {
+        const current = this._agentGroup.get(id) || '';
+        const next = window.prompt(
+            'Group for this agent\n(Clear to revert to the auto project group)',
+            current === 'ungrouped' ? '' : current
+        );
+        if (next == null) return;
+        this._setGroup({ id, group: next });
+    }
+
+    // Rename a whole group → reassigns every current member.
+    _promptRenameGroup(group) {
+        const next = window.prompt(
+            `Rename group "${group}" — moves every agent in it`,
+            group === 'ungrouped' ? '' : group
+        );
+        if (next == null) return;
+        const name = next.trim().slice(0, 40);
+        if (name === group) return;
+        const ids = this.order.filter(id => (this._agentGroup.get(id) || 'ungrouped') === group);
+        if (this._collapsedGroups.delete(group) && name) this._collapsedGroups.add(name);
+        ids.forEach(id => this._setGroup({ id, group: name }, false));
+        this._reflowGroups();
+    }
+
+    // POST the override (authed → works from desktop and phone). Optimistically
+    // moves the agent locally; the server's pushed 'manager' snapshot reconciles.
+    _setGroup({ id, cwd, group }, render = true) {
+        const g = (group || '').trim().slice(0, 40);
+        if (id != null) this._agentGroup.set(id, g || 'ungrouped');
+        if (render) this._reflowGroups();
+        const cfg = window.__SOA_WEB__ || {};
+        const base = String(cfg._resolvedBackend || cfg.backend || '').replace(/\/+$/, '');
+        const url = new URL(base + '/api/manager/group', location.origin);
+        if (cfg._resolvedToken) url.searchParams.set('t', cfg._resolvedToken);
+        fetch(url.toString(), {
+            method: 'POST', credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id, cwd, group: g }),
+        }).catch(() => { /* next manager frame reconciles truth */ });
+    }
+
+    // Re-render the group-aware surfaces (tiles sections + tab chips) at once.
+    _reflowGroups() {
+        this._groupSig = null;
+        if (this.viewMode === 'tiles') this._renderTiles();
+        this._tabsUISig = null;
+        this._syncTabsUI();
+    }
+
     _fitActive() {
         const rt = this.tabs.get(this.activeId);
         if (!rt) return;
@@ -2866,16 +2926,35 @@ class Shell {
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             existing.set(Number(node.dataset.tileId), node);
         }
-        const fragment = document.createDocumentFragment();
+        // Bucket tiles by group, preserving this.order within each group. When
+        // there's more than one group we emit a full-width collapsible header
+        // before each group's tiles so the grid reads as one row per group.
+        const buckets = new Map();
         for (const id of this.order) {
-            let node = existing.get(id);
-            if (node) {
-                existing.delete(id);
-                this._updateTileNode(node, id);
-            } else {
-                node = this._createTileNode(id);
+            const g = this._agentGroup.get(id) || 'ungrouped';
+            if (!buckets.has(g)) buckets.set(g, []);
+            buckets.get(g).push(id);
+        }
+        const groupNames = [...buckets.keys()].sort((a, b) => (
+            a === 'ungrouped' ? 1 : b === 'ungrouped' ? -1 : a.localeCompare(b)
+        ));
+        const showHeaders = groupNames.length > 1;
+        const fragment = document.createDocumentFragment();
+        for (const g of groupNames) {
+            const ids = buckets.get(g);
+            if (showHeaders) fragment.appendChild(this._tileGroupHeader(g, ids.length));
+            const collapsed = showHeaders && this._collapsedGroups.has(g);
+            for (const id of ids) {
+                let node = existing.get(id);
+                if (node) {
+                    existing.delete(id);
+                    this._updateTileNode(node, id);
+                } else {
+                    node = this._createTileNode(id);
+                }
+                node.style.display = collapsed ? 'none' : '';
+                fragment.appendChild(node);
             }
-            fragment.appendChild(node);
         }
         for (const old of existing.values()) old.remove();
         // replaceChildren wipes the pinned header cards too — carry them
@@ -3136,6 +3215,30 @@ class Shell {
     // Tile header: optional per-project icon + title. The icon is hidden until
     // it actually loads — a 404 (project has no icon) removes the <img>, so
     // icon-less tiles look exactly as before with no broken-image glyph.
+    // Full-width group section header in the tiles grid. Click toggles collapse;
+    // the ✎ button renames the whole group (reassigns every member agent).
+    _tileGroupHeader(group, count) {
+        const collapsed = this._collapsedGroups.has(group);
+        const caret = el('span', { class: 'tile-group-caret', text: collapsed ? '▸' : '▾' });
+        const name = el('span', { class: 'tile-group-name', text: group });
+        const cnt = el('span', { class: 'tile-group-count', text: String(count) });
+        const edit = el('button', {
+            class: 'tile-group-edit', title: 'Rename this group', text: '✎',
+            onclick: (e) => { e.stopPropagation(); this._promptRenameGroup(group); },
+        });
+        const header = el('div', {
+            class: 'tile-group-header' + (collapsed ? ' collapsed' : ''),
+            'data-group': group,
+            title: collapsed ? 'Expand group' : 'Collapse group',
+            onclick: () => {
+                if (this._collapsedGroups.has(group)) this._collapsedGroups.delete(group);
+                else this._collapsedGroups.add(group);
+                this._renderTiles();
+            },
+        }, [caret, name, cnt, edit]);
+        return header;
+    }
+
     _tileHead(id, title) {
         const icon = el('img', {
             class: 'tile-icon', alt: '', loading: 'lazy', decoding: 'async',
@@ -3201,7 +3304,31 @@ class Shell {
             this._clearTileDropTarget();
         });
 
+        this._syncTileGroupChip(node, id);
         return node;
+    }
+
+    // Group chip in a tile head — shows the agent's group, click to reassign.
+    // Kept in sync on both create and in-place update so a group change (which
+    // re-renders via _updateTileNode without rebuilding the head) is reflected.
+    _syncTileGroupChip(node, id) {
+        const head = node.querySelector('.tile-head');
+        if (!head) return;
+        const group = this._agentGroup.get(id) || '';
+        let chip = head.querySelector('.tile-group-chip');
+        if (group && group !== 'ungrouped') {
+            if (!chip) {
+                chip = el('span', {
+                    class: 'tile-group-chip',
+                    title: "Click to set this agent's group",
+                    onclick: (e) => { e.stopPropagation(); this._promptSetGroup(id); },
+                });
+                head.appendChild(chip);
+            }
+            if (chip.textContent !== group) chip.textContent = group;
+        } else if (chip) {
+            chip.remove();
+        }
     }
 
     _updateTileNode(node, id) {
@@ -3231,6 +3358,7 @@ class Shell {
         if (elapsedEl && elapsedEl.textContent !== elapsed) elapsedEl.textContent = elapsed;
         const pie = node.querySelector('.tile-pie');
         if (pie) this._paintTilePie(pie, pct);
+        this._syncTileGroupChip(node, id);
     }
 
     _statusLabel(status) {
@@ -3294,7 +3422,24 @@ class Shell {
     // sessions it reports on.
     _onManager(d) {
         this._manager = d;
+        // Fold each agent's group (server-resolved: cwd auto-group or manual
+        // override) into a client map. Only re-render structure when the group
+        // mapping actually changes — status-only manager frames must stay cheap.
+        const groups = new Map();
+        let sig = '';
+        for (const s of (d.sessions || [])) {
+            const g = s.group || 'ungrouped';
+            groups.set(s.id, g);
+            sig += s.id + ':' + g + ';';
+        }
+        this._agentGroup = groups;
         if (this.viewMode === 'tiles') this._renderFleetBar();
+        if (sig !== this._groupSig) {
+            this._groupSig = sig;
+            if (this.viewMode === 'tiles') this._renderTiles();
+            this._tabsUISig = null;   // force the tab row to rebuild with fresh chips
+            this._syncTabsUI();
+        }
     }
 
     _renderFleetBar() {

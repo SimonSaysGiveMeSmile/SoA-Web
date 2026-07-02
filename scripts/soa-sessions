@@ -69,7 +69,9 @@ function cohort(arg) {
     if (arg == null) return undefined;
     if (/^\d+$/.test(arg)) return Number(arg);
     if (/^\d+(,\d+)+$/.test(arg)) return arg.split(',').map(Number);
-    return arg; // all | working | attention | stuck | idle | done | highContext | limited
+    // all | working | attention | stuck | idle | done | highContext | limited
+    // | group:<name>  (a user-defined static group; resolved server-side)
+    return arg;
 }
 
 function stateDir() { return process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web'); }
@@ -133,6 +135,13 @@ function fmtList(snap) {
         }
         if (cmd === 'compact') {
             const r = await post({ action: 'compact', id: Number(rest[0]) });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // group <id> [name]   — assign an agent to a group (empty name → revert
+        // to its auto project group). Groups are targetable as `group:<name>`.
+        if (cmd === 'group') {
+            const r = await post({ action: 'setGroup', id: Number(rest[0]), group: rest.slice(1).join(' ') });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
