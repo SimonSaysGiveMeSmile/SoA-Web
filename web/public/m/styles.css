@@ -1722,3 +1722,68 @@ button:active { background: var(--accent-bg-hover); }
 .fleet-meta { overflow: hidden; text-overflow: ellipsis; }
 .fleet-name { min-width: 0; max-width: none; }
 .fleet-main { flex: 1 1 0; }   /* basis 0 so the ⋯ never wraps to a new line (flex-wrap uses base size) */
+
+/* ══ Light scheme — modern, comfortable design language ══════════════════════
+   Scoped to [data-scheme="light"] so the dark themes are untouched. Turns the
+   dark-first surfaces (near-invisible white overlays) into calm white cards with
+   soft layered shadows, subtle neutral borders, and accent-tinted CTAs. */
+[data-scheme="light"] {
+    --surface: var(--bg-alt);                 /* solid card surface (white-ish) */
+    --shadow-sm: 0 1px 2px rgba(17,24,39,0.05), 0 1px 3px rgba(17,24,39,0.05);
+    --shadow-md: 0 4px 18px rgba(17,24,39,0.09), 0 1px 3px rgba(17,24,39,0.05);
+}
+
+/* Manager bar + FLEET chrome */
+[data-scheme="light"] .manager-bar {
+    background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-sm);
+}
+[data-scheme="light"] .fleet-seg {
+    background: var(--surface); border-color: var(--line); box-shadow: var(--shadow-sm);
+}
+[data-scheme="light"] .fleet-seg-btn.active { background: var(--accent-bg); color: var(--accent); }
+[data-scheme="light"] .fleet-seg-btn + .fleet-seg-btn { border-left-color: var(--line); }
+[data-scheme="light"] .fleet-bcast-btn {
+    color: var(--accent); border-color: var(--accent); background: var(--accent-bg);
+}
+
+/* Session rows → white cards with soft depth */
+[data-scheme="light"] .fleet-row {
+    background: var(--surface); border-color: var(--line); box-shadow: var(--shadow-sm);
+}
+[data-scheme="light"] .fleet-row.active { background: var(--accent-bg); border-color: var(--accent); }
+[data-scheme="light"] .fleet-ctx-bar { background: rgba(17,24,39,0.1); }
+[data-scheme="light"] .fleet-act { border-left-color: var(--line); color: var(--fg-dim); }
+[data-scheme="light"] .fleet-act:active { background: rgba(17,24,39,0.05); }
+[data-scheme="light"] .fleet-actions { background: rgba(17,24,39,0.03); border-top-color: var(--line); }
+[data-scheme="light"] .fleet-a { border-color: var(--line); color: var(--fg-dim); }
+[data-scheme="light"] .fleet-a:active { background: rgba(17,24,39,0.05); color: var(--fg); }
+/* readable flag colors on a light background */
+[data-scheme="light"] .fl-stuck { color: #d1342b; box-shadow: inset 0 0 0 1px rgba(209,52,43,0.4); }
+[data-scheme="light"] .fl-attn  { color: #c2620a; box-shadow: inset 0 0 0 1px rgba(217,119,6,0.45); }
+[data-scheme="light"] .fl-ctx   { color: #b7791f; box-shadow: inset 0 0 0 1px rgba(183,121,31,0.4); }
+[data-scheme="light"] .fl-limit { color: #7c5cbf; box-shadow: inset 0 0 0 1px rgba(124,92,191,0.4); }
+
+/* TO-DO */
+[data-scheme="light"] .todo-input,
+[data-scheme="light"] .todo-item { background: var(--surface); border-color: var(--line); }
+[data-scheme="light"] .todo-item { box-shadow: var(--shadow-sm); }
+
+/* MONITOR */
+[data-scheme="light"] .mon-cell { background: var(--surface); border-color: var(--line); box-shadow: var(--shadow-sm); }
+[data-scheme="light"] .mon-port { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+
+/* BROADCAST sheet */
+[data-scheme="light"] .bcast-sheet { border-top-color: var(--accent); box-shadow: 0 -12px 40px rgba(17,24,39,0.18); }
+[data-scheme="light"] .bcast-title { color: var(--accent); }
+[data-scheme="light"] .bcast-input,
+[data-scheme="light"] .bcast-chip,
+[data-scheme="light"] .bcast-preset { background: var(--surface); border-color: var(--line); }
+[data-scheme="light"] .bcast-preset:active { background: rgba(17,24,39,0.05); }
+[data-scheme="light"] .bcast-chip.on { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+[data-scheme="light"] .bcast-chip .bcast-n { background: rgba(17,24,39,0.08); }
+[data-scheme="light"] .bcast-chip.on .bcast-n { background: var(--accent-bg-hover); }
+[data-scheme="light"] .bcast-send { color: #fff; box-shadow: var(--shadow-sm); }
+[data-scheme="light"] .fleet-seg-badge { color: #fff; }
+
+/* generic empty-state + tile hint text stays legible */
+[data-scheme="light"] .m-tile-empty { color: var(--fg-dim); }

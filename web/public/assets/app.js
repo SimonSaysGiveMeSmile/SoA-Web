@@ -3817,6 +3817,9 @@ async function _doBoot() {
         await bootServerMode(backend);
         return;
     }
+    // On a phone with no paired desktop there's nothing to boot — the sandbox
+    // needs a desktop browser. Show the companion welcome instead of a failure.
+    if (isPhone()) { renderMobileWelcome(); return; }
     // No reachable backend — hand off to the in-browser sandbox. The import
     // is guarded: if ANY module in the sandbox graph fails to fetch, Chrome
     // rejects with "Failed to fetch dynamically imported module: app-wc.js"
@@ -3865,6 +3868,88 @@ function renderSandboxFailure(err) {
         location.reload();
     }));
     node.insertAdjacentElement('afterend', actions);
+}
+
+// A phone can't host the in-browser WebContainer sandbox (it needs a desktop
+// browser) and the install wizard is desktop-only — so a mobile visitor with no
+// paired desktop would otherwise hit a failed boot. Detect that case up front.
+function isPhone() {
+    try {
+        return window.matchMedia('(max-width: 820px)').matches
+            && window.matchMedia('(pointer: coarse)').matches;
+    } catch (_) { return false; }
+}
+
+// Friendly mobile landing: showcase the product and explain that the phone is a
+// companion to a desktop, not a host — instead of dropping into a broken boot.
+function renderMobileWelcome() {
+    const boot = $('#boot');
+    if (boot) boot.classList.add('hidden');
+    if (document.querySelector('.mwel')) return;
+
+    const copyBtn = el('button', { class: 'mwel-btn', type: 'button', text: 'Copy desktop link' });
+    copyBtn.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText('https://www.s0a.app'); copyBtn.textContent = 'Copied ✓'; }
+        catch (_) { copyBtn.textContent = 'www.s0a.app'; }
+        setTimeout(() => { copyBtn.textContent = 'Copy desktop link'; }, 1800);
+    });
+
+    const sandboxBtn = el('button', { class: 'mwel-ghost', type: 'button', text: 'Try the sandbox anyway →' });
+    sandboxBtn.addEventListener('click', () => {
+        const v = document.querySelector('.mwel'); if (v) v.remove();
+        if (boot) boot.classList.remove('hidden');
+        const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
+        import('/assets/app-wc.js?v=15').catch((err) => renderSandboxFailure(err));
+    });
+
+    const b = (t) => el('b', { text: t });
+    const step = (n, h, body, extra) => el('div', { class: 'mwel-step' }, [
+        el('span', { class: 'mwel-step-n', text: String(n) }),
+        el('div', { class: 'mwel-step-body' }, [
+            el('h3', { class: 'mwel-step-h', text: h }),
+            el('p', { class: 'mwel-step-p' }, body),
+            ...(extra ? [extra] : []),
+        ]),
+    ]);
+
+    const view = el('div', { class: 'mwel' }, [
+        el('div', { class: 'mwel-inner' }, [
+            el('header', { class: 'mwel-head' }, [
+                el('h1', { class: 'mwel-title', text: 'SON OF ANTON' }),
+                el('p', { class: 'mwel-sub', text: 'WEB TERMINAL · PROTOCOL v1' }),
+            ]),
+            el('p', { class: 'mwel-lead' }, [
+                'A real terminal in your browser — run ', b('Claude Code'),
+                ', stream a live shell, and pair your phone to your desktop.',
+            ]),
+            el('div', { class: 'mwel-note' }, [
+                el('div', { class: 'mwel-note-h', text: 'Phones can’t host it — yet' }),
+                el('p', { class: 'mwel-note-p' }, [
+                    'SoA runs a real shell (', b('PTY'), ') that needs a Mac or Linux desktop. ',
+                    'Your phone is a ', b('companion'), ' that pairs to a running desktop — there’s ',
+                    'no terminal to boot here on its own.',
+                ]),
+            ]),
+            el('div', { class: 'mwel-steps' }, [
+                step(1, 'Open on your computer',
+                    ['Go to ', b('s0a.app'), ' on a Mac or Linux machine and run the one-line install — about 30 seconds, no account.'],
+                    copyBtn),
+                step(2, 'Pair this phone',
+                    ['Already running SoA on your desktop? Open its ', b('Mobile Link'), ' widget and scan the QR — you’ll drive that terminal right from this screen.']),
+            ]),
+            el('ul', { class: 'mwel-feats' }, [
+                el('li', { text: 'Real shell streamed over WebSocket' }),
+                el('li', { text: 'Run Claude Code in any browser' }),
+                el('li', { text: 'Phone ↔ desktop pairing over a tunnel' }),
+                el('li', { text: 'No Electron, no App Store' }),
+            ]),
+            el('nav', { class: 'mwel-foot' }, [
+                el('a', { class: 'mwel-ghost', href: 'https://github.com/SimonSaysGiveMeSmile/SoA-Web', target: '_blank', rel: 'noopener', text: 'github ↗' }),
+                sandboxBtn,
+            ]),
+        ]),
+    ]);
+    document.body.appendChild(view);
 }
 
 function bootFailed(err) {
