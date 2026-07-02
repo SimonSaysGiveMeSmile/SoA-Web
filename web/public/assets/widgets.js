@@ -11,7 +11,7 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=20';
-import { getSettings } from '/assets/settings.js?v=17';
+import { getSettings } from '/assets/settings.js?v=23';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -57,6 +57,17 @@ function api(path) {
     if (t) u.searchParams.set('t', t);
     return u.toString();
 }
+// Live accent for canvas paints (sparklines, charts, globe). Canvases can't
+// use CSS var() directly, so read the token off :root — this is what lets the
+// MINIMAL UI language re-tint every hand-painted pixel without code forks.
+function accentRGB() {
+    try {
+        const v = getComputedStyle(document.documentElement).getPropertyValue('--soa-accent-rgb').trim();
+        if (v) return v;
+    } catch (_) {}
+    return '170, 207, 209';
+}
+
 // Widgets call this to decide which data path to use. mountSandboxSidebar
 // sets _sandbox=true before starting widgets; mountSidebar leaves it false.
 // Keeping the decision in a flag (rather than inspecting the network on
@@ -116,7 +127,9 @@ class Widget {
         this.titleKey = titleKey || null;
         this.title = titleKey ? tr(titleKey) : title;
         this.intervalMs = intervalMs || 0;
-        this._titleEl = $el('span', { class: 'widget-title', text: `// ${this.title}` });
+        // The '// ' prefix is applied via CSS ::before (sidebar.css) so the
+        // MINIMAL UI language can drop it without touching this text node.
+        this._titleEl = $el('span', { class: 'widget-title', text: this.title });
         this.root = $el('section', { class: 'widget' }, [
             $el('header', { class: 'widget-h' }, [
                 this._titleEl,
@@ -132,7 +145,7 @@ class Widget {
         if (this.titleKey) {
             const retitle = () => {
                 this.title = tr(this.titleKey);
-                this._titleEl.textContent = `// ${this.title}`;
+                this._titleEl.textContent = this.title;
                 if (typeof this.onLangChange === 'function') this.onLangChange();
             };
             window.addEventListener('soa:lang', retitle);
@@ -335,11 +348,12 @@ class ClaudeUsageWidget extends Widget {
             const y = h - (this._series[i] / max) * (h - 3) - 1.5;
             i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
         }
-        ctx.strokeStyle = 'rgba(170,207,209,0.9)';
+        const acc = accentRGB();
+        ctx.strokeStyle = `rgba(${acc}, 0.9)`;
         ctx.lineWidth = 1.5;
         ctx.stroke();
         ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
-        ctx.fillStyle = 'rgba(170,207,209,0.12)';
+        ctx.fillStyle = `rgba(${acc}, 0.12)`;
         ctx.fill();
     }
 }
@@ -842,7 +856,7 @@ class LocationGlobeWidget extends Widget {
             if (this._destroyed) return;
             const w = this._canvasHost.offsetWidth || 240;
             const h = this._canvasHost.offsetHeight || 200;
-            const tron = 'rgb(170,207,209)';
+            const tron = `rgb(${accentRGB()})`;
             this.globe = new window.ENCOM.Globe(w, h, {
                 font: 'Fira Mono, ui-monospace, Menlo, monospace',
                 data: [],
@@ -860,7 +874,9 @@ class LocationGlobeWidget extends Widget {
                 maxMarkers: 32,
             });
             this._canvasHost.appendChild(this.globe.domElement);
-            this.globe.init('#05080d', () => { this._tickAnim(); });
+            // Clear color follows the active UI language's surface token.
+            const clearBg = (getComputedStyle(document.documentElement).getPropertyValue('--soa-bg') || '#05080d').trim() || '#05080d';
+            this.globe.init(clearBg, () => { this._tickAnim(); });
             this._onResize = () => {
                 if (!this.globe || !this.globe.camera || !this.globe.renderer) return;
                 const c = this._canvasHost;
@@ -1117,8 +1133,9 @@ class NetChartWidget extends Widget {
         const ctx = c.getContext('2d');
         const w = c.width, h = c.height;
         ctx.clearRect(0, 0, w, h);
-        ctx.strokeStyle = 'rgba(170,207,209,0.9)';
-        ctx.fillStyle = 'rgba(170,207,209,0.15)';
+        const acc = accentRGB();
+        ctx.strokeStyle = `rgba(${acc}, 0.9)`;
+        ctx.fillStyle = `rgba(${acc}, 0.15)`;
         ctx.lineWidth = 1.5;
         const n = this._samples.length;
         const max = Math.max(1, ...this._samples);

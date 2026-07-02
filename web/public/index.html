@@ -18,7 +18,10 @@
           (t === 'light' || t === 'dim') ? t
           : (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light'
           : 'dark';
-      } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+        // UI language (tron | minimal) — same pre-paint treatment so the
+        // MINIMAL skin never flashes TRON first (minimal.css keys off data-ui).
+        document.documentElement.dataset.ui = (s && s.uiLang === 'minimal') ? 'minimal' : 'tron';
+      } catch (e) { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.ui = 'tron'; }
     })();
   </script>
   <title>Son of Anton · Browser Terminal, Claude Code, and Desktop Pairing</title>
@@ -151,7 +154,8 @@
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
   <link rel="stylesheet" href="/assets/styles.css?v=74">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=23">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=24">
+  <link rel="stylesheet" href="/assets/minimal.css?v=1">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -870,7 +874,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-  <script type="module" src="/assets/app.js?v=111"></script>
+  <script type="module" src="/assets/app.js?v=112"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

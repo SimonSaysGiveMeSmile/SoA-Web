@@ -14,6 +14,9 @@
 .widget-title { font-size: 10px; letter-spacing: 0.3em; color: var(--soa-accent); text-shadow: 0 0 6px rgba(var(--soa-accent-rgb), 0.3); }
 .widget-pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--soa-accent); box-shadow: 0 0 6px var(--soa-accent); animation: pulse 2s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+/* TRON's voice: widget titles carry a '// ' prefix. Rendered here (not in JS
+   text) so the MINIMAL UI language can drop it via `content: none`. */
+.widget-title::before { content: '// '; }
 .widget-body { padding: 8px 10px; font-family: var(--font-mono); font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
 .kv { display: flex; justify-content: space-between; gap: 10px; }
 .kv .k { color: var(--soa-accent-dim); letter-spacing: 0.15em; }

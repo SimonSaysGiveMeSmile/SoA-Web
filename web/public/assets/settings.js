@@ -22,6 +22,7 @@ const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
     theme: 'dark',   // default to dark regardless of system preference
+    uiLang: 'tron',  // UI language: 'tron' (terminal classic) | 'minimal' (porcelain modern)
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,
@@ -36,6 +37,19 @@ export const DEFAULTS = Object.freeze({
 const THEMES = ['auto', 'dark', 'light', 'dim'];
 function asTheme(v) { return THEMES.includes(v) ? v : DEFAULTS.theme; }
 
+const UILANGS = ['tron', 'minimal'];
+function asUiLang(v) { return UILANGS.includes(v) ? v : DEFAULTS.uiLang; }
+
+// Reflect the UI language onto <html data-ui> so minimal.css activates.
+// index.html sets it pre-paint from localStorage; this keeps it in sync on
+// every change (app.js _applyTheme then re-themes open xterm instances).
+function applyUiAttr() {
+    const want = current ? current.uiLang : DEFAULTS.uiLang;
+    if (document.documentElement.dataset.ui !== want) {
+        document.documentElement.dataset.ui = want;
+    }
+}
+
 function clampFont(n)   { n = Number(n); return Number.isFinite(n) ? Math.max(8, Math.min(28, Math.round(n))) : DEFAULTS.termFontSize; }
 function clampVol(n)    { n = Number(n); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : DEFAULTS.audioVolume; }
 function asBool(v, dflt){ return typeof v === 'boolean' ? v : dflt; }
@@ -45,6 +59,7 @@ function normalize(raw) {
     const s = raw && typeof raw === 'object' ? raw : {};
     return {
         theme: asTheme(s.theme ?? DEFAULTS.theme),
+        uiLang: asUiLang(s.uiLang ?? DEFAULTS.uiLang),
         termFontSize: clampFont(s.termFontSize ?? DEFAULTS.termFontSize),
         cursorBlink: asBool(s.cursorBlink, DEFAULTS.cursorBlink),
         nocursor: asBool(s.nocursor, DEFAULTS.nocursor),
@@ -72,6 +87,7 @@ export function saveSettings(patch) {
     current = normalize({ ...current, ...(patch || {}) });
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(current)); } catch (_) {}
     applyCursorClass();
+    applyUiAttr();
     window.dispatchEvent(new CustomEvent('soa:settings', { detail: { ...current } }));
     return { ...current };
 }
@@ -80,6 +96,7 @@ export function resetSettings() {
     current = normalize(null);
     try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
     applyCursorClass();
+    applyUiAttr();
     window.dispatchEvent(new CustomEvent('soa:settings', { detail: { ...current } }));
     return { ...current };
 }
@@ -178,6 +195,19 @@ function langSelect(id) {
     return s;
 }
 
+function uiLangSelect(id, value) {
+    const sel = el('select', { id });
+    for (const [v, label] of [['tron', 'TRON · terminal classic'], ['minimal', 'MINIMAL · porcelain modern']]) {
+        const o = el('option', { value: v, text: label });
+        if (v === value) o.selected = true;
+        sel.appendChild(o);
+    }
+    // Instant apply, same pipeline as theme: saveSettings sets <html data-ui>
+    // (applyUiAttr) and 'soa:settings' → app.js _applyTheme re-themes xterm.
+    sel.addEventListener('change', () => saveSettings({ uiLang: asUiLang(sel.value) }));
+    return sel;
+}
+
 function themeSelect(id, value) {
     const sel = el('select', { id });
     for (const [v, label] of [['auto', 'Auto (system)'], ['dark', 'Dark'], ['light', 'Light'], ['dim', 'Dim']]) {
@@ -208,6 +238,11 @@ function buildAppearancePane(s) {
             el('th', { text: tr('settings.col.value') }),
         ])]),
         el('tbody', {}, [
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'uiLang' })]),
+                el('td', { class: 'd', text: 'UI language — TRON is the classic terminal look; MINIMAL is a modern porcelain skin with dark terminal cards (it brings its own palette, so theme below only affects TRON). Applies instantly.' }),
+                el('td', { class: 'v' }, [uiLangSelect('set-uiLang', s.uiLang)]),
+            ]),
             el('tr', {}, [
                 el('td', { class: 'k' }, [el('code', { text: 'theme' })]),
                 el('td', { class: 'd', text: 'Color theme — Auto follows your system; Light/Dim are bright variants. Applies instantly.' }),
@@ -707,8 +742,10 @@ function buildAutomationPane() {
 function collectFromDOM(prev) {
     const get = id => document.getElementById(id);
     const themeEl = get('set-theme');
+    const uiLangEl = get('set-uiLang');
     return {
         theme:                themeEl ? asTheme(themeEl.value) : (prev && prev.theme) || DEFAULTS.theme,
+        uiLang:               uiLangEl ? asUiLang(uiLangEl.value) : (prev && prev.uiLang) || DEFAULTS.uiLang,
         termFontSize:         Number(get('set-termFontSize').value),
         cursorBlink:          get('set-cursorBlink').value === 'true',
         nocursor:             get('set-nocursor').value === 'true',

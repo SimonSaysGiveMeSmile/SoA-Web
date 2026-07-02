@@ -1,0 +1,404 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   MINIMAL — the second UI language ("porcelain ops").
+   A complete, switchable skin that coexists with the TRON language.
+
+   Everything here is scoped under html[data-ui="minimal"], so with the
+   attribute absent this file is inert and TRON renders byte-identically.
+   Presentation only — no selectors are removed, no DOM is assumed beyond
+   what styles.css already styles — so every feature survives the switch.
+
+   The language: warm porcelain chrome, ink typography (Familjen Grotesk,
+   lowercase structural labels), hairline borders, soft layered shadows,
+   ONE deep-teal accent reserved for interaction/liveness — and the
+   signature inversion: terminals stay dark, floating as graphite "slate
+   cards" on the light ground. Chrome is daylight; the work surface is night.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Typeface (self-hosted under vendor/, consistent with the COEP setup) ── */
+@font-face {
+  font-family: 'Familjen Grotesk';
+  src: url('/assets/vendor/fonts/familjen-grotesk-400.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Familjen Grotesk';
+  src: url('/assets/vendor/fonts/familjen-grotesk-500.woff2') format('woff2');
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Familjen Grotesk';
+  src: url('/assets/vendor/fonts/familjen-grotesk-600.woff2') format('woff2');
+  font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Familjen Grotesk';
+  src: url('/assets/vendor/fonts/familjen-grotesk-700.woff2') format('woff2');
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+
+/* ── Tokens ──────────────────────────────────────────────────────────────
+   Overriding the --soa-* set re-skins ~80% of the UI automatically (lines,
+   glows and fills all derive from these). Accent == ink: MINIMAL chrome is
+   monochrome; the teal (--m-accent) is applied surgically below. */
+:root[data-ui="minimal"] {
+  --soa-bg:        #f2f0ea;
+  --soa-bg-deep:   #e9e6de;
+  --soa-bg-panel:  #faf9f5;
+  --soa-bg-panel-rgb: 250, 249, 245;
+  --soa-fg:        #22252b;
+  --soa-accent:    #22252b;
+  --soa-accent-rgb: 34, 37, 43;
+  --soa-accent-dim:#878d99;
+  --soa-accent-bright: #0b0d10;
+  --soa-orange:    #b96f12;
+  --soa-green:     #24875f;
+  --soa-red:       #c04f4b;
+  --soa-yellow:    #9c7a08;
+  --soa-blue:      #5a6c94;
+  --soa-line:      rgba(34, 37, 43, 0.14);
+  --soa-line-soft: rgba(34, 37, 43, 0.07);
+  --font-display:  'Familjen Grotesk', ui-sans-serif, system-ui, sans-serif;
+
+  /* MINIMAL-only tokens */
+  --m-accent:      #0c7d72;
+  --m-accent-rgb:  12, 125, 114;
+  --m-slate:       #14171d;      /* the dark terminal card */
+  --m-slate-edge:  #23272f;
+  --m-r:           10px;
+  --m-r-sm:        7px;
+  --m-shadow:      0 1px 2px rgba(29, 31, 36, 0.05), 0 8px 28px rgba(29, 31, 36, 0.07);
+  --m-shadow-deep: 0 2px 8px rgba(15, 17, 20, 0.16), 0 24px 64px rgba(15, 17, 20, 0.20);
+  --m-ease:        160ms cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+
+/* ── Base voice ──────────────────────────────────────────────────────────
+   Chrome speaks Familjen Grotesk, lowercase, tracking-neutral. Data (values,
+   paths, numbers) keeps the mono voice — that contrast IS the typography. */
+[data-ui="minimal"] body {
+  font-family: var(--font-display);
+  background: var(--soa-bg);
+  color: var(--soa-fg);
+}
+[data-ui="minimal"] button { font-family: var(--font-display); }
+
+/* Focus is teal, everywhere, unambiguous. */
+[data-ui="minimal"] :is(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid rgba(var(--m-accent-rgb), 0.75);
+  outline-offset: 1px;
+  border-radius: var(--m-r-sm);
+}
+
+/* Scrollbars: quiet ink. */
+[data-ui="minimal"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-ui="minimal"] ::-webkit-scrollbar-thumb {
+  background: rgba(34, 37, 43, 0.18);
+  border: 3px solid var(--soa-bg);
+  border-radius: 99px;
+}
+[data-ui="minimal"] ::-webkit-scrollbar-thumb:hover { background: rgba(34, 37, 43, 0.32); }
+[data-ui="minimal"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── Boot ── */
+[data-ui="minimal"] .boot { background: var(--soa-bg); }
+[data-ui="minimal"] .boot-grid { display: none; }
+[data-ui="minimal"] .boot-title {
+  font-family: var(--font-display); font-weight: 700;
+  letter-spacing: -0.02em; text-transform: lowercase; color: var(--soa-fg);
+  text-shadow: none;
+}
+[data-ui="minimal"] .boot-sub, [data-ui="minimal"] .boot-status { color: var(--soa-accent-dim); }
+
+/* ── Topbar ── */
+[data-ui="minimal"] .topbar {
+  background: var(--soa-bg);
+  border-bottom: 1px solid var(--soa-line);
+  box-shadow: none;
+}
+[data-ui="minimal"] .brand {
+  font-family: var(--font-display); font-weight: 700;
+  letter-spacing: -0.02em; text-transform: lowercase;
+  color: var(--soa-fg); text-shadow: none;
+}
+
+/* Tabs: quiet pills. The ACTIVE tab is a slate pill — the one dark chip in
+   the light chrome, echoing the terminal card it opens. Agent status keeps
+   its semantic color as a leading dot + tinted text (calmer than full
+   borders, still scannable at a glance). */
+[data-ui="minimal"] .tab {
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r-sm);
+  background: var(--soa-bg-panel);
+  color: var(--soa-fg);
+  transition: border-color var(--m-ease), background var(--m-ease), transform var(--m-ease);
+  box-shadow: none;
+}
+[data-ui="minimal"] .tab:hover { border-color: rgba(34, 37, 43, 0.35); transform: translateY(-1px); }
+[data-ui="minimal"] .tab.active {
+  background: var(--m-slate);
+  border-color: var(--m-slate);
+  color: #e8e6e1;
+  box-shadow: var(--m-shadow);
+}
+[data-ui="minimal"] .tab.active .tab-sub { color: #e8e6e1; opacity: 0.55; }
+[data-ui="minimal"] .tab .tab-label { font-family: var(--font-display); font-weight: 600; letter-spacing: 0; }
+[data-ui="minimal"] .tab[data-agent] { border-color: var(--soa-line); }
+[data-ui="minimal"] .tab[data-agent="working"]   { color: var(--soa-green); }
+[data-ui="minimal"] .tab[data-agent="done"]      { color: var(--soa-orange); }
+[data-ui="minimal"] .tab[data-agent="attention"] { color: var(--soa-red); border-color: rgba(192, 79, 75, 0.5); }
+[data-ui="minimal"] .tab[data-agent="idle"]      { color: var(--soa-blue); }
+[data-ui="minimal"] .tab[data-agent].active { background: var(--m-slate); border-color: var(--m-slate); }
+[data-ui="minimal"] .tab .ctx-bar { border-radius: 99px; overflow: hidden; }
+
+[data-ui="minimal"] .topbar button,
+[data-ui="minimal"] .tile-back-btn,
+[data-ui="minimal"] .actions-toggle,
+[data-ui="minimal"] .more-toggle {
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r-sm);
+  background: transparent;
+  color: var(--soa-fg);
+  transition: background var(--m-ease), border-color var(--m-ease);
+}
+[data-ui="minimal"] .topbar button:hover { background: var(--soa-line-soft); border-color: rgba(34, 37, 43, 0.3); }
+[data-ui="minimal"] .user-chip { border-radius: 99px; border: 1px solid var(--soa-line); background: var(--soa-bg-panel); }
+
+/* ── The stage: dark slate terminal cards on porcelain ── */
+[data-ui="minimal"] .terms { background: var(--soa-bg); }
+[data-ui="minimal"] .terms .term {
+  inset: 12px 14px 14px;
+  padding: 12px 14px;
+  background: var(--m-slate);
+  border: 1px solid var(--m-slate-edge);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: var(--m-shadow-deep);
+}
+
+/* ── Status bar ── */
+[data-ui="minimal"] .status-bar {
+  background: var(--soa-bg);
+  border-top: 1px solid var(--soa-line);
+  color: var(--soa-accent-dim);
+  font-family: var(--font-mono);
+  text-shadow: none;
+}
+
+/* ── Sidebar: widgets become soft paper cards ── */
+[data-ui="minimal"] .sidebar {
+  background: var(--soa-bg);
+  border-right: 1px solid var(--soa-line);
+}
+[data-ui="minimal"] .widget {
+  background: var(--soa-bg-panel);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r);
+  box-shadow: var(--m-shadow);
+  overflow: hidden;
+  /* overflow:hidden drops min-content to 0, letting the sidebar's flex column
+     compress cards to fit — pin them so they scroll instead (TRON behavior). */
+  flex-shrink: 0;
+}
+[data-ui="minimal"] .widget-h {
+  background: transparent;
+  border-bottom: 1px solid var(--soa-line-soft);
+}
+/* Clean titles: the '// ' prefix is TRON's voice (rendered via ::before in
+   sidebar.css); MINIMAL drops it and speaks lowercase grotesque instead. */
+[data-ui="minimal"] .widget-title::before { content: none; }
+[data-ui="minimal"] .widget-title {
+  font-family: var(--font-display);
+  font-weight: 600; font-size: 12px;
+  letter-spacing: 0.01em; text-transform: lowercase;
+  color: var(--soa-fg);
+}
+/* The pulse dot is one of the few carriers of the teal: alive = accent. */
+[data-ui="minimal"] .widget-pulse {
+  background: var(--m-accent);
+  box-shadow: 0 0 0 3px rgba(var(--m-accent-rgb), 0.15);
+  border-radius: 50%;
+}
+[data-ui="minimal"] .kv .k {
+  font-family: var(--font-display);
+  font-weight: 500; letter-spacing: 0.01em; text-transform: lowercase;
+  color: var(--soa-accent-dim);
+}
+[data-ui="minimal"] .kv .v { font-variant-numeric: tabular-nums; }
+[data-ui="minimal"] .bar { border-radius: 99px; overflow: hidden; background: var(--soa-line-soft); }
+[data-ui="minimal"] .bar-fill { background: var(--m-accent); }
+
+/* Widget sub-surfaces (charts, QR, logs) sit one step deeper. */
+[data-ui="minimal"] .netchart-canvas,
+[data-ui="minimal"] .claude-spark,
+[data-ui="minimal"] .globe-canvas {
+  background: rgba(34, 37, 43, 0.035);
+  border: 1px solid var(--soa-line-soft);
+  border-radius: var(--m-r-sm);
+}
+[data-ui="minimal"] .claude-head-l,
+[data-ui="minimal"] .netchart-legend,
+[data-ui="minimal"] .globe-meta {
+  font-family: var(--font-display); text-transform: lowercase;
+  letter-spacing: 0.01em; color: var(--soa-accent-dim);
+}
+[data-ui="minimal"] .claude-reset { color: var(--m-accent); font-family: var(--font-mono); }
+[data-ui="minimal"] .claude-reset.warn { color: var(--soa-yellow); }
+
+/* Buttons inside widgets: hairline ghosts; the primary action is teal. */
+[data-ui="minimal"] .mqr-toggle,
+[data-ui="minimal"] .widget-btn,
+[data-ui="minimal"] .port-btn,
+[data-ui="minimal"] .mqr-copy,
+[data-ui="minimal"] .globe-meta-btn {
+  font-family: var(--font-display); font-weight: 600;
+  letter-spacing: 0.01em; text-transform: lowercase;
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r-sm);
+  color: var(--soa-fg);
+  transition: background var(--m-ease), border-color var(--m-ease), color var(--m-ease);
+}
+[data-ui="minimal"] :is(.mqr-toggle, .widget-btn, .port-btn, .mqr-copy, .globe-meta-btn):hover {
+  background: var(--soa-line-soft);
+  border-color: rgba(34, 37, 43, 0.32);
+}
+[data-ui="minimal"] .mqr-toggle.mqr-start {
+  background: var(--m-accent); border-color: var(--m-accent); color: #fff;
+}
+[data-ui="minimal"] .mqr-toggle.mqr-start:hover { background: #0a6c62; }
+[data-ui="minimal"] .mqr-toggle.mqr-off { color: var(--soa-red); border-color: rgba(192, 79, 75, 0.45); }
+[data-ui="minimal"] .mqr-toggle.mqr-sim { color: var(--m-accent); border-color: rgba(var(--m-accent-rgb), 0.45); }
+[data-ui="minimal"] .port-btn-kill { color: var(--soa-red); border-color: rgba(192, 79, 75, 0.45); }
+[data-ui="minimal"] .mqr-online .mqr-dot { background: var(--m-accent); box-shadow: 0 0 0 3px rgba(var(--m-accent-rgb), 0.18); }
+[data-ui="minimal"] .mqr-empty { border-radius: var(--m-r-sm); }
+[data-ui="minimal"] .port-scan-row {
+  border-radius: var(--m-r-sm);
+  font-variant-numeric: tabular-nums;
+}
+[data-ui="minimal"] .port-scan-row:hover { background: var(--soa-line-soft); }
+[data-ui="minimal"] .clog-scroll { font-variant-numeric: tabular-nums; }
+
+/* ── Dashboard tiles (and manager tiles, which reuse .tile) ── */
+[data-ui="minimal"] .tile {
+  background: var(--soa-bg-panel);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r);
+  box-shadow: var(--m-shadow);
+  transition: transform var(--m-ease), box-shadow var(--m-ease), border-color var(--m-ease);
+}
+[data-ui="minimal"] .tile:hover {
+  background: var(--soa-bg-panel);
+  transform: translateY(-2px);
+  box-shadow: 0 2px 6px rgba(29, 31, 36, 0.08), 0 16px 40px rgba(29, 31, 36, 0.12);
+}
+[data-ui="minimal"] .tile-title {
+  font-family: var(--font-display); font-weight: 600; letter-spacing: 0;
+}
+/* Live output preview inside a tile: a miniature slate card. */
+[data-ui="minimal"] .tile-preview {
+  background: var(--m-slate);
+  color: #b9c0cc;
+  border-radius: var(--m-r-sm);
+  border: 1px solid var(--m-slate-edge);
+  padding: 6px 8px;
+}
+[data-ui="minimal"] .tile-activity,
+[data-ui="minimal"] .tile-status-line { font-family: var(--font-display); text-transform: lowercase; }
+[data-ui="minimal"] .tile[data-agent="working"]   { border-color: rgba(36, 135, 95, 0.45); }
+[data-ui="minimal"] .tile[data-agent="done"]      { border-color: rgba(185, 111, 18, 0.45); }
+[data-ui="minimal"] .tile[data-agent="attention"] { border-color: rgba(192, 79, 75, 0.55); }
+[data-ui="minimal"] .dashboard-fleet-bar,
+[data-ui="minimal"] .dashboard-port-info {
+  background: var(--soa-bg-panel);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r);
+}
+[data-ui="minimal"] .cat-tile { border-radius: var(--m-r); }
+[data-ui="minimal"] .mgrv-act {
+  font-family: var(--font-display); font-weight: 600; text-transform: lowercase;
+  border-radius: var(--m-r-sm);
+}
+
+/* ── Menus & popovers ── */
+[data-ui="minimal"] .more-menu,
+[data-ui="minimal"] .actions-tray {
+  background: var(--soa-bg-panel);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r);
+  box-shadow: var(--m-shadow-deep);
+  overflow: hidden;
+}
+[data-ui="minimal"] .more-menu .more-item {
+  font-family: var(--font-display); font-weight: 500; text-transform: lowercase;
+  color: var(--soa-fg);
+}
+[data-ui="minimal"] .more-menu .more-item:hover { background: var(--soa-line-soft); }
+
+/* ── Modals + the settings dropdown ── */
+[data-ui="minimal"] .soa-modal {
+  background: var(--soa-bg-panel);
+  border: 1px solid var(--soa-line);
+  border-radius: 14px;
+  box-shadow: var(--m-shadow-deep);
+  color: var(--soa-fg);
+  font-family: var(--font-display);
+}
+[data-ui="minimal"] .soa-modal-backdrop:not(.soa-settings-drop) {
+  background: rgba(34, 37, 43, 0.35);
+  backdrop-filter: blur(4px);
+}
+[data-ui="minimal"] .soa-modal-title {
+  font-family: var(--font-display); font-weight: 700;
+  letter-spacing: -0.01em; text-transform: lowercase;
+}
+[data-ui="minimal"] .soa-modal-cmd { border-radius: var(--m-r-sm); background: var(--m-slate); color: #d9dee7; }
+[data-ui="minimal"] :is(.soa-modal-copy, .soa-modal-close, .soa-modal-link) {
+  font-family: var(--font-display); font-weight: 600; text-transform: lowercase;
+  border: 1px solid var(--soa-line); border-radius: var(--m-r-sm);
+  color: var(--soa-fg);
+}
+[data-ui="minimal"] :is(.soa-modal-copy, .soa-modal-close, .soa-modal-link):hover {
+  background: var(--soa-line-soft); border-color: rgba(34, 37, 43, 0.32); color: var(--soa-fg);
+}
+[data-ui="minimal"] .settings-tab {
+  font-family: var(--font-display); font-weight: 500; text-transform: lowercase;
+  border-radius: var(--m-r-sm); letter-spacing: 0.01em;
+}
+[data-ui="minimal"] .settings-tab--active {
+  background: var(--m-slate); color: #e8e6e1; border-color: var(--m-slate);
+}
+[data-ui="minimal"] .settings-table td.v :is(input, select) {
+  background: #fff; color: var(--soa-fg);
+  border: 1px solid var(--soa-line); border-radius: var(--m-r-sm);
+}
+[data-ui="minimal"] .settings-table td.k code { color: var(--m-accent); background: rgba(var(--m-accent-rgb), 0.07); border-radius: 4px; padding: 1px 5px; }
+
+/* ── Preview panel ── */
+[data-ui="minimal"] .pv-bar { background: var(--soa-bg); border-bottom: 1px solid var(--soa-line); }
+[data-ui="minimal"] .pv-notice { border-radius: var(--m-r); border: 1px solid var(--soa-line); background: var(--soa-bg-panel); }
+
+/* ── Welcome surfaces ── */
+[data-ui="minimal"] .welcome { background: var(--soa-bg); }
+[data-ui="minimal"] .welcome-title,
+[data-ui="minimal"] .mwel-title {
+  font-family: var(--font-display); font-weight: 700;
+  letter-spacing: -0.02em; text-transform: lowercase;
+  text-shadow: none; color: var(--soa-fg);
+}
+[data-ui="minimal"] .mwel::before { display: none; }   /* the Tron grid is TRON's */
+[data-ui="minimal"] .mwel-head { border-bottom-color: var(--soa-line); box-shadow: none; }
+[data-ui="minimal"] .wiz-primary {
+  background: var(--m-accent); border-color: var(--m-accent); color: #fff;
+  border-radius: var(--m-r-sm); font-family: var(--font-display); font-weight: 600;
+  box-shadow: var(--m-shadow);
+}
+[data-ui="minimal"] .wiz-primary:hover { background: #0a6c62; }
+[data-ui="minimal"] .welcome-cmd { background: var(--m-slate); color: #d9dee7; border-radius: var(--m-r-sm); }
+
+/* ── Toasts / notes ── */
+[data-ui="minimal"] .widget-note { color: var(--soa-accent-dim); font-family: var(--font-display); }
+[data-ui="minimal"] .soa-toast {
+  background: var(--m-slate); color: #e8e6e1;
+  border-radius: var(--m-r); box-shadow: var(--m-shadow-deep); border: none;
+}
+
+/* ── Mobile-sim modal frame ── */
+[data-ui="minimal"] .msim-frame { border-radius: 18px; overflow: hidden; box-shadow: var(--m-shadow-deep); }

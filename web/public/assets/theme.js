@@ -31,9 +31,31 @@ const ANSI_LIGHT = {
     brightCyan: '#0891b2', brightWhite: '#ffffff',
 };
 
+// MINIMAL UI language: terminals are dark graphite "slate cards" floating on
+// the porcelain chrome, whatever the theme setting says — the inversion is the
+// language's signature. Calmer, desaturated ANSI to match.
+const ANSI_MINIMAL = {
+    black: '#171a20', red: '#e06c62', green: '#57ab5a', yellow: '#c69026',
+    blue: '#539bf5', magenta: '#b083f0', cyan: '#39c5cf', white: '#d9dee7',
+    brightBlack: '#525964', brightRed: '#ff938a', brightGreen: '#6bc46d',
+    brightYellow: '#daaa3f', brightBlue: '#6cb6ff', brightMagenta: '#dcbdfb',
+    brightCyan: '#56d4dd', brightWhite: '#ffffff',
+};
+const MINIMAL_XTERM = {
+    foreground: '#d9dee7', background: '#14171d', cursor: '#35b8ab',
+    cursorAccent: '#14171d', selectionBackground: 'rgba(53,184,171,0.28)', ...ANSI_MINIMAL,
+};
+
+// True while the MINIMAL UI language is active (data-ui set pre-paint by
+// index.html and kept in sync by settings.js on change).
+export function isMinimalUi() {
+    return document.documentElement.dataset.ui === 'minimal';
+}
+
 // xterm theme object for a RESOLVED theme. Surface + ink + cursor + selection are
 // swapped to match the CSS palette; ANSI follows the surface brightness.
 export function xtermTheme(resolved) {
+    if (isMinimalUi()) return { ...MINIMAL_XTERM };
     if (resolved === 'light') return {
         foreground: '#15302e', background: '#f7f9fa', cursor: '#0e6b73',
         cursorAccent: '#f7f9fa', selectionBackground: 'rgba(14,107,115,0.25)', ...ANSI_LIGHT,
