@@ -21,7 +21,7 @@ const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
-    theme: 'auto',
+    theme: 'dark',   // default to dark regardless of system preference
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,

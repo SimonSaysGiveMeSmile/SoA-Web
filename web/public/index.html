@@ -12,9 +12,12 @@
       try {
         var s = JSON.parse(localStorage.getItem('soa-web:settings') || '{}');
         var t = s && s.theme;
+        // Default to dark. Only an explicit light/dim override goes bright; an
+        // unset or 'auto' theme no longer follows the system into light mode.
         document.documentElement.dataset.theme =
-          (t === 'dark' || t === 'light' || t === 'dim') ? t
-          : ((window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark');
+          (t === 'light' || t === 'dim') ? t
+          : (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light'
+          : 'dark';
       } catch (e) { document.documentElement.dataset.theme = 'dark'; }
     })();
   </script>
@@ -147,8 +150,8 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=62">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=20">
+  <link rel="stylesheet" href="/assets/styles.css?v=63">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=21">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>

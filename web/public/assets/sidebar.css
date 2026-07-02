@@ -4,7 +4,7 @@
 .stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
 .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 .terms { grid-area: terms; }
-.sidebar { grid-area: sidebar; border-right: 1px solid var(--soa-line); border-left: none; background: linear-gradient(to right, var(--soa-bg-panel), var(--soa-bg)); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.sidebar { grid-area: sidebar; border-right: 1px solid var(--soa-line); border-left: none; background: var(--soa-bg-panel); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .stage.no-sidebar .sidebar { display: none; }
 .status-bar { grid-area: status; }
 
@@ -37,8 +37,11 @@
 .mqr-u   { color: var(--soa-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mqr-copy { background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line-soft); padding: 2px 6px; font-size: 9px; cursor: pointer; }
 .mqr-copy:hover { color: var(--soa-accent); border-color: var(--soa-accent); }
-.mqr-actions { margin-top: 8px; display: flex; justify-content: flex-end; gap: 6px; }
-.mqr-toggle { background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-accent); padding: 4px 14px; font-family: var(--font-display); font-size: 10px; letter-spacing: 0.3em; cursor: pointer; }
+/* Buttons share the row width equally and wrap as a fallback so the SIM /
+   RESTART / OFF trio can never overflow the narrow widget (was flex-end + no
+   wrap → the row spilled past the left edge and clipped SIM). */
+.mqr-actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.mqr-toggle { flex: 1 1 auto; min-width: 0; text-align: center; white-space: nowrap; background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-accent); padding: 5px 8px; font-family: var(--font-display); font-size: 10px; letter-spacing: 0.14em; cursor: pointer; }
 .mqr-toggle:hover { background: rgba(var(--soa-accent-rgb), 0.08); }
 .mqr-toggle[disabled] { opacity: 0.5; cursor: default; }
 .mqr-toggle.mqr-off { color: var(--soa-red); border-color: var(--soa-red); }
@@ -203,7 +206,7 @@
     position: relative;
     width: 100%;
     height: 200px;
-    background: radial-gradient(circle at 50% 50%, rgba(var(--soa-accent-rgb), 0.04), transparent 70%);
+    background: rgba(var(--soa-accent-rgb), 0.03);
     border: 1px solid rgba(var(--soa-accent-rgb), 0.14);
     overflow: hidden;
 }
