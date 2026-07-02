@@ -453,6 +453,12 @@ class Shell {
             this._updateMonitorBtn();
         }
 
+        const mgrBtn = $('#toggle-manager');
+        if (mgrBtn) {
+            mgrBtn.addEventListener('click', () => this._toggleManager());
+            this._updateManagerBtn();
+        }
+
         $('#new-tab').addEventListener('click', () => {
             this.audio.play('panels');
             this._openNewTabChooser();
@@ -2729,6 +2735,7 @@ class Shell {
         const shell = $('#shell');
         // Leaving the monitor → stop its stream + poll before switching away.
         if (this.viewMode !== 'monitor') this._teardownMonitor();
+        if (this.viewMode !== 'manager') this._teardownManager();
         if (this.viewMode === 'tiles') {
             shell.setAttribute('data-view', 'tiles');
             this._closeTileTerminal();
@@ -2740,6 +2747,12 @@ class Shell {
             this._removeTileOverlay();
             for (const [, rt] of this.tabs) rt.container.classList.remove('active');
             this._enterMonitor();
+        } else if (this.viewMode === 'manager') {
+            shell.setAttribute('data-view', 'manager');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterManager();
         } else {
             shell.removeAttribute('data-view');
             this._removeTilesGrid();
@@ -2752,6 +2765,7 @@ class Shell {
                 rt.focus();
             }
         }
+        this._updateManagerBtn();
     }
 
     // ── MONITOR view ────────────────────────────────────────────────────────
@@ -2911,6 +2925,486 @@ class Shell {
         })));
         if (!ports.length) this._monitorPortsEl.dataset.empty = 'No open localhost ports.';
         else this._monitorPortsEl.dataset.empty = '';
+    }
+
+    // ── MANAGER view — interactive fleet dashboard ──────────────────────────
+    // Desktop mirror of the mobile DASH: live fleet counts, the per-session
+    // oversight list with actions, the shared manager to-do list, agent
+    // browsers + ports, a chat line into the manager agent's terminal, and a
+    // cohort broadcast (CAST). Reads the same `manager` WS snapshot the fleet
+    // bar uses; actions go over the WS input path (term-keys / hotkey — the
+    // same reliable path the keyboard uses) and the /api/manager endpoints.
+    _toggleManager() {
+        this.viewMode = this.viewMode === 'manager' ? 'tabs' : 'manager';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this._updateMonitorBtn();
+        this.audio.play('panels');
+    }
+
+    _updateManagerBtn() {
+        const btn = $('#toggle-manager');
+        if (btn) btn.classList.toggle('active', this.viewMode === 'manager');
+    }
+
+    async _managerApi(path, body) {
+        const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+        const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+        const url = new URL(backend + path);
+        if (token) url.searchParams.set('t', token);
+        const res = await fetch(url.toString(), body == null
+            ? { credentials: 'include' }
+            : { method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+    }
+
+    // Freshen the fleet snapshot (todos included). The WS `manager` frame keeps
+    // it live afterwards; the fetch avoids a cold first paint on entry.
+    async _pullManager() {
+        try {
+            const d = await this._managerApi('/api/manager');
+            if (d && d.ok !== false && d.counts) { this._manager = d; this._renderManagerView(); }
+        } catch (_) { /* keep the last WS frame */ }
+    }
+
+    // The manager agent's tab: server-designated when available, else best
+    // effort by title so chat still lands somewhere sensible.
+    _managerTabId() {
+        const d = this._manager || {};
+        if (d.managerTabId != null) return d.managerTabId;
+        const s = (d.sessions || []).find(x => /manager|chef/i.test(x.title || ''));
+        return s ? s.id : null;
+    }
+
+    _enterManager() {
+        if (!this._managerEl) this._buildManagerView();
+        this._managerEl.style.display = '';
+        this._renderManagerView();
+        this._pullManager();
+        this._refreshManagerMonitor();
+        if (this._managerTimer) clearInterval(this._managerTimer);
+        // Sessions update live via WS manager frames; this poll only freshens
+        // what has no push channel (to-dos edited by the manager agent, ports).
+        this._managerTimer = setInterval(() => {
+            if (document.hidden || this.viewMode !== 'manager') return;
+            this._pullManager();
+            if (this._mgrvSub === 'monitor') this._refreshManagerMonitor();
+        }, 10_000);
+    }
+
+    _teardownManager() {
+        if (this._managerTimer) { clearInterval(this._managerTimer); this._managerTimer = null; }
+        if (this._managerEl) this._managerEl.style.display = 'none';
+    }
+
+    _setManagerSub(sub) {
+        this._mgrvSub = sub;
+        if (sub === 'monitor') this._refreshManagerMonitor();
+        this._renderManagerView();
+    }
+
+    // Static chrome, built once. Only the lists/chips re-render on snapshots,
+    // so typing in the chat / to-do / cast inputs never loses focus.
+    _buildManagerView() {
+        this._mgrvSub = 'sessions';
+        this._mgrvCohort = 'attention';
+        this._mgrvCastOpen = false;
+        this._mgrvCastPre = null;
+
+        this._mgrvHeadEl = el('div', { class: 'mgrv-head' });
+
+        this._mgrvTodoBadge = el('span', { class: 'mgrv-badge', hidden: '' });
+        const seg = (key, label, extra) => el('button', {
+            class: 'mgrv-seg-btn', type: 'button', 'data-seg': key,
+            onclick: () => this._setManagerSub(key),
+        }, [label, extra]);
+        this._mgrvSegBtns = [
+            seg('sessions', 'SESSIONS'),
+            seg('monitor', 'MONITOR'),
+            seg('todos', 'TO-DO', this._mgrvTodoBadge),
+        ];
+        const castBtn = el('button', {
+            class: 'mgrv-cast-btn', type: 'button', text: '⇄ CAST',
+            title: 'Broadcast a command to a cohort of sessions',
+            onclick: () => this._toggleManagerCast(),
+        });
+        const toolbar = el('div', { class: 'mgrv-toolbar' }, [
+            el('div', { class: 'mgrv-seg' }, this._mgrvSegBtns),
+            castBtn,
+        ]);
+
+        // CAST panel (hidden until ⇄ CAST) — cohort chips + presets + command.
+        this._mgrvCastCohortsEl = el('div', { class: 'mgrv-cast-cohorts' });
+        this._mgrvCastInput = el('input', {
+            class: 'mgrv-input', type: 'text', spellcheck: 'false',
+            placeholder: 'e.g. continue, /compact, npm test…',
+        });
+        this._mgrvCastEnter = el('input', { type: 'checkbox', checked: '' });
+        const presets = [
+            { label: 'continue', text: 'continue' },
+            { label: '/compact', text: '/compact' },
+            { label: '/clear', text: '/clear' },
+            { label: 'Esc', key: '\x1b' },
+            { label: 'Ctrl-C', key: '\x03' },
+        ];
+        const presetsEl = el('div', { class: 'mgrv-cast-presets' }, presets.map(p =>
+            el('button', { class: 'mgrv-chip', type: 'button', text: p.label,
+                onclick: () => this._sendManagerCast(p) })));
+        const castForm = el('form', { class: 'mgrv-cast-form',
+            onsubmit: (e) => { e.preventDefault(); this._sendManagerCast(); } }, [
+            this._mgrvCastInput,
+            el('button', { class: 'mgrv-send', type: 'submit', text: 'SEND' }),
+        ]);
+        this._mgrvCastEl = el('div', { class: 'mgrv-cast', hidden: '' }, [
+            el('div', { class: 'mgrv-label', text: 'TARGET COHORT' }),
+            this._mgrvCastCohortsEl,
+            el('div', { class: 'mgrv-label', text: 'COMMAND' }),
+            presetsEl,
+            castForm,
+            el('label', { class: 'mgrv-enter' }, [this._mgrvCastEnter, ' press Enter after sending']),
+        ]);
+
+        // Panes.
+        this._mgrvSessionsEl = el('div', { class: 'mgrv-pane mgrv-list' });
+        this._mgrvMonitorEl = el('div', { class: 'mgrv-pane', hidden: '' });
+        this._mgrvTodoListEl = el('div', { class: 'mgrv-todo-list' });
+        this._mgrvTodoInput = el('input', {
+            class: 'mgrv-input', type: 'text', autocomplete: 'off',
+            placeholder: 'Add a to-do for the fleet…',
+        });
+        const todoForm = el('form', { class: 'mgrv-todo-form',
+            onsubmit: (e) => {
+                e.preventDefault();
+                const text = this._mgrvTodoInput.value.trim();
+                if (text) { this._managerTodoOp({ op: 'add', text, source: 'user' }); this._mgrvTodoInput.value = ''; }
+            } }, [
+            this._mgrvTodoInput,
+            el('button', { class: 'mgrv-send', type: 'submit', text: '＋ ADD' }),
+        ]);
+        this._mgrvTodosEl = el('div', { class: 'mgrv-pane', hidden: '' }, [todoForm, this._mgrvTodoListEl]);
+
+        // Chat line into a session's terminal — defaults to the manager agent.
+        this._mgrvTargetSel = el('select', { class: 'mgrv-target', title: 'Which session receives the message' });
+        this._mgrvChatInput = el('input', {
+            class: 'mgrv-input', type: 'text', autocomplete: 'off', spellcheck: 'true',
+            placeholder: 'Message the manager agent — lands in its terminal…',
+        });
+        const chatForm = el('form', { class: 'mgrv-chat',
+            onsubmit: (e) => { e.preventDefault(); this._sendManagerChat(); } }, [
+            this._mgrvTargetSel,
+            this._mgrvChatInput,
+            el('button', { class: 'mgrv-send', type: 'submit', text: 'SEND ➤' }),
+        ]);
+
+        this._managerEl = el('div', { class: 'manager-view' }, [
+            this._mgrvHeadEl,
+            toolbar,
+            this._mgrvCastEl,
+            this._mgrvSessionsEl,
+            this._mgrvMonitorEl,
+            this._mgrvTodosEl,
+            chatForm,
+        ]);
+        this.termsEl.appendChild(this._managerEl);
+    }
+
+    _renderManagerView() {
+        if (this.viewMode !== 'manager' || !this._managerEl) return;
+        this._renderManagerHead();
+        const open = ((this._manager && this._manager.todos) || []).filter(t => !t.done).length;
+        this._mgrvTodoBadge.textContent = open ? String(open) : '';
+        this._mgrvTodoBadge.hidden = !open;
+        const sub = this._mgrvSub || 'sessions';
+        for (const b of this._mgrvSegBtns) b.classList.toggle('active', b.dataset.seg === sub);
+        this._mgrvSessionsEl.hidden = sub !== 'sessions';
+        this._mgrvMonitorEl.hidden = sub !== 'monitor';
+        this._mgrvTodosEl.hidden = sub !== 'todos';
+        if (sub === 'sessions') this._renderManagerSessions();
+        else if (sub === 'todos') this._renderManagerTodos();
+        else if (sub === 'monitor') this._renderManagerMonitor();
+        this._renderManagerTargets();
+        if (this._mgrvCastOpen) this._renderManagerCast();
+    }
+
+    _renderManagerHead() {
+        const d = this._manager;
+        if (!d || !d.counts || !d.counts.total) {
+            this._mgrvHeadEl.replaceChildren(el('div', { class: 'mgrv-empty',
+                text: 'No fleet yet — the supervisor reports sessions here as they open.' }));
+            return;
+        }
+        const c = d.counts;
+        const row = el('div', { class: 'fleet-row' });
+        row.appendChild(el('span', { class: 'fleet-title', text: `◉ FLEET · ${c.total}` }));
+        const mgrId = this._managerTabId();
+        const mgrS = mgrId != null && (d.sessions || []).find(s => s.id === mgrId);
+        if (mgrS) row.appendChild(el('span', { class: 'fleet-chip mgrv-mgr-chip', text: `◉ manager: ${mgrS.title}` }));
+        const chip = (label, n, cls) => {
+            if (n > 0) row.appendChild(el('span', { class: `fleet-chip ${cls}`, text: `${n} ${label}` }));
+        };
+        chip('working',    c.working,     'fleet-working');
+        chip('need input', c.attention,   'fleet-attention');
+        chip('stuck',      c.stuck,       'fleet-stuck');
+        chip('idle',       c.idle,        'fleet-idle');
+        chip('high ctx',   c.highContext, 'fleet-ctx');
+        chip('limited',    c.limited,     'fleet-limited');
+        this._mgrvHeadEl.replaceChildren(row);
+    }
+
+    _renderManagerSessions() {
+        const sessions = (this._manager && this._manager.sessions) || [];
+        if (!sessions.length) {
+            this._mgrvSessionsEl.replaceChildren(el('div', { class: 'mgrv-empty', text: 'No sessions yet.' }));
+            return;
+        }
+        const ago = (ms) => {
+            const s = Math.round(ms / 1000);
+            if (s < 60) return s + 's';
+            const m = Math.round(s / 60);
+            return m < 60 ? m + 'm' : Math.round(m / 60) + 'h';
+        };
+        const hhmm = (ms) => { const t = new Date(ms); return t.getHours() + ':' + String(t.getMinutes()).padStart(2, '0'); };
+        const statusLabel = (s) => ({
+            working: 'Working…', attention: 'Needs input', done: 'Awaiting next prompt', idle: 'Idle',
+        })[s] || 'Shell ready';
+        const ctxColor = (p) => p >= 80 ? '#ff4444' : p >= 50 ? '#f1c40f' : '#00e676';
+        const mgrId = this._managerTabId();
+        const rows = sessions.map(s => {
+            const flags = [];
+            if (s.id === mgrId) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-mgr', text: '◉ MGR' }));
+            if (s.stuck) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-stuck', text: 'STUCK' }));
+            if (s.attention) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-attn', text: 'NEEDS YOU' }));
+            if (s.highContext) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-ctx', text: 'HIGH CTX' }));
+            if (s.limited) {
+                const when = s.resumeAt ? `resume ${hhmm(s.resumeAt)}` : (s.limitResetAt ? `resets ${hhmm(s.limitResetAt)}` : 'limited');
+                flags.push(el('span', { class: 'mgrv-fl mgrv-fl-limit', text: '⏾ ' + when }));
+            }
+            const idle = (s.idleMs != null && (s.status === 'idle' || s.status === 'done')) ? ` · idle ${ago(s.idleMs)}` : '';
+            const ctx = s.ctxPct != null ? el('span', { class: 'mgrv-ctx', title: `Context ${s.ctxPct}% used` }, [
+                el('span', { class: 'mgrv-ctx-bar' }, [
+                    el('span', { style: `width:${s.ctxPct}%;background:${ctxColor(s.ctxPct)}` }),
+                ]),
+                el('span', { class: 'mgrv-ctx-pct', text: s.ctxPct + '%' }),
+            ]) : null;
+            const act = (label, fn, title) => el('button', {
+                class: 'mgrv-act', type: 'button', text: label, title: title || '',
+                onclick: (e) => { e.stopPropagation(); fn(); } });
+            return el('div', { class: 'mgrv-row', 'data-status': s.status || 'idle' }, [
+                el('span', { class: 'mgrv-dot' }),
+                el('div', { class: 'mgrv-body', onclick: () => this._openFromManager(s.id) }, [
+                    el('div', { class: 'mgrv-line1' }, [
+                        el('span', { class: 'mgrv-name', text: `#${s.id} ${s.title}` }),
+                        ...flags,
+                    ]),
+                    el('div', { class: 'mgrv-line2' }, [
+                        el('span', { class: 'mgrv-meta', text: statusLabel(s.status) + idle }),
+                        ctx,
+                    ]),
+                ]),
+                el('div', { class: 'mgrv-acts' }, [
+                    act('OPEN', () => this._openFromManager(s.id), 'Jump into this terminal'),
+                    act('INT', () => {
+                        this.bridge.input(INPUT_KIND.HOTKEY, { id: s.id, combo: 'ctrl+c' });
+                        this._mgrvToast('Ctrl-C → #' + s.id);
+                    }, 'Interrupt (Ctrl-C)'),
+                    act('CMP', () => {
+                        this.bridge.input(INPUT_KIND.TERM_KEYS, { id: s.id, text: '/compact' });
+                        setTimeout(() => this.bridge.input(INPUT_KIND.TERM_KEYS, { id: s.id, text: '\r' }), 160);
+                        this._mgrvToast('/compact → #' + s.id);
+                    }, 'Run /compact'),
+                    act('CAST', () => this._openManagerCast([s.id]), 'Broadcast starting from this session'),
+                ]),
+            ]);
+        });
+        this._mgrvSessionsEl.replaceChildren(...rows);
+    }
+
+    _openFromManager(id) {
+        this.viewMode = 'tabs';
+        try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        if (this.tabs.has(id)) this._activate(id);
+    }
+
+    // ── Manager to-dos (shared with the manager agent + mobile DASH) ────────
+    _renderManagerTodos() {
+        const todos = (this._manager && this._manager.todos) || [];
+        if (!todos.length) {
+            this._mgrvTodoListEl.replaceChildren(el('div', { class: 'mgrv-empty',
+                text: 'No to-dos. Add one above — the fleet manager sees it too.' }));
+            return;
+        }
+        this._mgrvTodoListEl.replaceChildren(...todos.map(td => el('div', {
+            class: 'mgrv-todo' + (td.done ? ' done' : '') }, [
+            el('button', { class: 'mgrv-todo-check', type: 'button', text: td.done ? '☑' : '☐',
+                onclick: () => this._managerTodoOp({ op: 'toggle', id: td.id }) }),
+            el('span', { class: 'mgrv-todo-text' }, [
+                td.text,
+                td.tab != null ? el('span', { class: 'mgrv-todo-tab', text: ` #${td.tab}` }) : null,
+                td.source === 'manager' ? el('span', { class: 'mgrv-todo-src', text: ' ◉ mgr' }) : null,
+            ]),
+            el('button', { class: 'mgrv-todo-del', type: 'button', text: '×',
+                onclick: () => this._managerTodoOp({ op: 'del', id: td.id }) }),
+        ])));
+    }
+
+    async _managerTodoOp(body) {
+        try {
+            const r = await this._managerApi('/api/manager/todo', body);
+            if (r && r.todos) {
+                if (!this._manager) this._manager = {};
+                this._manager.todos = r.todos;
+                this._renderManagerView();
+            }
+        } catch (_) { this._mgrvToast('To-do API unavailable on this server.'); }
+    }
+
+    // ── Manager monitor pane — agent browsers + localhost ports ─────────────
+    async _refreshManagerMonitor() {
+        const [instances, ports] = await Promise.all([
+            this._fetchBrowserInstances(),
+            this._managerApi('/api/ports').then(j => (j && j.data && j.data.ports) || []).catch(() => []),
+        ]);
+        this._mgrvMonitorData = { instances, ports };
+        this._renderManagerMonitor();
+    }
+
+    _renderManagerMonitor() {
+        if (!this._mgrvMonitorEl) return;
+        const d = this._mgrvMonitorData || { instances: [], ports: [] };
+        const cells = d.instances.length
+            ? d.instances.map(ins => {
+                const tab = this.tabs.get(Number(ins.tabId));
+                return el('div', { class: 'mon-cell mgrv-mon-cell' }, [
+                    el('div', { class: 'mon-bar' }, [
+                        el('span', { class: 'mon-title', text: (tab && tab.title) || ('tab ' + ins.tabId) }),
+                        el('span', { class: 'mon-url', text: ins.url || 'idle' }),
+                    ]),
+                ]);
+            })
+            : [el('div', { class: 'mgrv-empty', text: 'No agent browsers yet — `soa-browser open …` sessions appear here.' })];
+        const ports = d.ports.length
+            ? d.ports.map(p => el('button', {
+                class: 'mon-port', type: 'button',
+                title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                text: `:${p.port} — ${p.process}`,
+                onclick: async () => {
+                    try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(this, String(p.port)); }
+                    catch (err) { console.warn('[manager] preview open failed', err); }
+                } }))
+            : [el('div', { class: 'mgrv-empty', text: 'No open localhost ports.' })];
+        this._mgrvMonitorEl.replaceChildren(
+            el('div', { class: 'monitor-head', text: '◉ AGENT BROWSERS' }),
+            el('div', { class: 'mgrv-mon-grid' }, cells),
+            el('div', { class: 'monitor-head', text: '⊞ LOCALHOST PORTS' }),
+            el('div', { class: 'monitor-ports' }, ports),
+            el('div', { class: 'mgrv-hint', text: 'Live browser streams: ⋯ MORE → ⊡ MON.' }),
+        );
+    }
+
+    // ── Chat to a session (manager agent by default) ─────────────────────────
+    _renderManagerTargets() {
+        const sel = this._mgrvTargetSel;
+        if (!sel) return;
+        const sessions = (this._manager && this._manager.sessions) || [];
+        const mgrId = this._managerTabId();
+        const prev = sel.value;
+        sel.replaceChildren(...sessions.map(s => el('option', {
+            value: String(s.id),
+            text: (s.id === mgrId ? '◉ ' : '') + `#${s.id} ${s.title}`,
+        })));
+        // Keep the user's pick across re-renders; default to the manager tab.
+        if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+        else if (mgrId != null) sel.value = String(mgrId);
+    }
+
+    _sendManagerChat() {
+        const id = Number(this._mgrvTargetSel && this._mgrvTargetSel.value);
+        const text = ((this._mgrvChatInput && this._mgrvChatInput.value) || '').trim();
+        if (!id || !text) return;
+        this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text });
+        // Discrete Enter a beat later so the TUI submits instead of treating a
+        // glued CR as a pasted newline (same trick as the broadcast modal).
+        setTimeout(() => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: '\r' }), 160);
+        this._mgrvChatInput.value = '';
+        this.audio.play('granted');
+        this._mgrvToast('Sent to #' + id + '.');
+    }
+
+    // ── CAST — fan a command to a cohort ─────────────────────────────────────
+    _toggleManagerCast() {
+        this._mgrvCastOpen = !this._mgrvCastOpen;
+        if (!this._mgrvCastOpen) this._mgrvCastPre = null;
+        this._mgrvCastEl.hidden = !this._mgrvCastOpen;
+        if (this._mgrvCastOpen) { this._renderManagerCast(); this._mgrvCastInput.focus(); }
+    }
+
+    _openManagerCast(preIds) {
+        this._mgrvCastPre = Array.isArray(preIds) ? preIds : null;
+        if (this._mgrvCastPre) this._mgrvCohort = 'selected';
+        this._mgrvCastOpen = true;
+        this._mgrvCastEl.hidden = false;
+        this._renderManagerCast();
+        this._mgrvCastInput.focus();
+    }
+
+    _managerCohortIds(c) {
+        const ss = (this._manager && this._manager.sessions) || [];
+        if (c === 'selected') return (this._mgrvCastPre || []).slice();
+        if (c === 'all') return ss.map(s => s.id);
+        if (c === 'working') return ss.filter(s => s.status === 'working').map(s => s.id);
+        const key = { attention: 'attention', stuck: 'stuck', idle: 'idle', highContext: 'highContext' }[c];
+        return key ? ss.filter(s => s[key]).map(s => s.id) : [];
+    }
+
+    _renderManagerCast() {
+        const cohorts = [
+            ['all', 'All'], ['attention', 'Needs you'], ['stuck', 'Stuck'],
+            ['idle', 'Idle'], ['working', 'Working'], ['highContext', 'High ctx'],
+        ];
+        if (this._mgrvCastPre) cohorts.unshift(['selected', '#' + this._mgrvCastPre.join(', #')]);
+        this._mgrvCastCohortsEl.replaceChildren(...cohorts.map(([key, label]) => {
+            const n = this._managerCohortIds(key).length;
+            return el('button', {
+                class: 'mgrv-chip' + (key === this._mgrvCohort ? ' on' : '') + (n ? '' : ' empty'),
+                type: 'button', text: `${label} · ${n}`,
+                onclick: () => { this._mgrvCohort = key; this._renderManagerCast(); },
+            });
+        }));
+    }
+
+    _sendManagerCast(preset) {
+        const ids = this._managerCohortIds(this._mgrvCohort);
+        if (!ids.length) { this._mgrvToast('No sessions in that cohort.'); return; }
+        if (preset && preset.key != null) {
+            this._broadcastRaw(preset.key, ids);
+        } else {
+            const text = preset ? preset.text : ((this._mgrvCastInput.value) || '').trim();
+            if (!text) { this._mgrvCastInput.focus(); return; }
+            this._broadcastRaw(text, ids);
+            const wantEnter = preset ? true : this._mgrvCastEnter.checked;
+            if (wantEnter) setTimeout(() => this._broadcastRaw('\r', ids), 160);
+            if (!preset) this._mgrvCastInput.value = '';
+        }
+        this.audio.play('granted');
+        this._mgrvToast(`Sent to ${ids.length} session${ids.length > 1 ? 's' : ''}.`);
+    }
+
+    _mgrvToast(text) {
+        if (!this._managerEl) return;
+        if (!this._mgrvToastEl || !this._mgrvToastEl.isConnected) {
+            this._mgrvToastEl = el('div', { class: 'mgrv-toast' });
+            this._managerEl.appendChild(this._mgrvToastEl);
+        }
+        this._mgrvToastEl.textContent = text;
+        this._mgrvToastEl.classList.add('show');
+        clearTimeout(this._mgrvToastTimer);
+        this._mgrvToastTimer = setTimeout(() => this._mgrvToastEl.classList.remove('show'), 1800);
     }
 
     _renderTiles() {
@@ -3421,6 +3915,12 @@ class Shell {
     // only: it never sends anything, so it can't disturb the daemon or the
     // sessions it reports on.
     _onManager(d) {
+        // A frame from an older server build may omit todos/managerTabId —
+        // keep the last known values instead of wiping the manager view.
+        if (d && !d.todos && this._manager && this._manager.todos) d.todos = this._manager.todos;
+        if (d && d.managerTabId == null && this._manager && this._manager.managerTabId != null) {
+            d.managerTabId = this._manager.managerTabId;
+        }
         this._manager = d;
         // Fold each agent's group (server-resolved: cwd auto-group or manual
         // override) into a client map. Only re-render structure when the group
@@ -3434,6 +3934,7 @@ class Shell {
         }
         this._agentGroup = groups;
         if (this.viewMode === 'tiles') this._renderFleetBar();
+        if (this.viewMode === 'manager') this._renderManagerView();
         if (sig !== this._groupSig) {
             this._groupSig = sig;
             if (this.viewMode === 'tiles') this._renderTiles();
@@ -3784,7 +4285,7 @@ async function bootServerMode({ backend, token }) {
         $('#boot').classList.add('hidden');
         $('#shell').classList.remove('hidden');
         shell._fitActive();
-        if (shell.viewMode === 'tiles') shell._applyViewMode();
+        if (shell.viewMode === 'tiles' || shell.viewMode === 'manager') shell._applyViewMode();
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 
