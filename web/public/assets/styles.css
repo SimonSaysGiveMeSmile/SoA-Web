@@ -83,10 +83,6 @@ html, body {
 }
 .boot-grid {
   position: absolute; inset: 0;
-  background-image:
-    linear-gradient(var(--soa-line-soft) 1px, transparent 1px),
-    linear-gradient(90deg, var(--soa-line-soft) 1px, transparent 1px);
-  background-size: 40px 40px;
   opacity: 0.7;
   pointer-events: none;
 }
@@ -1740,9 +1736,6 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   border-radius: 3px;
   max-height: 4.5em; overflow: hidden;
   white-space: pre-wrap; word-break: break-all;
-  /* fade the bottom so a clipped last line reads as "more below" */
-  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
 }
 .tile-preview:empty { display: none; }
 

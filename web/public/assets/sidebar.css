@@ -20,7 +20,7 @@
 .kv .v { color: var(--soa-fg); }
 .kv.warn .v { color: var(--soa-yellow); }
 .bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
-.bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--soa-accent), var(--soa-green)); transition: width 0.5s ease; }
+.bar-fill { display: block; height: 100%; background: var(--soa-accent); transition: width 0.5s ease; }
 
 /* ── Mobile QR widget ───────────────────────────────────────────────── */
 .mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }
