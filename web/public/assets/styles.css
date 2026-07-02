@@ -2021,6 +2021,14 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   text-align: center; padding: 40px; color: rgba(var(--soa-accent-rgb), 0.55);
   background: var(--soa-bg); font-size: 13px;
 }
+.pv-notice { grid-auto-flow: row; gap: 14px; align-content: center; }
+.pv-notice-msg { max-width: 360px; line-height: 1.5; white-space: pre-line; color: var(--soa-fg); }
+.pv-notice-link {
+  color: var(--soa-accent); text-decoration: none;
+  border: 1px solid var(--soa-accent-dim); border-radius: 3px;
+  padding: 6px 14px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
+}
+.pv-notice-link:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.08); }
 
 /* ── New-tab folder picker ─────────────────────────────────────── */
 .soa-folder-picker { width: min(560px, calc(100vw - 32px)); }

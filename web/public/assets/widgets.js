@@ -1002,7 +1002,7 @@ class PortScanWidget extends Widget {
                         title: `Open localhost:${p.port} (${p.process}) in the preview`,
                         text: `:${p.port} — ${p.process}`,
                         onclick: async () => {
-                            try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(null, String(p.port)); }
+                            try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(null, String(p.port)); }
                             catch (_) {}
                         },
                     }));

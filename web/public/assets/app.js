@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=25';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=26';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=21';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -2905,7 +2905,7 @@ class Shell {
             title: `Open localhost:${p.port} (${p.process}) in the preview`,
             text: `:${p.port} — ${p.process}`,
             onclick: async () => {
-                try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(this, String(p.port)); }
+                try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(this, String(p.port)); }
                 catch (err) { console.warn('[monitor] preview open failed', err); }
             },
         })));
@@ -3186,7 +3186,7 @@ class Shell {
             if (!target) return;
         }
         try {
-            const wp = await import('/assets/previewPanel.js?v=2');
+            const wp = await import('/assets/previewPanel.js?v=3');
             wp.openPreviewModal(this, target);
         } catch (err) { console.warn('[preview] open failed', err); }
     }
@@ -3534,7 +3534,7 @@ class Shell {
                         text: `:${p.port} — ${p.process}`,
                         onclick: async () => {
                             try {
-                                const wp = await import('/assets/previewPanel.js?v=2');
+                                const wp = await import('/assets/previewPanel.js?v=3');
                                 wp.openPreviewModal(this, String(p.port));
                             } catch (err) { console.warn('[ports] preview open failed', err); }
                         },
