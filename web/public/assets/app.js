@@ -420,9 +420,14 @@ class Shell {
         // Reset on reload — we want the guard back each time the app boots.
         this._skipCloseConfirm = false;
 
-        // View mode: 'tabs' (classic) or 'tiles' (dashboard grid).
+        // View mode: 'tabs' (classic) or 'tiles' (dashboard grid). The tiles view
+        // has a grouped sub-mode: one horizontal-scrolling row per category.
         this.viewMode = 'tabs';
-        try { this.viewMode = localStorage.getItem('soa_web_view_mode') || 'tabs'; } catch (_) {}
+        this.tilesGrouped = false;
+        try {
+            this.viewMode = localStorage.getItem('soa_web_view_mode') || 'tabs';
+            this.tilesGrouped = localStorage.getItem('soa_web_tiles_grouped') === '1';
+        } catch (_) {}
         // Virtualize background tabs: only the on-screen terminal parses live;
         // hidden tabs buffer raw output and catch up on switch. Cuts ~N live
         // ANSI parsers down to ~1 with many sessions. Escape hatch:
@@ -2712,8 +2717,14 @@ class Shell {
     // ── Tiles view ──────────────────────────────────────────────────────
 
     _toggleViewMode() {
-        this.viewMode = this.viewMode === 'tiles' ? 'tabs' : 'tiles';
-        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        // Cycle: tabs → dashboard (flat tiles) → grouped (category rows) → tabs.
+        if (this.viewMode !== 'tiles') { this.viewMode = 'tiles'; this.tilesGrouped = false; }
+        else if (!this.tilesGrouped) { this.tilesGrouped = true; }
+        else { this.viewMode = 'tabs'; this.tilesGrouped = false; }
+        try {
+            localStorage.setItem('soa_web_view_mode', this.viewMode);
+            localStorage.setItem('soa_web_tiles_grouped', this.tilesGrouped ? '1' : '0');
+        } catch (_) {}
         this._applyViewMode();
         this._updateViewBtn();
         this.audio.play('panels');
@@ -2722,12 +2733,16 @@ class Shell {
     _updateViewBtn() {
         const btn = $('#toggle-view');
         if (!btn) return;
-        if (this.viewMode === 'tiles') {
+        // Icon shows the NEXT view in the cycle.
+        if (this.viewMode !== 'tiles') {
+            btn.setAttribute('data-icon', '⊞');
+            btn.title = 'Switch to dashboard view';
+        } else if (!this.tilesGrouped) {
+            btn.setAttribute('data-icon', '▤');
+            btn.title = 'Switch to grouped view';
+        } else {
             btn.setAttribute('data-icon', '☰');
             btn.title = 'Switch to tabs view';
-        } else {
-            btn.setAttribute('data-icon', '⊞');
-            btn.title = 'Switch to tiles view';
         }
     }
 
@@ -3414,40 +3429,51 @@ class Shell {
             this.termsEl.appendChild(this._tilesGridEl);
         }
         this._tilesGridEl.style.display = '';
+        this._tilesGridEl.classList.toggle('tiles-grouped', !!this.tilesGrouped);
         this._installTilesDrop();
         this._updateDashboardPortInfo();
         const existing = new Map();
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             existing.set(Number(node.dataset.tileId), node);
         }
-        // Bucket tiles by group, preserving this.order within each group. When
-        // there's more than one group we emit a full-width collapsible header
-        // before each group's tiles so the grid reads as one row per group.
-        const buckets = new Map();
-        for (const id of this.order) {
-            const g = this._agentGroup.get(id) || 'ungrouped';
-            if (!buckets.has(g)) buckets.set(g, []);
-            buckets.get(g).push(id);
-        }
-        const groupNames = [...buckets.keys()].sort((a, b) => (
-            a === 'ungrouped' ? 1 : b === 'ungrouped' ? -1 : a.localeCompare(b)
-        ));
-        const showHeaders = groupNames.length > 1;
+        // Diff-render: reuse a live tile node when we already have one.
+        const takeTile = (id) => {
+            let node = existing.get(id);
+            if (node) { existing.delete(id); this._updateTileNode(node, id); }
+            else node = this._createTileNode(id);
+            node.style.display = '';
+            return node;
+        };
         const fragment = document.createDocumentFragment();
-        for (const g of groupNames) {
-            const ids = buckets.get(g);
-            if (showHeaders) fragment.appendChild(this._tileGroupHeader(g, ids.length));
-            const collapsed = showHeaders && this._collapsedGroups.has(g);
-            for (const id of ids) {
-                let node = existing.get(id);
-                if (node) {
-                    existing.delete(id);
-                    this._updateTileNode(node, id);
-                } else {
-                    node = this._createTileNode(id);
+        if (this.tilesGrouped) {
+            // Grouped view: ONE horizontal-scrolling row per category. Tiles keep
+            // their dashboard size; the user scrolls each category sideways.
+            const buckets = new Map();
+            for (const id of this.order) {
+                const g = this._agentGroup.get(id) || 'ungrouped';
+                if (!buckets.has(g)) buckets.set(g, []);
+                buckets.get(g).push(id);
+            }
+            const groupNames = [...buckets.keys()].sort((a, b) => (
+                a === 'ungrouped' ? 1 : b === 'ungrouped' ? -1 : a.localeCompare(b)
+            ));
+            for (const g of groupNames) {
+                const ids = buckets.get(g);
+                const collapsed = this._collapsedGroups.has(g);
+                const strip = el('div', { class: 'cat-strip' });
+                if (!collapsed) for (const id of ids) {
+                    const n = takeTile(id); n.classList.add('cat-tile'); strip.appendChild(n);
                 }
-                node.style.display = collapsed ? 'none' : '';
-                fragment.appendChild(node);
+                fragment.appendChild(el('div', { class: 'cat-row' + (collapsed ? ' collapsed' : '') }, [
+                    this._tileGroupHeader(g, ids.length),
+                    strip,
+                ]));
+            }
+        } else {
+            // Flat dashboard: every tile in one wrapping grid, no categories.
+            for (const id of this.order) {
+                const n = takeTile(id); n.classList.remove('cat-tile');
+                fragment.appendChild(n);
             }
         }
         for (const old of existing.values()) old.remove();
