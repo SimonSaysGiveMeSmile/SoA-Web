@@ -780,7 +780,7 @@ function scheduleAutoResume(restoredTabs) {
 function handleInput(session, d, ws) {
     const mgr = session.tabMgr;
     if (d.kind === INPUT_KIND.TERM_RESIZE) {
-        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(resizes SHARED pty; desktop will reflow)');
+        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(shared pty resizes to MAX across live clients)');
     } else if (d.kind === INPUT_KIND.TERM_KEYS) {
         dbg('input', 'TERM_KEYS tab=' + d.id, JSON.stringify((d.text || '').slice(0, 16)));
     } else if (d.kind) {
@@ -867,7 +867,28 @@ function handleInput(session, d, ws) {
         }
         case INPUT_KIND.TERM_RESIZE: {
             const tab = mgr.get(d.id);
-            if (tab) tab.resize(Math.max(2, d.cols | 0), Math.max(2, d.rows | 0));
+            if (!tab) break;
+            const cols = Math.max(2, d.cols | 0);
+            const rows = Math.max(2, d.rows | 0);
+            // Remember THIS client's desired size for this tab.
+            if (ws) {
+                if (!ws._tabSizes) ws._tabSizes = new Map();
+                ws._tabSizes.set(d.id, { cols, rows });
+            }
+            // Resize the SHARED pty to the LARGEST size any live client wants
+            // for this tab — a narrow phone can then never clip the wide
+            // desktop (the "black void on the right when a mobile is attached,
+            // and it stays while the desktop is idle" bug). Smaller clients
+            // just scroll/scale; the widest surface stays whole.
+            let maxCols = cols, maxRows = rows;
+            for (const sock of session.sockets) {
+                if (!sock || sock.readyState !== 1 || !sock._tabSizes) continue;
+                const sz = sock._tabSizes.get(d.id);
+                if (!sz) continue;
+                if (sz.cols > maxCols) maxCols = sz.cols;
+                if (sz.rows > maxRows) maxRows = sz.rows;
+            }
+            tab.resize(maxCols, maxRows);
             break;
         }
         case INPUT_KIND.HOTKEY: {
