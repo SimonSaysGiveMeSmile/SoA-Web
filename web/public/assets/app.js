@@ -18,8 +18,8 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=27';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=19';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=28';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=20';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=21';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=1';

@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=19';
+import { t as tr } from '/assets/i18n.js?v=20';
 import { getSettings } from '/assets/settings.js?v=17';
 
 const $el = (tag, props = {}, children = []) => {
@@ -820,6 +820,8 @@ class LocationGlobeWidget extends Widget {
         this._offscreen = false;  // set by IntersectionObserver in _boot
         this._geoFails = 0;       // consecutive /api/geo failures (backoff)
         this._geoNextAt = 0;      // epoch ms before which tick() skips the fetch
+        this._peerPins = new Map(); // "lat,lon" -> globe pin for each connected client
+        this._peerCount = null;   // total connected clients (null until first poll)
         this._onUserLocation = e => this.setUserLocation(e.detail.lat, e.detail.lon, e.detail.name || 'You');
         window.addEventListener('soa:user-location', this._onUserLocation);
         this._bootPromise = this._boot();
@@ -921,6 +923,10 @@ class LocationGlobeWidget extends Widget {
 
     async tick() {
         if (isSandbox()) { this._renderSandbox(); return; }
+        // Multiuser peer pins refresh every tick (~30s), independent of the geo
+        // throttle below — clients connect/disconnect far more often than the
+        // server's own egress location changes.
+        this._refreshPeers();
         // /api/geo reports the server's public IP/location — effectively static.
         // Once we have a fix, recheck only every ~10 min; on failure (e.g. the
         // upstream 502s) back off exponentially instead of retrying every cycle.
@@ -1012,13 +1018,53 @@ class LocationGlobeWidget extends Widget {
         } catch (_) {}
     }
 
+    // Pin every connected client on the globe (multiuser). /api/geo/peers returns
+    // one city-level entry per distinct public IP (LAN/localhost clients arrive
+    // as a single "self" cluster at the server location, which the server pin
+    // already marks, so we skip drawing it here). Pins are diffed by rounded
+    // coord so unchanged peers aren't churned each poll.
+    async _refreshPeers() {
+        if (!this.globe || this._destroyed) return;
+        let data;
+        try { ({ data } = await jget('/api/geo/peers')); }
+        catch (_) { return; }
+        const peers = (data && data.peers) || [];
+        const want = new Map();
+        for (const p of peers) {
+            if (p.self || p.lat == null || p.lon == null) continue;
+            want.set(`${p.lat.toFixed(2)},${p.lon.toFixed(2)}`, p);
+        }
+        for (const [k, pin] of this._peerPins) {
+            if (want.has(k)) continue;
+            try { if (pin && pin.remove) pin.remove(); } catch (_) {}
+            this._peerPins.delete(k);
+        }
+        for (const [k, p] of want) {
+            if (this._peerPins.has(k)) continue;
+            try {
+                const label = (p.city || p.country || 'peer') + (p.count > 1 ? ` ×${p.count}` : '');
+                this._peerPins.set(k, this.globe.addPin(p.lat, p.lon, label, 1.0));
+            } catch (_) { /* globe not ready yet — retried next poll */ }
+        }
+        this._peerCount = (data && typeof data.total === 'number')
+            ? data.total
+            : peers.reduce((n, p) => n + (p.count || 1), 0);
+        this._refreshMeta(this._lastGeo || null);
+    }
+
     _refreshMeta(geo) {
-        if (!geo) { this._meta.textContent = '—'; return; }
-        const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
-        const coord = (geo.lat != null && geo.lon != null)
-            ? `${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)}`
-            : '—';
-        this._meta.textContent = `${place}  ·  ${coord}`;
+        let base = '—';
+        if (geo) {
+            const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
+            const coord = (geo.lat != null && geo.lon != null)
+                ? `${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)}`
+                : '—';
+            base = `${place}  ·  ${coord}`;
+        }
+        const online = (this._peerCount != null)
+            ? `  ·  ${this._peerCount} ${tr('widget.globe.online')}`
+            : '';
+        this._meta.textContent = base + online;
     }
 
     destroy() {
@@ -1026,6 +1072,8 @@ class LocationGlobeWidget extends Widget {
         if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
         if (this._onResize) window.removeEventListener('resize', this._onResize);
         if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);
+        for (const pin of this._peerPins.values()) { try { if (pin && pin.remove) pin.remove(); } catch (_) {} }
+        this._peerPins.clear();
         try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
         super.destroy();
     }

@@ -110,6 +110,64 @@ async function geoInfo() {
     return data;
 }
 
+// True for loopback / RFC1918 / link-local / IPv6 ULA addresses — anything that
+// can't be geolocated by a public IP service. Callers attribute these to the
+// server's own egress location instead (they share the machine/LAN).
+function isPrivateIp(ip) {
+    if (!ip) return true;
+    ip = String(ip).replace(/^::ffff:/i, '').trim();
+    if (ip === '::1' || ip === '127.0.0.1' || ip.startsWith('127.')) return true;
+    if (ip.startsWith('10.') || ip.startsWith('192.168.')) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+    if (ip.startsWith('169.254.')) return true;                 // IPv4 link-local
+    if (/^(fc|fd)/i.test(ip) || /^fe8/i.test(ip)) return true;  // IPv6 ULA / link-local
+    return false;
+}
+
+// Geolocate an ARBITRARY IP (a connected client), cached per-IP for 6h so a
+// busy /api/geo/peers poll never hammers the upstream. Private/loopback IPs
+// return null (not geolocatable). Failures are negatively cached to avoid
+// retry storms. Mirrors geoInfo()'s ipinfo.io response shape.
+const IP_GEO_TTL_MS = 6 * 60 * 60 * 1000;
+const _ipGeoCache = new Map();
+async function geoForIp(ip) {
+    if (isPrivateIp(ip)) return null;
+    ip = String(ip).replace(/^::ffff:/i, '').trim();
+    const now = Date.now();
+    const cached = _ipGeoCache.get(ip);
+    if (cached && (now - cached.t) < IP_GEO_TTL_MS) return cached.data;
+    const base = (process.env.SOA_WEB_GEO_IP_BASE || 'https://ipinfo.io').replace(/\/+$/, '');
+    const url = `${base}/${encodeURIComponent(ip)}/json`;
+    let data = null;
+    try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 4000);
+        let body;
+        try {
+            const r = await fetch(url, { signal: ctl.signal, headers: { accept: 'application/json' } });
+            if (!r.ok) throw new Error('geo ' + r.status);
+            body = await r.json();
+        } finally { clearTimeout(t); }
+        let lat = null, lon = null;
+        if (body && typeof body.loc === 'string' && body.loc.includes(',')) {
+            const [a, b] = body.loc.split(',').map(Number);
+            if (isFinite(a) && isFinite(b)) { lat = a; lon = b; }
+        }
+        if (lat != null) {
+            data = {
+                city: (body && body.city) || null,
+                region: (body && body.region) || null,
+                country: (body && body.country) || null,
+                lat, lon,
+            };
+        }
+    } catch (_) {
+        data = null;   // negative-cache below so we don't retry every poll
+    }
+    _ipGeoCache.set(ip, { t: now, data });
+    return data;
+}
+
 function gitCommits(cwd, limit = 8) {
     return new Promise(resolve => {
         const safeCwd = cwd && path.isAbsolute(cwd) ? cwd : process.cwd();
@@ -296,4 +354,4 @@ function mount(app, requireAuthed) {
     });
 }
 
-module.exports = { mount, setSoaPort, sys, cpuInfo, ramInfo, netInfo, gitCommits, geoInfo };
+module.exports = { mount, setSoaPort, sys, cpuInfo, ramInfo, netInfo, gitCommits, geoInfo, geoForIp, isPrivateIp };

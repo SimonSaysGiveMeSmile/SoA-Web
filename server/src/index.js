@@ -260,6 +260,44 @@ app.get('/api/devices', requireAuthed, (req, res) => {
     res.json({ ok: true, count: devices.length, devices });
 });
 
+// Approximate location of every connected client, for the WorldView globe's
+// multiuser pins. One entry per DISTINCT public IP (city-level, from ipinfo) —
+// LAN/localhost clients collapse into a single "local" cluster at the server's
+// own egress location. Raw IPs are never returned: only lat/lon/city/country +
+// a device count, so a peer can be pinned without being identified.
+app.get('/api/geo/peers', requireAuthed, async (req, res) => {
+    const byIp = new Map();   // public IP -> live-socket count
+    let localCount = 0;       // LAN/localhost sockets (server's own location)
+    for (const s of sessions.sessions.values()) {
+        for (const ws of s.sockets) {
+            if (!ws || ws.readyState !== 1) continue;
+            const ip = ws._remoteIp || '';
+            if (!ip || sysinfo.isPrivateIp(ip)) { localCount++; continue; }
+            byIp.set(ip, (byIp.get(ip) || 0) + 1);
+        }
+    }
+    const peers = [];
+    if (localCount > 0) {
+        try {
+            const g = await sysinfo.geoInfo();
+            if (g && g.lat != null) {
+                peers.push({ lat: g.lat, lon: g.lon, city: g.city, region: g.region, country: g.country, count: localCount, self: true });
+            }
+        } catch (_) { /* server geo unavailable — skip the local cluster */ }
+    }
+    // Cap the distinct-IP fan-out so a flood of connections can't spray the
+    // upstream; per-IP results are cached 6h so this is cheap in steady state.
+    const ips = [...byIp.keys()].slice(0, 64);
+    const geos = await Promise.all(ips.map(ip => sysinfo.geoForIp(ip).catch(() => null)));
+    geos.forEach((g, i) => {
+        if (g && g.lat != null) {
+            peers.push({ lat: g.lat, lon: g.lon, city: g.city, region: g.region, country: g.country, count: byIp.get(ips[i]) });
+        }
+    });
+    const total = peers.reduce((n, p) => n + (p.count || 1), 0);
+    res.json({ ok: true, data: { peers, total, locatable: peers.length } });
+});
+
 // Aggregate per-user stats for the profile panel. /api/devices only ever sees
 // the CALLER's own session sockets (and a browser's WS may bind to the primary
 // session, not its cookie session — so that endpoint reads 0 for an API caller).
@@ -498,6 +536,12 @@ function _broadcastDeviceCount(session, excludeWs) {
 function onWsConnect(ws, session, req) {
     ws._connectedAt = Date.now();
     ws._userAgent = (req && req.headers && req.headers['user-agent']) || '';
+    // Real client IP for the WorldView peer map. Behind cloudflared the visitor
+    // IP arrives as CF-Connecting-IP; LAN/localhost clients keep their private
+    // address (geolocated to the server's egress in /api/geo/peers).
+    const _h = (req && req.headers) || {};
+    ws._remoteIp = (_h['cf-connecting-ip'] || (_h['x-forwarded-for'] || '').split(',')[0]
+        || (req && req.socket && req.socket.remoteAddress) || '').toString().trim();
     session.attachSocket(ws);
     session.touch();
     ws.isAlive = true;
