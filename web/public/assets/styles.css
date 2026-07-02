@@ -425,10 +425,13 @@ html, body {
 #more-menu .more-item {
     display: flex;
     align-items: center;
-    gap: 10px;
+    position: relative;
     width: 100%;
-    justify-content: flex-start;
-    padding: 9px 12px;
+    /* Icon + label are absolutely pinned (below) so the hidden raw label text —
+       which collapses to 0 on the <button> rows but renders a few px on the <a>
+       Download row — can't push one row's label out of alignment. */
+    padding: 0 12px 0 40px;
+    min-height: 36px;
     box-sizing: border-box;
     background: transparent;
     color: var(--soa-accent);
@@ -441,7 +444,7 @@ html, body {
 #more-menu .more-item.active { background: rgba(var(--soa-accent-rgb), 0.14); border-color: var(--soa-accent); }
 #more-menu .more-item::before {
     content: "";
-    flex: 0 0 18px;
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
     width: 18px; height: 18px;
     background: currentColor;
     -webkit-mask: var(--mi-icon) center / contain no-repeat;
@@ -449,6 +452,7 @@ html, body {
 }
 #more-menu .more-item::after {
     content: attr(data-label);
+    position: absolute; left: 40px; top: 50%; transform: translateY(-50%);
     font-family: var(--font-display);
     font-size: 11px;
     letter-spacing: 0.18em;
