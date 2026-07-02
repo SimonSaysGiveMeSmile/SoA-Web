@@ -4488,6 +4488,10 @@ function renderMobileWelcome() {
                 el('a', { class: 'mwel-ghost', href: 'https://github.com/SimonSaysGiveMeSmile/SoA-Web', target: '_blank', rel: 'noopener', text: 'github ↗' }),
                 sandboxBtn,
             ]),
+            el('p', { class: 'mwel-credit' }, [
+                'Made by ',
+                el('a', { class: 'mwel-credit-link', href: 'https://github.com/SimonSaysGiveMeSmile', target: '_blank', rel: 'noopener', text: 'Simon Says ↗' }),
+            ]),
         ]),
     ]);
     document.body.appendChild(view);

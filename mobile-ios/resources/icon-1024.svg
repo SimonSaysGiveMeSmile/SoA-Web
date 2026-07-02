@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="75%">
+      <stop offset="0%"  stop-color="#161616"/>
+      <stop offset="55%" stop-color="#0a0a0a"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="45%" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- full-bleed background, no alpha -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <circle cx="512" cy="470" r="430" fill="url(#glow)"/>
+
+  <g transform="translate(512 470)" filter="url(#soft)">
+    <!-- outer diamond -->
+    <rect x="-250" y="-250" width="500" height="500" rx="18" transform="rotate(45)"
+          fill="none" stroke="#ffffff" stroke-width="26"/>
+    <!-- inner diamond -->
+    <rect x="-142" y="-142" width="284" height="284" rx="12" transform="rotate(45)"
+          fill="none" stroke="#ffffff" stroke-width="16" opacity="0.55"/>
+    <!-- core -->
+    <circle r="46" fill="#ffffff"/>
+  </g>
+
+  <text x="512" y="900" text-anchor="middle"
+        font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="92" letter-spacing="26" fill="#ffffff" opacity="0.92">SOA</text>
+</svg>

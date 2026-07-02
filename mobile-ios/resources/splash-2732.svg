@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="2732" height="2732" viewBox="0 0 2732 2732">
+  <defs>
+    <radialGradient id="g" cx="50%" cy="50%" r="42%">
+      <stop offset="0%"  stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="55%" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="2732" height="2732" fill="#000000"/>
+  <circle cx="1366" cy="1366" r="900" fill="url(#g)"/>
+  <g transform="translate(1366 1300)">
+    <rect x="-300" y="-300" width="600" height="600" rx="20" transform="rotate(45)"
+          fill="none" stroke="#ffffff" stroke-width="20"/>
+    <rect x="-170" y="-170" width="340" height="340" rx="14" transform="rotate(45)"
+          fill="none" stroke="#ffffff" stroke-width="12" opacity="0.5"/>
+    <circle r="52" fill="#ffffff"/>
+  </g>
+  <text x="1366" y="1820" text-anchor="middle"
+        font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="86" letter-spacing="30" fill="#ffffff" opacity="0.72">SON OF ANTON</text>
+</svg>

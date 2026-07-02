@@ -1237,6 +1237,11 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
     padding-bottom: 2px;
 }
 .welcome-link:hover { color: var(--soa-accent); border-color: rgba(var(--soa-accent-rgb), 0.55); }
+
+/* Creator signature — subtle footer credit on the desktop welcome wizard. */
+.welcome-credit { margin: 16px 0 0; text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; color: rgba(var(--soa-accent-rgb), 0.6); }
+.welcome-credit a { color: var(--soa-accent); text-decoration: none; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.3); transition: text-shadow 0.2s, border-color 0.2s; }
+.welcome-credit a:hover { text-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.6); border-color: var(--soa-accent); }
 .welcome-enter {
     background: var(--soa-accent);
     color: var(--soa-bg);
@@ -2139,6 +2144,11 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   color: var(--soa-accent-dim); text-decoration: none;
 }
 .mwel-ghost:hover, .mwel-ghost:active { color: var(--soa-accent); }
+
+/* Creator signature — subtle footer credit on the mobile welcome. */
+.mwel-credit { margin: 14px 0 2px; text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; color: var(--soa-accent-dim); opacity: 0.78; }
+.mwel-credit-link { color: var(--soa-accent); text-decoration: none; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.3); transition: text-shadow 0.2s, border-color 0.2s; }
+.mwel-credit-link:hover, .mwel-credit-link:active { text-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.6); border-color: var(--soa-accent); }
 
 /* ── Tron vibe: neon line-grid + accent glow (no CRT scanlines, no gradients) ── */
 .mwel { isolation: isolate; }
