@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fleet HEARTBEAT — runs scripts/soa-heartbeat every 10 min (600s). Mechanical
+  blocker scan across every tab (needs-input / stuck / usage-limited / high-ctx /
+  API errors / exited) + a compact per-tab report the manager reads to judge
+  PRD-adherence. Auto-soa-msg's the user ONLY on a fleet-wide blocker spike;
+  individual blockers are resolved silently by the manager agent.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.heartbeat.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.heartbeat</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-heartbeat</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/heartbeat.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/heartbeat.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
