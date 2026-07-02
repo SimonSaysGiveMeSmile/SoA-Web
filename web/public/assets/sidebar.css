@@ -22,6 +22,15 @@
 .bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--soa-accent); transition: width 0.5s ease; }
 
+/* ── CLAUDE USAGE widget ────────────────────────────────────────────── */
+.claude-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.18em; }
+.claude-head-l { color: var(--soa-accent-dim); }
+.claude-reset { color: var(--soa-accent); letter-spacing: 0.06em; white-space: nowrap; }
+.claude-reset.warn { color: var(--soa-yellow); }
+.claude-bar { margin-top: 5px; }
+.claude-sub { margin-top: 5px; font-family: var(--font-mono); font-size: 10.5px; color: var(--soa-fg); letter-spacing: 0.03em; }
+.claude-spark { display: block; width: 100%; height: 34px; margin: 7px 0 5px; background: rgba(var(--soa-accent-rgb), 0.04); border: 1px solid rgba(var(--soa-accent-rgb), 0.14); }
+
 /* ── Mobile QR widget ───────────────────────────────────────────────── */
 .mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }
 .mqr-status .mqr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--soa-accent-dim); }

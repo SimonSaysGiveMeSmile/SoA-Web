@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=17';
+import { t as tr } from '/assets/i18n.js?v=19';
 import { getSettings } from '/assets/settings.js?v=17';
 
 const $el = (tag, props = {}, children = []) => {
@@ -207,6 +207,140 @@ class ClockWidget extends Widget {
             ['DATE', date],
             ['UTC', utc],
         ]);
+    }
+}
+
+// ── CLAUDE USAGE ─────────────────────────────────────────────────────────
+// Live Claude token usage, read from the local transcripts by /api/claude-usage.
+// Leads with the 5-hour rolling window (Claude's usage-limit block) + a reset
+// countdown, then today's totals, a live burn rate, top model, and a per-minute
+// sparkline. Cost is shown small and labelled "≈" — it's an API-equivalent
+// estimate, not a bill (a Max/Pro seat is flat-rate).
+const _fmtTok = n => {
+    n = n || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k';
+    return String(Math.round(n));
+};
+const _fmtUsd = n => {
+    n = n || 0;
+    if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
+    if (n >= 100) return '$' + n.toFixed(0);
+    return '$' + n.toFixed(2);
+};
+const _fmtDur = ms => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+};
+
+class ClaudeUsageWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.claude', title: 'CLAUDE', parent, intervalMs: 4000 });
+        // Persistent DOM — tick() only updates text/width/canvas so the
+        // sparkline never flickers on refresh.
+        this._reset = $el('span', { class: 'claude-reset', text: '—' });
+        this._fill = $el('span', { class: 'bar-fill' });
+        this._sub = $el('div', { class: 'claude-sub', text: '—' });
+        this._spark = $el('canvas', { class: 'claude-spark', width: 240, height: 34 });
+        this._series = new Array(30).fill(0);
+        const kv = (k) => {
+            const v = $el('span', { class: 'v' });
+            const row = $el('div', { class: 'kv' }, [$el('span', { class: 'k', text: k }), v]);
+            return { row, v };
+        };
+        this._burn = kv('BURN');
+        this._today = kv('TODAY');
+        this._model = kv('MODEL');
+        this._mountStructure();
+    }
+
+    // Assemble the persistent DOM. Re-callable: a 404/sandbox tick swaps in a
+    // note (detaching these nodes), so _render re-mounts before updating them.
+    _mountStructure() {
+        this.body.replaceChildren(
+            $el('div', { class: 'claude-head' }, [
+                $el('span', { class: 'claude-head-l', text: '5H WINDOW' }),
+                this._reset,
+            ]),
+            $el('div', { class: 'bar claude-bar' }, [this._fill]),
+            this._sub,
+            this._spark,
+            this._burn.row, this._today.row, this._model.row,
+        );
+    }
+
+    async tick() {
+        if (isSandbox()) { this._note(tr('widget.claude.sandbox')); return; }
+        let data;
+        try {
+            ({ data } = await jget('/api/claude-usage'));
+        } catch (e) {
+            // The endpoint ships in a server build; before the backend restarts
+            // it 404s — show a hint rather than a scary ERR.
+            if (/\b404\b/.test(e.message)) this._note(tr('widget.claude.restart'));
+            return;
+        }
+        this._render(data);
+    }
+
+    _note(text) {
+        this.body.replaceChildren($el('div', { class: 'widget-note', text }));
+    }
+
+    _render(d) {
+        // A prior note tick may have detached the structure — re-mount it.
+        if (!this.body.contains(this._reset)) this._mountStructure();
+        const b = d.block || {};
+        if (b.active) {
+            this._reset.textContent = tr('widget.claude.resets', { t: _fmtDur(b.remainingMs) });
+            this._reset.classList.toggle('warn', b.remainingMs < 20 * 60000);
+            this._fill.style.width = `${Math.min(100, b.pct || 0)}%`;
+            this._sub.textContent = `${_fmtTok(b.tokens.total)} ${tr('widget.claude.tok')} · ${b.requests} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
+            this._burn.v.textContent = `${_fmtTok(b.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
+        } else {
+            this._reset.textContent = tr('widget.claude.idle');
+            this._reset.classList.remove('warn');
+            this._fill.style.width = '0%';
+            this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
+            this._burn.v.textContent = '0 ' + tr('widget.claude.tokmin');
+        }
+        const today = d.today || { tokens: { total: 0 }, cost: 0 };
+        this._today.v.textContent = `${_fmtTok(today.tokens.total)} · ≈${_fmtUsd(today.cost)}`;
+        const top = (d.models || [])[0];
+        if (top) {
+            const totAll = (d.models || []).reduce((s, m) => s + m.tokens, 0) || 1;
+            const share = Math.round((top.tokens / totAll) * 100);
+            this._model.v.textContent = `${top.tier} ${share}%`;
+        } else {
+            this._model.v.textContent = '—';
+        }
+        this._series = (d.series || []).slice(-30);
+        this._paintSpark();
+    }
+
+    onLangChange() { /* labels refresh on next tick */ }
+
+    _paintSpark() {
+        const c = this._spark, ctx = c.getContext('2d');
+        const w = c.width, h = c.height;
+        ctx.clearRect(0, 0, w, h);
+        const n = this._series.length;
+        if (!n) return;
+        const max = Math.max(1, ...this._series);
+        // Filled area + line, Tron accent.
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            const y = h - (this._series[i] / max) * (h - 3) - 1.5;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = 'rgba(170,207,209,0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        ctx.fillStyle = 'rgba(170,207,209,0.12)';
+        ctx.fill();
     }
 }
 
@@ -1193,6 +1327,7 @@ class InstallerWidget extends Widget {
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
+        new ClaudeUsageWidget({ parent }),
         new InstallerWidget({ parent }),
         new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),

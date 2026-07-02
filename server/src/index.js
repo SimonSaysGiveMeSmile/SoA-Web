@@ -39,6 +39,7 @@ const { SessionStore } = require('./sessionStore');
 const { TabManager }   = require('./tabManager');
 const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
+const claudeUsage      = require('./claudeUsage');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const procMem          = require('./procMem');
@@ -307,6 +308,7 @@ app.get('/api/user/stats', requireAuthed, async (req, res) => {
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
 consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
+claudeUsage.mount(app, requireAuthed);
 const pair = new pairing.PairingManager({ port: PORT });
 pairing.mount(app, requireAuthed, pair, {
     onTunnelUp: (url) => {
