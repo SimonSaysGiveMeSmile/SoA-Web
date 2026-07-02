@@ -586,18 +586,6 @@ html, body {
 .lang-select option { background: var(--soa-bg); color: var(--soa-fg); }
 
 .stage { position: relative; overflow: hidden; display: grid; grid-template-rows: 1fr 24px; }
-.scanline {
-  pointer-events: none;
-  position: absolute; inset: 0;
-  background: repeating-linear-gradient(
-    to bottom,
-    rgba(var(--soa-accent-rgb), 0.02) 0px,
-    rgba(var(--soa-accent-rgb), 0.02) 1px,
-    transparent 2px,
-    transparent 4px
-  );
-  z-index: 2;
-}
 
 .terms { position: relative; background: var(--soa-bg); overflow: hidden; }
 .terms .term {
