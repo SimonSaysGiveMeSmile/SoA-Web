@@ -19,7 +19,7 @@
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=26';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=18';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=21';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=1';
@@ -4412,16 +4412,17 @@ function isPhone() {
 function renderMobileWelcome() {
     const boot = $('#boot');
     if (boot) boot.classList.add('hidden');
-    if (document.querySelector('.mwel')) return;
+    const prior = document.querySelector('.mwel');
+    if (prior) prior.remove();   // rebuilt in place on a language switch
 
-    const copyBtn = el('button', { class: 'mwel-btn', type: 'button', text: 'Copy desktop link' });
+    const copyBtn = el('button', { class: 'mwel-btn', type: 'button', text: tr('mwel.copy') });
     copyBtn.addEventListener('click', async () => {
-        try { await navigator.clipboard.writeText('https://www.s0a.app'); copyBtn.textContent = 'Copied ✓'; }
+        try { await navigator.clipboard.writeText('https://www.s0a.app'); copyBtn.textContent = tr('mwel.copied'); }
         catch (_) { copyBtn.textContent = 'www.s0a.app'; }
-        setTimeout(() => { copyBtn.textContent = 'Copy desktop link'; }, 1800);
+        setTimeout(() => { copyBtn.textContent = tr('mwel.copy'); }, 1800);
     });
 
-    const sandboxBtn = el('button', { class: 'mwel-ghost', type: 'button', text: 'Try the sandbox anyway →' });
+    const sandboxBtn = el('button', { class: 'mwel-ghost', type: 'button', text: tr('mwel.sandbox') });
     sandboxBtn.addEventListener('click', () => {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
@@ -4429,46 +4430,48 @@ function renderMobileWelcome() {
         import('/assets/app-wc.js?v=15').catch((err) => renderSandboxFailure(err));
     });
 
-    const b = (t) => el('b', { text: t });
-    const step = (n, h, body, extra) => el('div', { class: 'mwel-step' }, [
+    // Language switcher — flips the page and re-renders the welcome in place.
+    const langNav = el('nav', { class: 'mwel-langs', 'aria-label': 'Language' },
+        LANGS.map(l => {
+            const btn = el('button', {
+                class: 'mwel-lang' + (l.code === getLang() ? ' on' : ''),
+                type: 'button', text: l.label, 'aria-pressed': l.code === getLang() ? 'true' : 'false',
+            });
+            btn.addEventListener('click', () => { setLang(l.code); renderMobileWelcome(); });
+            return btn;
+        })
+    );
+
+    const step = (n, h, p, extra) => el('div', { class: 'mwel-step' }, [
         el('span', { class: 'mwel-step-n', text: String(n) }),
         el('div', { class: 'mwel-step-body' }, [
             el('h3', { class: 'mwel-step-h', text: h }),
-            el('p', { class: 'mwel-step-p' }, body),
+            el('p', { class: 'mwel-step-p', text: p }),
             ...(extra ? [extra] : []),
         ]),
     ]);
 
     const view = el('div', { class: 'mwel' }, [
+        langNav,
         el('div', { class: 'mwel-inner' }, [
             el('header', { class: 'mwel-head' }, [
                 el('h1', { class: 'mwel-title', text: 'SON OF ANTON' }),
-                el('p', { class: 'mwel-sub', text: 'WEB TERMINAL · PROTOCOL v1' }),
+                el('p', { class: 'mwel-sub', text: tr('brand.sub') }),
             ]),
-            el('p', { class: 'mwel-lead' }, [
-                'A real terminal in your browser — run ', b('Claude Code'),
-                ', stream a live shell, and pair your phone to your desktop.',
-            ]),
+            el('p', { class: 'mwel-lead', text: tr('mwel.lead') }),
             el('div', { class: 'mwel-note' }, [
-                el('div', { class: 'mwel-note-h', text: 'Phones can’t host it — yet' }),
-                el('p', { class: 'mwel-note-p' }, [
-                    'SoA runs a real shell (', b('PTY'), ') that needs a Mac or Linux desktop. ',
-                    'Your phone is a ', b('companion'), ' that pairs to a running desktop — there’s ',
-                    'no terminal to boot here on its own.',
-                ]),
+                el('div', { class: 'mwel-note-h', text: tr('mwel.note_h') }),
+                el('p', { class: 'mwel-note-p', text: tr('mwel.note_p') }),
             ]),
             el('div', { class: 'mwel-steps' }, [
-                step(1, 'Open on your computer',
-                    ['Go to ', b('s0a.app'), ' on a Mac or Linux machine and run the one-line install — about 30 seconds, no account.'],
-                    copyBtn),
-                step(2, 'Pair this phone',
-                    ['Already running SoA on your desktop? Open its ', b('Mobile Link'), ' widget and scan the QR — you’ll drive that terminal right from this screen.']),
+                step(1, tr('mwel.s1_h'), tr('mwel.s1_p'), copyBtn),
+                step(2, tr('mwel.s2_h'), tr('mwel.s2_p')),
             ]),
             el('ul', { class: 'mwel-feats' }, [
-                el('li', { text: 'Real shell streamed over WebSocket' }),
-                el('li', { text: 'Run Claude Code in any browser' }),
-                el('li', { text: 'Phone ↔ desktop pairing over a tunnel' }),
-                el('li', { text: 'No Electron, no App Store' }),
+                el('li', { text: tr('mwel.feat1') }),
+                el('li', { text: tr('mwel.feat2') }),
+                el('li', { text: tr('mwel.feat3') }),
+                el('li', { text: tr('mwel.feat4') }),
             ]),
             el('nav', { class: 'mwel-foot' }, [
                 el('a', { class: 'mwel-ghost', href: 'https://github.com/SimonSaysGiveMeSmile/SoA-Web', target: '_blank', rel: 'noopener', text: 'github ↗' }),
