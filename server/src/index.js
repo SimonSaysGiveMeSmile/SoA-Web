@@ -101,6 +101,13 @@ const DEFAULT_ALLOWED_ORIGINS = [
     'https://s0a.app',
     'http://localhost:' + PORT,
     'http://127.0.0.1:' + PORT,
+    // Native app shells (Capacitor). The iOS/Android "Son of Anton" app serves
+    // its bundled web client from a local scheme, so its WS/CORS Origin is a
+    // fixed capacitor:// (iOS) / http://localhost (Android) — not the backend's
+    // own origin. Trust them so the native app's /ws upgrade isn't 403'd.
+    'capacitor://localhost',
+    'ionic://localhost',
+    'http://localhost',
     ...pairing.lanAddresses(PORT, 'http'),
 ];
 const ALLOWED_ORIGINS = Array.from(new Set([

@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v55 · agent-browser first-start subscribe fix · 2026-06-28';
+const MOBILE_BUILD = 'v54 · providers + auto-resume · 2026-06-11';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -311,6 +311,24 @@ applyTheme(loadSavedTheme());
 
 /* ── App ─────────────────────────────────────────── */
 
+// In a native shell (the Capacitor iOS/Android app) the page is served from the
+// app bundle — location.origin is `capacitor://localhost`, which is NOT a usable
+// backend. The backend URL is supplied by the bundled native config
+// (window.__SOA_BACKEND__, injected before this script) or by a user-set override
+// persisted on-device. On the plain web `/m/` build both are absent and the app
+// falls back to location.origin exactly as before, so this is a no-op there.
+const NATIVE_BACKEND_KEY = 'soa.native.backend';
+function nativeBackend() {
+    try {
+        const saved = localStorage.getItem(NATIVE_BACKEND_KEY);
+        if (saved) return saved.replace(/\/+$/, '');
+    } catch (_) {}
+    if (typeof window !== 'undefined' && window.__SOA_BACKEND__) {
+        return String(window.__SOA_BACKEND__).replace(/\/+$/, '');
+    }
+    return null;
+}
+
 function readToken() {
     const params = new URLSearchParams(location.search);
     let t = params.get('t');
@@ -330,7 +348,8 @@ function readToken() {
     }
     // When served same-origin as the backend (the common case via the local
     // server's /m/), there's no `backend` param — fall back to location.origin.
-    const effectiveBackend = backend || null;
+    // In the native shell, fall back to the configured native backend instead.
+    const effectiveBackend = backend || nativeBackend() || null;
     if (t) {
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -357,7 +376,7 @@ function readToken() {
             };
         }
     } catch (_) {}
-    return { token: null, backend: null, altOrigin: null };
+    return { token: null, backend: nativeBackend(), altOrigin: null };
 }
 
 function wsBaseFromHttp(origin) {
@@ -473,6 +492,7 @@ class App {
         this._wireFontSetting();
         this._wireModelAccess();
         this._wireMicSettings();
+        this._wireFleet();
         this._wireIdleHide();
 
         const { token, backend, altOrigin } = readToken();
@@ -702,6 +722,7 @@ class App {
         try {
             const mgr = await this._api('/api/manager');
             this._setAutoResumeBtn(!!mgr.autoResume);
+            this._setCloseInactiveBtn(!!mgr.closeInactive);
         } catch (_) {}
     }
 
@@ -710,6 +731,14 @@ class App {
         if (!btn) return;
         this._autoResume = on;
         btn.textContent = 'AUTO-RESUME: ' + (on ? 'ON' : 'OFF');
+        btn.classList.toggle('active', on);
+    }
+
+    _setCloseInactiveBtn(on) {
+        const btn = document.getElementById('btn-close-inactive');
+        if (!btn) return;
+        this._closeInactive = on;
+        btn.textContent = 'CLOSE INACTIVE: ' + (on ? 'ON' : 'OFF');
         btn.classList.toggle('active', on);
     }
 
@@ -738,6 +767,7 @@ class App {
         const form = document.getElementById('provider-form');
         const addBtn = document.getElementById('btn-provider-add');
         const arBtn = document.getElementById('btn-auto-resume');
+        const ciBtn = document.getElementById('btn-close-inactive');
         if (!listEl || !form) return;
         const f = (id) => document.getElementById(id);
         const showForm = (p) => {
@@ -791,6 +821,12 @@ class App {
             try {
                 const r = await this._api('/api/manager/config', { autoResume: !this._autoResume });
                 this._setAutoResumeBtn(!!r.autoResume);
+            } catch (_) { this._toast('Update failed'); }
+        });
+        if (ciBtn) ciBtn.addEventListener('click', async () => {
+            try {
+                const r = await this._api('/api/manager/config', { closeInactive: !this._closeInactive });
+                this._setCloseInactiveBtn(!!r.closeInactive);
             } catch (_) { this._toast('Update failed'); }
         });
     }
@@ -892,17 +928,23 @@ class App {
 
         // Refresh devices button
         if (this.btnRefreshDevices) {
-            this.btnRefreshDevices.addEventListener('click', () => this._enumerateMicDevices());
+            this.btnRefreshDevices.addEventListener('click', () => this._enumerateMicDevices(true));
         }
     }
 
-    async _enumerateMicDevices() {
+    async _enumerateMicDevices(requestPermission = false) {
         if (!this.micDeviceSelect) return;
 
         try {
-            // Request permission first to get device labels
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            stream.getTracks().forEach(t => t.stop());
+            // Only prompt for the microphone when the user explicitly opts in
+            // (taps REFRESH DEVICES / TEST MIC). On load we just list devices —
+            // labels stay generic until permission is granted. Requesting mic on
+            // boot is intrusive and an App Store review risk (sensitive perm with
+            // no user intent), so it is gated behind an explicit action.
+            if (requestPermission) {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(t => t.stop());
+            }
 
             const devices = await navigator.mediaDevices.enumerateDevices();
             this._micDevices = devices.filter(d => d.kind === 'audioinput');
@@ -1091,6 +1133,10 @@ class App {
 
     _hideChrome() {
         if (this._chromeHidden) return;
+        // Only auto-hide over the terminal (to maximise reading area). On the
+        // DASH/FLEET, CHAT, BROWSER and SYSTEM views the top bar is the primary
+        // navigation, so hiding it would strand the user.
+        if (this._currentView && this._currentView !== 'terminal-view') return;
         this._chromeHidden = true;
         const top = document.getElementById('topbar');
         if (top) top.classList.add('chrome-hidden');
@@ -1124,15 +1170,6 @@ class App {
                     this._hideReconnect();
                     this._acquireWakeLock();        // keep the screen on while streaming
                     if (this._prevSocketState !== SocketState.CONNECTED) sounds.play('connect');
-                    // Re-arm the agent-browser stream on (re)connect. A
-                    // `browser-subscribe` sent before the WS reached OPEN — e.g.
-                    // tapping the top-right 🤖 toggle right after launch — is
-                    // dropped SILENTLY by socket.send() (readyState !== 1), so
-                    // the agent browser never "pops out" on first start. Resend
-                    // it here whenever the web view + agent mode are active.
-                    if (this._agentMode && this._currentView === 'web-view') {
-                        this.socket.sendInput('browser-subscribe');
-                    }
                     break;
                 case SocketState.DISCONNECTED:
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
@@ -1309,8 +1346,9 @@ class App {
         // Dashboard: render immediately, then keep the terminal-tail previews
         // live with a 1s tick while the view is open (cheap; stopped on leave).
         if (target === 'tiles-view') {
-            this._renderTiles();
-            if (!this._tilesTimer) this._tilesTimer = setInterval(() => this._renderTiles(), 1000);
+            this._pullManager();          // freshen the server fleet view on open
+            this._renderFleet();
+            if (!this._tilesTimer) this._tilesTimer = setInterval(() => this._renderFleet(), 1200);
         } else if (this._tilesTimer) {
             clearInterval(this._tilesTimer);
             this._tilesTimer = null;
@@ -1373,7 +1411,69 @@ class App {
     // counts and flags which sessions need attention / are stuck / high-context.
     _onManager(d) {
         this._manager = d;
-        if (this._currentView === 'tiles-view') this._renderManagerBar();
+        this._updateTodoBadge();
+        if (this._currentView === 'tiles-view') this._renderFleet();
+    }
+
+    // Pull the authoritative server fleet view (also arrives live via the WS
+    // `manager` frame, but a fetch on view-open avoids a cold first paint).
+    async _pullManager() {
+        try {
+            const d = await this._api('/api/manager');
+            if (d && d.ok !== false && d.counts) { this._manager = d; this._updateTodoBadge(); }
+        } catch (_) { /* fall back to the last WS frame */ }
+    }
+
+    // ── FLEET manager view (SESSIONS · MONITOR · TO-DO + BROADCAST) ──────────
+    _wireFleet() {
+        this._fleetSub = 'sessions';
+        this._bcastCohort = 'attention';
+        document.querySelectorAll('.fleet-seg-btn').forEach(btn => {
+            btn.addEventListener('click', () => this._setFleetSub(btn.dataset.fleet));
+        });
+        const bcBtn = document.getElementById('btn-broadcast');
+        if (bcBtn) bcBtn.addEventListener('click', () => this._openBroadcast());
+        const bcClose = document.getElementById('bcast-close');
+        if (bcClose) bcClose.addEventListener('click', () => this._closeBroadcast());
+        const bcOverlay = document.getElementById('broadcast-overlay');
+        if (bcOverlay) bcOverlay.addEventListener('click', (e) => { if (e.target === bcOverlay) this._closeBroadcast(); });
+        const bcForm = document.getElementById('bcast-form');
+        if (bcForm) bcForm.addEventListener('submit', (e) => { e.preventDefault(); this._sendBroadcast(); });
+        const todoForm = document.getElementById('todo-form');
+        if (todoForm) todoForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const inp = document.getElementById('todo-input');
+            const text = inp && inp.value.trim();
+            if (text) { this._todoOp({ op: 'add', text, source: 'user' }); inp.value = ''; }
+        });
+    }
+
+    _setFleetSub(sub) {
+        this._fleetSub = sub;
+        document.querySelectorAll('.fleet-seg-btn').forEach(b => b.classList.toggle('active', b.dataset.fleet === sub));
+        ['sessions', 'monitor', 'todos'].forEach(s => {
+            const pane = document.getElementById('fleet-' + s);
+            if (pane) pane.hidden = s !== sub;
+        });
+        this._renderFleet();
+        if (sub === 'monitor') this._refreshMonitor();
+    }
+
+    // Master render for the DASH/FLEET view — dispatches to the active sub-pane.
+    _renderFleet() {
+        this._renderManagerBar();
+        const sub = this._fleetSub || 'sessions';
+        if (sub === 'sessions') this._renderTiles();
+        else if (sub === 'todos') this._renderTodos();
+        else if (sub === 'monitor') this._renderMonitor();
+    }
+
+    _updateTodoBadge() {
+        const badge = document.getElementById('fleet-todo-badge');
+        if (!badge) return;
+        const open = ((this._manager && this._manager.todos) || []).filter(t => !t.done).length;
+        badge.textContent = open ? String(open) : '';
+        badge.hidden = !open;
     }
 
     _renderManagerBar() {
@@ -1389,9 +1489,15 @@ class App {
         const callout = [];
         if (attentionTabs.length) callout.push(`⚠ awaiting you: ${attentionTabs.slice(0, 3).join(', ')}${attentionTabs.length > 3 ? '…' : ''}`);
         if (stuckTabs.length) callout.push(`◷ stuck: ${stuckTabs.slice(0, 3).join(', ')}`);
+        // Manager-active badge: lit when a fleet-manager tab is running; flips to
+        // a warning style if tab-closing was opted into (closeInactive).
+        const mgrBadge = d.managerActive
+            ? `<span class="mgr-chip mgr-active${d.closeInactive ? ' mgr-active-reaping' : ''}">${d.closeInactive ? '◉ MGR · closing ON' : '◉ MGR'}</span>`
+            : '';
         bar.innerHTML =
             `<div class="mgr-row">` +
             `<span class="mgr-title">FLEET · ${c.total}</span>` +
+            mgrBadge +
             chip('working', c.working, 'mgr-working') +
             chip('need input', c.attention, 'mgr-attention') +
             chip('stuck', c.stuck, 'mgr-stuck') +
@@ -1403,77 +1509,316 @@ class App {
         bar.hidden = false;
     }
 
+    // Per-session oversight list. Uses the server supervisor view
+    // (this._manager.sessions — the whole fleet, with authoritative status +
+    // flags) as the source of truth, merged with local tab data (preview,
+    // exited). Falls back to the local tab list before the first manager frame.
     _renderTiles() {
         if (!this.tilesEl) return;
-        this._renderManagerBar();
+        const sup = (this._manager && this._manager.sessions) || [];
         const tabs = (this._snapshot && this._snapshot.tabs) || [];
-        if (!tabs.length) {
-            this.tilesEl.innerHTML = '<div class="m-tile-empty">No tabs yet — tap + to open one.</div>';
+        const byId = new Map(tabs.map(t => [t.id, t]));
+        // Prefer the supervisor list (full fleet); else the local tabs.
+        const rows = sup.length
+            ? sup.map(s => ({ sup: s, tab: byId.get(s.id) }))
+            : tabs.map(t => ({ sup: null, tab: t }));
+        if (!rows.length) {
+            this.tilesEl.innerHTML = '<div class="m-tile-empty">No sessions yet — tap + to open one.</div>';
             return;
         }
+        const hhmm = (ms) => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
+        const ago = (ms) => {
+            if (ms == null) return '';
+            const s = Math.round(ms / 1000);
+            if (s < 60) return s + 's';
+            const m = Math.round(s / 60);
+            return m < 60 ? m + 'm' : Math.round(m / 60) + 'h';
+        };
         const frag = document.createDocumentFragment();
-        tabs.forEach((t, i) => {
-            const id = t.id;
-            const mob = this._mobileStatus && this._mobileStatus.get(id);
-            const css = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
-            const ts = this._getTabState(id);
-            // Freshly scan this tab's screen so context + preview are current
-            // even for tabs that haven't streamed in the last detection window.
+        rows.forEach(({ sup: s, tab: t }, i) => {
+            const id = s ? s.id : t.id;
+            const exited = t ? !!t.exited : false;
+            // Status: server truth first, else the local heuristic.
+            const status = exited ? 'exited' : (s ? s.status : (this._mobileStatus && this._mobileStatus.get(id)) || 'idle');
+            const css = exited ? 'exited' : cssStatus(status);
+            const name = (s && s.title) || (t && t.title) || `TAB ${i + 1}`;
+            const ts = this._tabStates && this._tabStates.get(id);
             if (ts && ts.term) this._scanCtx(id);
-            // Cleaner preview: real content lines, decoration stripped. Fall back
-            // to the raw tail only if nothing meaningful is found.
-            let preview = (ts && ts.term) ? ts.term.previewLines(3) : '';
-            if (!preview && ts && ts.term) preview = ts.term.tailText(3);
-            const name = t.title || `TAB ${i + 1}`;
-            const pct = this._ctxPct.get(id);
-            const tile = document.createElement('button');
-            tile.type = 'button';
-            tile.className = 'm-tile' + (id === this._activeTabId ? ' active' : '');
-            tile.dataset.tabId = String(id);
-            if (css) tile.setAttribute('data-status', css);
+            const pct = (s && s.ctxPct != null) ? s.ctxPct : this._ctxPct.get(id);
+
+            // Flags — the reason a human should care about this row.
+            const flags = [];
+            if (s && s.stuck) flags.push('<span class="fl fl-stuck">STUCK</span>');
+            if (s && s.attention) flags.push('<span class="fl fl-attn">NEEDS YOU</span>');
+            if (s && s.highContext) flags.push('<span class="fl fl-ctx">HIGH CTX</span>');
+            if (s && s.limited) {
+                const when = s.resumeAt ? `resume ${hhmm(s.resumeAt)}` : (s.limitResetAt ? `resets ${hhmm(s.limitResetAt)}` : 'limited');
+                flags.push(`<span class="fl fl-limit">⏾ ${escapeHtml(when)}</span>`);
+            }
+            const idle = (s && s.idleMs != null && (status === 'idle' || status === 'done')) ? `idle ${ago(s.idleMs)}` : '';
+            const meta = [this._tileStatusLabel(exited ? null : status, exited), idle].filter(Boolean).join(' · ');
+
             const ctxHtml = (pct != null)
-                ? `<span class="m-tile-ctx" title="Context ${pct}% used">` +
-                  `<span class="m-tile-pie" style="background:conic-gradient(${ctxColor(pct)} ${pct}%, rgba(255,255,255,0.16) 0)"></span>` +
-                  `<span class="m-tile-pct">${pct}%</span></span>`
+                ? `<span class="fleet-ctx" title="Context ${pct}% used"><span class="fleet-ctx-bar"><span style="width:${pct}%;background:${ctxColor(pct)}"></span></span><span class="fleet-ctx-pct">${pct}%</span></span>`
                 : '';
-            // Supervisor: usage-limit hit → show when it lifts / when the
-            // scheduled auto-resume will nudge this session.
-            const sup = this._manager && (this._manager.sessions || []).find(x => x.id === id);
-            const hhmm = (ms) => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
-            const limitHtml = (sup && sup.limited)
-                ? `<span class="m-tile-limit" title="Usage limit hit">⏾ ` +
-                  (sup.resumeAt ? `resume ${hhmm(sup.resumeAt)}` : (sup.limitResetAt ? `resets ${hhmm(sup.limitResetAt)}` : 'limited')) +
-                  `</span>`
-                : '';
-            tile.innerHTML =
-                `<span class="m-tile-dot"></span>` +
-                `<span class="m-tile-title">${escapeHtml(name)}</span>` +
-                ctxHtml +
-                `<span class="m-tile-status">${escapeHtml(this._tileStatusLabel(mob, t.exited))}</span>` +
-                limitHtml +
-                `<pre class="m-tile-preview">${escapeHtml(preview)}</pre>`;
-            tile.addEventListener('click', () => {
-                // User-initiated switch on THIS device — optimistic-local so it
-                // works even if the server suppresses the echo (desktop already
-                // on this tab), and so a foreign switch can never yank us.
-                this._switchTabLocal(id);
-                this._showView('terminal-view');
-                // No keyboard here — opening a tab from the dashboard just shows
-                // its terminal. Tap the terminal when you actually want to type.
-            });
-            frag.appendChild(tile);
+
+            const row = document.createElement('div');
+            row.className = 'fleet-row' + (id === this._activeTabId ? ' active' : '');
+            row.dataset.tabId = String(id);
+            if (css) row.setAttribute('data-status', css);
+            row.innerHTML =
+                `<div class="fleet-main" data-open="${id}">` +
+                    `<span class="fleet-dot"></span>` +
+                    `<div class="fleet-body">` +
+                        `<div class="fleet-line1"><span class="fleet-name">${escapeHtml(name)}</span>${flags.join('')}</div>` +
+                        `<div class="fleet-line2"><span class="fleet-meta">${escapeHtml(meta)}</span>${ctxHtml}</div>` +
+                    `</div>` +
+                `</div>` +
+                `<button class="fleet-act" data-act-toggle="${id}" aria-label="Session actions">⋯</button>` +
+                `<div class="fleet-actions" hidden>` +
+                    `<button class="fleet-a" data-a="open" data-id="${id}">OPEN</button>` +
+                    `<button class="fleet-a" data-a="interrupt" data-id="${id}">INTERRUPT</button>` +
+                    `<button class="fleet-a" data-a="compact" data-id="${id}">COMPACT</button>` +
+                    `<button class="fleet-a" data-a="cast" data-id="${id}">CAST…</button>` +
+                `</div>`;
+            frag.appendChild(row);
         });
         this.tilesEl.replaceChildren(frag);
+        if (!this._fleetDelegated) {
+            this._fleetDelegated = true;
+            this.tilesEl.addEventListener('click', (e) => this._onFleetClick(e));
+        }
     }
 
-    _tileStatusLabel(mob, exited) {
+    _onFleetClick(e) {
+        const open = e.target.closest('[data-open]');
+        if (open) { this._openSession(+open.dataset.open); return; }
+        const toggle = e.target.closest('[data-act-toggle]');
+        if (toggle) {
+            const row = toggle.closest('.fleet-row');
+            const menu = row && row.querySelector('.fleet-actions');
+            if (menu) menu.hidden = !menu.hidden;
+            return;
+        }
+        const a = e.target.closest('.fleet-a');
+        if (a) { this._fleetAction(a.dataset.a, +a.dataset.id); }
+    }
+
+    _openSession(id) {
+        this._switchTabLocal(id);
+        this._showView('terminal-view');
+    }
+
+    // Per-session actions, driven over the WS input path (the same reliable path
+    // the keyboard uses) so they work from the phone over the tunnel.
+    _fleetAction(action, id) {
+        if (action === 'open') { this._openSession(id); return; }
+        if (action === 'interrupt') { this.socket.sendInput('hotkey', { id, combo: 'ctrl+c' }); this._toast('Ctrl-C → ' + this._tabName(id)); }
+        else if (action === 'compact') { this.socket.sendInput('term-keys', { id, text: '/compact\r' }); this._toast('/compact → ' + this._tabName(id)); }
+        else if (action === 'cast') { this._openBroadcast([id]); return; }
+        // collapse the menu after acting
+        const row = this.tilesEl.querySelector(`.fleet-row[data-tab-id="${id}"] .fleet-actions`);
+        if (row) row.hidden = true;
+    }
+
+    _tileStatusLabel(status, exited) {
         if (exited) return 'exited';
-        switch (mob) {
+        switch (status) {
             case 'working':   return 'Working…';
             case 'attention': return 'Needs input';
             case 'done':      return 'Awaiting next prompt';
+            case 'idle':      return 'Idle';
             default:          return 'Shell ready';
         }
+    }
+
+    // ── TO-DO list (manager) ─────────────────────────────────────────────────
+    _renderTodos() {
+        const listEl = document.getElementById('todo-list');
+        if (!listEl) return;
+        const todos = (this._manager && this._manager.todos) || [];
+        if (!todos.length) {
+            listEl.innerHTML = '<div class="m-tile-empty">No to-dos. Add one above — the fleet manager sees it too.</div>';
+            return;
+        }
+        const rows = todos.map(td => {
+            const tab = td.tab != null ? ` <span class="todo-tab">#${td.tab}</span>` : '';
+            const src = td.source === 'manager' ? ' <span class="todo-src">◉ mgr</span>' : '';
+            return `<div class="todo-item${td.done ? ' done' : ''}">` +
+                `<button class="todo-check" data-toggle="${td.id}" aria-label="Toggle">${td.done ? '☑' : '☐'}</button>` +
+                `<span class="todo-text">${escapeHtml(td.text)}${tab}${src}</span>` +
+                `<button class="todo-del" data-del="${td.id}" aria-label="Delete">×</button>` +
+                `</div>`;
+        }).join('');
+        listEl.innerHTML = rows;
+        if (!this._todoDelegated) {
+            this._todoDelegated = true;
+            listEl.addEventListener('click', (e) => {
+                const tog = e.target.closest('[data-toggle]');
+                if (tog) { this._todoOp({ op: 'toggle', id: tog.dataset.toggle }); return; }
+                const del = e.target.closest('[data-del]');
+                if (del) { this._todoOp({ op: 'del', id: del.dataset.del }); }
+            });
+        }
+    }
+
+    async _todoOp(body) {
+        try {
+            const r = await this._api('/api/manager/todo', body);
+            if (r && r.todos) {
+                if (!this._manager) this._manager = {};
+                this._manager.todos = r.todos;
+                this._updateTodoBadge();
+                this._renderTodos();
+            }
+        } catch (_) { this._toast('Could not reach the fleet manager.'); }
+    }
+
+    // ── MONITOR — agent browsers + localhost ports ───────────────────────────
+    async _refreshMonitor() {
+        try {
+            const [ab, ports] = await Promise.all([
+                this._api('/api/agent-browser', { action: 'list' }).catch(() => null),
+                this._api('/api/ports').catch(() => null),
+            ]);
+            this._monitorData = { ab, ports };
+        } catch (_) { this._monitorData = null; }
+        this._renderMonitor();
+    }
+
+    _renderMonitor() {
+        const el = document.getElementById('fleet-monitor');
+        if (!el) return;
+        const d = this._monitorData || {};
+        const instances = (d.ab && (d.ab.instances || d.ab.list || d.ab.sessions)) || [];
+        const portList = (d.ports && d.ports.data && d.ports.data.ports) || [];
+        const abHtml = instances.length
+            ? instances.map(ins => {
+                const title = ins.title || ins.tabTitle || ('tab ' + (ins.tabId ?? ins.id ?? '?'));
+                const url = ins.url || ins.currentUrl || '';
+                return `<div class="mon-cell"><div class="mon-cell-t">${escapeHtml(title)}</div>` +
+                    `<div class="mon-cell-u">${escapeHtml(url || 'idle')}</div></div>`;
+            }).join('')
+            : '<div class="m-tile-empty">No agent browsers open.</div>';
+        const portHtml = portList.length
+            ? portList.map(p => {
+                const port = p.port || p;
+                const name = p.name || p.process || '';
+                return `<button class="mon-port" data-port="${escapeHtml(String(port))}">:${escapeHtml(String(port))}${name ? ` <span>${escapeHtml(name)}</span>` : ''}</button>`;
+            }).join('')
+            : '<div class="m-tile-empty">No local ports detected.</div>';
+        el.innerHTML =
+            `<div class="mon-sec-title">◉ AGENT BROWSERS</div>` +
+            `<div class="mon-grid">${abHtml}</div>` +
+            `<div class="mon-sec-title">⊞ LOCALHOST PORTS</div>` +
+            `<div class="mon-ports">${portHtml}</div>`;
+        if (!this._monDelegated) {
+            this._monDelegated = true;
+            el.addEventListener('click', (e) => {
+                const p = e.target.closest('[data-port]');
+                if (p) { this._openPortInWebView(p.dataset.port); }
+            });
+        }
+    }
+
+    _openPortInWebView(port) {
+        this._showView('web-view');
+        const inp = document.getElementById('web-url');
+        if (inp) { inp.value = 'localhost:' + port; }
+        const go = document.getElementById('web-go');
+        if (go) go.click();
+    }
+
+    // ── BROADCAST — fan a command to a cohort of sessions ────────────────────
+    _openBroadcast(preIds) {
+        const overlay = document.getElementById('broadcast-overlay');
+        if (!overlay) return;
+        this._bcastPreIds = Array.isArray(preIds) ? preIds : null;
+        if (this._bcastPreIds) this._bcastCohort = 'selected';
+        this._renderBroadcast();
+        overlay.classList.add('visible');
+        setTimeout(() => { const i = document.getElementById('bcast-input'); if (i) i.focus(); }, 80);
+    }
+
+    _closeBroadcast() {
+        const overlay = document.getElementById('broadcast-overlay');
+        if (overlay) overlay.classList.remove('visible');
+    }
+
+    _renderBroadcast() {
+        const sessions = (this._manager && this._manager.sessions) || [];
+        const count = (pred) => sessions.filter(pred).length;
+        const cohorts = [
+            { key: 'all', label: 'All', n: sessions.length },
+            { key: 'attention', label: 'Needs you', n: count(s => s.attention) },
+            { key: 'stuck', label: 'Stuck', n: count(s => s.stuck) },
+            { key: 'idle', label: 'Idle', n: count(s => s.idle) },
+            { key: 'working', label: 'Working', n: count(s => s.status === 'working') },
+            { key: 'highContext', label: 'High ctx', n: count(s => s.highContext) },
+        ];
+        if (this._bcastPreIds) cohorts.unshift({ key: 'selected', label: `#${this._bcastPreIds.join(', #')}`, n: this._bcastPreIds.length });
+        const cEl = document.getElementById('bcast-cohorts');
+        if (cEl) cEl.innerHTML = cohorts.map(c =>
+            `<button class="bcast-chip${c.key === this._bcastCohort ? ' on' : ''}${c.n ? '' : ' empty'}" data-cohort="${c.key}">${escapeHtml(c.label)}<span class="bcast-n">${c.n}</span></button>`
+        ).join('');
+        const presets = [
+            { label: 'continue', text: 'continue', enter: true },
+            { label: '/compact', text: '/compact', enter: true },
+            { label: '/clear', text: '/clear', enter: true },
+            { label: 'Esc', hotkey: 'esc' },
+            { label: 'Ctrl-C', hotkey: 'ctrl+c' },
+        ];
+        const pEl = document.getElementById('bcast-presets');
+        if (pEl) pEl.innerHTML = presets.map((p, i) =>
+            `<button class="bcast-preset" data-preset="${i}">${escapeHtml(p.label)}</button>`).join('');
+        this._bcastPresets = presets;
+        if (!this._bcastDelegated) {
+            this._bcastDelegated = true;
+            if (cEl) cEl.addEventListener('click', (e) => {
+                const c = e.target.closest('[data-cohort]');
+                if (c) { this._bcastCohort = c.dataset.cohort; this._renderBroadcast(); }
+            });
+            if (pEl) pEl.addEventListener('click', (e) => {
+                const b = e.target.closest('[data-preset]');
+                if (!b) return;
+                const p = this._bcastPresets[+b.dataset.preset];
+                if (p.hotkey) this._sendBroadcast(p);
+                else { const inp = document.getElementById('bcast-input'); if (inp) inp.value = p.text; this._sendBroadcast(p); }
+            });
+        }
+    }
+
+    _broadcastTargets() {
+        const sessions = (this._manager && this._manager.sessions) || [];
+        const c = this._bcastCohort;
+        if (c === 'selected' && this._bcastPreIds) return this._bcastPreIds.slice();
+        if (c === 'all') return sessions.map(s => s.id);
+        if (c === 'attention') return sessions.filter(s => s.attention).map(s => s.id);
+        if (c === 'stuck') return sessions.filter(s => s.stuck).map(s => s.id);
+        if (c === 'idle') return sessions.filter(s => s.idle).map(s => s.id);
+        if (c === 'working') return sessions.filter(s => s.status === 'working').map(s => s.id);
+        if (c === 'highContext') return sessions.filter(s => s.highContext).map(s => s.id);
+        return [];
+    }
+
+    _sendBroadcast(preset) {
+        const ids = this._broadcastTargets();
+        if (!ids.length) { this._toast('No sessions in that cohort.'); return; }
+        const enterEl = document.getElementById('bcast-enter');
+        const wantEnter = enterEl ? enterEl.checked : true;
+        if (preset && preset.hotkey) {
+            ids.forEach(id => this.socket.sendInput('hotkey', { id, combo: preset.hotkey }));
+        } else {
+            const inp = document.getElementById('bcast-input');
+            const text = preset ? preset.text : (inp ? inp.value : '');
+            if (!text) { this._toast('Type a command first.'); return; }
+            const line = text + ((preset ? preset.enter : wantEnter) ? '\r' : '');
+            ids.forEach(id => this.socket.sendInput('term-keys', { id, text: line }));
+            if (inp && !preset) inp.value = '';
+        }
+        sounds.play('tabSwitch');
+        this._toast(`Sent to ${ids.length} session${ids.length > 1 ? 's' : ''}.`);
+        this._closeBroadcast();
     }
 
     // ── Text-to-speech ───────────────────────────────────────────────────
@@ -2771,7 +3116,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // Only register the service worker when served at the root scope (i.e.
     // same-origin as the backend). On Vercel we live under /m/ which would
     // give the SW the wrong scope and cache stale assets.
-    if ('serviceWorker' in navigator && location.pathname === '/') {
+    // Skip the SW inside the native shell: Capacitor already serves the assets
+    // from the app bundle (offline works without it) and registering a SW on the
+    // capacitor:// scheme is unreliable. window.Capacitor is injected by the
+    // native runtime and is undefined on the plain web build.
+    if ('serviceWorker' in navigator && location.pathname === '/' && !window.Capacitor) {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
         navigator.serviceWorker.addEventListener('controllerchange', () => {
             location.reload();

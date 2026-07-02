@@ -61,7 +61,26 @@
             </section>
             <section id="tiles-view" class="view">
                 <div id="manager-bar" class="manager-bar" hidden></div>
-                <div id="tiles"></div>
+                <div class="fleet-toolbar">
+                    <div class="fleet-seg" role="tablist">
+                        <button class="fleet-seg-btn active" data-fleet="sessions" role="tab">SESSIONS</button>
+                        <button class="fleet-seg-btn" data-fleet="monitor" role="tab">MONITOR</button>
+                        <button class="fleet-seg-btn" data-fleet="todos" role="tab">TO&#8209;DO<span class="fleet-seg-badge" id="fleet-todo-badge" hidden></span></button>
+                    </div>
+                    <button id="btn-broadcast" class="fleet-bcast-btn" type="button" title="Broadcast a command to a cohort">&#8646; CAST</button>
+                </div>
+                <div id="fleet-sessions" class="fleet-pane">
+                    <div id="tiles"></div>
+                </div>
+                <div id="fleet-monitor" class="fleet-pane" hidden></div>
+                <div id="fleet-todos" class="fleet-pane" hidden>
+                    <form id="todo-form" class="todo-form">
+                        <input id="todo-input" class="todo-input" type="text" placeholder="Add a to-do for the fleet…"
+                               autocomplete="off" autocapitalize="sentences" />
+                        <button class="todo-add" type="submit" aria-label="Add">＋</button>
+                    </form>
+                    <div id="todo-list" class="todo-list"></div>
+                </div>
             </section>
             <section id="web-view" class="view">
                 <div class="web-bar">
@@ -151,6 +170,11 @@
                 <div class="settings-row">
                     <button class="settings-btn" id="btn-auto-resume" type="button">AUTO-RESUME: …</button>
                 </div>
+                <div class="settings-label">Close inactive tabs</div>
+                <div class="settings-hint">Let the fleet manager close (stop) idle / done tabs. Off by default — the manager never reaps your tabs unless this is on.</div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-close-inactive" type="button">CLOSE INACTIVE: …</button>
+                </div>
             </div>
             <div class="settings-section">
                 <div class="settings-label">Sound</div>
@@ -205,6 +229,28 @@
             <p class="reconnect-diag" id="reconnect-diag" hidden></p>
             <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY NOW</button>
             <button class="reconnect-btn reconnect-open" id="reconnect-open-browser" hidden>OPEN WIFI LOGIN</button>
+        </div>
+    </div>
+
+    <div id="broadcast-overlay">
+        <div class="bcast-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="bcast-header">
+                <div class="bcast-title">&#8646; BROADCAST</div>
+                <button class="settings-close" id="bcast-close">&times;</button>
+            </div>
+            <div class="bcast-sub">Send a command to a cohort of sessions at once.</div>
+            <div class="bcast-label">Target</div>
+            <div class="bcast-cohorts" id="bcast-cohorts"></div>
+            <div class="bcast-label">Command</div>
+            <div class="bcast-presets" id="bcast-presets"></div>
+            <form id="bcast-form" class="bcast-form">
+                <input id="bcast-input" class="bcast-input" type="text"
+                       placeholder="e.g. continue, /compact, npm test…"
+                       autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+                <button class="bcast-send" type="submit" id="bcast-send">SEND</button>
+            </form>
+            <label class="bcast-enter"><input type="checkbox" id="bcast-enter" checked /> press Enter after sending</label>
         </div>
     </div>
 
