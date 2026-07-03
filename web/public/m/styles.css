@@ -1787,3 +1787,80 @@ button:active { background: var(--accent-bg-hover); }
 
 /* generic empty-state + tile hint text stays legible */
 [data-scheme="light"] .m-tile-empty { color: var(--fg-dim); }
+
+/* ══ MINIMAL theme — porcelain chrome, ink type, dark slate terminal ═════════
+   Mobile face of the desktop MINIMAL UI language (html[data-ui="minimal"]).
+   Rides the [data-scheme="light"] surface layer above; this block adds only
+   what tokens can't express — Familjen Grotesk chrome, lowercase labels, and
+   the signature inversion: the terminal stays DARK, a slate card floating on
+   the light ground (which also keeps the fixed bright ANSI palette legible). */
+
+@font-face {
+    font-family: 'Familjen Grotesk';
+    src: url('/assets/vendor/fonts/familjen-grotesk-400.woff2') format('woff2');
+    font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+    font-family: 'Familjen Grotesk';
+    src: url('/assets/vendor/fonts/familjen-grotesk-500.woff2') format('woff2');
+    font-weight: 500; font-style: normal; font-display: swap;
+}
+@font-face {
+    font-family: 'Familjen Grotesk';
+    src: url('/assets/vendor/fonts/familjen-grotesk-600.woff2') format('woff2');
+    font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+    font-family: 'Familjen Grotesk';
+    src: url('/assets/vendor/fonts/familjen-grotesk-700.woff2') format('woff2');
+    font-weight: 700; font-style: normal; font-display: swap;
+}
+
+/* chrome labels: lowercase, tighter — structural text whispers */
+[data-theme="minimal"] button {
+    text-transform: lowercase;
+    letter-spacing: 0.03em;
+    font-weight: 600;
+}
+[data-theme="minimal"] .status,
+[data-theme="minimal"] .settings-label,
+[data-theme="minimal"] .chat-meta,
+[data-theme="minimal"] .mic-label {
+    text-transform: lowercase;
+    letter-spacing: 0.06em;
+}
+
+/* ink brand mark — the accent stays reserved for live / interactive */
+[data-theme="minimal"] .brand-mark { border-color: var(--fg); }
+
+/* the signature: terminal = dark slate card on the porcelain ground */
+[data-theme="minimal"] #terminal-view {
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+}
+[data-theme="minimal"] #term {
+    background: #14171d;
+    color: #d9dee7;
+    border-radius: 14px;
+    padding: 12px 14px 14px;
+    box-shadow: 0 1px 2px rgba(20,23,29,0.10), 0 12px 32px rgba(20,23,29,0.16);
+    color-scheme: dark;
+}
+[data-theme="minimal"] #term .ansi-rev { background: #d9dee7; color: #14171d; }
+/* focus mode hands the whole screen back to the slate */
+[data-theme="minimal"] #app.focus-mode #terminal-view { padding: 0; }
+[data-theme="minimal"] #app.focus-mode #term {
+    border-radius: 0;
+    box-shadow: none;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+}
+
+/* teal "you" bubbles read better with warm white than porcelain-inherit */
+[data-theme="minimal"] .chat-msg.you { color: #fdfdfb; }
+
+/* solid porcelain sheets — MINIMAL is matte, not glassy */
+[data-theme="minimal"] .settings-sheet,
+[data-theme="minimal"] .bcast-sheet {
+    background: var(--panel-bg);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+}

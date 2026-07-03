@@ -280,6 +280,32 @@ const THEMES = {
         },
         colorScheme: 'light',
     },
+
+    // ── MINIMAL — mobile face of the desktop MINIMAL UI language ──────────
+    // Porcelain chrome, ink text, ONE teal accent; the terminal stays dark
+    // (slate card) via the [data-theme="minimal"] block in styles.css.
+    minimal: {
+        name: 'Minimal',
+        preview: ['#f2f0ea', '#0c7d72'],
+        vars: {
+            '--bg':             '#f2f0ea',
+            '--bg-alt':         '#faf9f5',
+            '--fg':             '#22252b',
+            '--fg-dim':         'rgba(34,37,43,0.58)',
+            '--fg-faint':       'rgba(34,37,43,0.32)',
+            '--accent':         '#0c7d72',
+            '--accent-glow':    'rgba(12,125,114,0.28)',
+            '--accent-bg':      'rgba(12,125,114,0.09)',
+            '--accent-bg-hover':'rgba(12,125,114,0.16)',
+            '--warn':           '#a16207',
+            '--err':            '#c02626',
+            '--line':           'rgba(34,37,43,0.13)',
+            '--radius':         '10px',
+            '--panel-bg':       'rgba(250,249,245,0.86)',
+            '--font':           "'Familjen Grotesk', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+        },
+        colorScheme: 'light',
+    },
 };
 
 const DEFAULT_THEME = 'mono';
