@@ -3186,9 +3186,9 @@ class Shell {
         const statusLabel = (s) => ({
             working: 'Working…', attention: 'Needs input', done: 'Awaiting next prompt', idle: 'Idle',
         })[s] || 'Shell ready';
-        const ctxColor = (p) => p >= 80 ? '#ff4444' : p >= 50 ? '#f1c40f' : '#00e676';
         const mgrId = this._managerTabId();
-        const rows = sessions.map(s => {
+        this._mgrvPreEls = new Map();
+        const tile = (s) => {
             const flags = [];
             if (s.id === mgrId) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-mgr', text: '◉ MGR' }));
             if (s.stuck) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-stuck', text: 'STUCK' }));
@@ -3198,38 +3198,46 @@ class Shell {
                 const when = s.resumeAt ? `resume ${hhmm(s.resumeAt)}` : (s.limitResetAt ? `resets ${hhmm(s.limitResetAt)}` : 'limited');
                 flags.push(el('span', { class: 'mgrv-fl mgrv-fl-limit', text: '⏾ ' + when }));
             }
-            const idle = (s.idleMs != null && (s.status === 'idle' || s.status === 'done')) ? ` · idle ${ago(s.idleMs)}` : '';
-            // Dashboard-style tile: reuse the dashboard tile's rich data (status,
-            // activity, live output preview, context pie) which is populated for
-            // the local fleet, falling back to the manager snapshot fields.
+            // Dashboard tile: rich local data (status/activity/live preview) when
+            // this client has the buffer, else the manager snapshot + the daemon's
+            // scrollback tail (async, see _mgrvFillTails) so tiles are never blank.
             const status = this._agentStatus.get(s.id) || s.status || 'idle';
             const pct = (this._ctxPct.get(s.id) != null ? this._ctxPct.get(s.id) : s.ctxPct) || 0;
             const buf = this._agentBuf.get(s.id);
-            const activity = (buf && buf.activity) || (statusLabel(s.status) + idle);
+            const fallback = (s.status === 'idle' || s.status === 'done') && s.idleMs != null
+                ? `${statusLabel(s.status)} · ${ago(s.idleMs)}`
+                : statusLabel(s.status);
+            const activity = (buf && buf.activity) || fallback;
             const statusLine = (buf && buf.statusLine) || '';
             const actionLine = (buf && buf.actionLine) || '';
-            const tail = this._tileTailText(s.id);
             const pie = el('span', { class: 'tile-pie', title: `Context ${pct}% used` });
             this._paintTilePie(pie, pct);
+            const pctEl = el('span', { class: 'mgrv-pct', text: pct ? pct + '%' : '' });
             const icon = el('img', {
                 class: 'tile-icon', alt: '', loading: 'lazy', decoding: 'async',
                 src: `/api/tabs/${s.id}/icon`,
                 onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
                 onerror: () => icon.remove(),
             });
+            const group = s.group || this._agentGroup.get(s.id) || '';
+            const grpChip = (group && group !== 'ungrouped')
+                ? el('span', { class: 'tile-group-chip mgrv-grp', text: group }) : null;
+            const pre = el('pre', { class: 'tile-preview', text: this._mgrvTailFor(s.id) });
+            this._mgrvPreEls.set(s.id, pre);
             const act = (label, fn, title) => el('button', {
                 class: 'mgrv-act', type: 'button', text: label, title: title || '',
                 onclick: (e) => { e.stopPropagation(); fn(); } });
             return el('div', { class: 'tile mgrv-tile', 'data-agent': status, 'data-status': s.status || 'idle' }, [
-                pie,
+                pie, pctEl,
                 el('div', { class: 'tile-head', onclick: () => this._openFromManager(s.id) }, [
                     icon,
                     el('span', { class: 'tile-title', text: `#${s.id} ${s.title}` }),
+                    grpChip,
                 ]),
                 flags.length ? el('div', { class: 'mgrv-flags' }, flags) : null,
                 el('span', { class: 'tile-status-line', text: statusLine }),
                 el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
-                el('pre', { class: 'tile-preview', text: tail }),
+                pre,
                 el('span', { class: 'tile-activity', text: activity }),
                 el('div', { class: 'mgrv-acts' }, [
                     act('OPEN', () => this._openFromManager(s.id), 'Jump into this terminal'),
@@ -3245,8 +3253,77 @@ class Shell {
                     act('CAST', () => this._openManagerCast([s.id]), 'Broadcast starting from this session'),
                 ]),
             ]);
-        });
-        this._mgrvSessionsEl.replaceChildren(...rows);
+        };
+        // Triage sections — the dashboard read: what needs me, what's moving,
+        // what's parked. Severity-ordered inside NEEDS YOU.
+        const needs = [], working = [], resting = [];
+        for (const s of sessions) {
+            const live = this._agentStatus.get(s.id) || s.status;
+            if (s.attention || s.stuck || s.limited || s.highContext || live === 'attention' || live === 'error') needs.push(s);
+            else if (live === 'working') working.push(s);
+            else resting.push(s);
+        }
+        const sev = (s) => s.stuck ? 0 : s.attention ? 1 : s.limited ? 2 : 3;
+        needs.sort((a, b) => sev(a) - sev(b) || a.id - b.id);
+        const sec = (label, cls, arr) => !arr.length ? [] : [
+            el('div', { class: 'mgrv-sec ' + cls }, [
+                el('span', { class: 'mgrv-sec-name', text: label }),
+                el('span', { class: 'mgrv-sec-count', text: String(arr.length) }),
+            ]),
+            ...arr.map(tile),
+        ];
+        this._mgrvSessionsEl.replaceChildren(
+            ...sec('▲ NEEDS YOU', 'mgrv-sec-attn', needs),
+            ...sec('● WORKING', 'mgrv-sec-work', working),
+            ...sec('○ IDLE / DONE', 'mgrv-sec-idle', resting),
+        );
+        this._mgrvFillTails(sessions.map(s => s.id));
+    }
+
+    // ── Manager tile previews — daemon scrollback fallback ──────────────────
+    // The local xterm buffer only exists for tabs this client has streamed;
+    // after a reload (or for a never-opened tab) it's empty and the tile looks
+    // like a bare box. The daemon's scrollback covers every session, so fetch
+    // the tail for blank tiles ({action:'read'} — loopback-trusted, so this
+    // works on the desktop at localhost and fails quiet through a tunnel).
+    _mgrvCleanTail(text, n = 4) {
+        const clean = String(text || '')
+            .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?/g, '')   // OSC titles/links
+            .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')             // CSI colors/moves
+            .replace(/^[0-9;]{2,}m/gm, '')                       // clipped SGR residue
+            .replace(/\x1b/g, '');
+        const lines = clean.split(/\r\n|\r|\n/).map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+        return lines.slice(-n).join('\n');
+    }
+
+    _mgrvTailFor(id) {
+        const local = this._tileTailText(id);
+        if (local) return local;
+        const c = this._mgrvReadCache && this._mgrvReadCache.get(id);
+        return (c && c.text) || '';
+    }
+
+    _mgrvFillTails(ids) {
+        if (!this._mgrvReadCache) this._mgrvReadCache = new Map();
+        const now = Date.now();
+        const stale = ids.filter(id => {
+            if (this._tileTailText(id)) return false;
+            const c = this._mgrvReadCache.get(id);
+            return !c || (now - c.ts > 9000);
+        }).slice(0, 16);
+        for (const id of stale) {
+            const prev = this._mgrvReadCache.get(id);
+            this._mgrvReadCache.set(id, { ts: now, text: (prev && prev.text) || '' });
+            this._managerApi('/api/sessions', { action: 'read', id, lines: 12 })
+                .then(r => {
+                    if (!r || r.ok === false) return;
+                    const text = this._mgrvCleanTail(r.text, 4);
+                    this._mgrvReadCache.set(id, { ts: Date.now(), text });
+                    const pre = this._mgrvPreEls && this._mgrvPreEls.get(id);
+                    if (text && pre && pre.isConnected && !this._tileTailText(id)) pre.textContent = text;
+                })
+                .catch(() => {});
+        }
     }
 
     _openFromManager(id) {

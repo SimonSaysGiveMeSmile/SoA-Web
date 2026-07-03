@@ -2544,6 +2544,29 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .mgrv-tile .mgrv-acts { margin-top: 8px; display: flex; gap: 4px; }
 .mgrv-tile .mgrv-act { flex: 1 1 auto; text-align: center; padding: 4px 6px; }
 
+/* Triage section headers spanning the tile grid — the dashboard read */
+.mgrv-sec {
+  grid-column: 1 / -1;
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 8px 0 -4px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--soa-line-soft);
+  font-family: var(--font-display); font-size: 10px;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--soa-accent-dim);
+}
+.mgrv-sec:first-child { margin-top: 0; }
+.mgrv-sec-count { font-family: var(--font-mono); font-size: 10px; opacity: 0.7; }
+.mgrv-sec-attn .mgrv-sec-name { color: var(--soa-red); }
+.mgrv-sec-work .mgrv-sec-name { color: var(--soa-green); }
+
+/* Context % next to the pie; static group chip in the tile head */
+.mgrv-pct {
+  position: absolute; top: 10px; right: 26px;
+  font-family: var(--font-mono); font-size: 9px;
+  color: var(--soa-accent-dim);
+}
+.mgrv-grp { pointer-events: none; }
+
 /* To-dos */
 .mgrv-todo-form { display: flex; gap: 8px; margin-bottom: 10px; }
 .mgrv-todo {

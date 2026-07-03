@@ -299,6 +299,7 @@
   border-radius: var(--m-r-sm);
   border: 1px solid var(--m-slate-edge);
   padding: 6px 8px;
+  max-height: 6.6em;   /* fits the 4-line tail + padding — no mid-line crop */
 }
 [data-ui="minimal"] .tile-activity,
 [data-ui="minimal"] .tile-status-line { font-family: var(--font-display); text-transform: lowercase; }
@@ -315,6 +316,10 @@
 [data-ui="minimal"] .mgrv-act {
   font-family: var(--font-display); font-weight: 600; text-transform: lowercase;
   border-radius: var(--m-r-sm);
+}
+[data-ui="minimal"] .mgrv-sec {
+  font-family: var(--font-display); font-weight: 600;
+  text-transform: lowercase; letter-spacing: 0.04em; font-size: 12px;
 }
 
 /* ── Menus & popovers ── */
