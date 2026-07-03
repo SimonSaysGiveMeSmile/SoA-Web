@@ -31,7 +31,17 @@ collects nothing). This matches `appstore/PRIVACY.md`.
 
 ## 4. Provide a way for Apple to test it (review-risk — decide) ⚠️
 The app needs a **backend to connect to**, or the reviewer sees only a connect
-screen and rejects under Guideline 2.1 (incomplete) / 4.2. Options — pick one:
+screen and rejects under Guideline 2.1 (incomplete) / 4.2.
+
+> **Origin blocker is already solved (verified live 2026-07-03).** `capacitor://localhost`
+> is hardcoded in the server's default allowed origins (`server/src/index.js:110-112`),
+> and a WS-upgrade probe with the native origin against the **running `:4010` fleet**
+> returned `101 Switching Protocols` (not `403`). So a native/App-Store build connects
+> to a SoA server with **no server change and no restart** — you only need to expose
+> one at a public `https` URL. (This also unblocks the tap-free deep-link screenshot
+> capture below, which points the sim at a live backend.)
+
+Options — pick one:
 - **(Recommended)** Stand up a demo SoA backend on a stable public `https` tunnel,
   put its URL as the app's default backend (rebuild), and/or add it to the review
   notes with any token. Keep it up through review.
