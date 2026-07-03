@@ -76,14 +76,20 @@ encryption but is exempt), and Submit.
   MONITOR/TO-DO segments, CAST broadcast.
 - ✅ Terminal readability fix (font floor 5→12px) so text is legible on a
   phone — shipped to `main`, verified on-device (line pitch ~doubled).
-- ✅ Hero screenshot recaptured at true 6.9" (1320×2868, iPhone 16 Pro Max):
-  `screenshots/01-terminal-chrome.png`
 - ✅ View deep-linking (`/m/?view=chat|dash|browser|system`) shipped to `main`
-  so each view opens directly — no tapping needed. This makes the remaining
-  6.9" screenshots a tap-free capture: point the sim's browser at the view URL
-  with `xcrun simctl openurl <udid> "<backend>/m/?view=chat&t=<token>"` then
-  `xcrun simctl io <udid> screenshot`, once a demo backend is up (step 4).
-- ⏳ Extra 6.9" screenshots (CHAT / DASH-fleet / BROWSER): all three views are
-  functionally verified (soa-browser); the native 6.9" capture is best done at
-  submission time against the reviewer demo backend (step 4) using the tap-free
-  deep-link method above.
+  so each view opens directly — no tapping needed.
+- ✅ **Full 6.9" screenshot set** — all native 1320×2868 (iPhone 16 Pro Max),
+  captured 2026-07-03 with **zero sim taps**: headless render at the exact device
+  metrics (440×956 @3×, mobile emulation) deep-linked through the client's own
+  `?view=` router against the live 26-session fleet, clipped to 1320×2868:
+  - `screenshots/01-terminal-chrome.png` — live terminal (hero)
+  - `screenshots/02-fleet-manager.png`   — DASH: real 26-session fleet, status
+    chips (3 working / 1 needs input / 22 idle), context bars, ⋯ actions
+  - `screenshots/03-system.png`          — SYSTEM: clock, host, CPU, memory, battery
+  - `screenshots/04-chat.png`            — CHAT (agent IM, clean first-run state)
+  - `screenshots/05-browser.png`         — BROWSER (port/URL preview, first-run state)
+  Strongest marketing shots: terminal + fleet + system. Chat/browser show the
+  honest first-run state (no fabricated content) — trim/reorder in App Store
+  Connect to taste. **No remaining non-Apple screenshot work.** (At submission you
+  may optionally re-shoot chat/browser against the reviewer demo backend once it
+  has live content, via the same tap-free `simctl openurl … ?view=…` method.)
