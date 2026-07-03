@@ -68,7 +68,12 @@ encryption but is exempt), and Submit.
   phone — shipped to `main`, verified on-device (line pitch ~doubled).
 - ✅ Hero screenshot recaptured at true 6.9" (1320×2868, iPhone 16 Pro Max):
   `screenshots/01-terminal-chrome.png`
-- ⏳ Extra 6.9" screenshots (CHAT / DASH-fleet / BROWSER) are the one remaining
-  non-Apple item — they need the sim GUI driven view-by-view. Functionally all
-  three views are already verified (soa-browser); only the native 6.9" capture
-  is outstanding.
+- ✅ View deep-linking (`/m/?view=chat|dash|browser|system`) shipped to `main`
+  so each view opens directly — no tapping needed. This makes the remaining
+  6.9" screenshots a tap-free capture: point the sim's browser at the view URL
+  with `xcrun simctl openurl <udid> "<backend>/m/?view=chat&t=<token>"` then
+  `xcrun simctl io <udid> screenshot`, once a demo backend is up (step 4).
+- ⏳ Extra 6.9" screenshots (CHAT / DASH-fleet / BROWSER): all three views are
+  functionally verified (soa-browser); the native 6.9" capture is best done at
+  submission time against the reviewer demo backend (step 4) using the tap-free
+  deep-link method above.

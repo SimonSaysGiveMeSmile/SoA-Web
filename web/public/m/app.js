@@ -318,6 +318,28 @@ applyTheme(loadSavedTheme());
 // (window.__SOA_BACKEND__, injected before this script) or by a user-set override
 // persisted on-device. On the plain web `/m/` build both are absent and the app
 // falls back to location.origin exactly as before, so this is a no-op there.
+// Deep-link the initial view via `?view=` (search) or `#view=` (hash), so the
+// app can open straight onto CHAT / DASH / BROWSER / SYSTEM instead of always
+// the terminal — handy for bookmarking a view, and for capturing per-view
+// screenshots on a device without any tapping. Accepts the friendly aliases the
+// bottom-bar uses. Captured at module load because readToken() rewrites the
+// hash away once a session token is present.
+const VIEW_ALIASES = {
+    terminal: 'terminal-view', term: 'terminal-view',
+    chat: 'chat-view',
+    dash: 'tiles-view', fleet: 'tiles-view', tiles: 'tiles-view',
+    browser: 'web-view', web: 'web-view',
+    system: 'widgets-view', widgets: 'widgets-view',
+};
+const INITIAL_VIEW = (() => {
+    try {
+        const search = new URLSearchParams(location.search);
+        const hash = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+        const raw = (search.get('view') || hash.get('view') || '').toLowerCase();
+        return VIEW_ALIASES[raw] || null;
+    } catch (_) { return null; }
+})();
+
 const NATIVE_BACKEND_KEY = 'soa.native.backend';
 function nativeBackend() {
     try {
@@ -555,6 +577,10 @@ class App {
         this._wireUi();
         this._buildDiagPanel();
         this._wireWebPreview();
+
+        // Honour a `?view=`/`#view=` deep link (see INITIAL_VIEW) once the views
+        // and bottom-bar are wired; otherwise the HTML default (terminal) stands.
+        if (INITIAL_VIEW) this._showView(INITIAL_VIEW);
 
         window.addEventListener('resize', () => this._fitTerminalFont());
 
