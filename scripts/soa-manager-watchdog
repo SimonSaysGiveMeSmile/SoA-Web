@@ -31,8 +31,10 @@ ID_FILE="$STATE_DIR/manager-id"
 PORT="${SOA_WEB_PORT:-7332}"
 
 # The manager's standing mandate: fully own running the fleet so the user doesn't
-# have to (open / modify / pause / stop / kill any agent, at any time).
-MANAGER_GOAL="You are the fleet manager — you fully own running the fleet so the user does not have to. Run the event loop: soa-sessions whoami, then events+list to reconcile, then forever block on: soa-sessions watch — for each event, read the offending session and act. You may OPEN (spawn), MODIFY (goal/btw), PAUSE (interrupt), and STOP/KILL (stop) any agent at any time to keep the fleet unblocked and productive. Be decisive, but conservative about destroying in-progress work: prefer interrupt+resume over stop unless an agent is truly dead or finished. Never command your own tab id. Only soa-msg the user when a decision is genuinely theirs."
+# have to (open / modify / pause / resume any agent, at any time). Closing tabs is
+# OFF by default — the manager never reaps inactive tabs unless the user opts in
+# (soa-sessions config closeInactive on).
+MANAGER_GOAL="You are the fleet manager — you fully own running the fleet so the user does not have to. Run the event loop: soa-sessions whoami, then events+list to reconcile, then forever block on: soa-sessions watch — for each event, read the offending session and act. You may OPEN (spawn), MODIFY (goal/btw), and PAUSE (interrupt) any agent at any time to keep the fleet unblocked and productive. Do NOT close inactive tabs: an idle or done agent is fine left alone — never 'stop' it. Tab-closing is disabled by default (closeInactive=off); only close a tab if the user has explicitly enabled it, and even then prefer interrupt+resume over stop unless an agent is truly dead. You are equipped with the full skill toolbox — use it yourself or hand it to agents you spawn: frontend-design (polished UI/frontend work), computeruse (drive macOS apps, screenshot + OCR/read on-screen UI), browseruse (control Chrome / Browser Use for web tasks and logins), deep-research (multi-source cited research), code-review and simplify (review/clean a diff), verify and run (launch the app and confirm a change works), slides (decks), vercel (deploy), gsd (structured planning). When a session's task calls for one of these, invoke the skill or spawn/goal an agent equipped for it. HEARTBEAT (core duty, every ~15 min — also on a launchd timer via soa-heartbeat): sweep EVERY tab (active, idle, AND dead) for blockers — needs-input, stuck, API errors, usage limits, high context, exited — and confirm each agent is still following its project's PRD/goal objectives; unblock routine prompts with safe defaults, redirect agents that have drifted off their PRD, resume dead ones, and escalate only genuine decisions. As part of each heartbeat, use your browser skills (soa-browser, which streams into the SoA BROWSER panel; or browseruse/computeruse) to MIMIC A REAL USER — visit each product's live webpage, click through its key flows, and screenshot — so you catch UI/UX and deploy regressions the agents can't see from the terminal. Never command your own tab id. Only soa-msg the user when a decision is genuinely theirs."
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
@@ -48,25 +50,23 @@ fi
 # ── Snapshot live sessions ─────────────────────────────────────────────────────
 SESSION_LIST="$(soa-sessions list 2>/dev/null || true)"
 
-# Look up a field for a given tab id.
-# Line format: "  #<id>  <title>  <status>  ctx  <pct>%  [FLAGS...]"
-tab_field() {
-    local id="$1" field="$2"  # field: 3=status 5=ctx_pct ("ctx" label is field 4)
-    echo "$SESSION_LIST" | awk -v id="$id" -v f="$field" '
-        /^[[:space:]]*#[0-9]+/ {
-            gsub(/^[[:space:]]*#/, "", $1)
-            if ($1 == id) { print $f; exit }
-        }'
-}
+# ── Parse `soa-sessions list` lines ───────────────────────────────────────────
+# Line format (title is padded to 20 chars and MAY CONTAIN SPACES):
+#   "  #<id>  <title>  <status>  ctx <pct>  [FLAGS…]"
+#   '  #1  Master Chef           working    ctx  14%  '
+#   '  #7  api                   attention  ctx  41%  NEEDS-INPUT'
+# Positional field parsing (awk $3/$5) broke on multi-word titles: "Master Chef"
+# shifted every column, logging garbage like "status=Chef ctx=ctx%". Instead we
+# anchor on the TRAILING columns — the status word immediately before the last
+# "ctx <pct>" — and treat everything after the pct as flags (NEEDS-INPUT /
+# STUCK / HIGH-CTX / LIMITED→HH:MM). ctx prints "—" when unknown → tab_ctx
+# yields empty and callers default to 0.
+TAIL_RE='[[:space:]]([^[:space:]]+)[[:space:]]+ctx[[:space:]]+([0-9]+%|—)[[:space:]]*(.*)$'
 
-tab_flags() {
-    local id="$1"
-    echo "$SESSION_LIST" | awk -v id="$id" '
-        /^[[:space:]]*#[0-9]+/ {
-            gsub(/^[[:space:]]*#/, "", $1)
-            if ($1 == id) { for(i=6;i<=NF;i++) printf "%s ", $i; print ""; exit }
-        }'
-}
+tab_line()   { echo "$SESSION_LIST" | grep -E "^[[:space:]]*#${1}[[:space:]]" | head -1 || true; }
+tab_status() { tab_line "$1" | sed -nE "s/^.*${TAIL_RE}/\1/p"; }
+tab_ctx()    { tab_line "$1" | sed -nE "s/^.*${TAIL_RE}/\2/p" | sed -nE 's/^([0-9]+)%$/\1/p'; }
+tab_flags()  { tab_line "$1" | sed -nE "s/^.*${TAIL_RE}/\3/p" | sed -E 's/[[:space:]]+$//'; }
 
 tab_exists() {
     local id="$1"
@@ -75,19 +75,24 @@ tab_exists() {
 
 # Find a tab by title; print its id or nothing.
 find_by_title() {
-    local title="$1"
+    local title="$1" live="" any="" line id rest status
     # Prefer a LIVE (non-done) manager tab; fall back to any manager tab.
     # Picking the lowest-id tab blindly used to select a stale "done" duplicate,
     # which then re-triggered the done→respawn path (manager proliferation).
-    echo "$SESSION_LIST" | awk -v t="$title" '
-        /^[[:space:]]*#[0-9]+/ {
-            gsub(/^[[:space:]]*#/, "", $1)
-            if ($2 == t) {
-                if ($3 != "done" && live == "") live = $1
-                if (any == "") any = $1
-            }
-        }
-        END { print (live != "" ? live : any) }'
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*\#([0-9]+)[[:space:]][[:space:]](.*)$ ]]; then
+            id="${BASH_REMATCH[1]}"
+            rest="${BASH_REMATCH[2]}"
+            # Exact-title match against the padded title field: the title must be
+            # followed by a padding space ("manager" must NOT match "manager-ui").
+            if [[ "$rest" == "$title "* || "$rest" == "$title" ]]; then
+                status="$(tab_status "$id")"
+                if [ "$status" != "done" ] && [ -z "$live" ]; then live="$id"; fi
+                if [ -z "$any" ]; then any="$id"; fi
+            fi
+        fi
+    done <<< "$SESSION_LIST"
+    echo "${live:-$any}"
 }
 
 spawn_manager() {
@@ -142,8 +147,8 @@ if [ -z "$MGR_ID" ]; then
 fi
 
 # ── Manager tab found — evaluate state ────────────────────────────────────────
-STATUS="$(tab_field "$MGR_ID" 3)"
-CTX_PCT="$(tab_field "$MGR_ID" 5 | tr -d '%')"
+STATUS="$(tab_status "$MGR_ID")"
+CTX_PCT="$(tab_ctx "$MGR_ID")"
 FLAGS="$(tab_flags "$MGR_ID")"
 log "manager tab #$MGR_ID — status=${STATUS:-?} ctx=${CTX_PCT:-0}% flags='${FLAGS:-}'"
 

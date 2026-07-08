@@ -1,0 +1,116 @@
+#!/bin/bash
+# SoA fleet HEARTBEAT — runs every ~15 min (launchd com.soa-web.heartbeat) and
+# is also invoked by the manager agent each cycle. Two jobs:
+#   1. Mechanical blocker scan across every tab (active / idle / dead): needs-
+#      input, stuck, usage-limited, high-context, hard errors, or exited.
+#   2. Emit a COMPACT per-tab report the manager reads to judge PRD-adherence
+#      (kept small so it doesn't blow the manager's context).
+# On NEW hard blockers it prints an ALERT line; the launchd wrapper soa-msg's
+# the user. LLM-level checks (PRD-adherence + visual product QA) are done by the
+# manager on top of this report — see MANAGER_GOAL.
+set -u
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="$DIR/logs/heartbeat.log"
+STATE="$DIR/logs/.heartbeat-blockers"      # previous run's blocker ids (for diff)
+mkdir -p "$DIR/logs" 2>/dev/null
+TS="$(date '+%Y-%m-%dT%H:%M:%S')"
+
+# Don't flag the manager's own tab — by caller-self AND by the "manager" title
+# (whoami can't identify self when this runs from launchd, not inside the tab).
+SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+
+LIST="$(soa-sessions list 2>/dev/null)"
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | head -1)"
+skip() { [ "$1" = "$SELF" ] || [ "$1" = "$MGR" ]; }
+SUMMARY="$(echo "$LIST" | head -1)"
+
+# strip spinner glyphs / control seqs / collapse whitespace → readable digest
+clean() { sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[◎⏺✻✳✶✽✢·❯➤◉]+/ /g; s/[[:cntrl:]]/ /g; s/  +/ /g'; }
+
+# hard-error phrases (explicit wording only — bare HTTP codes match random
+# token-counts/percentages) + post-error activity markers for the freshness gate
+ERRPAT='API Error|overloaded_error|Traceback \(most recent|command not found|ECONNREFUSED|panic:|FATAL:'
+NBSP=$'\302\240'                      # nbsp — pads the BARE input prompt "❯ "
+ACTPAT='⏺|⎿|Compacted \(|❯ *[^ ]'     # assistant/tool row, compaction, submitted input
+
+blockers=""          # "id title reason digest" lines
+watch_lines=""
+ids="$(echo "$LIST" | sed -nE 's/^ *#([0-9]+) .*/\1/p')"
+
+for id in $ids; do
+  skip "$id" && continue
+  line="$(echo "$LIST" | grep -E "^ *#$id ")"
+  title="$(echo "$line" | sed -E 's/^ *#[0-9]+ +([^ ].*[^ ]) {2,}(working|idle|attention|stuck|done).*/\1/')"
+  status="$(echo "$line" | grep -oE '(working|idle|attention|stuck|done)' | head -1)"
+  ctx="$(echo "$line" | grep -oE 'ctx +[0-9—-]+%?' | grep -oE '[0-9]+%|—' | head -1)"
+  reason=""
+  case "$line" in
+    *NEEDS-INPUT*) reason="needs-input" ;;
+    *STUCK*)       reason="stuck-silent" ;;
+    *limited*|*LIMITED*) reason="usage-limited" ;;
+  esac
+  case "$line" in *HIGH-CTX*) [ -z "$reason" ] && reason="high-context" ;; esac
+
+  # hard-error scan on the recent tail — same ERRPAT for detect + extract so
+  # they never disagree.
+  # FRESHNESS (two gates — stale errors used to flag the same 9 tabs for days):
+  #   1. PTY output arrives \r-separated (often ONE giant newline-"line" holding
+  #      thousands of rendered rows), so the old `tail -4` kept the ENTIRE
+  #      scrollback chunk and matched errors deep in history. Split \r → \n
+  #      FIRST, drop blank rows, keep only the LAST 25 rendered rows — the
+  #      session's current on-screen tail.
+  #   2. Only flag an error with NO activity after it: if anything renders AFTER
+  #      the last error row — an assistant/tool row (⏺/⎿), a submitted input
+  #      echo (❯ + text; the BARE ❯ prompt doesn't count), or a compaction — the
+  #      session already moved past it (e.g. errored → /compact → resumed), so
+  #      it's history, not a live blocker. A genuinely fresh error is the newest
+  #      event on screen: only the empty prompt / status hint follows it.
+  rows="$(soa-sessions read "$id" 40 2>/dev/null | sed '1,2d' | tr '\r' '\n' | grep -vE '^[[:space:]]*$' | tail -25)"
+  tail_raw="$(echo "$rows" | clean)"   # row-parallel to $rows (clean only substitutes)
+  errline="$(echo "$tail_raw" | grep -inE "$ERRPAT" | tail -1 | cut -d: -f1)"
+  err=""
+  if [ -n "$errline" ] && ! echo "$rows" | awk -v n="$errline" 'NR > n' | sed "s/${NBSP}/ /g" | grep -qE "$ACTPAT"; then
+    err="$(echo "$tail_raw" | sed -n "${errline}p" | grep -oiE "$ERRPAT" | head -1)"
+  fi
+  [ -n "$err" ] && reason="error:${err}"
+
+  digest="$(echo "$tail_raw" | grep -oE '[[:print:]]{6,}' | tail -1 | cut -c1-90)"
+  if [ -n "$reason" ]; then
+    case "$reason" in
+      high-context) watch_lines="${watch_lines}  #$id $title  $reason  $ctx :: $digest"$'\n' ;;
+      *)            blockers="${blockers}  #$id $title  $reason  $ctx :: $digest"$'\n' ;;
+    esac
+  fi
+done
+
+# roster lines (exclude the manager tab so it doesn't list itself)
+noself() { grep -vE "^ *#(${SELF:-x}|${MGR:-x}) "; }
+working="$(echo "$LIST" | grep -E ' working ' | noself | sed -nE 's/^ *#([0-9]+) .*/#\1/p' | tr '\n' ' ')"
+idle="$(echo "$LIST" | grep -E ' idle | done ' | noself | sed -nE 's/^ *#([0-9]+) .*/#\1/p' | tr '\n' ' ')"
+
+# ---- report ----
+{
+  echo "=== SoA HEARTBEAT $TS ==="
+  echo "FLEET: $SUMMARY"
+  if [ -n "$blockers" ]; then echo "-- BLOCKERS --"; printf '%s' "$blockers"; else echo "-- BLOCKERS -- none"; fi
+  [ -n "$watch_lines" ] && { echo "-- WATCH --"; printf '%s' "$watch_lines"; }
+  echo "-- WORKING -- $working"
+  echo "-- IDLE/DONE -- $idle"
+} | tee -a "$LOG"
+
+# ---- new-blocker diff → ALERT (launchd wrapper turns this into a soa-msg) ----
+now_ids="$(printf '%s' "$blockers" | sed -nE 's/^  #([0-9]+) .*/\1/p' | sort -u | tr '\n' ',' )"
+prev_ids="$(cat "$STATE" 2>/dev/null)"
+printf '%s' "$now_ids" > "$STATE"
+bcount="$(printf '%s' "$now_ids" | tr ',' '\n' | grep -c '[0-9]')"
+total="$(echo "$SUMMARY" | grep -oE '^[0-9]+' | head -1)"; total="${total:-0}"
+thresh=$(( total * 50 / 100 )); [ "$thresh" -lt 8 ] && thresh=8
+if [ -n "$blockers" ] && [ "$now_ids" != "$prev_ids" ]; then
+  echo "ALERT: blockers changed -> $now_ids ($bcount/$total)"
+  # Auto-notify the user ONLY on a fleet-wide spike (e.g. an API outage hitting
+  # most tabs). Individual blockers are the manager's job to resolve silently.
+  if [ "$bcount" -ge "$thresh" ] && [ "${SOA_HB_NOMSG:-0}" != "1" ]; then
+    soa-msg "⧗ Heartbeat: fleet-wide blockers — $bcount/$total tabs blocked ($now_ids). Manager investigating." 2>/dev/null || true
+  fi
+fi
+exit 0
