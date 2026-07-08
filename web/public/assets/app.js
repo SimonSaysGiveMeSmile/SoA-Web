@@ -963,7 +963,7 @@ class Shell {
         // _setStatus, so including it here would rebuild all N tab buttons on
         // every working↔done flip. Only structural changes (set/title/active)
         // bust the row cache.
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentGroup.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         // replaceChildren destroys the old tab buttons, which resets the
@@ -977,7 +977,6 @@ class Shell {
                 // button's richer tooltip (memory + context + rename hint).
                 class: 'tab-label',
                 text: t.title || tr('tab.default', { id: t.id }),
-                ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
             // Dim second line: a live peek at this tab's last output line so
             // tabs with default / near-identical titles are still tellable
@@ -995,11 +994,10 @@ class Shell {
             }, ['⧉']);
             const main = el('span', { class: 'tab-main' }, [label, sub, pvBtn]);
             const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
-            const gName = this._agentGroup.get(t.id);
-            const gchip = (gName && gName !== 'ungrouped') ? el('span', {
-                class: 'tab-group', text: gName, title: `Group: ${gName} — click to change`,
-                onclick: (e) => { e.stopPropagation(); this._promptSetGroup(t.id); },
-            }) : null;
+            // No group chip here: the auto-group is the cwd folder name, which
+            // just duplicated the (folder-named) title on most tabs. Groups
+            // still show in the tiles + manager views. Rename is dblclick or
+            // right-click anywhere on the tab.
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
                 this._requestCloseTab(t.id);
@@ -1012,8 +1010,9 @@ class Shell {
                 'data-has-preview': previewUrl ? '1' : null,
                 draggable: 'true',
                 onclick: () => this._activate(t.id),
+                ondblclick: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
-            }, gchip ? [dot, main, gchip, x] : [dot, main, x]);
+            }, [dot, main, x]);
             this._attachTabDrag(root, t.id);
             this._attachTabLongPress(root, t.id);
             return root;
