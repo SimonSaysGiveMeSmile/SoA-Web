@@ -170,10 +170,11 @@ function fmtList(snap) {
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
-        // config [autoResume on|off] [text <resume text…>]
+        // config [autoResume on|off] [closeInactive on|off] [text <resume text…>]
         if (cmd === 'config') {
             const body = { action: 'config' };
             if (rest[0] === 'autoResume') body.autoResume = rest[1] === 'on' || rest[1] === 'true';
+            if (rest[0] === 'closeInactive') body.closeInactive = rest[1] === 'on' || rest[1] === 'true';
             if (rest[0] === 'text') body.autoResumeText = rest.slice(1).join(' ');
             const r = await post(body);
             console.log(JSON.stringify(r));
@@ -304,9 +305,12 @@ function fmtList(snap) {
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
-        // stop — kill a tab/agent (refuses your own tab).
+        // stop — kill a tab/agent (refuses your own tab). Disabled by default
+        // unless closeInactive is on; pass --force to override for a dead agent.
         if (cmd === 'stop') {
-            const r = await post({ action: 'stop', id: Number(rest[0]), self: SELF });
+            const force = rest.includes('--force');
+            const idArg = rest.find(a => a !== '--force');
+            const r = await post({ action: 'stop', id: Number(idArg), self: SELF, force });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
@@ -316,14 +320,35 @@ function fmtList(snap) {
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
+        // todo — manager to-do store: add <text…> | done|toggle <id> | del <id> | list
+        if (cmd === 'todo') {
+            const sub = rest[0];
+            let r;
+            if (sub === 'add') {
+                const text = rest.slice(1).join(' ');
+                r = await post({ action: 'todo-add', text, source: 'manager' });
+            } else if (sub === 'done' || sub === 'toggle') {
+                r = await post({ action: 'todo-toggle', id: rest[1] });
+            } else if (sub === 'del' || sub === 'rm') {
+                r = await post({ action: 'todo-del', id: rest[1] });
+            } else if (sub === 'list' || sub === 'ls' || sub == null) {
+                r = await post({ action: 'todos' });
+            } else {
+                console.error('usage: soa-sessions todo add <text…> | done <id> | toggle <id> | del <id> | list');
+                process.exit(1);
+            }
+            console.log(JSON.stringify(r, null, 2));
+            process.exit(r.ok ? 0 : 1);
+        }
         console.error('usage: soa-sessions list | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>\n' +
                       '       schedule <id|all|limited> <+15m|2:30am|epochMs> [text] | resume-all [when] [text]\n' +
-                      '       schedules | unschedule <scheduleId> | config autoResume on|off | config text <text>\n' +
+                      '       schedules | unschedule <scheduleId> | config autoResume on|off | config closeInactive on|off | config text <text>\n' +
                       '   manager-agent:\n' +
                       '       whoami | events [--since N] [--kinds a,b] | watch [--kinds a,b] [--timeout 25] [--once] [--catchup] [--raw]\n' +
                       '       goal <id|all|attention|stuck|idle|done|highContext|limited> <text> | btw <id|cohort> <note> | clear <id|cohort>\n' +
                       '       resume <id|all|limited> | broadcast <all|working|attention|idle|limited> <text>\n' +
-                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] | stop <id> | interrupt <id>');
+                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] | stop <id> [--force] | interrupt <id>\n' +
+                      '       todo add <text…> | todo done <id> | todo toggle <id> | todo del <id> | todo list');
         process.exit(1);
     } catch (e) {
         console.error('soa-sessions error:', e.message, '(is the SoA server running?)');

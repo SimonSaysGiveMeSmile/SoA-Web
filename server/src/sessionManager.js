@@ -26,6 +26,12 @@ const localKey = require('./localKey');
 // ── Manager config + pending resume schedules (persisted across restarts) ──
 const { STATE_DIR } = require('./stateDir');
 const MANAGER_FILE = path.join(STATE_DIR, 'manager.json');
+// Optional hard override for the "manager may close inactive tabs" policy.
+// SOA_MANAGER_CLOSE_INACTIVE=1 forces it ON, =0 forces OFF, unset → use the
+// persisted manager.json value (which itself defaults OFF). Off by default.
+const CLOSE_INACTIVE_ENV = process.env.SOA_MANAGER_CLOSE_INACTIVE == null
+    ? null
+    : /^(1|true|on|yes)$/i.test(String(process.env.SOA_MANAGER_CLOSE_INACTIVE));
 
 function loadManagerState() {
     try {
@@ -33,7 +39,12 @@ function loadManagerState() {
         return {
             autoResume: d.autoResume === true,
             autoResumeText: typeof d.autoResumeText === 'string' && d.autoResumeText ? d.autoResumeText.slice(0, 200) : 'continue',
+            // Whether the manager agent is allowed to CLOSE (stop) live/inactive
+            // tabs. Default OFF — the manager never reaps a tab unless the user
+            // explicitly opts in. Env override wins for headless/prod pinning.
+            closeInactive: CLOSE_INACTIVE_ENV != null ? CLOSE_INACTIVE_ENV : (d.closeInactive === true),
             schedules: Array.isArray(d.schedules) ? d.schedules.filter(s => s && Number(s.at) > 0) : [],
+            todos: Array.isArray(d.todos) ? d.todos.filter(x => x && typeof x.id === 'string' && typeof x.text === 'string').slice(0, 500) : [],
             // User-defined agent groups: manual overrides keyed by cwd
             // ({ "<cwd>": "<groupName>" }). Absent a match, a session's group is
             // auto-derived from its cwd (the project folder name). Keyed by cwd
@@ -41,7 +52,7 @@ function loadManagerState() {
             groups: (d.groups && typeof d.groups === 'object' && !Array.isArray(d.groups)) ? d.groups : {},
         };
     } catch (_) {
-        return { autoResume: false, autoResumeText: 'continue', schedules: [], groups: {} };
+        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, schedules: [], todos: [], groups: {} };
     }
 }
 
@@ -288,7 +299,8 @@ class SessionManager {
     constructor(session) {
         this.session = session;
         this.tabs = new Map();       // tabId → state
-        this.state = loadManagerState();   // {autoResume, autoResumeText, schedules}
+        this.state = loadManagerState();   // {autoResume, autoResumeText, schedules, todos}
+        if (!Array.isArray(this.state.todos)) this.state.todos = [];
         // ── Event ring: manager-agent triggers ──────────────────────────────
         // In-memory, monotonic, transient. Events are WAKEUPS, not history —
         // snapshot()/`list` is always ground truth. A daemon restart resets
@@ -342,6 +354,38 @@ class SessionManager {
         this.state.schedules = this.state.schedules.filter(s => s.id !== id);
         if (this.state.schedules.length !== before) this._saveState();
         return this.state.schedules.length !== before;
+    }
+
+    // ── Manager to-do store (persisted; surfaced in snapshot for the dashboard) ──
+    addTodo(text, { source = 'manager', tab = null } = {}) {
+        const todo = {
+            id: 't' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36),
+            text: String(text).slice(0, 400),
+            done: false,
+            createdAt: Date.now(),
+            source: source === 'user' ? 'user' : 'manager',
+            tab: tab == null ? null : Number(tab),
+        };
+        this.state.todos.push(todo);
+        if (this.state.todos.length > 500) this.state.todos = this.state.todos.slice(-500);
+        this._saveState();
+        this.broadcast();
+        return todo;
+    }
+
+    toggleTodo(id) {
+        const t = this.state.todos.find(x => x.id === id);
+        if (t) t.done = !t.done;
+        this._saveState();
+        this.broadcast();
+        return this.state.todos;
+    }
+
+    delTodo(id) {
+        this.state.todos = this.state.todos.filter(x => x.id !== id);
+        this._saveState();
+        this.broadcast();
+        return this.state.todos;
     }
 
     _fireDue() {
@@ -538,9 +582,12 @@ class SessionManager {
         const mgr = this.session.tabMgr;
         const order = mgr ? mgr.order : [];
         const now = Date.now();
+        let managerTabId = null;
+        let managerStatus = null;
         const sessions = order.map(id => {
             const tab = mgr.get(id);
             const s = this._state(id);
+            if (managerTabId == null && tab && typeof tab.title === 'string' && tab.title.trim().toLowerCase() === 'manager') { managerTabId = id; managerStatus = s.status; }
             const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS && !looksDone(s.recent);
             // Match the schedule the way _fireDue resolves it (prefer the exact id
             // when its cwd still matches, else the cwd) so resumeAt shows on the tab
@@ -580,7 +627,15 @@ class SessionManager {
             highContext: sessions.filter(x => x.highContext).length,
             limited: sessions.filter(x => x.limited).length,
         };
-        return { sessions, counts, ts: now, autoResume: this.state.autoResume };
+        return {
+            sessions, counts, ts: now,
+            autoResume: this.state.autoResume,
+            closeInactive: this.state.closeInactive === true,
+            todos: this.state.todos,
+            managerTabId,
+            managerActive: managerTabId != null,
+            managerStatus,
+        };
     }
 
     broadcast() {
@@ -616,11 +671,32 @@ function mount(app, requireAuthed, sessions) {
         const man = ensure(s);
         const body = req.body || {};
         if (typeof body.autoResume === 'boolean') man.state.autoResume = body.autoResume;
+        if (typeof body.closeInactive === 'boolean') man.state.closeInactive = body.closeInactive;
         if (typeof body.autoResumeText === 'string' && body.autoResumeText.trim()) {
             man.state.autoResumeText = body.autoResumeText.trim().slice(0, 200);
         }
         man._saveState();
-        res.json({ ok: true, autoResume: man.state.autoResume, autoResumeText: man.state.autoResumeText });
+        res.json({ ok: true, autoResume: man.state.autoResume, closeInactive: man.state.closeInactive === true, autoResumeText: man.state.autoResumeText });
+    });
+
+    // Authed manager to-do mutations (the desktop Manager view, over the tunnel).
+    app.post('/api/manager/todo', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+        const s = (req.session && req.session.tabMgr) ? req.session : primary();
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        const man = ensure(s);
+        const body = req.body || {};
+        const op = String(body.op || '');
+        if (op === 'add') {
+            if (!body.text || !String(body.text).trim()) return res.status(400).json({ ok: false, error: 'text required' });
+            man.addTodo(String(body.text), { source: body.source, tab: body.tab });
+        } else if (op === 'toggle') {
+            man.toggleTodo(String(body.id || ''));
+        } else if (op === 'del') {
+            man.delTodo(String(body.id || ''));
+        } else {
+            return res.status(400).json({ ok: false, error: 'bad op — add|toggle|del' });
+        }
+        res.json({ ok: true, todos: man.state.todos });
     });
 
     app.get('/api/manager', requireAuthed, (req, res) => {
@@ -727,14 +803,31 @@ function mount(app, requireAuthed, sessions) {
             if (action === 'unschedule') {
                 return res.json({ ok: man.unschedule(String(body.scheduleId || '')) });
             }
-            // config: {action:'config', autoResume?:bool, autoResumeText?:string}
+            // config: {action:'config', autoResume?:bool, closeInactive?:bool, autoResumeText?:string}
             if (action === 'config') {
                 if (typeof body.autoResume === 'boolean') man.state.autoResume = body.autoResume;
+                if (typeof body.closeInactive === 'boolean') man.state.closeInactive = body.closeInactive;
                 if (typeof body.autoResumeText === 'string' && body.autoResumeText.trim()) {
                     man.state.autoResumeText = body.autoResumeText.trim().slice(0, 200);
                 }
                 man._saveState();
-                return res.json({ ok: true, autoResume: man.state.autoResume, autoResumeText: man.state.autoResumeText });
+                return res.json({ ok: true, autoResume: man.state.autoResume, closeInactive: man.state.closeInactive === true, autoResumeText: man.state.autoResumeText });
+            }
+
+            // ── Manager to-do store ─────────────────────────────────────────
+            if (action === 'todos') {
+                return res.json({ ok: true, todos: man.state.todos });
+            }
+            if (action === 'todo-add') {
+                if (!body.text || !String(body.text).trim()) return res.status(400).json({ ok: false, error: 'text required' });
+                const todo = man.addTodo(String(body.text), { source: body.source, tab: body.tab });
+                return res.json({ ok: true, todo });
+            }
+            if (action === 'todo-toggle') {
+                return res.json({ ok: true, todos: man.toggleTodo(String(body.id || '')) });
+            }
+            if (action === 'todo-del') {
+                return res.json({ ok: true, todos: man.delTodo(String(body.id || '')) });
             }
 
             // ── Manager-agent: event triggers ───────────────────────────────
@@ -874,6 +967,15 @@ function mount(app, requireAuthed, sessions) {
                 if (self != null && id === self) return res.status(400).json({ ok: false, error: 'refusing to stop your own tab' });
                 const tab = mgr.get(id);
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
+                // Policy gate: by default the manager must NOT close inactive tabs.
+                // Off unless the user opted in (closeInactive) or the caller passes
+                // an explicit force:true for a genuinely dead/finished agent.
+                if (!man.state.closeInactive && body.force !== true) {
+                    return res.status(409).json({
+                        ok: false, id, disabled: true,
+                        error: 'manager tab-closing is disabled (closeInactive=off) — not closing inactive tabs; pass force:true to override',
+                    });
+                }
                 const wasStatus = man._state(id).status;
                 mgr.close(id); // onExit → noteExit() emits 'exited' + forgets
                 return res.json({ ok: true, id, closed: true, wasStatus });
