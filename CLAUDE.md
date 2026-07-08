@@ -107,25 +107,50 @@ soa-browser screenshot out.jpg
 
 ## Deploy model
 
+The production instance is the **consolidated daemon**: launchd label
+`app.s0a.web.local`, port `:4010`, code `~/.soa-web/server/src`, static
+`~/.soa-web/web/public`, state dir `~/.soa-web-local` (`SOA_WEB_STATE_DIR`).
+
 Edit this repo (`/Users/test/Desktop/Hireal/soa-web`), then mirror changed files
-to the install dir (`~/.soa-web`). Static client files (`web/public/**`) take
-effect on reload (bump the SW `VERSION` in `web/public/m/sw.js`). Server changes
-(`server/src/**`) need a graceful restart: `kill -TERM <daemon-pid>` (flushes
-scrollback/tabs, leaves the tunnel running) then
-`launchctl kickstart -k gui/$(id -u)/com.soa-web.server`. The tunnel URL is
-persisted to `~/.soa-web/tunnel.json` and re-adopted across restarts, so it
-stays stable.
+to the install dir (`~/.soa-web`) — that is the code the live daemon runs (it
+reads code only at startup). Static client files (`web/public/**`) take effect
+on reload (bump the SW `VERSION` in `web/public/m/sw.js`). Server changes
+(`server/src/**`) need a graceful restart: `kill -TERM <pid>` — read the pid
+from `~/.soa-web-local/daemon.lock` — (flushes scrollback/tabs) then
+`launchctl kickstart -k gui/$(id -u)/app.s0a.web.local`; tabs and tunnel
+re-adopt. The tunnel URL is persisted to `~/.soa-web-local/tunnel.json` (the
+**state dir**, not `~/.soa-web`) and re-adopted across restarts, so it stays
+stable.
 
 ## Self-healing (no more manual restores)
 
-The prod daemon is supervised so it comes back on its own — see
-`deploy/launchd/`. Two layers: (1) the `com.soa-web.server` launchd job uses
-**unconditional `KeepAlive`** (any exit → restart in ≤10s; the old conditional
-form left a clean exit-0 dead, which was the recurring "please restore"); (2) a
-`com.soa-web.watchdog` job runs `scripts/soa-watchdog` every 60s, pinging
-`/api/ping` and `kickstart -k`-ing the daemon if it's **hung or down** (the case
-KeepAlive can't see). On restart the daemon re-adopts the tunnel + persisted
-tabs. The watchdog only touches `com.soa-web.server`/`:7332` — never the product
-instance (`:4010`/`~/.soa-web-local`). To stop the daemon by hand, bootout the
-**watchdog first** (else it revives the daemon). Action log:
-`~/.soa-web/logs/watchdog.log`.
+The supervision plists are tracked in `deploy/launchd/` in the **canonical
+repo** (`/Users/test/Desktop/Hireal/soa-web/deploy/launchd/`; the install dir
+`~/.soa-web` has no copy, and the daemon's own `app.s0a.web.local.plist` lives
+only in `~/Library/LaunchAgents`). Layers of supervision (all `gui/501`
+launchd jobs):
+
+1. `app.s0a.web.local` itself has unconditional **`KeepAlive = true`** — any
+   exit → restart in ≤10s. On restart the daemon re-adopts the tunnel +
+   persisted tabs.
+2. `com.soa-web.watchdog-4010` — every 60s runs `scripts/soa-watchdog`: pings
+   `:4010` and `kickstart -k`s `app.s0a.web.local` if it's **hung or down**
+   (the case KeepAlive can't see). It is load-tolerant — it re-probes over
+   ~30s before acting, so a load-starved (not dead) daemon isn't restarted —
+   and runs with `SOA_WEB_MANAGE_TUNNEL=0` so it never touches the tunnel.
+3. `com.soa-web.manager-watchdog-4010` — every 90s ensures a manager tab
+   exists (resumes a wedged one, respawns it if missing).
+4. `com.soa-web.channels` — every 60s owns/heals the public tunnel
+   (provider-agnostic: it has switched between cloudflare and ngrok) and
+   persists the active channel (`tunnel.json`/`channels.json` in the state
+   dir).
+5. `com.soa-web.heartbeat` — every 600s produces the fleet blocker digest.
+
+The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
+`com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end
+then; the `-4010` replacements were installed minutes later) and are
+launchctl-**disabled**; their plists remain in `~/Library/LaunchAgents` but
+must **not** be re-enabled. To stop the daemon by hand, bootout
+`com.soa-web.watchdog-4010` **first** (else it revives the daemon). Action
+logs: `~/.soa-web-local/logs/watchdog.log` (watchdog) and
+`~/.soa-web/logs/heartbeat.log` (heartbeat).
