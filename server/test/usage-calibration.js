@@ -16,10 +16,15 @@
  */
 const { costOf } = require('../src/claudeUsage');
 
-// tokens from the /usage screen; usd is what Claude Code itself charged them at
+// tokens from the /usage screen; usd is what Claude Code itself charged them
+// at. First two rows: 2026-07-03 screenshot (session 6face46a). Last two:
+// 2026-07-08 screenshot of a 17d session (haiku row includes 10 web searches
+// at $10/1k — checks the server-tool line item).
 const CASES = [
     { name: 'claude-opus-4-8', model: 'claude-opus-4-8', input: 31900, output: 204300, cacheRead: 20.4e6, cacheWrite: 797200, usd: 22.25 },
     { name: 'claude-fable-5', model: 'claude-fable-5', input: 15100, output: 91200, cacheRead: 11.2e6, cacheWrite: 571700, usd: 24.24 },
+    { name: 'claude-opus-4-8 (17d)', model: 'claude-opus-4-8', input: 936800, output: 3.0e6, cacheRead: 500.7e6, cacheWrite: 16.4e6, usd: 473.22 },
+    { name: 'claude-haiku-4-5 (+search)', model: 'claude-haiku-4-5-20251001', input: 148700, output: 204600, cacheRead: 11.4e6, cacheWrite: 1.4e6, webSearch: 10, usd: 4.21 },
 ];
 
 function priceWith(c, mix1h) {
@@ -33,6 +38,7 @@ function priceWith(c, mix1h) {
         cw1h: c.cacheWrite * mix1h,
         fast: false,
         geoUs: false,
+        webSearch: c.webSearch || 0,
     });
 }
 

@@ -235,11 +235,13 @@
   border-radius: var(--m-r-sm);
 }
 [data-ui="minimal"] .claude-head-l,
+[data-ui="minimal"] .claude-sess-head,
 [data-ui="minimal"] .netchart-legend,
 [data-ui="minimal"] .globe-meta {
   font-family: var(--font-display); text-transform: lowercase;
   letter-spacing: 0.01em; color: var(--soa-accent-dim);
 }
+[data-ui="minimal"] .claude-sess-val { color: var(--m-accent); font-variant-numeric: tabular-nums; }
 [data-ui="minimal"] .claude-reset { color: var(--m-accent); font-family: var(--font-mono); }
 [data-ui="minimal"] .claude-reset.warn { color: var(--soa-yellow); }
 

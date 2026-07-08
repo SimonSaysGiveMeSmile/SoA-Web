@@ -33,6 +33,11 @@
 .claude-bar { margin-top: 5px; }
 .claude-sub { margin-top: 5px; font-family: var(--font-mono); font-size: 10.5px; color: var(--soa-fg); letter-spacing: 0.03em; }
 .claude-spark { display: block; width: 100%; height: 34px; margin: 7px 0 5px; background: rgba(var(--soa-accent-rgb), 0.04); border: 1px solid rgba(var(--soa-accent-rgb), 0.14); }
+.claude-sess-head { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--soa-line-soft); font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.18em; color: var(--soa-accent-dim); }
+.claude-sess-list { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.claude-sess-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-family: var(--font-mono); font-size: 10.5px; }
+.claude-sess-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soa-fg); }
+.claude-sess-val { flex-shrink: 0; color: var(--soa-accent); letter-spacing: 0.02em; }
 
 /* ── Mobile QR widget ───────────────────────────────────────────────── */
 .mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }

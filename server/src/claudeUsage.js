@@ -108,6 +108,8 @@ function costOf(r) {
         + r.cw1h * p.cw1h * cacheScale
         + r.cacheRead * p.cr * cacheScale) / M;
     if (r.geoUs) usd *= 1.1;
+    // Server-side web search bills $10 per 1k requests on top of tokens.
+    usd += (r.webSearch || 0) * 0.01;
     return usd;
 }
 
@@ -161,6 +163,7 @@ function parseInto(line, c) {
         fast: u.speed === 'fast',
         geoUs: u.inference_geo === 'us',
         side: obj.isSidechain === true,
+        webSearch: (u.server_tool_use && u.server_tool_use.web_search_requests) || 0,
     });
 }
 

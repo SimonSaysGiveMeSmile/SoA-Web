@@ -265,6 +265,12 @@ class ClaudeUsageWidget extends Widget {
         this._burn = kv('BURN');
         this._today = kv('TODAY');
         this._model = kv('MODEL');
+        // Per-session breakdown ("which session is burning the tokens") — fed
+        // by the same endpoint; hidden until the server ships session rows.
+        this._sessHead = $el('div', { class: 'claude-sess-head', text: 'TOP SESSIONS' });
+        this._sessList = $el('div', { class: 'claude-sess-list' });
+        this._sessHead.style.display = 'none';
+        this._sessList.style.display = 'none';
         this._mountStructure();
     }
 
@@ -280,6 +286,7 @@ class ClaudeUsageWidget extends Widget {
             this._sub,
             this._spark,
             this._burn.row, this._today.row, this._model.row,
+            this._sessHead, this._sessList,
         );
     }
 
@@ -328,8 +335,46 @@ class ClaudeUsageWidget extends Widget {
         } else {
             this._model.v.textContent = '—';
         }
+        this._renderSessions(d);
         this._series = (d.series || []).slice(-30);
         this._paintSpark();
+    }
+
+    // Top sessions by estimated cost — in the live 5h window while one is
+    // active, else today. Subagent usage is already folded into its parent
+    // session server-side, so an agent-heavy session shows its whole bill.
+    _renderSessions(d) {
+        const scope = d.sessionScope === 'block' ? 'block' : 'today';
+        const rows = (d.sessions || [])
+            .map(s => ({ s, sc: (scope === 'block' ? s.block : s.today) || {} }))
+            .filter(x => x.sc.tok > 0)
+            .slice(0, 6);
+        if (!rows.length) {
+            this._sessHead.style.display = 'none';
+            this._sessList.style.display = 'none';
+            this._sessList.replaceChildren();
+            return;
+        }
+        this._sessHead.style.display = '';
+        this._sessList.style.display = '';
+        this._sessHead.textContent = 'TOP SESSIONS · ' + (scope === 'block' ? '5H' : 'TODAY');
+        this._sessList.replaceChildren(...rows.map(({ s, sc }) => {
+            // "project · first-slug-word" tells same-project sessions apart
+            // without eating the row ("soa-web · keen" vs "soa-web · noble").
+            const slugBit = s.slug ? s.slug.split('-')[0] : (s.shortId || '').slice(0, 4);
+            const label = (s.project || '?') + (slugBit ? ' · ' + slugBit : '');
+            const b = s.block || {}, t = s.today || {};
+            const tip = [
+                (s.project || '?') + ' — ' + (s.slug || s.shortId || ''),
+                `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
+                `today: ${_fmtTok(t.tok)} tok · ≈${_fmtUsd(t.cost)} · ${t.req || 0} req`,
+            ];
+            if (t.subCost > 0.01) tip.push(`of which subagents today: ≈${_fmtUsd(t.subCost)}`);
+            return $el('div', { class: 'claude-sess-row', title: tip.join('\n') }, [
+                $el('span', { class: 'claude-sess-name', text: label }),
+                $el('span', { class: 'claude-sess-val', text: `${_fmtTok(sc.tok)} · ≈${_fmtUsd(sc.cost)}` }),
+            ]);
+        }));
     }
 
     onLangChange() { /* labels refresh on next tick */ }
