@@ -5,8 +5,9 @@
   "description": "Son of Anton — native iOS shell (Capacitor) bundling the /m/ mobile client",
   "scripts": {
     "sync-web": "node scripts/sync-web.js",
-    "build": "npm run sync-web && npx cap sync ios",
-    "open": "npx cap open ios"
+    "build": "npm run sync-web && npx cap sync ios && node scripts/fix-spm.js",
+    "open": "npx cap open ios",
+    "fix-spm": "node scripts/fix-spm.js"
   },
   "dependencies": {
     "@capacitor/cli": "^8.4.1",

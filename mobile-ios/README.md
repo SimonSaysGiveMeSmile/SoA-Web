@@ -70,7 +70,14 @@ while SPM fetches Capacitor's binary XCFrameworks from GitHub releases (plain
 `curl` fetches them fine). Workaround: the frameworks are vendored at
 `ios/capacitor-swift-pm-local/` and `ios/App/CapApp-SPM/Package.swift` plus the
 two plugin `node_modules/@capacitor/*/Package.swift` manifests point at that local
-path instead of the git URL. If you re-run `npx cap sync ios`, it regenerates
-`CapApp-SPM/Package.swift` (repoint it) — prefer `npx cap copy ios` for web-only
-updates. After repointing, delete
-`ios/App/App.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
+path instead of the git URL.
+
+**This fix is now automatic.** `npx cap sync ios` regenerates
+`CapApp-SPM/Package.swift` back to the network URL, so `scripts/fix-spm.js`
+runs right after it in `npm run build` (and every other script that invokes
+`cap sync`): it repoints any GitHub `capacitor-swift-pm` reference — in
+`CapApp-SPM/Package.swift` and the plugin manifests under
+`node_modules/@capacitor/*` (which `npm install` restores to the network
+form) — back to the local vendor, and deletes any stale swiftpm
+`Package.resolved`. It is idempotent; run it by hand any time with
+`npm run fix-spm`.

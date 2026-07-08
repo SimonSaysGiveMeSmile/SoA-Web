@@ -19,11 +19,13 @@ const path = require('path');
 
 const SRC = process.env.SOA_WEB_SRC || '/Users/test/.soa-web/web/public/m';
 const DEST = path.join(__dirname, '..', 'www');
-// Default backend: a public https/wss origin reachable from a real device AND
-// the simulator. Override at sync time with SOA_BACKEND=... A trycloudflare
-// quick-tunnel URL is ephemeral — set a stable tunnel for release builds.
-const DEFAULT_BACKEND =
-  process.env.SOA_BACKEND || 'https://gras-pest-harvard-arguments.trycloudflare.com';
+// Default backend: supplied at sync time via SOA_BACKEND=... (a public
+// https/wss origin reachable from a real device AND the simulator; a
+// trycloudflare quick-tunnel URL is ephemeral — set a stable tunnel for
+// release builds). When unset, NO backend is baked: window.__SOA_BACKEND__
+// stays empty, nativeBackend() returns null, and the app shows its
+// "re-scan the QR code" connect screen instead of spinning on a dead URL.
+const DEFAULT_BACKEND = process.env.SOA_BACKEND || '';
 
 function rmrf(p) {
   if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
@@ -74,5 +76,9 @@ if (!html.includes('soa-native.js')) {
   fs.writeFileSync(idxPath, html);
 }
 
-console.log(`[sync-web] backend = ${DEFAULT_BACKEND}`);
+if (DEFAULT_BACKEND) {
+  console.log(`[sync-web] backend = ${DEFAULT_BACKEND}`);
+} else {
+  console.warn('[sync-web] WARNING: SOA_BACKEND unset — no backend baked; the app will ask the user to pair (QR scan).');
+}
 console.log('[sync-web] done.');
