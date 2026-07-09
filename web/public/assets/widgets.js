@@ -249,7 +249,10 @@ const _fmtDur = ms => {
 
 class ClaudeUsageWidget extends Widget {
     constructor({ parent }) {
-        super({ titleKey: 'widget.claude', title: 'CLAUDE', parent, intervalMs: 4000 });
+        // 2.5s poll: the server memoizes compute() for 1.2s and tails only
+        // appended bytes, so the fast cadence is cheap — the remaining lag is
+        // transcript flush timing (a record lands when its message completes).
+        super({ titleKey: 'widget.claude', title: 'CLAUDE', parent, intervalMs: 2500 });
         // Persistent DOM — tick() only updates text/width/canvas so the
         // sparkline never flickers on refresh.
         this._reset = $el('span', { class: 'claude-reset', text: '—' });
