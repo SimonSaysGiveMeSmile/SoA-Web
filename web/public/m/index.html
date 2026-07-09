@@ -24,7 +24,8 @@
             <nav id="controls" class="controls" aria-label="Functions">
                 <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
                 <button class="bb-btn" data-view="chat-view">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
-                <button class="bb-btn" data-view="tiles-view">DASH</button>
+                <!-- Manager-only (premium gate): hidden by default; app.js reveals it when /api/capabilities reports manager=true. -->
+                <button class="bb-btn" data-view="tiles-view" hidden>DASH</button>
                 <button class="bb-btn" data-view="web-view">BROWSER</button>
                 <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
                 <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>

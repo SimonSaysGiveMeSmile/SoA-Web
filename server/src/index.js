@@ -54,6 +54,7 @@ const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
+const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
 const { dbg, agg }     = require('./debug');
 const { STATE_DIR, MODE } = require('./stateDir');
@@ -248,7 +249,17 @@ app.get('/api/ping', (req, res) => {
 });
 
 app.get('/api/me', requireAuthed, (req, res) => {
-    res.json({ ok: true, authed: true });
+    // `capabilities` tells the client which premium features to surface. Bundled
+    // into /api/me so the client learns its entitlements in the same round-trip
+    // it already makes on load (no extra request needed to hide/show the DASH).
+    res.json({ ok: true, authed: true, capabilities: entitlements.capabilities({ req, user: entitlements.getUserContext(req) }) });
+});
+
+// Standalone capabilities probe (same data as /api/me.capabilities) — a stable
+// endpoint the client/CLI can hit to decide whether to show the manager UI.
+// Per-context, so it becomes per-user automatically once accounts exist.
+app.get('/api/capabilities', requireAuthed, (req, res) => {
+    res.json({ ok: true, capabilities: entitlements.capabilities({ req, user: entitlements.getUserContext(req) }) });
 });
 
 app.get('/api/devices', requireAuthed, (req, res) => {
@@ -595,8 +606,13 @@ function onWsConnect(ws, session, req) {
         if (session._cwdInterval.unref) session._cwdInterval.unref();
 
         // Supervisor tick: refresh stuck/idle derivations and push a MANAGER
-        // snapshot to the dashboard. Always-on (independent of connected clients).
+        // snapshot to the dashboard. Always-on (independent of connected clients)
+        // — but ONLY when the manager feature is entitled. On a free install this
+        // premium supervision loop never runs, so there's zero overhead and no
+        // manager frames leak to the client. (Install-wide today; filter per
+        // connection here once entitlement is per-user.)
         session._managerInterval = setInterval(() => {
+            if (!entitlements.isEnabled('manager')) return;
             try {
                 const m = sessionManager.ensure(session);
                 m.emitStuckSweep();   // time-derived 'stuck' → manager event

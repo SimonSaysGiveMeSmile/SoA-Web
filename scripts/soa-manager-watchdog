@@ -47,6 +47,17 @@ if ! curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1;
     exit 0
 fi
 
+# ── Premium gate ────────────────────────────────────────────────────────────────
+# The Fleet Manager is a paid feature. On a free/unlicensed install, don't spawn
+# or supervise a manager tab at all. Ask the daemon what THIS install is entitled
+# to; only proceed when manager is enabled. (Fails open only if the probe itself
+# errors, so a transient hiccup doesn't strand a paying user's manager.)
+CAPS="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/capabilities" 2>/dev/null || echo '')"
+if [ -n "$CAPS" ] && ! printf '%s' "$CAPS" | grep -q '"manager":[[:space:]]*true'; then
+    log "manager feature not entitled for this install — skipping (free tier)"
+    exit 0
+fi
+
 # ── Snapshot live sessions ─────────────────────────────────────────────────────
 SESSION_LIST="$(soa-sessions list 2>/dev/null || true)"
 

@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+/**
+ * soa-license — mint / inspect / check SoA premium licenses.
+ *
+ * The Fleet Manager is a paid feature gated by server/src/entitlements.js. A
+ * license unlocks it per-install: drop the file at $SOA_WEB_STATE_DIR/license.json
+ * (or hand it to a paying customer). If SOA_WEB_LICENSE_SECRET is set, licenses
+ * are HMAC-signed so they can't be forged; without it, an unsigned license still
+ * works for a single owner install.
+ *
+ * Usage:
+ *   soa-license status                       # what THIS install resolves per feature
+ *   soa-license inspect [file]               # validate a license file (default: state dir)
+ *   soa-license issue --to "Name" [opts]     # mint a license → stdout (or --out FILE)
+ *     --to <name>            who it's for (issuedTo)              [required]
+ *     --plan <plan>          plan label (default: pro)
+ *     --features <a,b>       comma features (default: manager)
+ *     --expires <ISO|days>   e.g. 2027-01-01 or 365  (default: none = perpetual)
+ *     --out <file>           write here instead of stdout
+ *     --install              write straight to the state dir's license.json
+ *
+ * Signing uses SOA_WEB_LICENSE_SECRET when present.
+ */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+// Reuse the daemon's own canonicalization + signing so tool and server agree.
+const ent = require(path.join(__dirname, '..', 'server', 'src', 'entitlements'));
+
+function stateDir() { return process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web'); }
+function licPath() { return process.env.SOA_WEB_LICENSE_FILE || path.join(stateDir(), 'license.json'); }
+function arg(flag, def) { const i = process.argv.indexOf(flag); return i !== -1 ? process.argv[i + 1] : def; }
+function has(flag) { return process.argv.includes(flag); }
+
+function sign(payload) {
+    const secret = process.env.SOA_WEB_LICENSE_SECRET;
+    if (!secret) return payload; // unsigned — accepted only when the daemon also has no secret
+    return { ...payload, sig: ent.expectedSig(payload, secret) };
+}
+
+function issue() {
+    const to = arg('--to');
+    if (!to) { console.error('soa-license issue: --to "Name" is required'); process.exit(2); }
+    const plan = arg('--plan', 'pro');
+    const features = String(arg('--features', 'manager')).split(',').map(s => s.trim()).filter(Boolean);
+    let expiresAt = null;
+    const exp = arg('--expires');
+    if (exp) {
+        if (/^\d+$/.test(exp)) expiresAt = new Date(Date.now() + Number(exp) * 864e5).toISOString();
+        else { const t = Date.parse(exp); if (Number.isNaN(t)) { console.error('bad --expires'); process.exit(2); } expiresAt = new Date(t).toISOString(); }
+    }
+    // issuedAt is stamped from the wall clock at mint time (fine for a CLI tool).
+    const payload = { features, plan, issuedTo: to, issuedAt: new Date().toISOString(), expiresAt };
+    const signed = sign(payload);
+    const json = JSON.stringify(signed, null, 2);
+    const dest = has('--install') ? licPath() : arg('--out');
+    if (dest) {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(dest, json + '\n');
+        console.error(`wrote license → ${dest}${signed.sig ? ' (signed)' : ' (UNSIGNED — set SOA_WEB_LICENSE_SECRET to sign)'}`);
+    } else {
+        process.stdout.write(json + '\n');
+    }
+}
+
+function inspect() {
+    const file = process.argv[3] && !process.argv[3].startsWith('-') ? process.argv[3] : licPath();
+    if (process.env.SOA_WEB_LICENSE_FILE == null) process.env.SOA_WEB_LICENSE_FILE = file;
+    ent.reload();
+    const lic = ent.loadLicense();
+    console.log(`license: ${file}`);
+    console.log(JSON.stringify({ valid: lic.valid, reason: lic.reason, plan: lic.plan,
+        features: lic.features ? [...lic.features] : [], expiresAt: lic.expiresAt, issuedTo: lic.issuedTo }, null, 2));
+    process.exit(lic.valid ? 0 : 1);
+}
+
+function status() {
+    console.log('this install resolves:');
+    for (const f of Object.keys(ent.FEATURES)) {
+        const r = ent.resolve(f);
+        console.log(`  ${f.padEnd(10)} ${r.enabled ? 'ENABLED ' : 'locked  '} (source: ${r.source}${r.plan ? ', plan: ' + r.plan : ''})`);
+    }
+    console.log(`\nstate dir: ${stateDir()}\nlicense:   ${licPath()}${fs.existsSync(licPath()) ? '' : '  (none)'}`);
+    console.log(`signing:   ${process.env.SOA_WEB_LICENSE_SECRET ? 'enforced (SOA_WEB_LICENSE_SECRET set)' : 'OFF (unsigned licenses accepted)'}`);
+}
+
+const cmd = process.argv[2];
+if (cmd === 'issue') issue();
+else if (cmd === 'inspect') inspect();
+else if (cmd === 'status' || !cmd) status();
+else { console.error('usage: soa-license status | inspect [file] | issue --to "Name" [--plan pro] [--features manager] [--expires ISO|days] [--out FILE|--install]'); process.exit(2); }

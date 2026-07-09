@@ -45,7 +45,20 @@ function post(body, opts = {}) {
             headers,
         }, (res) => {
             let b = ''; res.on('data', d => b += d);
-            res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve({ ok: false, raw: b }); } });
+            res.on('end', () => {
+                let j; try { j = JSON.parse(b); } catch (_) { return resolve({ ok: false, raw: b }); }
+                // Premium gate: the manager surface is a paid feature. On a free
+                // install the daemon 403s with this code — fail loud + helpful
+                // rather than letting every command print a confusing error.
+                if (j && j.code === 'FEATURE_NOT_ENTITLED') {
+                    process.stderr.write(
+                        'soa-sessions: the Fleet Manager feature is not enabled for this install.\n'
+                        + '  Enable it with a license:  soa-license issue --to "You" --install\n'
+                        + '  or for this shell only:    SOA_WEB_MANAGER_ENABLED=1\n');
+                    process.exit(3);
+                }
+                resolve(j);
+            });
         });
         req.on('error', reject);
         // `watch` is a long-poll; hold the socket open past the server's

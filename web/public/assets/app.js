@@ -463,6 +463,12 @@ class Shell {
             mgrBtn.addEventListener('click', () => this._toggleManager());
             this._updateManagerBtn();
         }
+        // Premium-feature gate: the fleet-manager view is manager-only. Default to
+        // DISABLED so a slow/failed capabilities fetch fails safe to hidden, then
+        // reveal it only once the server confirms the entitlement.
+        this._caps = { manager: false };
+        this._applyManagerEntitlement();
+        this._loadCapabilities();
 
         $('#new-tab').addEventListener('click', () => {
             this.audio.play('panels');
@@ -2650,6 +2656,7 @@ class Shell {
         window.addEventListener('soa:user-geo', e => this._setChipFlag(e.detail && e.detail.flag));
         // The CLAUDE sidebar widget deep-links here: manager view, USAGE pane.
         window.addEventListener('soa:open-usage', () => {
+            if (!this._managerEnabled()) return; // entitlement gate: no manager deep-link when unentitled
             this.viewMode = 'manager';
             try { localStorage.setItem('soa_web_view_mode', 'manager'); } catch (_) {}
             this._applyViewMode();
@@ -2948,6 +2955,34 @@ class Shell {
         else this._monitorPortsEl.dataset.empty = '';
     }
 
+    // ── Manager entitlement (premium gate) ───────────────────────────────────
+    // The fleet-manager view is manager-only. Fetch the entitlement on boot;
+    // fails safe — on any error the default (manager: false → hidden) stands.
+    async _loadCapabilities() {
+        try {
+            const { ok, capabilities } = await this._apiJson('/api/capabilities');
+            if (ok && capabilities) this._caps = capabilities;
+        } catch (_) { /* keep fail-safe default (manager hidden) */ }
+        this._applyManagerEntitlement();
+    }
+
+    _managerEnabled() { return !!(this._caps && this._caps.manager); }
+
+    // Show/hide the fleet-manager entry point based on the entitlement, and
+    // bounce out of the manager view if we somehow landed there unentitled
+    // (e.g. a stale localStorage view mode).
+    _applyManagerEntitlement() {
+        const btn = $('#toggle-manager');
+        if (btn) btn.hidden = !this._managerEnabled();
+        if (!this._managerEnabled() && this.viewMode === 'manager') {
+            this.viewMode = 'tabs';
+            try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
+            this._applyViewMode();
+            this._updateViewBtn();
+            this._updateMonitorBtn();
+        }
+    }
+
     // ── MANAGER view — interactive fleet dashboard ──────────────────────────
     // Desktop mirror of the mobile DASH: live fleet counts, the per-session
     // oversight list with actions, the shared manager to-do list, agent
@@ -2956,6 +2991,8 @@ class Shell {
     // bar uses; actions go over the WS input path (term-keys / hotkey — the
     // same reliable path the keyboard uses) and the /api/manager endpoints.
     _toggleManager() {
+        // Entitlement gate: never switch into the manager view when unentitled.
+        if (!this._managerEnabled()) { if (this.viewMode === 'manager') this.viewMode = 'tabs'; return; }
         this.viewMode = this.viewMode === 'manager' ? 'tabs' : 'manager';
         try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
         this._applyViewMode();

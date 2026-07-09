@@ -599,6 +599,12 @@ class App {
             },
         });
 
+        // Premium-feature gate — default the DASH/FLEET manager tab to HIDDEN
+        // (fail safe) until /api/capabilities proves this install is entitled.
+        this._caps = { manager: false };
+        this._applyManagerGate();
+        this._pullCapabilities();
+
         this._wireSocket();
         this._wireUi();
         this._buildDiagPanel();
@@ -778,11 +784,14 @@ class App {
         } catch (_) {
             listEl.innerHTML = '<div class="settings-hint">Could not load providers.</div>';
         }
-        try {
-            const mgr = await this._api('/api/manager');
-            this._setAutoResumeBtn(!!mgr.autoResume);
-            this._setCloseInactiveBtn(!!mgr.closeInactive);
-        } catch (_) {}
+        // Manager-gated: skip the fetch on a free install (403 anyway).
+        if (this._caps && this._caps.manager) {
+            try {
+                const mgr = await this._api('/api/manager');
+                this._setAutoResumeBtn(!!mgr.autoResume);
+                this._setCloseInactiveBtn(!!mgr.closeInactive);
+            } catch (_) {}
+        }
     }
 
     _setAutoResumeBtn(on) {
@@ -1378,6 +1387,13 @@ class App {
     }
 
     _showView(target) {
+        // Premium-feature gate: the DASH/FLEET view is manager-only. On a
+        // free/unlicensed install (`capabilities.manager` false) navigating to
+        // it is a no-op that falls back to the terminal — the /api/manager
+        // endpoint would only 403 anyway. Fails safe to hidden (see _caps init).
+        if (target === 'tiles-view' && !(this._caps && this._caps.manager)) {
+            target = 'terminal-view';
+        }
         this._currentView = target;
         this.viewEls.forEach(v => v.classList.toggle('active', v.id === target));
         this.viewBtns.forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-view') === target ? 'true' : 'false'));
@@ -1469,6 +1485,8 @@ class App {
     // Overarching supervisor summary (server-side, always-on). Shows fleet-wide
     // counts and flags which sessions need attention / are stuck / high-context.
     _onManager(d) {
+        // Manager-gated: ignore fleet frames on a free/unlicensed install.
+        if (!(this._caps && this._caps.manager)) return;
         this._manager = d;
         this._updateTodoBadge();
         if (this._currentView === 'tiles-view') this._renderFleet();
@@ -1477,10 +1495,35 @@ class App {
     // Pull the authoritative server fleet view (also arrives live via the WS
     // `manager` frame, but a fetch on view-open avoids a cold first paint).
     async _pullManager() {
+        // Manager-gated: skip the fetch entirely on a free install (403 anyway).
+        if (!(this._caps && this._caps.manager)) return;
         try {
             const d = await this._api('/api/manager');
             if (d && d.ok !== false && d.counts) { this._manager = d; this._updateTodoBadge(); }
         } catch (_) { /* fall back to the last WS frame */ }
+    }
+
+    // Premium-feature gate — fetch the server's capability set and (re)apply the
+    // manager gate. Fails safe: any error leaves `manager` DISABLED (hidden).
+    async _pullCapabilities() {
+        try {
+            const d = await this._api('/api/capabilities');
+            const mgr = !!(d && d.ok !== false && d.capabilities && d.capabilities.manager);
+            this._caps = { manager: mgr };
+        } catch (_) {
+            this._caps = { manager: false };
+        }
+        this._applyManagerGate();
+    }
+
+    // Show/hide the DASH (tiles-view) top-bar tab per entitlement, and bounce
+    // off the fleet view if it was somehow open while unentitled.
+    _applyManagerGate() {
+        const on = !!(this._caps && this._caps.manager);
+        this.viewBtns.forEach(btn => {
+            if (btn.getAttribute('data-view') === 'tiles-view') btn.hidden = !on;
+        });
+        if (!on && this._currentView === 'tiles-view') this._showView('terminal-view');
     }
 
     // ── FLEET manager view (SESSIONS · MONITOR · TO-DO + BROADCAST) ──────────

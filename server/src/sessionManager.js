@@ -22,6 +22,7 @@ const { MSG, frame } = require('./protocol');
 const envStore = require('./envStore');
 const claudeSessions = require('./claudeSessions');
 const localKey = require('./localKey');
+const entitlements = require('./entitlements');
 
 // ── Manager config + pending resume schedules (persisted across restarts) ──
 const { STATE_DIR } = require('./stateDir');
@@ -661,11 +662,15 @@ function mount(app, requireAuthed, sessions) {
     }
     // Loopback trust gate is module-level + tunnel-aware (see isLocalRequest).
     const isLoopback = isLocalRequest;
+    // Premium gate: the whole manager surface is a paid feature. Every route
+    // below is entitlement-gated so a free install can't reach it (403). See
+    // entitlements.js — today per-install, per-user once accounts land.
+    const gateManager = entitlements.requireEntitled('manager');
 
     // Read-only fleet view (authed; powers the dashboard too).
     // Authed config (the mobile Settings sheet) — same knobs as the loopback
     // 'config' action, but reachable from the phone over the tunnel.
-    app.post('/api/manager/config', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+    app.post('/api/manager/config', requireAuthed, gateManager, express.json({ limit: '8kb' }), (req, res) => {
         const s = (req.session && req.session.tabMgr) ? req.session : primary();
         if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
         const man = ensure(s);
@@ -680,7 +685,7 @@ function mount(app, requireAuthed, sessions) {
     });
 
     // Authed manager to-do mutations (the desktop Manager view, over the tunnel).
-    app.post('/api/manager/todo', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+    app.post('/api/manager/todo', requireAuthed, gateManager, express.json({ limit: '8kb' }), (req, res) => {
         const s = (req.session && req.session.tabMgr) ? req.session : primary();
         if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
         const man = ensure(s);
@@ -699,7 +704,7 @@ function mount(app, requireAuthed, sessions) {
         res.json({ ok: true, todos: man.state.todos });
     });
 
-    app.get('/api/manager', requireAuthed, (req, res) => {
+    app.get('/api/manager', requireAuthed, gateManager, (req, res) => {
         const s = req.session && req.session.tabMgr ? req.session : primary();
         if (!s) return res.json({ ok: true, sessions: [], counts: {} });
         res.json({ ok: true, ...ensure(s).snapshot() });
@@ -709,7 +714,7 @@ function mount(app, requireAuthed, sessions) {
     // the phone). Keyed by cwd; {id} is resolved to its cwd. Empty group reverts
     // that cwd to its auto (project-folder) group. Pushes a fresh snapshot so
     // every connected client re-renders immediately.
-    app.post('/api/manager/group', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+    app.post('/api/manager/group', requireAuthed, gateManager, express.json({ limit: '8kb' }), (req, res) => {
         const s = (req.session && req.session.tabMgr) ? req.session : primary();
         if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
         const man = ensure(s);
@@ -728,6 +733,12 @@ function mount(app, requireAuthed, sessions) {
     // no misleading per-route override here.
     app.post('/api/sessions', (req, res) => {
         if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'loopback only' });
+        // Premium gate: even a loopback CLI caller (soa-sessions) needs the
+        // manager entitlement. Keeps the paid surface off on free installs.
+        if (!entitlements.isEnabled('manager', { req })) {
+            return res.status(403).json({ ok: false, code: 'FEATURE_NOT_ENTITLED', feature: 'manager',
+                error: 'Fleet Manager is not enabled for this install' });
+        }
         const s = primary();
         if (!s || !s.tabMgr) return res.status(503).json({ ok: false, error: 'no active session' });
         const mgr = s.tabMgr;
