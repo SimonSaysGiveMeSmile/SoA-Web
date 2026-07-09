@@ -47,6 +47,8 @@
 .mqr-online  .mqr-dot { background: var(--soa-green); box-shadow: 0 0 8px var(--soa-green); }
 .mqr-starting .mqr-dot { background: var(--soa-yellow); animation: pulse 1s infinite; }
 .mqr-error   .mqr-dot { background: var(--soa-red); }
+/* one-time cloudflared download progress during first START */
+.mqr-note { font-family: var(--font-mono); font-size: 9px; color: var(--soa-yellow); letter-spacing: 0.06em; margin: -2px 0 6px; }
 .mqr-qr { display: grid; place-items: center; padding: 4px 0 8px; }
 .mqr-img { width: 180px; height: 180px; display: block; }
 .mqr-empty { font-size: 10px; opacity: 0.55; text-align: center; padding: 30px 10px; border: 1px dashed var(--soa-line-soft); }

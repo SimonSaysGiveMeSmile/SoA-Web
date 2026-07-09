@@ -27,23 +27,29 @@ function lanAddresses(port, proto = 'http') {
 }
 
 class PairingManager {
-    constructor({ port, publicProto = 'http' }) {
+    constructor({ port, publicProto = 'http', bindHost = '0.0.0.0' }) {
         this.port = port;
         this.publicProto = publicProto;
+        // Loopback bind → no LAN interface can actually reach the daemon, so
+        // advertising interface IPs would hand the phone a connection-refused
+        // URL. The tunnel is the only real remote door in that mode.
+        this.lanReachable = !/^(127\.|localhost$|::1$)/.test(String(bindHost));
         this.state = 'idle';      // 'idle' | 'starting' | 'online' | 'error'
         this.tunnel = null;       // { url, close }
         this.publicUrl = null;
         this.error = null;
         this.startedAt = null;
+        this.progress = null;     // {pct, receivedMB, totalMB} while cloudflared auto-downloads
     }
 
     snapshot() {
         return {
             state: this.state,
-            lan:   lanAddresses(this.port, this.publicProto),
+            lan:   this.lanReachable ? lanAddresses(this.port, this.publicProto) : [],
             publicUrl: this.publicUrl,
             error: this.error,
             startedAt: this.startedAt,
+            progress: this.progress,
         };
     }
 
@@ -52,10 +58,14 @@ class PairingManager {
         this.state = 'starting';
         this.error = null;
         try {
-            this.tunnel = await openTunnel(this.port);
+            // On a machine with no tunnel provider, openTunnel downloads
+            // cloudflared first (~20 MB). Live progress lands in the snapshot
+            // so the widget's 6s status poll can narrate the one-time setup.
+            this.tunnel = await openTunnel(this.port, p => { this.progress = p; });
+            this.progress = null;
             if (!this.tunnel) {
                 this.state = 'error';
-                this.error = 'no tunnel provider available (install cloudflared or ngrok, or npm i localtunnel)';
+                this.error = 'no tunnel provider available (cloudflared auto-download failed — check network, or brew install cloudflared)';
                 return this.snapshot();
             }
             this.publicUrl = this.tunnel.url;
@@ -66,6 +76,7 @@ class PairingManager {
             }
             return this.snapshot();
         } catch (err) {
+            this.progress = null;
             this.state = 'error';
             this.error = err && err.message || 'tunnel failed';
             return this.snapshot();
@@ -117,6 +128,7 @@ class PairingManager {
         this.state = error ? 'error' : 'idle';
         this.error = error;
         this.startedAt = null;
+        this.progress = null;
     }
 }
 

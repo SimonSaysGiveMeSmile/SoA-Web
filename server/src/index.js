@@ -362,7 +362,10 @@ app.get('/api/user/stats', requireAuthed, async (req, res) => {
 consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
 claudeUsage.mount(app, requireAuthed);
-const pair = new pairing.PairingManager({ port: PORT });
+// bindHost matters: a loopback-bound daemon (the curl|sh install default)
+// must not advertise LAN interface IPs in the pairing widget — they
+// connection-refuse from a phone, a dead link dressed up as an option.
+const pair = new pairing.PairingManager({ port: PORT, bindHost: HOST });
 pairing.mount(app, requireAuthed, pair, {
     onTunnelUp: (url) => {
         if (!ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
@@ -1217,29 +1220,34 @@ function onListening() {
     // Headless self-heal: rehydrate the fleet even if no browser reconnects.
     scheduleBootResume();
 
-    if (process.env.SOA_WEB_AUTOPAIR !== '0') {
-        const registerTunnel = (url) => {
-            if (url && !ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
-        };
-        // Try to re-adopt a tunnel that outlived the previous process first; only
-        // mint a fresh one if there's nothing healthy to take over. Adoption keeps
-        // the same public URL across restarts so the mobile client never loses it.
-        pair.resume().then(snap => {
-            if (snap.state === 'online' && snap.publicUrl) {
-                registerTunnel(snap.publicUrl);
-                console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (re-adopted — survived restart)`);
-                return;
+    const registerTunnel = (url) => {
+        if (url && !ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
+    };
+    // Try to re-adopt a tunnel that outlived the previous process first; only
+    // mint a fresh one if there's nothing healthy to take over. Adoption keeps
+    // the same public URL across restarts so the mobile client never loses it.
+    //
+    // Adoption runs UNCONDITIONALLY — AUTOPAIR only gates minting a FRESH
+    // tunnel. On AUTOPAIR=0 installs (curl|sh default) the user's clicked
+    // START spawned a detached cloudflared that survives our restart; if we
+    // skipped resume() here its origin would never be re-registered and the
+    // paired phone would 403 on /ws until the user clicked START again.
+    pair.resume().then(snap => {
+        if (snap.state === 'online' && snap.publicUrl) {
+            registerTunnel(snap.publicUrl);
+            console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (re-adopted — survived restart)`);
+            return;
+        }
+        if (process.env.SOA_WEB_AUTOPAIR === '0') return;
+        return pair.start().then(snap2 => {
+            if (snap2.state === 'online' && snap2.publicUrl) {
+                registerTunnel(snap2.publicUrl);
+                console.log(`SoA-Web tunnel:  ${snap2.publicUrl}  (QR in the sidebar)`);
+            } else if (snap2.state === 'error') {
+                console.log(`SoA-Web tunnel:  unavailable — ${snap2.error}`);
             }
-            return pair.start().then(snap2 => {
-                if (snap2.state === 'online' && snap2.publicUrl) {
-                    registerTunnel(snap2.publicUrl);
-                    console.log(`SoA-Web tunnel:  ${snap2.publicUrl}  (QR in the sidebar)`);
-                } else if (snap2.state === 'error') {
-                    console.log(`SoA-Web tunnel:  unavailable — ${snap2.error}`);
-                }
-            });
-        }).catch(() => {});
-    }
+        });
+    }).catch(() => {});
 }
 
 function tryListen(port) {

@@ -21,6 +21,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { dbg } = require('./debug');
+const { ensureCloudflared } = require('./tunnelProvision');
 
 // Where we remember a live tunnel so it can be re-adopted after a daemon
 // restart instead of minting a fresh (different) URL. Keeping the same public
@@ -157,9 +158,11 @@ function _wrapAdopted(st) {
     };
 }
 
-async function openTunnel(port) {
+// onProgress (optional) receives {pct, receivedMB, totalMB} while cloudflared
+// is being auto-downloaded on a machine that has none (see tunnelProvision).
+async function openTunnel(port, onProgress) {
     dbg('tunnel', 'openTunnel: probing providers for port', port);
-    const cf = await _tryCloudflared(port);
+    const cf = await _tryCloudflared(port, onProgress);
     if (cf) { dbg('tunnel', 'cloudflared up:', cf.url); return cf; }
     dbg('tunnel', 'cloudflared unavailable, trying ngrok');
     const ng = await _tryNgrok(port);
@@ -173,9 +176,15 @@ async function openTunnel(port) {
 
 // ── Cloudflare Tunnel (quick tunnel, no account needed) ───────────
 
-async function _tryCloudflared(port) {
-    const cfPath = await _findBinary('cloudflared');
-    if (!cfPath) { dbg('tunnel', 'cloudflared binary not found on PATH or well-known dirs'); return null; }
+async function _tryCloudflared(port, onProgress) {
+    // Finds a system cloudflared, or downloads the official release into the
+    // state dir when the machine has none — a fresh install pairs a phone
+    // with one click, no brew/account/terminal (see tunnelProvision.js).
+    const cfPath = await ensureCloudflared(onProgress);
+    // Download done (or skipped) — clear the progress note so the UI shows a
+    // plain STARTING while the tunnel itself spawns, not a stuck "99%".
+    if (onProgress) { try { onProgress(null); } catch (_) {} }
+    if (!cfPath) { dbg('tunnel', 'cloudflared unavailable (not found and auto-download failed/disabled)'); return null; }
     dbg('tunnel', 'cloudflared binary:', cfPath);
     try {
         // detached: run cloudflared in its own process group so it survives a
@@ -183,7 +192,11 @@ async function _tryCloudflared(port) {
         // the URL is known and persist {pid,url} so the next boot can adopt it
         // and keep the SAME public URL — the mobile bridge never has to chase
         // a new address.
-        const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`], {
+        // --no-autoupdate LAST so the argv prefix stays pgrep-matchable by
+        // _findCloudflaredPid. Without it a standalone binary self-updates
+        // (~24h) and re-execs, minting a NEW trycloudflare URL out from under
+        // the paired phone and defeating adopt()'s same-URL restart survival.
+        const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`, '--no-autoupdate'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
         });

@@ -77,11 +77,12 @@ need npm
 # without it a perfectly healthy install would be reported as FAILED.
 need curl
 
-# Mobile bridge needs a public tunnel. localtunnel is bundled as an npm
-# dependency (always-available fallback), but cloudflared is preferred — free,
-# fast, no account. Best-effort install it when absent; NEVER fatal, since a
-# missing tunnel only affects remote/phone access, not the local shell. Without
-# this, a fresh machine hit "no tunnel provider available" on first pair.
+# Mobile bridge needs a public tunnel. cloudflared is preferred — free, fast,
+# no account — and the daemon SELF-PROVISIONS it: on the first pair click the
+# server downloads the official release into its state dir (tunnelProvision.js),
+# so no platform is degraded. A brew install is still nicer when available
+# (brew keeps it updated), so best-effort it here; NEVER fatal — a missing
+# provider now only costs the new user a one-time ~20 MB download on first pair.
 ensure_tunnel_provider() {
     if command -v cloudflared >/dev/null 2>&1 || command -v ngrok >/dev/null 2>&1; then
         return 0
@@ -90,9 +91,9 @@ ensure_tunnel_provider() {
         log "no tunnel provider found — installing cloudflared via brew (for mobile access)…"
         brew install cloudflared >/dev/null 2>&1 \
             && log "cloudflared installed" \
-            || log "cloudflared install skipped — mobile will use the bundled localtunnel fallback"
+            || log "cloudflared install skipped — the daemon will auto-download it on first pair"
     else
-        log "no cloudflared/ngrok — mobile will use the bundled localtunnel fallback"
+        log "no cloudflared/ngrok — the daemon will auto-download cloudflared on first pair"
     fi
 }
 ensure_tunnel_provider
@@ -379,4 +380,5 @@ log "service is up"
 printf '\n\033[32m✓ installed\033[0m  \033[2m(in %s)\033[0m\n' "$ROOT"
 printf '  Shell:     \033[36mhttp://127.0.0.1:%s\033[0m\n' "$PORT"
 printf '  Via site:  \033[36m%s\033[0m  \033[2m(auto-detects localhost)\033[0m\n' "$FRONTEND_ORIGIN"
+printf '  Phone:     \033[2msidebar → MOBILE LINK → START, then scan the QR (cloudflared auto-provisions)\033[0m\n'
 printf '  Uninstall: \033[36m%s/uninstall.sh\033[0m\n\n' "$ROOT"

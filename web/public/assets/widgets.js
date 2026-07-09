@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=20';
+import { t as tr } from '/assets/i18n.js?v=21';
 import { getSettings } from '/assets/settings.js?v=23';
 
 const $el = (tag, props = {}, children = []) => {
@@ -742,14 +742,23 @@ class MobileQRWidget extends Widget {
                 }),
             ];
 
+        // First-time setup on a fresh machine: the server auto-downloads
+        // cloudflared during START and narrates progress via /api/pair/status
+        // — surface it so a ~20 MB one-time fetch doesn't look like a hang.
+        const prog = state === 'starting' && snap && snap.progress;
+        const progText = prog
+            ? `${tr('mqr.provisioning')} ${prog.pct}% (${prog.receivedMB}/${prog.totalMB} MB)`
+            : null;
+
         this.body.replaceChildren(
             $el('div', { class: `mqr-status mqr-${state}` }, [
                 $el('span', { class: 'mqr-dot' }),
                 $el('span', { text: tr(`mqr.state.${state}`) }),
             ]),
+            progText ? $el('div', { class: 'mqr-note', text: progText }) : '',
             $el('div', { class: 'mqr-qr' }, target
                 ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(pairUrl(target))}`), alt: 'pairing QR' })]
-                : [$el('div', { class: 'mqr-empty', text: tr('mqr.empty') })]),
+                : [$el('div', { class: 'mqr-empty', text: state === 'starting' ? tr('mqr.empty_starting') : tr('mqr.empty') })]),
             $el('div', { class: 'mqr-urls' },
                 state === 'online'
                     ? lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
