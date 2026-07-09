@@ -272,6 +272,12 @@ class ClaudeUsageWidget extends Widget {
         this._sessHead.style.display = 'none';
         this._sessList.style.display = 'none';
         this._mountStructure();
+        // The widget is the teaser; the full usage dashboard lives in the
+        // manager view's USAGE pane. app.js listens for this event.
+        this.body.classList.add('claude-clickable');
+        this.body.title = 'Open the usage dashboard';
+        this.body.addEventListener('click', () =>
+            window.dispatchEvent(new CustomEvent('soa:open-usage')));
     }
 
     // Assemble the persistent DOM. Re-callable: a 404/sandbox tick swaps in a

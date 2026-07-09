@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=30';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=31';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=20';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=23';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -2648,6 +2648,13 @@ class Shell {
         // The profile pane broadcasts the egress country as it polls — mirror its
         // flag onto the always-visible chip.
         window.addEventListener('soa:user-geo', e => this._setChipFlag(e.detail && e.detail.flag));
+        // The CLAUDE sidebar widget deep-links here: manager view, USAGE pane.
+        window.addEventListener('soa:open-usage', () => {
+            this.viewMode = 'manager';
+            try { localStorage.setItem('soa_web_view_mode', 'manager'); } catch (_) {}
+            this._applyViewMode();
+            this._setManagerSub('usage');
+        });
 
         // Load current profile from server
         try {
@@ -3007,6 +3014,7 @@ class Shell {
             if (document.hidden || this.viewMode !== 'manager') return;
             this._pullManager();
             if (this._mgrvSub === 'monitor') this._refreshManagerMonitor();
+            if (this._mgrvSub === 'usage') this._refreshManagerUsage();
         }, 10_000);
     }
 
@@ -3018,6 +3026,7 @@ class Shell {
     _setManagerSub(sub) {
         this._mgrvSub = sub;
         if (sub === 'monitor') this._refreshManagerMonitor();
+        if (sub === 'usage') this._refreshManagerUsage();
         this._renderManagerView();
     }
 
@@ -3039,6 +3048,7 @@ class Shell {
         this._mgrvSegBtns = [
             seg('sessions', 'SESSIONS'),
             seg('monitor', 'MONITOR'),
+            seg('usage', 'USAGE'),
             seg('todos', 'TO-DO', this._mgrvTodoBadge),
         ];
         const castBtn = el('button', {
@@ -3085,6 +3095,7 @@ class Shell {
         // Panes.
         this._mgrvSessionsEl = el('div', { class: 'mgrv-pane mgrv-cards' });
         this._mgrvMonitorEl = el('div', { class: 'mgrv-pane', hidden: '' });
+        this._mgrvUsageEl = el('div', { class: 'mgrv-pane mgru', hidden: '' });
         this._mgrvTodoListEl = el('div', { class: 'mgrv-todo-list' });
         this._mgrvTodoInput = el('input', {
             class: 'mgrv-input', type: 'text', autocomplete: 'off',
@@ -3120,6 +3131,7 @@ class Shell {
             this._mgrvCastEl,
             this._mgrvSessionsEl,
             this._mgrvMonitorEl,
+            this._mgrvUsageEl,
             this._mgrvTodosEl,
             chatForm,
         ]);
@@ -3136,10 +3148,12 @@ class Shell {
         for (const b of this._mgrvSegBtns) b.classList.toggle('active', b.dataset.seg === sub);
         this._mgrvSessionsEl.hidden = sub !== 'sessions';
         this._mgrvMonitorEl.hidden = sub !== 'monitor';
+        this._mgrvUsageEl.hidden = sub !== 'usage';
         this._mgrvTodosEl.hidden = sub !== 'todos';
         if (sub === 'sessions') this._renderManagerSessions();
         else if (sub === 'todos') this._renderManagerTodos();
         else if (sub === 'monitor') this._renderManagerMonitor();
+        else if (sub === 'usage') this._renderManagerUsage();
         this._renderManagerTargets();
         if (this._mgrvCastOpen) this._renderManagerCast();
     }
@@ -3167,6 +3181,201 @@ class Shell {
         chip('high ctx',   c.highContext, 'fleet-ctx');
         chip('limited',    c.limited,     'fleet-limited');
         this._mgrvHeadEl.replaceChildren(row);
+    }
+
+    // ── USAGE pane ──────────────────────────────────────────────────────
+    // The fleet's live Claude bill: 5h window + burn + projection, today with
+    // the per-model split, a 30-minute burn chart, and the per-session
+    // leaderboard (which session is burning the most — subagents folded into
+    // their parent). Fed by /api/claude-usage; the leaderboard needs the v2
+    // usage engine and degrades to a restart hint on an older backend.
+
+    _mgruFmtTok(n) {
+        n = n || 0;
+        if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k';
+        return String(Math.round(n));
+    }
+    _mgruFmtUsd(n) {
+        n = n || 0;
+        if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
+        if (n >= 100) return '$' + n.toFixed(0);
+        return '$' + n.toFixed(2);
+    }
+    _mgruFmtDur(ms) {
+        const s = Math.max(0, Math.round(ms / 1000));
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+        return h ? `${h}h ${m}m` : `${m}m`;
+    }
+
+    async _refreshManagerUsage() {
+        if (this._mgruBusy) return;
+        this._mgruBusy = true;
+        try {
+            const j = await this._managerApi('/api/claude-usage');
+            if (j && j.ok !== false && j.data) { this._usage = j.data; this._usageErr = null; }
+        } catch (e) {
+            this._usageErr = e;
+        } finally {
+            this._mgruBusy = false;
+        }
+        if (this.viewMode === 'manager' && this._mgrvSub === 'usage') this._renderManagerUsage();
+    }
+
+    _renderManagerUsage() {
+        const root = this._mgrvUsageEl;
+        if (!root) return;
+        const d = this._usage;
+        if (!d) {
+            const msg = this._usageErr && /\b404\b/.test(String(this._usageErr.message || this._usageErr))
+                ? 'The usage engine is not live on this backend yet — restart the local daemon to enable it.'
+                : (this._usageErr ? 'Usage endpoint unreachable — retrying…' : 'Reading transcripts…');
+            root.replaceChildren(el('div', { class: 'mgrv-empty', text: msg }));
+            return;
+        }
+        const fmtTok = (n) => this._mgruFmtTok(n), fmtUsd = (n) => this._mgruFmtUsd(n);
+        const head = (label, right) => el('div', { class: 'mgru-head' }, [
+            el('span', { class: 'mgru-head-l', text: label }),
+            right || null,
+        ]);
+        const big = (usd) => el('div', { class: 'mgru-big' }, [
+            el('span', { class: 'mgru-approx', text: '≈' }), fmtUsd(usd),
+        ]);
+
+        // 5H WINDOW — the number that maps to Claude's rolling limit block.
+        const b = d.block || {};
+        let windowCard;
+        if (b.active) {
+            windowCard = el('div', { class: 'mgru-card mgru-window' }, [
+                head('5H WINDOW', el('span', { class: 'mgru-reset', text: `resets in ${this._mgruFmtDur(b.remainingMs)}` })),
+                big(b.cost),
+                el('div', { class: 'mgru-dim', text: `${fmtTok((b.tokens || {}).total)} tok · ${b.requests} req` }),
+                el('div', { class: 'mgru-gauge', title: `${Math.round(b.pct || 0)}% of the 5h window elapsed` }, [
+                    el('span', { class: 'mgru-gauge-fill', style: `width:${Math.min(100, b.pct || 0)}%` }),
+                ]),
+                el('div', { class: 'mgru-kline' }, [
+                    el('span', {}, ['burn ', el('b', { text: `${fmtTok(b.burnRatePerMin)}/min` })]),
+                    el('span', {}, ['projected ', el('b', { text: `≈${fmtUsd(b.projectedCost || 0)}` }), ' by reset']),
+                ]),
+            ]);
+        } else {
+            windowCard = el('div', { class: 'mgru-card mgru-window idle' }, [
+                head('5H WINDOW'),
+                el('div', { class: 'mgru-big mgru-idle-big', text: 'idle' }),
+                el('div', { class: 'mgru-dim', text: d.hasData ? 'window reset — next request opens a fresh block' : 'no recent usage' }),
+                el('div', { class: 'mgru-gauge' }, [el('span', { class: 'mgru-gauge-fill', style: 'width:0%' })]),
+            ]);
+        }
+
+        // TODAY — totals since local midnight + how they split across models.
+        const t = d.today || { tokens: {}, cost: 0, requests: 0 };
+        // Drop rows that would render as ≈$0.00 (stray records with no model).
+        const models = (d.models || []).filter(m => m.cost >= 0.005);
+        const maxModel = Math.max(1, ...models.map(m => m.cost));
+        const todayCard = el('div', { class: 'mgru-card mgru-today' }, [
+            head('TODAY'),
+            big(t.cost),
+            el('div', { class: 'mgru-dim', text: `${fmtTok((t.tokens || {}).total)} tok · ${t.requests} req` }),
+            el('div', { class: 'mgru-models' }, models.slice(0, 4).map(m =>
+                el('div', { class: 'mgru-model', title: `${m.tier}: ${fmtTok(m.tokens)} tok · ${m.requests} req` }, [
+                    el('span', { class: 'mgru-model-name', text: m.tier }),
+                    el('span', { class: 'mgru-model-bar' }, [
+                        el('span', { class: 'mgru-model-fill', style: `width:${Math.max(2, (m.cost / maxModel) * 100)}%` }),
+                    ]),
+                    el('span', { class: 'mgru-model-val', text: '≈' + fmtUsd(m.cost) }),
+                ]))),
+        ]);
+
+        // BURN — per-minute token series, painted in the active accent so it
+        // re-tints across UI languages for free.
+        const spark = el('canvas', { class: 'mgru-spark', width: 720, height: 64 });
+        this._paintUsageSpark(spark, d.series || []);
+        const burnCard = el('div', { class: 'mgru-card mgru-burn' }, [
+            head(`BURN · LAST ${d.seriesMinutes || 30} MIN`),
+            spark,
+        ]);
+
+        // SESSIONS — the leaderboard. Bars scale to the top burner; the inner
+        // brighter segment is the share its subagents spent.
+        const scope = this._mgruScope || d.sessionScope || 'today';
+        const scopeBtn = (key, label) => el('button', {
+            class: 'mgrv-chip mgru-scope' + (scope === key ? ' active' : ''), type: 'button', text: label,
+            onclick: () => { this._mgruScope = key; this._renderManagerUsage(); },
+        });
+        let sessBody;
+        if (!d.sessions) {
+            sessBody = [el('div', { class: 'mgrv-empty', text: 'Per-session rows need the updated backend — restart the local daemon to enable them.' })];
+        } else {
+            const rows = d.sessions
+                .map(s => ({ s, sc: (scope === 'block' ? s.block : s.today) || {} }))
+                .filter(x => x.sc.tok > 0)
+                .sort((a, z) => z.sc.cost - a.sc.cost);
+            const maxCost = Math.max(0.01, ...rows.map(x => x.sc.cost));
+            sessBody = rows.length ? rows.map(({ s, sc }, i) => {
+                const subShare = sc.cost > 0 ? sc.subCost / sc.cost : 0;
+                const tip = [
+                    `${s.project || '?'} — ${s.slug || s.shortId || ''}`,
+                    `5h window: ${fmtTok((s.block || {}).tok)} tok · ≈${fmtUsd((s.block || {}).cost)} · ${(s.block || {}).req || 0} req`,
+                    `today: ${fmtTok((s.today || {}).tok)} tok · ≈${fmtUsd((s.today || {}).cost)} · ${(s.today || {}).req || 0} req`,
+                ];
+                if (subShare > 0.005) tip.push(`subagents: ${Math.round(subShare * 100)}% of this scope's cost`);
+                return el('div', { class: 'mgru-sess' + (i === 0 ? ' top' : ''), title: tip.join('\n') }, [
+                    el('span', { class: 'mgru-rank', text: String(i + 1).padStart(2, '0') }),
+                    el('div', { class: 'mgru-sess-main' }, [
+                        el('div', { class: 'mgru-sess-name' }, [
+                            el('span', { class: 'mgru-sess-proj', text: s.project || '?' }),
+                            el('span', { class: 'mgru-sess-slug', text: s.slug || s.shortId || '' }),
+                        ]),
+                        el('div', { class: 'mgru-sess-bar' }, [
+                            el('span', { class: 'mgru-sess-fill', style: `width:${Math.max(1.5, (sc.cost / maxCost) * 100)}%` },
+                                subShare > 0.005 ? [el('span', { class: 'mgru-sess-sub', style: `width:${Math.min(100, subShare * 100)}%` })] : []),
+                        ]),
+                        el('div', { class: 'mgru-sess-meta', text: `${fmtTok(sc.tok)} tok · ${sc.req || 0} req` + (subShare > 0.005 ? ` · ${Math.round(subShare * 100)}% subagents` : '') }),
+                    ]),
+                    el('span', { class: 'mgru-sess-cost', text: '≈' + fmtUsd(sc.cost) }),
+                ]);
+            }) : [el('div', { class: 'mgrv-empty', text: scope === 'block' ? 'No usage in the current 5h window.' : 'No usage today yet.' })];
+        }
+        const sessCard = el('div', { class: 'mgru-card mgru-sessions' }, [
+            head('SESSIONS', el('span', { class: 'mgru-scopes' }, [scopeBtn('block', '5H'), scopeBtn('today', 'TODAY')])),
+            ...sessBody,
+            el('div', { class: 'mgru-note', text: 'cost is an API-list-price estimate — a flat-rate seat does not pay per token' }),
+        ]);
+
+        root.replaceChildren(
+            el('div', { class: 'mgru-grid' }, [windowCard, todayCard]),
+            burnCard,
+            sessCard,
+        );
+    }
+
+    _paintUsageSpark(canvas, series) {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+        const n = series.length;
+        if (!n) return;
+        const cs = getComputedStyle(document.documentElement);
+        const acc = (cs.getPropertyValue('--soa-accent-rgb') || '0,229,255').trim();
+        const max = Math.max(1, ...series);
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            const y = h - (series[i] / max) * (h - 4) - 2;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = `rgba(${acc}, 0.9)`;
+        ctx.lineWidth = 1.75;
+        ctx.stroke();
+        ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        ctx.fillStyle = `rgba(${acc}, 0.10)`;
+        ctx.fill();
+        // Faint midline so an empty-ish chart still reads as instrumentation.
+        ctx.strokeStyle = `rgba(${acc}, 0.12)`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 5]);
+        ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+        ctx.setLineDash([]);
     }
 
     _renderManagerSessions() {
@@ -4440,7 +4649,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=17');
+        await import('/assets/app-wc.js?v=18');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -4514,7 +4723,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=17').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=18').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.

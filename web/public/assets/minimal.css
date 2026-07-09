@@ -324,6 +324,42 @@
   text-transform: lowercase; letter-spacing: 0.04em; font-size: 12px;
 }
 
+/* ── USAGE pane: porcelain cards, ink numerals, one teal accent ── */
+[data-ui="minimal"] .mgru-card {
+  background: var(--soa-bg-panel);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--m-r);
+  box-shadow: var(--m-shadow);
+}
+[data-ui="minimal"] .mgru-head {
+  font-family: var(--font-display); font-weight: 600;
+  text-transform: lowercase; letter-spacing: 0.04em; font-size: 12px;
+}
+[data-ui="minimal"] .mgru-head-l::before { content: none; }
+[data-ui="minimal"] .mgru-big {
+  font-weight: 600; text-shadow: none; font-variant-numeric: tabular-nums;
+}
+[data-ui="minimal"] .mgru-reset { color: var(--m-accent); }
+[data-ui="minimal"] .mgru-gauge,
+[data-ui="minimal"] .mgru-model-bar,
+[data-ui="minimal"] .mgru-sess-bar { border-radius: 99px; }
+[data-ui="minimal"] .mgru-gauge-fill { background: var(--m-accent); box-shadow: none; border-radius: 99px; }
+[data-ui="minimal"] .mgru-model-fill,
+[data-ui="minimal"] .mgru-sess-fill { background: rgba(var(--m-accent-rgb), 0.45); box-shadow: none; border-radius: 99px; }
+[data-ui="minimal"] .mgru-sess.top .mgru-sess-fill { background: var(--m-accent); box-shadow: none; }
+[data-ui="minimal"] .mgru-sess-sub { background: repeating-linear-gradient(-45deg, rgba(255,255,255,0.55) 0 2px, transparent 2px 5px); }
+[data-ui="minimal"] .mgru-sess-cost { font-weight: 600; text-shadow: none; font-variant-numeric: tabular-nums; }
+[data-ui="minimal"] .mgru-sess.top .mgru-sess-cost { color: var(--m-accent); text-shadow: none; }
+[data-ui="minimal"] .mgru-spark {
+  background: rgba(34, 37, 43, 0.035);
+  border: 1px solid var(--soa-line-soft);
+  border-radius: var(--m-r-sm);
+}
+[data-ui="minimal"] .mgru-scope.active {
+  color: #fff; background: var(--m-accent); border-color: var(--m-accent);
+}
+[data-ui="minimal"] .mgru-note { font-family: var(--font-display); text-transform: lowercase; letter-spacing: 0.01em; }
+
 /* ── Menus & popovers ── */
 [data-ui="minimal"] .more-menu,
 [data-ui="minimal"] .actions-tray {

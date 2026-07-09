@@ -2567,6 +2567,62 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .mgrv-grp { pointer-events: none; }
 
+/* ── USAGE pane (mgru) — the fleet's live Claude bill ──────────────────
+   Instrumentation, not a report: big display-font dollars, hairline cards,
+   phosphor bars scaled to the top burner, canvas burn chart in the accent. */
+.mgru { display: flex; flex-direction: column; gap: 12px; align-content: start; }
+.mgru-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.mgru-card {
+  border: 1px solid var(--soa-line);
+  background: rgba(var(--soa-bg-panel-rgb), 0.9);
+  padding: 14px 16px 13px;
+}
+.mgru-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  font-family: var(--font-display); font-size: 10px; letter-spacing: 0.22em;
+  color: var(--soa-accent-dim); margin-bottom: 8px;
+}
+.mgru-head-l::before { content: '// '; }
+.mgru-reset { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; color: var(--soa-accent); white-space: nowrap; }
+.mgru-big {
+  font-family: var(--font-display); font-size: 30px; line-height: 1.1;
+  color: var(--soa-fg); letter-spacing: 0.02em;
+  text-shadow: 0 0 18px rgba(var(--soa-accent-rgb), 0.25);
+}
+.mgru-approx { font-size: 16px; color: var(--soa-accent-dim); margin-right: 2px; }
+.mgru-idle-big { color: var(--soa-accent-dim); text-shadow: none; }
+.mgru-dim { font-family: var(--font-mono); font-size: 10.5px; color: var(--soa-accent-dim); margin-top: 3px; }
+.mgru-gauge { height: 5px; background: var(--soa-line-soft); margin-top: 10px; overflow: hidden; }
+.mgru-gauge-fill { display: block; height: 100%; background: var(--soa-accent); box-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.6); transition: width 0.5s ease; }
+.mgru-kline { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); }
+.mgru-kline b { font-weight: normal; color: var(--soa-fg); }
+.mgru-models { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+.mgru-model { display: grid; grid-template-columns: 64px 1fr auto; gap: 10px; align-items: center; font-family: var(--font-mono); font-size: 10px; }
+.mgru-model-name { color: var(--soa-fg); letter-spacing: 0.08em; }
+.mgru-model-bar { height: 4px; background: var(--soa-line-soft); overflow: hidden; }
+.mgru-model-fill { display: block; height: 100%; background: rgba(var(--soa-accent-rgb), 0.65); }
+.mgru-model-val { color: var(--soa-accent-dim); }
+.mgru-spark { display: block; width: 100%; height: 64px; background: rgba(var(--soa-accent-rgb), 0.03); border: 1px solid rgba(var(--soa-accent-rgb), 0.12); }
+.mgru-scopes { display: inline-flex; gap: 4px; }
+.mgru-scope { letter-spacing: 0.12em; }
+.mgru-scope.active { color: var(--soa-accent); border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.1); }
+.mgru-sess { display: grid; grid-template-columns: 24px 1fr auto; gap: 12px; align-items: center; padding: 8px 0 7px; border-top: 1px solid var(--soa-line-soft); }
+.mgru-sess:first-of-type { border-top: none; }
+.mgru-rank { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); }
+.mgru-sess.top .mgru-rank { color: var(--soa-accent); }
+.mgru-sess-main { min-width: 0; }
+.mgru-sess-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.mgru-sess-proj { font-family: var(--font-mono); font-size: 12px; color: var(--soa-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mgru-sess-slug { font-family: var(--font-mono); font-size: 9.5px; color: var(--soa-accent-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mgru-sess-bar { height: 5px; background: var(--soa-line-soft); margin-top: 5px; overflow: hidden; }
+.mgru-sess-fill { display: block; position: relative; height: 100%; background: rgba(var(--soa-accent-rgb), 0.55); }
+.mgru-sess.top .mgru-sess-fill { background: var(--soa-accent); box-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.55); }
+.mgru-sess-sub { position: absolute; right: 0; top: 0; height: 100%; background: repeating-linear-gradient(-45deg, rgba(255,255,255,0.4) 0 2px, transparent 2px 5px); }
+.mgru-sess-meta { font-family: var(--font-mono); font-size: 9.5px; color: var(--soa-accent-dim); margin-top: 4px; }
+.mgru-sess-cost { font-family: var(--font-display); font-size: 15px; color: var(--soa-fg); white-space: nowrap; }
+.mgru-sess.top .mgru-sess-cost { color: var(--soa-accent); text-shadow: 0 0 12px rgba(var(--soa-accent-rgb), 0.4); }
+.mgru-note { margin-top: 10px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.05em; color: var(--soa-accent-dim); opacity: 0.75; }
+
 /* To-dos */
 .mgrv-todo-form { display: flex; gap: 8px; margin-bottom: 10px; }
 .mgrv-todo {

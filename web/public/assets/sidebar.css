@@ -38,6 +38,8 @@
 .claude-sess-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-family: var(--font-mono); font-size: 10.5px; }
 .claude-sess-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soa-fg); }
 .claude-sess-val { flex-shrink: 0; color: var(--soa-accent); letter-spacing: 0.02em; }
+.claude-clickable { cursor: pointer; }
+.claude-clickable:hover .claude-head-l { color: var(--soa-accent); }
 
 /* ── Mobile QR widget ───────────────────────────────────────────────── */
 .mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }
