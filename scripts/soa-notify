@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# soa-notify — push a fleet-attention alert to the user's phone, for free.
+#
+# The fleet already has soa-msg (in-app CHAT bubble), but that's only seen when
+# the user has SoA open. soa-notify reaches the user's phone as a real OS push
+# notification even when SoA is closed — so the manager can flag a genuine
+# blocker/decision and the user actually sees it.
+#
+# Default provider is ntfy.sh: free, no account, curl-to-send. The user installs
+# the free ntfy app (iOS/Android) or opens the topic URL in a browser and
+# subscribes to the topic in ~/.soa-web-local/notify.json. The topic is a random
+# string that doubles as a shared secret.
+#
+# Usage:
+#   soa-notify "MacnCheese deploy is failing — need a decision"
+#   soa-notify -t "Fleet blocker" -p high -T warning "socialrizz needs LinkedIn login"
+#   echo "piped body" | soa-notify -t "Heartbeat"
+#   soa-notify --click "https://s0a.app" "tap to open the dashboard"
+#   soa-notify --test           # send a self-test notification
+#
+# Flags:
+#   -t <title>          notification title (default: "SoA fleet")
+#   -p <priority>       min|low|default|high|max  (ntfy; default: default)
+#   -T <tags>           comma list of ntfy tags/emojis (e.g. warning,robot)
+#   --click <url>       URL opened when the notification is tapped
+#   --also-msg          ALSO mirror the body into the in-app CHAT via soa-msg
+#   --test              send a canned self-test and exit
+#
+# Config (~/.soa-web-local/notify.json): {provider, server, topic}. Env overrides:
+#   SOA_NOTIFY_TOPIC, SOA_NOTIFY_SERVER, SOA_NOTIFY_PROVIDER.
+#
+# Exit: 0 on a delivered POST (HTTP 2xx), non-zero otherwise. Designed to be
+# safe in launchd jobs (the heartbeat/supervisor can call it).
+
+set -uo pipefail
+
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
+CFG="$STATE_DIR/notify.json"
+
+jget() { # jget <key> < json
+    python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('$1','') or '')
+except Exception: print('')" 2>/dev/null
+}
+
+PROVIDER="${SOA_NOTIFY_PROVIDER:-}"
+SERVER="${SOA_NOTIFY_SERVER:-}"
+TOPIC="${SOA_NOTIFY_TOPIC:-}"
+if [ -f "$CFG" ]; then
+    [ -z "$PROVIDER" ] && PROVIDER="$(jget provider < "$CFG")"
+    [ -z "$SERVER" ]   && SERVER="$(jget server   < "$CFG")"
+    [ -z "$TOPIC" ]    && TOPIC="$(jget topic    < "$CFG")"
+fi
+PROVIDER="${PROVIDER:-ntfy}"
+SERVER="${SERVER:-https://ntfy.sh}"
+
+TITLE="SoA fleet"
+PRIORITY="default"
+TAGS=""
+CLICK=""
+ALSO_MSG=0
+TEST=0
+BODY=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t) TITLE="$2"; shift 2;;
+        -p) PRIORITY="$2"; shift 2;;
+        -T) TAGS="$2"; shift 2;;
+        --click) CLICK="$2"; shift 2;;
+        --also-msg) ALSO_MSG=1; shift;;
+        --test) TEST=1; shift;;
+        --) shift; BODY="$*"; break;;
+        -*) echo "soa-notify: unknown flag $1" >&2; shift;;
+        *) BODY="${BODY:+$BODY }$1"; shift;;
+    esac
+done
+
+# Body from stdin if not passed as args (and stdin is not a TTY).
+if [ -z "$BODY" ] && [ ! -t 0 ]; then BODY="$(cat)"; fi
+
+if [ "$TEST" = "1" ]; then
+    TITLE="SoA fleet — test"
+    BODY="✅ soa-notify is wired up. This is a self-test from the fleet manager. If you're reading this on your phone, the channel works."
+    TAGS="${TAGS:-white_check_mark,robot}"
+fi
+
+[ -z "$BODY" ] && { echo "soa-notify: empty message (pass text or pipe stdin)" >&2; exit 2; }
+
+send_ntfy() {
+    [ -z "$TOPIC" ] && { echo "soa-notify: no ntfy topic configured ($CFG or SOA_NOTIFY_TOPIC)" >&2; return 3; }
+    local url="${SERVER%/}/$TOPIC"
+    local -a H=(-H "Title: $TITLE" -H "Priority: $PRIORITY")
+    [ -n "$TAGS" ]  && H+=(-H "Tags: $TAGS")
+    [ -n "$CLICK" ] && H+=(-H "Click: $CLICK")
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+        "${H[@]}" -d "$BODY" "$url" 2>/dev/null)"
+    if [ "${code:0:1}" = "2" ]; then
+        echo "soa-notify: sent via ntfy → $url (HTTP $code)"
+        return 0
+    fi
+    echo "soa-notify: ntfy POST failed (HTTP ${code:-000}) → $url" >&2
+    return 1
+}
+
+rc=0
+case "$PROVIDER" in
+    ntfy) send_ntfy || rc=$?;;
+    *) echo "soa-notify: unknown provider '$PROVIDER'" >&2; rc=4;;
+esac
+
+# Optional: also drop it in the in-app CHAT so it's visible inside SoA too.
+if [ "$ALSO_MSG" = "1" ] && command -v soa-msg >/dev/null 2>&1; then
+    printf '%s' "$BODY" | soa-msg >/dev/null 2>&1 || true
+fi
+
+exit $rc
