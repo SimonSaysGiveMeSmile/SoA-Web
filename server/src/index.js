@@ -140,6 +140,10 @@ try {
 // the first WS connect (see onWsConnect) so we don't spawn PTYs for a
 // session no one is actually visiting.
 const _persistedSession = tabPersist.loadSession();
+// Truth flag for "the saved fleet was actually rehydrated somewhere this
+// process". Boot-resume keys off THIS — not off "some session has tabs",
+// which a client's own fresh tab used to satisfy, cancelling rehydration.
+let _diskRestoreRan = false;
 if (_persistedSession) {
     try { sessions.create({ id: _persistedSession.id, token: _persistedSession.token }); }
     catch (_) { /* corrupted state — fall through, fresh session minted on first hit */ }
@@ -601,20 +605,40 @@ function onWsConnect(ws, session, req) {
         }, 3000);
         if (session._managerInterval.unref) session._managerInterval.unref();
 
-        // Restore tabs from disk if this is a fresh session with no tabs.
-        // Seed each new shell's scrollback with the bytes saved by the prior
-        // run so the user sees the conversation/work that was on screen
-        // before the restart. The PTY itself is fresh — divider makes that
-        // explicit so nobody mistakes the seeded text for a live process.
-        // Match scrollback to tab by index; cwd doubles as a sanity check so
-        // a desync between the two files doesn't cross-paste history.
+        // Restore tabs from disk into a fresh session. Seed each new shell's
+        // scrollback with the bytes saved by the prior run so the user sees
+        // the conversation/work that was on screen before the restart. The
+        // PTY itself is fresh — divider makes that explicit so nobody
+        // mistakes the seeded text for a live process. Match scrollback to
+        // tab by index; cwd doubles as a sanity check so a desync between the
+        // two files doesn't cross-paste history.
+        //
+        // Runs even when the session already holds tab(s): the old
+        // "order.length === 0" gate meant any client that got a tab in first
+        // (a mobile view binding right at boot) cancelled rehydration
+        // entirely and its tiny list then persisted over the saved fleet —
+        // the 2026-07-08 fleet loss. Saved entries already represented live
+        // (same cwd, multiset) are skipped, and the per-session latch stops
+        // a second pass, so nothing double-opens.
         const saved = tabPersist.load();
-        if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
+        if (saved && Array.isArray(saved.tabs) && saved.tabs.length > 0 && !session._diskRestored) {
+            session._diskRestored = true;
+            _diskRestoreRan = true;
             const shellEnv = envStore.getEnvForShell();
             const savedSb = tabPersist.loadScrollback();
             const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
+            // Multiset of live cwds: each live tab consumes one matching saved
+            // entry, so projects with several saved tabs still restore fully.
+            const liveByCwd = new Map();
+            for (const id of session.tabMgr.order) {
+                const t = session.tabMgr.tabs.get(id);
+                if (t && t.cwd) liveByCwd.set(t.cwd, (liveByCwd.get(t.cwd) || 0) + 1);
+            }
             const restoredTabs = [];
+            let skipped = 0;
             saved.tabs.forEach((entry, i) => {
+                const have = liveByCwd.get(entry.cwd) || 0;
+                if (have > 0) { liveByCwd.set(entry.cwd, have - 1); skipped++; return; }
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
                 const sb = sbList[i];
                 const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
@@ -631,6 +655,8 @@ function onWsConnect(ws, session, req) {
                 });
                 if (tab && cwd) restoredTabs.push({ tab, cwd });
             });
+            console.log(`restore-on-connect: rehydrated ${restoredTabs.length}/${saved.tabs.length} saved tab(s)`
+                + (skipped ? ` (${skipped} already live)` : ''));
             // A fresh daemon respawns dead shells, so each tab's Claude
             // conversation is gone unless we resume it. Auto-resume the tabs
             // whose cwd has a recent transcript (SOA_WEB_NO_AUTO_RESUME=1 off).
@@ -813,6 +839,9 @@ function handleInput(session, d, ws) {
             break;
         }
         case INPUT_KIND.CLOSE_TAB:
+            // Explicit user intent — lets the persist shrink-guard tell a real
+            // "close my tabs" apart from a boot-race clobber.
+            tabPersist.noteUserClose();
             mgr.close(d.id);
             break;
         case INPUT_KIND.MOVE_TAB:
@@ -1117,27 +1146,47 @@ process.on('unhandledRejection', (err) => crashFlush('unhandledRejection', err))
 // and skips restore.
 function scheduleBootResume() {
     if (process.env.SOA_WEB_NO_BOOT_RESUME === '1') return;
-    if (!_persistedSession || !_persistedSession.token) return;
     const delay = parseInt(process.env.SOA_WEB_BOOT_RESUME_DELAY_MS || '4000', 10);
-    const t = setTimeout(() => {
+    const MAX_ATTEMPTS = 3;
+    // UNCONDITIONAL rehydration: the only thing that cancels an attempt is
+    // proof the restore actually ran (_diskRestoreRan — set inside
+    // restore-on-connect itself). The old heuristic — "the persisted session
+    // has >0 tabs, so a client must have rehydrated" — was satisfied by a
+    // client's own fresh tab and silently skipped the whole fleet
+    // (2026-07-08). Every skip now says why, and failed attempts retry with
+    // backoff instead of giving up for the life of the process.
+    const attempt = (n) => {
         try {
-            const s = sessions.getByToken(_persistedSession.token);
-            if (s && s.tabMgr && s.tabMgr.order.length > 0) return; // a client already rehydrated
-            if (!s) console.log('boot-resume: persisted session not re-seated in store; will rehydrate into a fresh primary session');
+            if (_diskRestoreRan) { console.log(`boot-resume[${n}]: restore-on-connect already ran — nothing to do`); return; }
             const saved = tabPersist.load();
-            if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) return;
-            console.log(`boot-resume: no client ${delay}ms after boot — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
-            const cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+            if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) {
+                console.log(`boot-resume[${n}]: no saved tabs on disk — nothing to rehydrate`);
+                return;
+            }
+            console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
+            const headers = {};
+            if (_persistedSession && _persistedSession.token) {
+                // Bind to the persisted primary session so the restored tabs
+                // land where the user's existing cookie points.
+                headers.Cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+            } else {
+                console.log(`boot-resume[${n}]: no persisted session — rehydrating into a fresh primary session`);
+            }
             const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
-            const probe = new WebSocket(url, { headers: { Cookie: cookie } });
+            const probe = new WebSocket(url, { headers });
             probe.on('open', () => {
                 // restore-on-connect runs synchronously inside onWsConnect; hold the
                 // socket open briefly so the first auto-resume tick can fire, then close.
                 setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
             });
-            probe.on('error', e => console.log('boot-resume self-connect failed:', e && e.message));
-        } catch (e) { console.log('boot-resume failed:', e && e.message); }
-    }, delay);
+            probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
+        } catch (e) { console.log(`boot-resume[${n}] failed:`, e && e.message); }
+        if (n < MAX_ATTEMPTS) {
+            const r = setTimeout(() => { if (!_diskRestoreRan) attempt(n + 1); }, delay * 2 * n);
+            if (r.unref) r.unref();
+        }
+    };
+    const t = setTimeout(() => attempt(1), delay);
     if (t.unref) t.unref();
 }
 

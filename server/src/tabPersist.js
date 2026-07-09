@@ -38,6 +38,31 @@ const MAX_SCROLLBACK_PER_TAB = 128 * 1024;
 let _saveTimer = null;
 const DEBOUNCE_MS = 500;
 
+// Shrink guard window: for this long after boot, refuse to overwrite tabs.json
+// (or scrollback.json) with a DRASTICALLY smaller tab set unless the user
+// explicitly closed that many tabs. This is the backstop for the boot race
+// that lost the fleet twice (2026-06-29, 2026-07-08): persistence is
+// last-writer-wins across sessions, so a client that binds right after boot
+// with 1-2 fresh tabs — before the fleet rehydrated anywhere — used to persist
+// its tiny list straight over the 26-tab file. Explicit user closes are
+// reported via noteUserClose() from the CLOSE_TAB input path, so a genuine
+// "close most of my tabs" flurry still persists even inside the window.
+const SHRINK_GUARD_MS = () => parseInt(process.env.SOA_WEB_TAB_SHRINK_GUARD_MS || String(10 * 60 * 1000), 10);
+const _bootAt = Date.now();
+let _userCloses = 0;
+function noteUserClose() { _userCloses++; }
+
+// A shrink is suspicious when it's early, drastic (below half), and larger
+// than what the user's explicit closes account for.
+function _shrinkRefused(kind, priorCount, nextCount) {
+    const uptimeMs = Date.now() - _bootAt;
+    if (uptimeMs >= SHRINK_GUARD_MS()) return false;
+    if (nextCount >= Math.ceil(priorCount / 2)) return false;
+    if (priorCount - nextCount <= _userCloses) return false;
+    console.log(`tabPersist: refused ${kind} shrink ${priorCount} → ${nextCount} at ${Math.round(uptimeMs / 1000)}s after boot (${_userCloses} user close(s) seen) — clobber guard`);
+    return true;
+}
+
 // Has this process ever held a real (non-empty) tab list? Distinguishes a
 // genuine user "close-all" (after having had tabs) from a *transient/pristine*
 // empty list — e.g. the primary session re-seated empty on boot, or a WS client
@@ -132,6 +157,17 @@ function _writeMetaSync(tabMgr) {
             });
         }
         const data = { savedAt: new Date().toISOString(), tabs };
+        // ANTI-CLOBBER (shrink guard): early after boot, never let a much
+        // smaller list replace a bigger saved fleet without matching explicit
+        // user closes. Applies to the empty case too — the specific guards
+        // below stay as after-window backstops.
+        {
+            const prior = load();
+            if (prior && Array.isArray(prior.tabs) && prior.tabs.length > 0 && !prior.closedByUser
+                && _shrinkRefused('tabs.json', prior.tabs.length, tabs.length)) {
+                return;
+            }
+        }
         if (tabs.length > 0) {
             // Real list → remember it, and never carry a stale close-all marker.
             _liveTabsSeen = true;
@@ -247,6 +283,16 @@ function _writeScrollbackSync(tabMgr) {
                 return;
             }
         }
+        // Same shrink guard as the metadata path: scrollback.json is the
+        // recovery source, so an early drastic shrink would erase exactly what
+        // reconcileTabsFromScrollback() needs to bring the fleet back.
+        {
+            const prior = loadScrollback();
+            if (prior && Array.isArray(prior.tabs) && prior.tabs.length > 0
+                && _shrinkRefused('scrollback.json', prior.tabs.length, tabs.length)) {
+                return;
+            }
+        }
         const data = { savedAt: new Date().toISOString(), tabs };
         const tmp = SCROLLBACK_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data));
@@ -257,6 +303,7 @@ function _writeScrollbackSync(tabMgr) {
 module.exports = {
     load, loadScrollback, loadSession, saveSession,
     save, saveImmediate, saveAll, reconcileTabsFromScrollback,
+    noteUserClose,
     STATE_FILE, SCROLLBACK_FILE, SESSION_FILE,
     // test hook: reset the per-process "have we seen tabs" latch
     _resetLiveTabsSeen: () => { _liveTabsSeen = false; },
