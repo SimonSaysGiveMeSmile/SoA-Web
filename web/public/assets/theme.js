@@ -46,16 +46,30 @@ const MINIMAL_XTERM = {
     cursorAccent: '#14171d', selectionBackground: 'rgba(53,184,171,0.28)', ...ANSI_MINIMAL,
 };
 
+// LIQUID UI language: terminals are deep near-black glass cards floating on the
+// lit graphite ground. Monochrome white cursor/selection; program output keeps
+// the standard ANSI 16 (dark) so colors read as themselves.
+const LIQUID_XTERM = {
+    foreground: '#e6e6ea', background: '#0a0a0e', cursor: '#ffffff',
+    cursorAccent: '#0a0a0e', selectionBackground: 'rgba(255,255,255,0.22)', ...ANSI_DARK,
+};
+
 // True while the MINIMAL UI language is active (data-ui set pre-paint by
 // index.html and kept in sync by settings.js on change).
 export function isMinimalUi() {
     return document.documentElement.dataset.ui === 'minimal';
 }
 
+// True while the LIQUID (liquid-glass / iOS) UI language is active.
+export function isLiquidUi() {
+    return document.documentElement.dataset.ui === 'liquid';
+}
+
 // xterm theme object for a RESOLVED theme. Surface + ink + cursor + selection are
 // swapped to match the CSS palette; ANSI follows the surface brightness.
 export function xtermTheme(resolved) {
     if (isMinimalUi()) return { ...MINIMAL_XTERM };
+    if (isLiquidUi()) return { ...LIQUID_XTERM };
     if (resolved === 'light') return {
         foreground: '#15302e', background: '#f7f9fa', cursor: '#0e6b73',
         cursorAccent: '#f7f9fa', selectionBackground: 'rgba(14,107,115,0.25)', ...ANSI_LIGHT,

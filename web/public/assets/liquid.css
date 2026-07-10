@@ -1,0 +1,432 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   LIQUID — the third UI language ("liquid glass", after iOS 26).
+   A complete, switchable skin that coexists with TRON and MINIMAL.
+
+   Everything is scoped under html[data-ui="liquid"], so with the attribute
+   absent this file is inert and TRON/MINIMAL render byte-identically.
+   Presentation only — no selectors removed, no DOM assumed beyond what
+   styles.css already styles — so every feature survives the switch.
+
+   The language: black & white. A deep graphite ground lit from within by
+   soft white blooms, and every surface is FROSTED GLASS floating above it —
+   translucent, backdrop-blurred, saturating the light behind it, edged with a
+   bright specular rim (the signature liquid-glass highlight). Squircle radii,
+   SF Pro typography, spring motion. Colour is spent only where it MEANS
+   something: agent status. Everything else is glass, ink, and light.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Tokens ──────────────────────────────────────────────────────────────
+   Overriding the --soa-* set re-skins ~80% of the UI automatically (lines,
+   glows, fills derive from these). Accent == white: liquid chrome is
+   monochrome; iOS system colours are applied surgically for status only. */
+:root[data-ui="liquid"] {
+  --soa-bg:        #0b0b0f;
+  --soa-bg-deep:   #060608;
+  --soa-bg-panel:  rgba(255, 255, 255, 0.055);   /* the glass fill */
+  --soa-bg-panel-rgb: 255, 255, 255;
+  --soa-fg:        #f5f5f7;                        /* iOS off-white ink */
+  --soa-accent:    #ffffff;
+  --soa-accent-rgb: 255, 255, 255;
+  --soa-accent-dim:#8e8e93;                        /* iOS systemGray */
+  --soa-accent-bright: #ffffff;
+  --soa-orange:    #ff9f0a;                         /* iOS systemOrange */
+  --soa-green:     #30d158;                         /* iOS systemGreen  */
+  --soa-red:       #ff453a;                         /* iOS systemRed    */
+  --soa-yellow:    #ffd60a;                         /* iOS systemYellow */
+  --soa-blue:      #0a84ff;                         /* iOS systemBlue   */
+  --soa-line:      rgba(255, 255, 255, 0.12);
+  --soa-line-soft: rgba(255, 255, 255, 0.06);
+  --font-display:  -apple-system, "SF Pro Display", "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
+
+  /* LIQUID-only material tokens */
+  --lq-glass:       rgba(255, 255, 255, 0.055);
+  --lq-glass-2:     rgba(255, 255, 255, 0.09);     /* raised / hover */
+  --lq-glass-3:     rgba(255, 255, 255, 0.14);     /* active / pressed */
+  /* Top-lit gradient — the single biggest "this is glass, not a flat card"
+     tell: the surface catches the ambient light along its upper edge. */
+  --lq-fill:        linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.045) 62%, rgba(255,255,255,0.03) 100%);
+  --lq-fill-2:      linear-gradient(180deg, rgba(255,255,255,0.17) 0%, rgba(255,255,255,0.075) 62%, rgba(255,255,255,0.05) 100%);
+  --lq-blur:        blur(22px) saturate(180%);
+  --lq-blur-lg:     blur(40px) saturate(180%);
+  --lq-edge:        rgba(255, 255, 255, 0.14);
+  --lq-rim:         inset 0 1px 0 rgba(255, 255, 255, 0.35),
+                    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  --lq-shadow:      0 6px 24px rgba(0, 0, 0, 0.42);
+  --lq-shadow-deep: 0 18px 60px rgba(0, 0, 0, 0.62);
+  --lq-r:           22px;     /* squircle — panels/cards */
+  --lq-r-sm:        14px;     /* buttons / inputs */
+  --lq-r-xs:        10px;
+  --lq-pill:        999px;
+  --lq-ink-2:       rgba(245, 245, 247, 0.62);      /* secondary ink */
+  --lq-ink-3:       rgba(245, 245, 247, 0.34);      /* tertiary ink  */
+  --lq-ease:        420ms cubic-bezier(0.32, 0.72, 0, 1);   /* iOS spring-ish */
+  /* The lit graphite ground — one field of light every view sits on. */
+  --lq-ground:      radial-gradient(1200px 820px at 10% -10%, rgba(255,255,255,0.14), transparent 60%),
+                    radial-gradient(1050px 720px at 110% 14%, rgba(188,204,255,0.11), transparent 56%),
+                    radial-gradient(920px 920px at 80% 120%, rgba(255,255,255,0.07), transparent 55%),
+                    #0c0c11;
+}
+
+/* Reusable glass recipe. Applied to every floating surface below. */
+:root[data-ui="liquid"] {
+  --lq-panel-bg: var(--lq-glass);
+  --lq-panel-shadow: var(--lq-shadow), var(--lq-rim);
+}
+
+/* ── Ground: graphite lit from within ────────────────────────────────────
+   Soft white/cool blooms give the frosted panels something luminous to
+   refract — without them, glass on flat black reads as flat grey. Fixed so
+   it never scrolls; the whole app floats over one calm field of light. */
+[data-ui="liquid"] body {
+  font-family: var(--font-display);
+  letter-spacing: 0;
+  color: var(--soa-fg);
+  background: var(--lq-ground);
+  background-attachment: fixed;
+}
+[data-ui="liquid"] button,
+[data-ui="liquid"] input,
+[data-ui="liquid"] select,
+[data-ui="liquid"] textarea { font-family: var(--font-display); }
+
+/* Each stacked view carries the SAME lit ground: glass panels get light to
+   refract, AND an absolute overlay (manager / tiles) fully occludes the
+   terminal layer beneath it. A bare `transparent` here let live terminals
+   bleed through the fleet view. Shell/welcome stay clear to reveal the body. */
+[data-ui="liquid"] .shell,
+[data-ui="liquid"] .welcome { background: transparent; }
+[data-ui="liquid"] .terms,
+[data-ui="liquid"] .tiles-grid,
+[data-ui="liquid"] .manager-view { background: var(--lq-ground); }
+
+/* Focus: a soft white ring, iOS-style. */
+[data-ui="liquid"] :is(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+  border-radius: var(--lq-r-sm);
+}
+
+/* Scrollbars: quiet frost. */
+[data-ui="liquid"] ::-webkit-scrollbar { width: 11px; height: 11px; }
+[data-ui="liquid"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border: 3px solid transparent; background-clip: padding-box;
+  border-radius: var(--lq-pill);
+}
+[data-ui="liquid"] ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); background-clip: padding-box; }
+[data-ui="liquid"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* Selection: monochrome. */
+[data-ui="liquid"] ::selection { background: rgba(255, 255, 255, 0.22); color: #fff; }
+
+/* ── Boot ── */
+[data-ui="liquid"] .boot {
+  background:
+    radial-gradient(900px 600px at 50% 30%, rgba(255,255,255,0.10), transparent 60%),
+    #08080b;
+}
+[data-ui="liquid"] .boot-grid { display: none; }
+[data-ui="liquid"] .boot-title {
+  font-family: var(--font-display); font-weight: 700;
+  letter-spacing: -0.02em; color: var(--soa-fg); text-shadow: 0 2px 30px rgba(255,255,255,0.25);
+}
+[data-ui="liquid"] .boot-sub,
+[data-ui="liquid"] .boot-status { color: var(--lq-ink-2); }
+
+/* ═══ Topbar — a floating glass rail ═══════════════════════════════════ */
+[data-ui="liquid"] .topbar {
+  background: rgba(255, 255, 255, 0.05);
+  -webkit-backdrop-filter: var(--lq-blur-lg);
+  backdrop-filter: var(--lq-blur-lg);
+  border-bottom: 1px solid var(--soa-line);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 8px 30px rgba(0,0,0,0.28);
+}
+[data-ui="liquid"] .brand {
+  font-family: var(--font-display); font-weight: 700;
+  letter-spacing: -0.01em; color: var(--soa-fg); text-shadow: none;
+}
+
+/* Toolbar buttons: hairline glass capsules. */
+[data-ui="liquid"] :is(.topbar button, .tile-back-btn, .actions-toggle, .more-toggle) {
+  border: 1px solid var(--soa-line);
+  border-radius: var(--lq-r-sm);
+  background: var(--lq-glass);
+  color: var(--soa-fg);
+  box-shadow: var(--lq-rim);
+  transition: background var(--lq-ease), border-color var(--lq-ease), transform var(--lq-ease);
+}
+[data-ui="liquid"] :is(.topbar button, .tile-back-btn, .actions-toggle, .more-toggle):hover {
+  background: var(--lq-glass-2);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+[data-ui="liquid"] :is(.topbar button, .tile-back-btn, .actions-toggle, .more-toggle):active { transform: scale(0.96); }
+[data-ui="liquid"] .user-chip {
+  border-radius: var(--lq-pill); border: 1px solid var(--soa-line);
+  background: var(--lq-glass); -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  box-shadow: var(--lq-rim);
+}
+
+/* ═══ Tabs — glass lozenges; the active one is a bright liquid pill ═════ */
+[data-ui="liquid"] .tab {
+  border: 1px solid var(--soa-line);
+  border-radius: var(--lq-pill);
+  background: var(--lq-glass);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  color: var(--soa-fg);
+  box-shadow: var(--lq-rim);
+  transition: background var(--lq-ease), border-color var(--lq-ease), transform var(--lq-ease), box-shadow var(--lq-ease);
+}
+[data-ui="liquid"] .tab:hover { background: var(--lq-glass-2); border-color: rgba(255,255,255,0.26); transform: translateY(-1px); }
+[data-ui="liquid"] .tab .tab-label { font-family: var(--font-display); font-weight: 590; letter-spacing: 0; }
+[data-ui="liquid"] .tab.active {
+  background: var(--lq-glass-3);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: #fff;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.5), inset 0 -1px 0 rgba(255,255,255,0.08);
+  position: relative; overflow: hidden;
+}
+/* The "liquid" — a slow specular sweep across the active tab. */
+[data-ui="liquid"] .tab.active::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.16) 48%, transparent 62%);
+  background-size: 250% 100%;
+  animation: lq-sheen 5.5s ease-in-out infinite;
+}
+@keyframes lq-sheen { 0% { background-position: 140% 0; } 60%, 100% { background-position: -40% 0; } }
+[data-ui="liquid"] .tab.active .tab-sub { color: rgba(255,255,255,0.6); }
+/* Status becomes a coloured leading glow on the ctx-bar + tinted ink — calm,
+   not a full border, keeping the chrome monochrome. */
+[data-ui="liquid"] .tab[data-agent="working"]   { color: var(--soa-green); }
+[data-ui="liquid"] .tab[data-agent="done"]      { color: var(--soa-orange); }
+[data-ui="liquid"] .tab[data-agent="attention"] { color: var(--soa-red); border-color: rgba(255,69,58,0.5); }
+[data-ui="liquid"] .tab[data-agent="idle"]      { color: var(--lq-ink-2); }
+[data-ui="liquid"] .tab .ctx-bar { border-radius: var(--lq-pill); box-shadow: none; }
+[data-ui="liquid"] .tab .x:hover { color: var(--soa-red); }
+
+/* ═══ The stage — dark glass terminal cards ════════════════════════════ */
+[data-ui="liquid"] .terms .term {
+  inset: 12px 14px 14px;
+  padding: 14px 16px;
+  background: rgba(10, 10, 14, 0.62);
+  -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: var(--lq-shadow-deep), var(--lq-rim);
+}
+
+/* ═══ Status bar ═══════════════════════════════════════════════════════ */
+[data-ui="liquid"] .status-bar {
+  background: rgba(255, 255, 255, 0.04);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border-top: 1px solid var(--soa-line);
+  color: var(--lq-ink-2); font-family: var(--font-mono); text-shadow: none;
+}
+
+/* ═══ Sidebar — widgets are frosted glass cards ════════════════════════ */
+[data-ui="liquid"] .sidebar {
+  background: rgba(255, 255, 255, 0.03);
+  -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
+  border-right: 1px solid var(--soa-line);
+}
+[data-ui="liquid"] .widget {
+  background: var(--lq-fill);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--lq-r);
+  box-shadow: var(--lq-panel-shadow);
+  overflow: hidden; flex-shrink: 0;
+}
+[data-ui="liquid"] .widget-h { background: transparent; border-bottom: 1px solid var(--soa-line-soft); }
+[data-ui="liquid"] .widget-title::before { content: none; }   /* drop the TRON '// ' voice */
+[data-ui="liquid"] .widget-title {
+  font-family: var(--font-display); font-weight: 620; font-size: 12px;
+  letter-spacing: 0.01em; text-transform: none; color: var(--soa-fg);
+}
+[data-ui="liquid"] .widget-pulse {
+  background: #fff; border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.14), 0 0 10px rgba(255,255,255,0.5);
+}
+[data-ui="liquid"] .kv .k {
+  font-family: var(--font-display); font-weight: 510; letter-spacing: 0.01em;
+  text-transform: none; color: var(--lq-ink-2);
+}
+[data-ui="liquid"] .kv .v { font-variant-numeric: tabular-nums; }
+[data-ui="liquid"] .bar { border-radius: var(--lq-pill); overflow: hidden; background: rgba(255,255,255,0.08); }
+[data-ui="liquid"] .bar-fill { background: #fff; }
+[data-ui="liquid"] :is(.netchart-canvas, .claude-spark, .globe-canvas) {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--soa-line-soft);
+  border-radius: var(--lq-r-sm);
+}
+[data-ui="liquid"] :is(.claude-head-l, .claude-sess-head, .netchart-legend, .globe-meta) {
+  font-family: var(--font-display); text-transform: none;
+  letter-spacing: 0.01em; color: var(--lq-ink-2);
+}
+[data-ui="liquid"] .claude-sess-val { color: #fff; font-variant-numeric: tabular-nums; }
+[data-ui="liquid"] .claude-reset { color: var(--lq-ink-2); font-family: var(--font-mono); }
+[data-ui="liquid"] .claude-reset.warn { color: var(--soa-yellow); }
+
+/* Widget buttons: glass ghosts; the primary is a bright glass pill. */
+[data-ui="liquid"] :is(.mqr-toggle, .widget-btn, .port-btn, .mqr-copy, .globe-meta-btn) {
+  font-family: var(--font-display); font-weight: 600; letter-spacing: 0.01em;
+  text-transform: none;
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
+  background: var(--lq-glass); color: var(--soa-fg); box-shadow: var(--lq-rim);
+  transition: background var(--lq-ease), border-color var(--lq-ease), transform var(--lq-ease);
+}
+[data-ui="liquid"] :is(.mqr-toggle, .widget-btn, .port-btn, .mqr-copy, .globe-meta-btn):hover {
+  background: var(--lq-glass-2); border-color: rgba(255,255,255,0.28);
+}
+[data-ui="liquid"] :is(.mqr-toggle, .widget-btn, .port-btn, .mqr-copy, .globe-meta-btn):active { transform: scale(0.97); }
+[data-ui="liquid"] .mqr-toggle.mqr-start { background: rgba(255,255,255,0.92); border-color: #fff; color: #0b0b0f; }
+[data-ui="liquid"] .mqr-toggle.mqr-start:hover { background: #fff; }
+[data-ui="liquid"] .mqr-toggle.mqr-off { color: var(--soa-red); border-color: rgba(255,69,58,0.45); }
+[data-ui="liquid"] .port-btn-kill { color: var(--soa-red); border-color: rgba(255,69,58,0.45); }
+[data-ui="liquid"] .mqr-online .mqr-dot { background: var(--soa-green); box-shadow: 0 0 0 3px rgba(48,209,88,0.2); }
+[data-ui="liquid"] :is(.mqr-empty, .port-scan-row) { border-radius: var(--lq-r-sm); }
+[data-ui="liquid"] .port-scan-row { font-variant-numeric: tabular-nums; }
+[data-ui="liquid"] .port-scan-row:hover { background: var(--lq-glass); }
+
+/* ═══ Dashboard tiles (also manager tiles) ═════════════════════════════ */
+[data-ui="liquid"] .tile {
+  background: var(--lq-fill);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--lq-r);
+  box-shadow: var(--lq-panel-shadow);
+  transition: transform var(--lq-ease), box-shadow var(--lq-ease), border-color var(--lq-ease), background var(--lq-ease);
+}
+[data-ui="liquid"] .tile:hover {
+  background: var(--lq-fill-2);
+  transform: translateY(-3px);
+  box-shadow: var(--lq-shadow-deep), var(--lq-rim);
+  border-color: rgba(255,255,255,0.24);
+}
+[data-ui="liquid"] .tile-title { font-family: var(--font-display); font-weight: 620; letter-spacing: 0; }
+[data-ui="liquid"] .tile-preview {
+  background: rgba(10, 10, 14, 0.6);
+  color: #d7d7dc;
+  border-radius: var(--lq-r-sm);
+  border: 1px solid rgba(255,255,255,0.08);
+  padding: 6px 8px; max-height: 6.6em;
+}
+[data-ui="liquid"] :is(.tile-activity, .tile-status-line) { font-family: var(--font-display); text-transform: none; }
+[data-ui="liquid"] .tile[data-agent="working"]   { border-color: rgba(48,209,88,0.42); }
+[data-ui="liquid"] .tile[data-agent="done"]      { border-color: rgba(255,159,10,0.42); }
+[data-ui="liquid"] .tile[data-agent="attention"] { border-color: rgba(255,69,58,0.5); }
+[data-ui="liquid"] :is(.dashboard-fleet-bar, .dashboard-port-info, .cat-tile) {
+  background: var(--lq-fill);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--lq-r);
+  box-shadow: var(--lq-rim);
+}
+[data-ui="liquid"] .mgrv-act {
+  font-family: var(--font-display); font-weight: 600; text-transform: none;
+  border-radius: var(--lq-r-sm);
+}
+[data-ui="liquid"] .mgrv-sec {
+  font-family: var(--font-display); font-weight: 620; text-transform: none;
+  letter-spacing: 0.02em; font-size: 12px;
+}
+
+/* ═══ USAGE pane — glass cards, white numerals ═════════════════════════ */
+[data-ui="liquid"] .mgru-card {
+  background: var(--lq-fill);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r); box-shadow: var(--lq-panel-shadow);
+}
+[data-ui="liquid"] .mgru-head { font-family: var(--font-display); font-weight: 620; text-transform: none; letter-spacing: 0.02em; font-size: 12px; }
+[data-ui="liquid"] .mgru-head-l::before { content: none; }
+[data-ui="liquid"] .mgru-big { font-weight: 680; text-shadow: none; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+[data-ui="liquid"] .mgru-reset { color: var(--lq-ink-2); }
+[data-ui="liquid"] :is(.mgru-gauge, .mgru-model-bar, .mgru-sess-bar) { border-radius: var(--lq-pill); background: rgba(255,255,255,0.08); }
+[data-ui="liquid"] .mgru-gauge-fill { background: #fff; box-shadow: 0 0 12px rgba(255,255,255,0.35); border-radius: var(--lq-pill); }
+[data-ui="liquid"] :is(.mgru-model-fill, .mgru-sess-fill) { background: rgba(255,255,255,0.5); box-shadow: none; border-radius: var(--lq-pill); }
+[data-ui="liquid"] .mgru-sess.top .mgru-sess-fill { background: #fff; }
+[data-ui="liquid"] .mgru-sess-sub { background: repeating-linear-gradient(-45deg, rgba(255,255,255,0.4) 0 2px, transparent 2px 5px); }
+[data-ui="liquid"] .mgru-sess-cost { font-weight: 640; text-shadow: none; font-variant-numeric: tabular-nums; }
+[data-ui="liquid"] .mgru-sess.top .mgru-sess-cost { color: #fff; text-shadow: none; }
+[data-ui="liquid"] .mgru-spark { background: rgba(255,255,255,0.04); border: 1px solid var(--soa-line-soft); border-radius: var(--lq-r-sm); }
+[data-ui="liquid"] .mgru-scope.active { color: #0b0b0f; background: #fff; border-color: #fff; }
+[data-ui="liquid"] .mgru-note { font-family: var(--font-display); text-transform: none; letter-spacing: 0.01em; }
+
+/* ═══ Menus, trays & popovers — deep frosted glass ═════════════════════ */
+[data-ui="liquid"] :is(.more-menu, .actions-tray, .ctx-popover) {
+  background: rgba(28, 28, 32, 0.55);
+  -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--lq-r);
+  box-shadow: var(--lq-shadow-deep), var(--lq-rim);
+  overflow: hidden;
+}
+[data-ui="liquid"] .more-menu .more-item {
+  font-family: var(--font-display); font-weight: 510; text-transform: none; color: var(--soa-fg);
+}
+[data-ui="liquid"] .more-menu .more-item:hover { background: var(--lq-glass-2); }
+
+/* ═══ Modals + settings ════════════════════════════════════════════════ */
+[data-ui="liquid"] .soa-modal {
+  background: rgba(28, 28, 32, 0.62);
+  -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
+  border: 1px solid var(--soa-line);
+  border-radius: 26px;
+  box-shadow: var(--lq-shadow-deep), var(--lq-rim);
+  color: var(--soa-fg); font-family: var(--font-display);
+}
+[data-ui="liquid"] .soa-modal-backdrop:not(.soa-settings-drop) {
+  background: rgba(0, 0, 0, 0.4);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+[data-ui="liquid"] .soa-modal-title { font-family: var(--font-display); font-weight: 700; letter-spacing: -0.01em; text-transform: none; }
+[data-ui="liquid"] .soa-modal-cmd { border-radius: var(--lq-r-sm); background: rgba(10,10,14,0.6); color: #e8e8ea; }
+[data-ui="liquid"] :is(.soa-modal-copy, .soa-modal-close, .soa-modal-link) {
+  font-family: var(--font-display); font-weight: 600; text-transform: none;
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
+  background: var(--lq-glass); color: var(--soa-fg);
+}
+[data-ui="liquid"] :is(.soa-modal-copy, .soa-modal-close, .soa-modal-link):hover { background: var(--lq-glass-2); border-color: rgba(255,255,255,0.28); }
+[data-ui="liquid"] .settings-tab { font-family: var(--font-display); font-weight: 510; text-transform: none; border-radius: var(--lq-r-sm); letter-spacing: 0.01em; }
+[data-ui="liquid"] .settings-tab--active { background: rgba(255,255,255,0.92); color: #0b0b0f; border-color: #fff; }
+[data-ui="liquid"] .settings-table td.v :is(input, select) {
+  background: rgba(255,255,255,0.06); color: var(--soa-fg);
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
+}
+[data-ui="liquid"] .settings-table td.k code { color: #fff; background: rgba(255,255,255,0.1); border-radius: 6px; padding: 1px 5px; }
+
+/* ═══ Preview panel ════════════════════════════════════════════════════ */
+[data-ui="liquid"] .pv-bar { background: rgba(255,255,255,0.04); -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur); border-bottom: 1px solid var(--soa-line); }
+[data-ui="liquid"] .pv-notice { border-radius: var(--lq-r); border: 1px solid var(--soa-line); background: var(--lq-glass); }
+
+/* ═══ Welcome / wizard ═════════════════════════════════════════════════ */
+[data-ui="liquid"] :is(.welcome-title, .mwel-title) {
+  font-family: var(--font-display); font-weight: 700; letter-spacing: -0.02em;
+  text-transform: none; text-shadow: 0 2px 40px rgba(255,255,255,0.2); color: var(--soa-fg);
+}
+[data-ui="liquid"] .mwel::before { display: none; }   /* the TRON grid is TRON's */
+[data-ui="liquid"] .mwel-head { border-bottom-color: var(--soa-line); box-shadow: none; }
+[data-ui="liquid"] .wiz-primary {
+  background: rgba(255,255,255,0.94); border: 1px solid #fff; color: #0b0b0f;
+  border-radius: var(--lq-pill); font-family: var(--font-display); font-weight: 640;
+  box-shadow: 0 8px 30px rgba(255,255,255,0.16);
+  transition: transform var(--lq-ease), box-shadow var(--lq-ease);
+}
+[data-ui="liquid"] .wiz-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 40px rgba(255,255,255,0.24); }
+[data-ui="liquid"] .wiz-primary:active { transform: scale(0.98); }
+[data-ui="liquid"] .welcome-cmd { background: rgba(10,10,14,0.6); color: #e8e8ea; border-radius: var(--lq-r-sm); }
+
+/* ═══ Toasts / notes / mobile-sim ══════════════════════════════════════ */
+[data-ui="liquid"] .widget-note { color: var(--lq-ink-2); font-family: var(--font-display); }
+[data-ui="liquid"] .soa-toast {
+  background: rgba(28, 28, 32, 0.68);
+  -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
+  color: var(--soa-fg); border-radius: var(--lq-r); box-shadow: var(--lq-shadow-deep), var(--lq-rim);
+  border: 1px solid var(--soa-line);
+}
+[data-ui="liquid"] .msim-frame { border-radius: 30px; overflow: hidden; box-shadow: var(--lq-shadow-deep); }
+
+/* Respect reduced-motion: kill the specular sweep. */
+@media (prefers-reduced-motion: reduce) {
+  [data-ui="liquid"] .tab.active::after { animation: none; }
+}

@@ -18,9 +18,10 @@
           (t === 'light' || t === 'dim') ? t
           : (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light'
           : 'dark';
-        // UI language (tron | minimal) — same pre-paint treatment so the
-        // MINIMAL skin never flashes TRON first (minimal.css keys off data-ui).
-        document.documentElement.dataset.ui = (s && s.uiLang === 'minimal') ? 'minimal' : 'tron';
+        // UI language (tron | minimal | liquid) — same pre-paint treatment so
+        // an alternate skin never flashes TRON first (each keys off data-ui).
+        var _ui = s && s.uiLang;
+        document.documentElement.dataset.ui = (_ui === 'minimal' || _ui === 'liquid') ? _ui : 'tron';
       } catch (e) { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.ui = 'tron'; }
     })();
   </script>
@@ -156,6 +157,7 @@
   <link rel="stylesheet" href="/assets/styles.css?v=76">
   <link rel="stylesheet" href="/assets/sidebar.css?v=27">
   <link rel="stylesheet" href="/assets/minimal.css?v=4">
+  <link rel="stylesheet" href="/assets/liquid.css?v=3">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>

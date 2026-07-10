@@ -22,7 +22,7 @@ const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
     theme: 'dark',   // default to dark regardless of system preference
-    uiLang: 'tron',  // UI language: 'tron' (terminal classic) | 'minimal' (porcelain modern)
+    uiLang: 'tron',  // UI language: 'tron' (terminal classic) | 'minimal' (porcelain modern) | 'liquid' (liquid glass / iOS)
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,
@@ -37,7 +37,7 @@ export const DEFAULTS = Object.freeze({
 const THEMES = ['auto', 'dark', 'light', 'dim'];
 function asTheme(v) { return THEMES.includes(v) ? v : DEFAULTS.theme; }
 
-const UILANGS = ['tron', 'minimal'];
+const UILANGS = ['tron', 'minimal', 'liquid'];
 function asUiLang(v) { return UILANGS.includes(v) ? v : DEFAULTS.uiLang; }
 
 // Reflect the UI language onto <html data-ui> so minimal.css activates.
@@ -197,7 +197,7 @@ function langSelect(id) {
 
 function uiLangSelect(id, value) {
     const sel = el('select', { id });
-    for (const [v, label] of [['tron', 'TRON · terminal classic'], ['minimal', 'MINIMAL · porcelain modern']]) {
+    for (const [v, label] of [['tron', 'TRON · terminal classic'], ['minimal', 'MINIMAL · porcelain modern'], ['liquid', 'LIQUID · glass (iOS)']]) {
         const o = el('option', { value: v, text: label });
         if (v === value) o.selected = true;
         sel.appendChild(o);
@@ -240,7 +240,7 @@ function buildAppearancePane(s) {
         el('tbody', {}, [
             el('tr', {}, [
                 el('td', { class: 'k' }, [el('code', { text: 'uiLang' })]),
-                el('td', { class: 'd', text: 'UI language — TRON is the classic terminal look; MINIMAL is a modern porcelain skin with dark terminal cards (it brings its own palette, so theme below only affects TRON). Applies instantly.' }),
+                el('td', { class: 'd', text: 'UI language — TRON is the classic terminal look; MINIMAL is a warm porcelain skin; LIQUID is a black & white iOS-style liquid-glass skin (frosted panels, rounded corners). MINIMAL and LIQUID bring their own palettes, so the theme below only affects TRON. Applies instantly.' }),
                 el('td', { class: 'v' }, [uiLangSelect('set-uiLang', s.uiLang)]),
             ]),
             el('tr', {}, [
