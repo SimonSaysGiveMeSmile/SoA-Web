@@ -1664,6 +1664,19 @@ class App {
                 ? `<span class="fleet-ctx" title="Context ${pct}% used"><span class="fleet-ctx-bar"><span style="width:${pct}%;background:${ctxColor(pct)}"></span></span><span class="fleet-ctx-pct">${pct}%</span></span>`
                 : '';
 
+            // Model tier chip — which Claude model this session runs, from the
+            // supervisor snapshot (live, tracks /model switches). Color-coded so
+            // the odd one out (e.g. a Fable unstick) is spottable in the list.
+            const mt = (function (r) {
+                r = String(r || '').toLowerCase();
+                if (r.includes('opus')) return 'opus';
+                if (r.includes('sonnet')) return 'sonnet';
+                if (r.includes('haiku')) return 'haiku';
+                if (r.includes('fable') || r.includes('mythos')) return 'fable';
+                return '';
+            })(s && s.model);
+            const modelHtml = mt ? `<span class="fleet-model" data-tier="${mt}">${mt}</span>` : '';
+
             const row = document.createElement('div');
             row.className = 'fleet-row' + (id === this._activeTabId ? ' active' : '');
             row.dataset.tabId = String(id);
@@ -1673,7 +1686,7 @@ class App {
                     `<span class="fleet-dot"></span>` +
                     `<div class="fleet-body">` +
                         `<div class="fleet-line1"><span class="fleet-name">${escapeHtml(name)}</span>${flags.join('')}</div>` +
-                        `<div class="fleet-line2"><span class="fleet-meta">${escapeHtml(meta)}</span>${ctxHtml}</div>` +
+                        `<div class="fleet-line2"><span class="fleet-meta">${escapeHtml(meta)}</span>${modelHtml}${ctxHtml}</div>` +
                     `</div>` +
                 `</div>` +
                 `<button class="fleet-act" data-act-toggle="${id}" aria-label="Session actions">⋯</button>` +

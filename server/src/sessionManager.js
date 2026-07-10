@@ -21,6 +21,7 @@ const express = require('express');
 const { MSG, frame } = require('./protocol');
 const envStore = require('./envStore');
 const claudeSessions = require('./claudeSessions');
+const sessionModel = require('./sessionModel');
 const localKey = require('./localKey');
 const entitlements = require('./entitlements');
 
@@ -607,6 +608,10 @@ class SessionManager {
                 title: (tab && tab.title) || `tab ${id}`,
                 cwd: (tab && tab.cwd) || null,
                 group: this._groupFor(tab && tab.cwd),
+                // Current model (raw id, e.g. "claude-opus-4-8"), read from the
+                // live transcript so it tracks in-session /model switches. The
+                // client renders it as a tier-colored badge on the tab/tile.
+                model: sessionModel.modelFor(tab && tab.cwd),
                 status: s.status,
                 ctxPct: s.ctxPct,
                 attention: s.status === 'attention',

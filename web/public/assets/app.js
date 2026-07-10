@@ -383,6 +383,7 @@ class Shell {
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
         this._agentGroup = new Map();  // tabId → group name (from the manager snapshot)
+        this._agentModel = new Map();  // tabId → raw model id (from the manager snapshot)
         this._collapsedGroups = new Set(); // group names collapsed in the tiles view
         this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
         // Tabs whose PTY emitted output since the last status scan. The 500ms
@@ -921,6 +922,7 @@ class Shell {
         if (det && det.pending) clearTimeout(det.pending);
         this._agentBuf.delete(id);
         this._agentStatus.delete(id);
+        this._agentModel.delete(id);
         this._lastStdoutCue.delete(id);
         this._ctxPct.delete(id);
         this._previewUrls.delete(id);
@@ -969,7 +971,7 @@ class Shell {
         // _setStatus, so including it here would rebuild all N tab buttons on
         // every working↔done flip. Only structural changes (set/title/active)
         // bust the row cache.
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0);
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentModel.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         // replaceChildren destroys the old tab buttons, which resets the
@@ -1000,6 +1002,7 @@ class Shell {
             }, ['⧉']);
             const main = el('span', { class: 'tab-main' }, [label, sub, pvBtn]);
             const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
+            const modelBadge = this._makeModelBadge(t.id);
             // No group chip here: the auto-group is the cwd folder name, which
             // just duplicated the (folder-named) title on most tabs. Groups
             // still show in the tiles + manager views. Rename is dblclick or
@@ -1018,7 +1021,7 @@ class Shell {
                 onclick: () => this._activate(t.id),
                 ondblclick: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
-            }, [dot, main, x]);
+            }, [dot, main, modelBadge, x].filter(Boolean));
             this._attachTabDrag(root, t.id);
             this._attachTabLongPress(root, t.id);
             return root;
@@ -1074,6 +1077,33 @@ class Shell {
         const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-bar`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
         node.replaceWith(this._makeCtxBar(pct, id));
+    }
+
+    // Collapse a raw model id ("claude-opus-4-8[1m]") to its tier for the badge
+    // label + color. Fable is the odd-one-out (unstick model), so it gets its
+    // own color and stands out in the row.
+    _modelTier(raw) {
+        const m = String(raw || '').toLowerCase();
+        if (m.includes('opus')) return 'opus';
+        if (m.includes('sonnet')) return 'sonnet';
+        if (m.includes('haiku')) return 'haiku';
+        if (m.includes('fable') || m.includes('mythos')) return 'fable';
+        return m ? 'other' : '';
+    }
+
+    // A compact, tier-colored pill showing which model a session runs — for
+    // at-a-glance fleet management. Color encodes the model TIER only; session
+    // STATUS stays on the tab border + ctx-bar, so the two never collide.
+    _makeModelBadge(id) {
+        const raw = this._agentModel.get(id);
+        const tier = this._modelTier(raw);
+        if (!tier) return null;
+        return el('span', {
+            class: 'tab-model',
+            'data-tier': tier,
+            title: `Model: ${raw}\n(live — reflects in-session /model switches)`,
+            text: tier,
+        });
     }
 
     // ── Per-tab memory occupation (hover tooltip) ───────────────────────────
@@ -1496,6 +1526,7 @@ class Shell {
             j = await r.json();
         } catch (_) { return; }
         if (!j || !Array.isArray(j.sessions)) return;
+        let tabsDirty = false;
         for (const sess of j.sessions) {
             const id = sess.id;
             const rt = this.tabs.get(id);
@@ -1504,6 +1535,10 @@ class Shell {
             // client-side detection — don't let the 4s pull fight it.
             if (id === this.activeId && rt._opened && this.viewMode !== 'tiles') continue;
             if (sess.status) this._setStatus(id, sess.status);
+            if (sess.model && sess.model !== this._agentModel.get(id)) {
+                this._agentModel.set(id, sess.model);
+                tabsDirty = true;   // model badge changed → rebuild the tab row below
+            }
             if (sess.ctxPct != null && sess.ctxPct !== this._ctxPct.get(id)) {
                 this._ctxPct.set(id, sess.ctxPct);
                 this._updateCtxBar(id, sess.ctxPct);
@@ -1513,6 +1548,7 @@ class Shell {
                 }
             }
         }
+        if (tabsDirty) { this._tabsUISig = null; this._syncTabsUI(); }
         this._statusSeeded = true;
     }
 
@@ -4109,10 +4145,14 @@ class Shell {
             onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
             onerror: () => icon.remove(),
         });
-        return el('div', { class: 'tile-head' }, [
+        const head = el('div', { class: 'tile-head' }, [
             icon,
             el('span', { class: 'tile-title', text: title }),
         ]);
+        // Model badge sits in the head alongside the (later-appended) group chip.
+        const badge = this._makeModelBadge(id);
+        if (badge) head.appendChild(badge);
+        return head;
     }
 
     _createTileNode(id) {
@@ -4295,13 +4335,18 @@ class Shell {
         // override) into a client map. Only re-render structure when the group
         // mapping actually changes — status-only manager frames must stay cheap.
         const groups = new Map();
+        const models = new Map();
         let sig = '';
         for (const s of (d.sessions || [])) {
             const g = s.group || 'ungrouped';
             groups.set(s.id, g);
-            sig += s.id + ':' + g + ';';
+            if (s.model) models.set(s.id, s.model);
+            // Model folds into the signature too: a /model switch is rare but
+            // must rebuild the tab row so the badge re-colors.
+            sig += s.id + ':' + g + ':' + (s.model || '') + ';';
         }
         this._agentGroup = groups;
+        this._agentModel = models;
         if (this.viewMode === 'tiles') this._renderFleetBar();
         if (this.viewMode === 'manager') this._renderManagerView();
         if (sig !== this._groupSig) {

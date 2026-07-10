@@ -1610,6 +1610,16 @@ button:active { background: var(--accent-bg-hover); }
 }
 .fleet-line2 { display: flex; align-items: center; gap: 10px; }
 .fleet-meta { font-size: 10px; letter-spacing: 0.06em; color: var(--fg-dim); white-space: nowrap; }
+/* Model tier chip — which Claude model this session runs. Color = tier only. */
+.fleet-model {
+  font-size: 8px; letter-spacing: 0.05em; text-transform: lowercase;
+  padding: 1px 5px; border-radius: 7px; margin-left: 6px; white-space: nowrap;
+  border: 1px solid rgba(255,255,255,0.12); color: var(--fg-dim);
+}
+.fleet-model[data-tier="opus"]   { color: #bd93f9; border-color: rgba(189,147,249,0.42); }
+.fleet-model[data-tier="sonnet"] { color: #8be9fd; border-color: rgba(139,233,253,0.42); }
+.fleet-model[data-tier="haiku"]  { color: #f1fa8c; border-color: rgba(241,250,140,0.42); }
+.fleet-model[data-tier="fable"]  { color: #ff79c6; border-color: rgba(255,121,198,0.46); }
 .fleet-ctx { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 .fleet-ctx-bar { width: 54px; height: 4px; border-radius: 3px; background: rgba(255,255,255,0.12); overflow: hidden; }
 .fleet-ctx-bar > span { display: block; height: 100%; border-radius: 3px; }
