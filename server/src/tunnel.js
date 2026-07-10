@@ -210,7 +210,12 @@ async function _tryCloudflared(port, onProgress) {
             let buf = '';
             const onData = chunk => {
                 buf += chunk.toString();
-                const match = buf.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+                // (?!api\.) — cloudflared's own log mentions its API endpoint
+                // https://api.trycloudflare.com while REQUESTING the tunnel;
+                // matching the first *.trycloudflare.com in the buffer handed
+                // that out as the public URL (broken QR). Keep buffering until
+                // the actually-assigned subdomain appears.
+                const match = buf.match(/https:\/\/(?!api\.)[a-zA-Z0-9-]+\.trycloudflare\.com/);
                 if (match) {
                     clearTimeout(timeout);
                     resolve(match[0]);

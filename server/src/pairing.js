@@ -65,7 +65,7 @@ class PairingManager {
             this.progress = null;
             if (!this.tunnel) {
                 this.state = 'error';
-                this.error = 'no tunnel provider available (cloudflared auto-download failed — check network, or brew install cloudflared)';
+                this.error = 'tunnel could not start (cloudflared download or startup failed — check network + CA certificates; details in the server log)';
                 return this.snapshot();
             }
             this.publicUrl = this.tunnel.url;
