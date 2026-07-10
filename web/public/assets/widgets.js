@@ -11,7 +11,7 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=21';
-import { getSettings } from '/assets/settings.js?v=23';
+import { getSettings } from '/assets/settings.js?v=24';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);

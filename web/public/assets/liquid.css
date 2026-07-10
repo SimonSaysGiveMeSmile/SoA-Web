@@ -60,11 +60,17 @@
   --lq-ink-2:       rgba(245, 245, 247, 0.62);      /* secondary ink */
   --lq-ink-3:       rgba(245, 245, 247, 0.34);      /* tertiary ink  */
   --lq-ease:        420ms cubic-bezier(0.32, 0.72, 0, 1);   /* iOS spring-ish */
-  /* The lit graphite ground — one field of light every view sits on. */
-  --lq-ground:      radial-gradient(1200px 820px at 10% -10%, rgba(255,255,255,0.14), transparent 60%),
-                    radial-gradient(1050px 720px at 110% 14%, rgba(188,204,255,0.11), transparent 56%),
-                    radial-gradient(920px 920px at 80% 120%, rgba(255,255,255,0.07), transparent 55%),
-                    #0c0c11;
+  /* iOS systemBlue (dark) — the single interactive accent. Chrome stays black &
+     white; only the things you can act on / that are selected pick up the tint. */
+  --lq-tint:        #0a84ff;
+  --lq-tint-rgb:    10, 132, 255;
+  --lq-tint-press:  #0a6fd6;
+  /* The lit ground — near-pure iOS OLED black, lit from within by soft neutral
+     blooms plus one faint systemBlue wash (iOS's "wallpaper behind the glass"). */
+  --lq-ground:      radial-gradient(1250px 840px at 8% -12%, rgba(255,255,255,0.12), transparent 60%),
+                    radial-gradient(1100px 760px at 112% 12%, rgba(10,132,255,0.10), transparent 56%),
+                    radial-gradient(960px 960px at 82% 122%, rgba(255,255,255,0.05), transparent 55%),
+                    #050506;
 }
 
 /* Reusable glass recipe. Applied to every floating surface below. */
@@ -99,9 +105,9 @@
 [data-ui="liquid"] .tiles-grid,
 [data-ui="liquid"] .manager-view { background: var(--lq-ground); }
 
-/* Focus: a soft white ring, iOS-style. */
+/* Focus: iOS systemBlue ring. */
 [data-ui="liquid"] :is(button, a, input, select, textarea):focus-visible {
-  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline: 2px solid rgba(var(--lq-tint-rgb), 0.9);
   outline-offset: 2px;
   border-radius: var(--lq-r-sm);
 }
@@ -279,8 +285,8 @@
   background: var(--lq-glass-2); border-color: rgba(255,255,255,0.28);
 }
 [data-ui="liquid"] :is(.mqr-toggle, .widget-btn, .port-btn, .mqr-copy, .globe-meta-btn):active { transform: scale(0.97); }
-[data-ui="liquid"] .mqr-toggle.mqr-start { background: rgba(255,255,255,0.92); border-color: #fff; color: #0b0b0f; }
-[data-ui="liquid"] .mqr-toggle.mqr-start:hover { background: #fff; }
+[data-ui="liquid"] .mqr-toggle.mqr-start { background: var(--lq-tint); border-color: var(--lq-tint); color: #fff; box-shadow: 0 4px 16px rgba(var(--lq-tint-rgb),0.35); }
+[data-ui="liquid"] .mqr-toggle.mqr-start:hover { background: var(--lq-tint-press); border-color: var(--lq-tint-press); }
 [data-ui="liquid"] .mqr-toggle.mqr-off { color: var(--soa-red); border-color: rgba(255,69,58,0.45); }
 [data-ui="liquid"] .port-btn-kill { color: var(--soa-red); border-color: rgba(255,69,58,0.45); }
 [data-ui="liquid"] .mqr-online .mqr-dot { background: var(--soa-green); box-shadow: 0 0 0 3px rgba(48,209,88,0.2); }
@@ -330,6 +336,19 @@
   font-family: var(--font-display); font-weight: 620; text-transform: none;
   letter-spacing: 0.02em; font-size: 12px;
 }
+/* Segmented control (SESSIONS · MONITOR · USAGE · TO-DO) — iOS glass segments,
+   the selected one filled systemBlue like an iOS control. */
+[data-ui="liquid"] :is(.mgrv-seg-btn, .mgrv-cast-btn) {
+  font-family: var(--font-display); font-weight: 590; text-transform: none;
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
+  background: var(--lq-glass); color: var(--soa-fg); box-shadow: var(--lq-rim);
+  transition: background var(--lq-ease), border-color var(--lq-ease), color var(--lq-ease);
+}
+[data-ui="liquid"] :is(.mgrv-seg-btn, .mgrv-cast-btn):hover { background: var(--lq-glass-2); border-color: rgba(255,255,255,0.26); color: var(--soa-fg); }
+[data-ui="liquid"] .mgrv-seg-btn.active {
+  background: var(--lq-tint); border-color: var(--lq-tint); color: #fff;
+  box-shadow: 0 3px 14px rgba(var(--lq-tint-rgb),0.34);
+}
 
 /* ═══ USAGE pane — glass cards, white numerals ═════════════════════════ */
 [data-ui="liquid"] .mgru-card {
@@ -342,14 +361,14 @@
 [data-ui="liquid"] .mgru-big { font-weight: 680; text-shadow: none; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 [data-ui="liquid"] .mgru-reset { color: var(--lq-ink-2); }
 [data-ui="liquid"] :is(.mgru-gauge, .mgru-model-bar, .mgru-sess-bar) { border-radius: var(--lq-pill); background: rgba(255,255,255,0.08); }
-[data-ui="liquid"] .mgru-gauge-fill { background: #fff; box-shadow: 0 0 12px rgba(255,255,255,0.35); border-radius: var(--lq-pill); }
+[data-ui="liquid"] .mgru-gauge-fill { background: var(--lq-tint); box-shadow: 0 0 14px rgba(var(--lq-tint-rgb),0.5); border-radius: var(--lq-pill); }
 [data-ui="liquid"] :is(.mgru-model-fill, .mgru-sess-fill) { background: rgba(255,255,255,0.5); box-shadow: none; border-radius: var(--lq-pill); }
 [data-ui="liquid"] .mgru-sess.top .mgru-sess-fill { background: #fff; }
 [data-ui="liquid"] .mgru-sess-sub { background: repeating-linear-gradient(-45deg, rgba(255,255,255,0.4) 0 2px, transparent 2px 5px); }
 [data-ui="liquid"] .mgru-sess-cost { font-weight: 640; text-shadow: none; font-variant-numeric: tabular-nums; }
 [data-ui="liquid"] .mgru-sess.top .mgru-sess-cost { color: #fff; text-shadow: none; }
 [data-ui="liquid"] .mgru-spark { background: rgba(255,255,255,0.04); border: 1px solid var(--soa-line-soft); border-radius: var(--lq-r-sm); }
-[data-ui="liquid"] .mgru-scope.active { color: #0b0b0f; background: #fff; border-color: #fff; }
+[data-ui="liquid"] .mgru-scope.active { color: #fff; background: var(--lq-tint); border-color: var(--lq-tint); }
 [data-ui="liquid"] .mgru-note { font-family: var(--font-display); text-transform: none; letter-spacing: 0.01em; }
 
 /* ═══ Menus, trays & popovers — deep frosted glass ═════════════════════ */
@@ -387,8 +406,9 @@
   background: var(--lq-glass); color: var(--soa-fg);
 }
 [data-ui="liquid"] :is(.soa-modal-copy, .soa-modal-close, .soa-modal-link):hover { background: var(--lq-glass-2); border-color: rgba(255,255,255,0.28); }
+[data-ui="liquid"] .soa-modal-link { color: var(--lq-tint); border-color: rgba(var(--lq-tint-rgb),0.4); }
 [data-ui="liquid"] .settings-tab { font-family: var(--font-display); font-weight: 510; text-transform: none; border-radius: var(--lq-r-sm); letter-spacing: 0.01em; }
-[data-ui="liquid"] .settings-tab--active { background: rgba(255,255,255,0.92); color: #0b0b0f; border-color: #fff; }
+[data-ui="liquid"] .settings-tab--active { background: var(--lq-tint); color: #fff; border-color: var(--lq-tint); }
 [data-ui="liquid"] .settings-table td.v :is(input, select) {
   background: rgba(255,255,255,0.06); color: var(--soa-fg);
   border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
@@ -407,12 +427,12 @@
 [data-ui="liquid"] .mwel::before { display: none; }   /* the TRON grid is TRON's */
 [data-ui="liquid"] .mwel-head { border-bottom-color: var(--soa-line); box-shadow: none; }
 [data-ui="liquid"] .wiz-primary {
-  background: rgba(255,255,255,0.94); border: 1px solid #fff; color: #0b0b0f;
+  background: var(--lq-tint); border: 1px solid var(--lq-tint); color: #fff;
   border-radius: var(--lq-pill); font-family: var(--font-display); font-weight: 640;
-  box-shadow: 0 8px 30px rgba(255,255,255,0.16);
-  transition: transform var(--lq-ease), box-shadow var(--lq-ease);
+  box-shadow: 0 8px 30px rgba(var(--lq-tint-rgb),0.36);
+  transition: transform var(--lq-ease), box-shadow var(--lq-ease), background var(--lq-ease);
 }
-[data-ui="liquid"] .wiz-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 40px rgba(255,255,255,0.24); }
+[data-ui="liquid"] .wiz-primary:hover { transform: translateY(-1px); background: var(--lq-tint-press); box-shadow: 0 12px 44px rgba(var(--lq-tint-rgb),0.5); }
 [data-ui="liquid"] .wiz-primary:active { transform: scale(0.98); }
 [data-ui="liquid"] .welcome-cmd { background: rgba(10,10,14,0.6); color: #e8e8ea; border-radius: var(--lq-r-sm); }
 
