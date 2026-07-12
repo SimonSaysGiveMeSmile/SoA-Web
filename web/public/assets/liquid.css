@@ -45,15 +45,24 @@
   --lq-glass-3:     rgba(255, 255, 255, 0.14);     /* active / pressed */
   /* Top-lit gradient — the single biggest "this is glass, not a flat card"
      tell: the surface catches the ambient light along its upper edge. */
-  --lq-fill:        linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.045) 62%, rgba(255,255,255,0.03) 100%);
-  --lq-fill-2:      linear-gradient(180deg, rgba(255,255,255,0.17) 0%, rgba(255,255,255,0.075) 62%, rgba(255,255,255,0.05) 100%);
+  --lq-fill:        radial-gradient(140% 120% at 0% -8%, rgba(255,255,255,0.14), transparent 46%),
+                    linear-gradient(177deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.045) 58%, rgba(255,255,255,0.03) 100%);
+  --lq-fill-2:      radial-gradient(140% 120% at 0% -8%, rgba(255,255,255,0.2), transparent 46%),
+                    linear-gradient(177deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.075) 58%, rgba(255,255,255,0.05) 100%);
   --lq-blur:        blur(22px) saturate(180%);
   --lq-blur-lg:     blur(40px) saturate(180%);
   --lq-edge:        rgba(255, 255, 255, 0.14);
-  --lq-rim:         inset 0 1px 0 rgba(255, 255, 255, 0.35),
-                    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
-  --lq-shadow:      0 6px 24px rgba(0, 0, 0, 0.42);
-  --lq-shadow-deep: 0 18px 60px rgba(0, 0, 0, 0.62);
+  /* Edge lensing — the signature liquid-glass rim: a bright top edge, a
+     hairline of light around the whole perimeter, light pooling softly at the
+     base, and a fine dark contour so the glass crisply separates from ground. */
+  --lq-rim:         inset 0 1px 0 rgba(255, 255, 255, 0.5),
+                    inset 0 0 0 0.5px rgba(255, 255, 255, 0.1),
+                    inset 0 -9px 18px -12px rgba(255, 255, 255, 0.09),
+                    inset 0 -1px 0 rgba(0, 0, 0, 0.28);
+  /* Two-layer elevation: a tight contact shadow + a wide ambient one, so glass
+     reads as floating rather than pasted on. */
+  --lq-shadow:      0 2px 6px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.44);
+  --lq-shadow-deep: 0 6px 16px rgba(0, 0, 0, 0.4), 0 24px 72px rgba(0, 0, 0, 0.6);
   --lq-r:           22px;     /* squircle — panels/cards */
   --lq-r-sm:        14px;     /* buttons / inputs */
   --lq-r-xs:        10px;
@@ -68,9 +77,10 @@
   --lq-tint-press:  #0a6fd6;
   /* The lit ground — near-pure iOS OLED black, lit from within by soft neutral
      blooms plus one faint systemBlue wash (iOS's "wallpaper behind the glass"). */
-  --lq-ground:      radial-gradient(1250px 840px at 8% -12%, rgba(255,255,255,0.12), transparent 60%),
-                    radial-gradient(1100px 760px at 112% 12%, rgba(10,132,255,0.10), transparent 56%),
-                    radial-gradient(960px 960px at 82% 122%, rgba(255,255,255,0.05), transparent 55%),
+  --lq-ground:      radial-gradient(1250px 860px at 6% -14%, rgba(255,255,255,0.16), transparent 60%),
+                    radial-gradient(1150px 780px at 114% 10%, rgba(10,132,255,0.12), transparent 55%),
+                    radial-gradient(1000px 1000px at 84% 124%, rgba(255,255,255,0.06), transparent 55%),
+                    radial-gradient(760px 520px at 50% 42%, rgba(255,255,255,0.03), transparent 70%),
                     #050506;
 }
 
