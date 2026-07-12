@@ -1350,6 +1350,10 @@ class ConsoleLogWidget extends Widget {
         this._maxLines = 80;
         this.body.appendChild(this._log);
         this._es = null;
+        this._lastSeq = 0;        // high-watermark for de-duping across SSE↔poll
+        this._polling = false;
+        this._pollTimer = null;
+        this._streamWatchdog = null;
     }
 
     start() {
@@ -1364,27 +1368,71 @@ class ConsoleLogWidget extends Widget {
     // Close the EventSource while the tab is backgrounded to avoid a
     // persistent idle connection (and the 502 spam if the backend is down).
     _suspend() {
+        this._clearWatchdog();
         if (this._es) { this._es.close(); this._es = null; }
+        this._stopPolling();
     }
 
     _resume() {
-        if (!this._destroyed && !this._es && !isSandbox()) this._connect();
+        if (!this._destroyed && !isSandbox() && !this._es && !this._polling) this._connect();
     }
 
     _connect() {
-        if (this._es) return;
+        if (this._es || this._polling) return;
         this._es = new EventSource(api('/api/logs'));
+        // Buffering transports (Cloudflare quick tunnels don't flush
+        // event-stream bodies) deliver no events AND never fire onerror — the
+        // widget would just hang. The server's `ready` handshake lands on any
+        // working stream within a beat; if it doesn't, switch to polling.
+        this._streamWatchdog = setTimeout(() => this._fallbackToPolling(), 4000);
+        this._es.addEventListener('ready', () => this._clearWatchdog());
         this._es.onmessage = (ev) => {
-            try {
-                const entry = JSON.parse(ev.data);
-                this._append(entry);
-            } catch (_) {}
+            this._clearWatchdog();
+            try { this._ingest(JSON.parse(ev.data)); } catch (_) {}
         };
         this._es.onerror = () => {
-            this._es.close();
-            this._es = null;
+            if (this._es) { this._es.close(); this._es = null; }
+            if (this._polling) return;   // already tailing over JSON
             setTimeout(() => { if (!this._destroyed) this._connect(); }, 5000);
         };
+    }
+
+    _clearWatchdog() {
+        if (this._streamWatchdog) { clearTimeout(this._streamWatchdog); this._streamWatchdog = null; }
+    }
+
+    // Tail the server's ring buffer over plain JSON when the SSE handshake
+    // never lands (buffering proxy). Deduped by monotonic `seq`.
+    _fallbackToPolling() {
+        this._streamWatchdog = null;
+        if (this._es) { this._es.close(); this._es = null; }
+        if (this._polling || this._destroyed) return;
+        this._polling = true;
+        const pump = async () => {
+            if (this._destroyed || !this._polling) { this._stopPolling(); return; }
+            try {
+                const r = await jget('/api/logs?poll=1');
+                for (const entry of (r.data || [])) this._ingest(entry);
+            } catch (_) {}
+        };
+        pump();
+        this._pollTimer = setInterval(pump, 4000);
+    }
+
+    _stopPolling() {
+        this._polling = false;
+        if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    }
+
+    _ingest(entry) {
+        if (!entry) return;
+        // seq is monotonic; skip anything we've already rendered (handles the
+        // SSE ring-replay, poll overlap, and same-ms collisions cleanly).
+        if (entry.seq != null) {
+            if (entry.seq <= this._lastSeq) return;
+            this._lastSeq = entry.seq;
+        }
+        this._append(entry);
     }
 
     _append(entry) {
@@ -1403,7 +1451,9 @@ class ConsoleLogWidget extends Widget {
     }
 
     destroy() {
+        this._clearWatchdog();
         if (this._es) { this._es.close(); this._es = null; }
+        this._stopPolling();
         super.destroy();
     }
 }
