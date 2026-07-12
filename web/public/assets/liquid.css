@@ -20,6 +20,7 @@
    glows, fills derive from these). Accent == white: liquid chrome is
    monochrome; iOS system colours are applied surgically for status only. */
 :root[data-ui="liquid"] {
+  color-scheme: dark;   /* native controls (select popups, scrollbars, carets) render dark */
   --soa-bg:        #0b0b0f;
   --soa-bg-deep:   #060608;
   --soa-bg-panel:  rgba(255, 255, 255, 0.055);   /* the glass fill */
@@ -412,7 +413,19 @@
 [data-ui="liquid"] .settings-table td.v :is(input, select) {
   background: rgba(255,255,255,0.06); color: var(--soa-fg);
   border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
+  font-family: var(--font-display);
 }
+/* macOS paints native aqua over a select's fill unless appearance is reset;
+   strip it and draw a custom iOS chevron so it reads as a dark-glass control. */
+[data-ui="liquid"] .settings-table td.v select {
+  -webkit-appearance: none; appearance: none;
+  padding: 5px 30px 5px 10px;
+  background-color: rgba(255,255,255,0.06);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='white' stroke-opacity='.55' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 12px 8px;
+  transition: background-color var(--lq-ease), border-color var(--lq-ease);
+}
+[data-ui="liquid"] .settings-table td.v select:hover { background-color: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.24); }
 [data-ui="liquid"] .settings-table td.k code { color: #fff; background: rgba(255,255,255,0.1); border-radius: 6px; padding: 1px 5px; }
 
 /* ═══ Preview panel ════════════════════════════════════════════════════ */
