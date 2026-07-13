@@ -54,6 +54,7 @@ const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
+const tunnelGate       = require('./tunnelGate');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
 const { dbg, agg }     = require('./debug');
@@ -75,6 +76,12 @@ const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(100
 const SIGN_KEY   = auth.resolveSignKey();
 const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
 const SESSION_TOKEN = process.env.SOA_WEB_SESSION_TOKEN || '';
+// QR-holder-only tunnel: a request arriving over the tunnel (not local) must
+// present a valid per-session pairing token — otherwise the tunnel would be an
+// open, unauthenticated shell for anyone who found the URL. Local requests are
+// unaffected. SOA_WEB_OPEN_TUNNEL=1 restores the old open behavior; it is a
+// no-op under SESSION_TOKEN mode (that already gates every request upstream).
+const OPEN_TUNNEL = process.env.SOA_WEB_OPEN_TUNNEL === '1';
 
 function constantTimeEq(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -232,7 +239,26 @@ function currentSession(req) {
 // keeps them on the same one across reloads.
 function requireAuthed(req, res, next) {
     let s = currentSession(req);
+    // Pairing-token attach: a request carrying a valid per-session token (?t= or
+    // Bearer) binds to that session even with no cookie — this is how a phone
+    // that scanned the QR authenticates. Mint the cookie so its later
+    // same-origin calls are authed too (the mobile client also re-sends ?t=).
     if (!s) {
+        const presented = extractPresentedToken(req);
+        const byTok = presented && sessions.getByToken(presented);
+        if (byTok) {
+            s = byTok;
+            const token = auth.issue(s.token, SIGN_KEY);
+            res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
+        }
+    }
+    if (!s) {
+        // No session and no valid token. A remote (tunnel) caller must pair with
+        // a token first — never hand an anonymous internet visitor a fresh shell.
+        // Local callers still get one for free (no login on your own machine).
+        if (!tunnelGate.httpMayProvision({ isLocal: sessionManager.isLocalRequest(req), openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN })) {
+            return res.status(401).json({ ok: false, error: 'pairing required — scan the QR' });
+        }
         s = sessions.create();
         const token = auth.issue(s.token, SIGN_KEY);
         res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
@@ -245,7 +271,11 @@ function requireAuthed(req, res, next) {
 
 // ── API ─────────────────────────────────────────────────────────────────
 app.get('/api/ping', (req, res) => {
-    res.json({ ok: true, name: 'soa-web', protocol: 1, tokenRequired: !!SESSION_TOKEN });
+    // Remote callers now need the per-session pairing token too, so advertise
+    // tokenRequired to a tunnel visitor with no token — the mobile client shows
+    // "re-scan the QR" instead of looping on a doomed tokenless /ws upgrade.
+    const remoteNeedsPair = !tunnelGate.httpMayProvision({ isLocal: sessionManager.isLocalRequest(req), openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN });
+    res.json({ ok: true, name: 'soa-web', protocol: 1, tokenRequired: !!SESSION_TOKEN || remoteNeedsPair });
 });
 
 app.get('/api/me', requireAuthed, (req, res) => {
@@ -500,32 +530,55 @@ server.on('upgrade', (req, socket, head) => {
         } catch (_) { return null; }
     })(req);
 
-    // Share the primary desktop session (the one with live tabs) whenever this
-    // connection doesn't already own a non-empty session. Mobile reliably picks
-    // up its OWN empty cookie-session from authed /api/* polls (sysinfo, etc.);
-    // if we honored that cookie it would bind to an empty session and show a
-    // dead/stale terminal while the desktop streams to the primary — the exact
-    // "different state on each device" divergence. Only an existing session that
-    // already has tabs of its own is trusted over the primary.
+    // A phone that scanned the QR presents the desktop session's per-session
+    // token as ?t=. Possessing it authorizes sharing THAT session — this is the
+    // pairing capability, and it's what a remote caller needs to get in.
+    const presentedTok = url.searchParams.get('t') || '';
+    const tokenSession = presentedTok ? sessions.getByToken(presentedTok) : null;
+
+    // Share the primary desktop session (the one with live tabs) whenever a
+    // *trusted* connection doesn't already own a non-empty session. Mobile picks
+    // up its OWN empty cookie-session from authed /api/* polls; honoring that
+    // cookie would bind it to an empty session and show a dead terminal while
+    // the desktop streams to the primary — the "different state per device"
+    // divergence. Only a session that already has tabs is trusted over primary.
     const existingHasTabs = existing && existing.tabMgr && existing.tabMgr.order.length > 0;
-    let session = existing;
-    let via = 'cookie';
-    if (!existingHasTabs) {
+    const isLocal = sessionManager.isLocalRequest(req);
+    const decision = tunnelGate.decideWsBind({
+        tokenSession, existingHasTabs, isLocal, openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN,
+    });
+
+    if (decision.action === 'reject') {
+        // Anonymous tunnel visitor: no pairing token, no populated session of
+        // its own. Never hand it the primary desktop shell.
+        dbg('ws-upgrade', 'REJECT 401: remote /ws without a valid pairing token');
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+
+    let session, via = decision.via;
+    if (decision.source === 'token') {
+        session = tokenSession;
+    } else if (decision.source === 'cookie') {
+        session = existing;
+    } else { // primary-or-new (trusted callers only)
         const primary = _findPrimarySession();
         if (primary && primary !== existing) {
             if (existing) dbg('ws-upgrade', 'cookie session', existing.id.slice(0, 8), 'is empty — sharing primary', primary.id.slice(0, 8));
             session = primary;
             via = existing ? 'primary-over-empty-cookie' : 'primary-share';
+        } else if (existing) {
+            session = existing; via = 'cookie-empty';
+        } else {
+            session = sessions.create();
+            tabPersist.saveSession({ id: session.id, token: session.token });
+            via = 'new';
+            dbg('ws-upgrade', 'bound to NEW empty session', session.id.slice(0, 8), '(no cookie match, no primary found — mobile will see no tabs)');
         }
     }
-    if (!session) {
-        session = sessions.create();
-        tabPersist.saveSession({ id: session.id, token: session.token });
-        dbg('ws-upgrade', 'bound to NEW empty session', session.id.slice(0, 8), '(no cookie match, no primary found — mobile will see no tabs)');
-    } else {
-        const tabCount = session.tabMgr ? session.tabMgr.order.length : 0;
-        dbg('ws-upgrade', 'bound to session', session.id.slice(0, 8), 'via', via, '— tabs=' + tabCount, 'existingSockets=' + session.sockets.size);
-    }
+    const tabCount = session.tabMgr ? session.tabMgr.order.length : 0;
+    dbg('ws-upgrade', 'bound to session', session.id.slice(0, 8), 'via', via, '— tabs=' + tabCount, 'existingSockets=' + session.sockets.size, 'local=' + isLocal);
     wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session, req));
 });
 
