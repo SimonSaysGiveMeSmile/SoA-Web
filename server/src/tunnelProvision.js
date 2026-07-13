@@ -21,11 +21,18 @@
  *   SOA_WEB_TUNNEL_FRESH     '1' skips system discovery (managed copy +
  *                            download only) — simulates a fresh machine for
  *                            tests even when brew's cloudflared is present.
+ *
+ * The download also honors the standard HTTPS_PROXY / ALL_PROXY / NO_PROXY
+ * env vars (via a dependency-free CONNECT tunnel), so the one-click provision
+ * works on networks that force egress through a proxy.
  */
 
 const fs = require('fs');
 const os = require('os');
+const net = require('net');
+const tls = require('tls');
 const path = require('path');
+const http = require('http');
 const https = require('https');
 const { execFile } = require('child_process');
 const { STATE_DIR } = require('./stateDir');
@@ -82,12 +89,37 @@ function _findSystemBinary() {
 
 // ── download ──────────────────────────────────────────────────────────────
 
+// Corporate/edu networks often force egress through a proxy, and Node's https
+// doesn't read *_PROXY on its own — so a fresh install there would fail the
+// one-click download on connect. Honor the conventional env vars (lower-case
+// first, per the de-facto proxy-from-env order) with NO_PROXY exemptions.
+// Returns the proxy URL string, or null when the target should be reached
+// directly (the overwhelmingly common case — which keeps the direct path below
+// exactly as it was).
+function _proxyForUrl(target) {
+    let host;
+    try { host = new URL(target).hostname.toLowerCase(); } catch (_) { return null; }
+    const noProxy = (process.env.no_proxy || process.env.NO_PROXY || '').trim();
+    if (noProxy === '*') return null;
+    for (let entry of noProxy.split(',')) {
+        entry = entry.trim().toLowerCase();
+        if (!entry) continue;
+        const bare = entry.replace(/^\*?\.?/, '');   // "*.ex.com" / ".ex.com" → "ex.com"
+        if (host === bare || host.endsWith('.' + bare)) return null;
+    }
+    return process.env.https_proxy || process.env.HTTPS_PROXY ||
+           process.env.all_proxy  || process.env.ALL_PROXY  || null;
+}
+
 // GET that follows redirects (github.com 302s to objects.githubusercontent)
 // and streams to a file, reporting {pct,receivedMB,totalMB} as bytes land.
+// Routes through an HTTP proxy via CONNECT when *_PROXY is set (dependency-free
+// tunnelling); the direct, no-proxy path is unchanged.
 function _download(url, dest, onProgress, redirects = 0) {
     return new Promise((resolve, reject) => {
         if (redirects > 5) return reject(new Error('too many redirects'));
-        const req = https.get(url, { headers: { 'user-agent': 'soa-web-tunnel-provision' } }, res => {
+
+        const onResponse = res => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 res.resume();
                 return resolve(_download(res.headers.location, dest, onProgress, redirects + 1));
@@ -113,11 +145,63 @@ function _download(url, dest, onProgress, redirects = 0) {
             out.on('finish', () => out.close(() => resolve()));
             out.on('error', reject);
             res.on('error', reject);
-        });
-        req.on('error', reject);
+        };
+
         // A quick-tunnel binary is ~20–40 MB; 5 min covers even a slow link,
         // and a hung socket must not wedge the pairing state machine forever.
-        req.setTimeout(300000, () => { try { req.destroy(new Error('download timeout')); } catch (_) {} });
+        const startGet = rawSocket => {
+            const tgt = new URL(url);
+            const isIp = net.isIP(tgt.hostname) !== 0;   // SNI must not be an IP literal
+            const reqOpts = {
+                hostname: tgt.hostname,
+                port: tgt.port || 443,
+                path: tgt.pathname + tgt.search,
+                method: 'GET',
+                headers: { 'user-agent': 'soa-web-tunnel-provision' },
+            };
+            if (!isIp) reqOpts.servername = tgt.hostname;
+            if (rawSocket) {
+                // Run the TLS handshake over the proxied raw socket. Passing a
+                // socket straight to https.get ignores it and dials direct, so
+                // supply the connection explicitly.
+                reqOpts.agent = false;
+                reqOpts.createConnection = () => tls.connect({ socket: rawSocket, servername: isIp ? undefined : tgt.hostname });
+            }
+            const req = https.request(reqOpts, onResponse);
+            req.on('error', reject);
+            req.setTimeout(300000, () => { try { req.destroy(new Error('download timeout')); } catch (_) {} });
+            req.end();
+        };
+
+        const proxy = _proxyForUrl(url);
+        if (!proxy) return startGet(null);   // direct — unchanged behavior
+
+        // HTTPS target through an HTTP proxy: open a CONNECT tunnel, then run
+        // the TLS GET over the raw socket the proxy hands back.
+        let pu, tgt;
+        try { pu = new URL(proxy); tgt = new URL(url); } catch (_) { return startGet(null); }
+        const headers = {};
+        if (pu.username) {
+            const cred = `${decodeURIComponent(pu.username)}:${decodeURIComponent(pu.password || '')}`;
+            headers['proxy-authorization'] = 'Basic ' + Buffer.from(cred).toString('base64');
+        }
+        const conn = http.request({
+            host: pu.hostname,
+            port: pu.port || 80,
+            method: 'CONNECT',
+            path: `${tgt.hostname}:${tgt.port || 443}`,
+            headers,
+        });
+        conn.on('connect', (res, socket) => {
+            if (res.statusCode !== 200) {
+                socket.destroy();
+                return reject(new Error(`proxy CONNECT failed: HTTP ${res.statusCode}`));
+            }
+            startGet(socket);
+        });
+        conn.on('error', reject);
+        conn.setTimeout(300000, () => { try { conn.destroy(new Error('proxy connect timeout')); } catch (_) {} });
+        conn.end();
     });
 }
 
@@ -215,4 +299,4 @@ async function ensureCloudflared(onProgress) {
     }
 }
 
-module.exports = { ensureCloudflared, assetName, MANAGED_BIN };
+module.exports = { ensureCloudflared, assetName, MANAGED_BIN, __test: { _download, _proxyForUrl } };
