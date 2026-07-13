@@ -43,4 +43,15 @@ function decideWsBind({ tokenSession, existingHasTabs, isLocal, openTunnel, sess
     return { action: 'reject', via: 'remote-no-token' };
 }
 
-module.exports = { httpMayProvision, decideWsBind };
+// Boot: should the tunnel auto-start so a fresh install is ready to pair with
+// no manual step? Default yes. Never in open mode (SOA_WEB_OPEN_TUNNEL with no
+// SESSION_TOKEN) — auto-exposing an unauthenticated shell must be a deliberate
+// click, never a boot side effect. `autopairEnv` is the raw env string ('0'
+// disables); undefined/anything-else means the default (on).
+function shouldAutoStartTunnel({ autopairEnv, openTunnel, sessionTokenMode }) {
+    if (autopairEnv === '0') return false;
+    if (openTunnel && !sessionTokenMode) return false;
+    return true;
+}
+
+module.exports = { httpMayProvision, decideWsBind, shouldAutoStartTunnel };

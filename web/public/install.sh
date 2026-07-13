@@ -78,11 +78,14 @@ need npm
 need curl
 
 # Mobile bridge needs a public tunnel. cloudflared is preferred — free, fast,
-# no account — and the daemon SELF-PROVISIONS it: on the first pair click the
-# server downloads the official release into its state dir (tunnelProvision.js),
-# so no platform is degraded. A brew install is still nicer when available
-# (brew keeps it updated), so best-effort it here; NEVER fatal — a missing
-# provider now only costs the new user a one-time ~20 MB download on first pair.
+# no account — and the daemon SELF-PROVISIONS it: the server downloads the
+# official release into its state dir on first use (tunnelProvision.js), so no
+# platform is degraded. With SOA_WEB_AUTOPAIR=1 (set below) the tunnel now
+# auto-starts on boot, so a fresh install is ready to pair with zero steps —
+# safe because the tunnel is QR-holder-only (only a device with the scanned
+# token gets in; see tunnelGate.js). A brew install is still nicer when
+# available (keeps it updated), so best-effort it here; NEVER fatal — a missing
+# provider only costs a one-time ~20 MB download.
 ensure_tunnel_provider() {
     if command -v cloudflared >/dev/null 2>&1 || command -v ngrok >/dev/null 2>&1; then
         return 0
@@ -278,7 +281,7 @@ if [ "$PLATFORM" = "darwin" ]; then
         <key>SOA_WEB_PORT</key><string>$PORT</string>
         <key>SOA_WEB_HOST</key><string>127.0.0.1</string>
         <key>SOA_WEB_STATE_DIR</key><string>$STATE_DIR</string>
-        <key>SOA_WEB_AUTOPAIR</key><string>0</string>
+        <key>SOA_WEB_AUTOPAIR</key><string>1</string>
         <key>SOA_WEB_BROWSER_DEBUG_PORT</key><string>9333</string>
         <key>SOA_WEB_ALLOWED_ORIGINS</key><string>$FRONTEND_ORIGIN,http://127.0.0.1:$PORT,http://localhost:$PORT</string>
         <key>SOA_WEB_SECURE_COOKIE</key><string>1</string>
@@ -325,7 +328,7 @@ WorkingDirectory=$APP_DIR
 Environment="SOA_WEB_PORT=$PORT"
 Environment="SOA_WEB_HOST=127.0.0.1"
 Environment="SOA_WEB_STATE_DIR=$STATE_DIR"
-Environment="SOA_WEB_AUTOPAIR=0"
+Environment="SOA_WEB_AUTOPAIR=1"
 Environment="SOA_WEB_BROWSER_DEBUG_PORT=9333"
 Environment="SOA_WEB_ALLOWED_ORIGINS=$FRONTEND_ORIGIN,http://127.0.0.1:$PORT,http://localhost:$PORT"
 Environment="SOA_WEB_SECURE_COOKIE=1"
@@ -380,5 +383,5 @@ log "service is up"
 printf '\n\033[32m✓ installed\033[0m  \033[2m(in %s)\033[0m\n' "$ROOT"
 printf '  Shell:     \033[36mhttp://127.0.0.1:%s\033[0m\n' "$PORT"
 printf '  Via site:  \033[36m%s\033[0m  \033[2m(auto-detects localhost)\033[0m\n' "$FRONTEND_ORIGIN"
-printf '  Phone:     \033[2msidebar → MOBILE LINK → START, then scan the QR (cloudflared auto-provisions)\033[0m\n'
+printf '  Phone:     \033[2msidebar → MOBILE LINK → scan the QR (tunnel auto-starts; only the QR holder gets in)\033[0m\n'
 printf '  Uninstall: \033[36m%s/uninstall.sh\033[0m\n\n' "$ROOT"

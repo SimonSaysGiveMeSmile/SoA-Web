@@ -17,7 +17,13 @@
  *   SOA_WEB_SHELL      shell binary; defaults to $SHELL or /bin/bash
  *   SOA_WEB_SESSION_TTL_MS  idle timeout for sessions (default 6h)
  *   SOA_WEB_DEV=1      dev mode — sends cache-control: no-store on static assets
- *   SOA_WEB_AUTOPAIR   '0' disables auto-starting the Cloudflare tunnel on boot
+ *   SOA_WEB_AUTOPAIR   '0' disables auto-starting the Cloudflare tunnel on boot.
+ *                      Default auto-starts so a fresh install is ready to pair
+ *                      with no manual step — safe because the tunnel is now
+ *                      QR-holder-only (see tunnelGate / SOA_WEB_OPEN_TUNNEL).
+ *   SOA_WEB_OPEN_TUNNEL '1' restores the pre-hardening OPEN tunnel (any visitor
+ *                      to the URL gets a shell). Never auto-starts on boot in
+ *                      this mode — exposing an open shell must be deliberate.
  *   SOA_WEB_SESSION_TOKEN  when set, every /api/* and /ws request must carry
  *                          ?t=<this-token> (or Authorization: Bearer <token>
  *                          on /api/*). Used by scripts/selfhost.js to gate a
@@ -1291,7 +1297,16 @@ function onListening() {
             console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (re-adopted — survived restart)`);
             return;
         }
-        if (process.env.SOA_WEB_AUTOPAIR === '0') return;
+        // Auto-start so a fresh install is ready to pair with no manual step —
+        // but only a HARDENED tunnel. Open mode (SOA_WEB_OPEN_TUNNEL=1, no
+        // SESSION_TOKEN) is an unauthenticated shell, so it must never come up
+        // by itself; the user clicks START to expose it deliberately.
+        if (!tunnelGate.shouldAutoStartTunnel({ autopairEnv: process.env.SOA_WEB_AUTOPAIR, openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN })) {
+            if (OPEN_TUNNEL && !SESSION_TOKEN) {
+                console.log('SoA-Web tunnel:  auto-start skipped — SOA_WEB_OPEN_TUNNEL makes the tunnel an open shell; click START to expose it deliberately.');
+            }
+            return;
+        }
         return pair.start().then(snap2 => {
             if (snap2.state === 'online' && snap2.publicUrl) {
                 registerTunnel(snap2.publicUrl);
