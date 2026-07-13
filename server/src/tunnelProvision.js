@@ -205,6 +205,27 @@ function _download(url, dest, onProgress, redirects = 0) {
     });
 }
 
+// A first-run download over flaky wifi shouldn't drop the user to a broken
+// tunnel. Retry the download stage only (a truncated/aborted transfer is worth
+// another go); extract/verify failures are deterministic and handled upstream.
+async function _downloadWithRetry(url, dest, onProgress, attempts = 3) {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            await _download(url, dest, onProgress);
+            return;
+        } catch (err) {
+            lastErr = err;
+            try { fs.rmSync(dest, { force: true }); } catch (_) {}   // clear the partial
+            if (i < attempts - 1) {
+                dbg('tunnel', `provision: download attempt ${i + 1} failed (${err.message}); retrying`);
+                await new Promise(r => setTimeout(r, 800 * (i + 1)));  // brief linear backoff
+            }
+        }
+    }
+    throw lastErr;
+}
+
 function _extractTgz(tgz, destDir) {
     // bsdtar ships with macOS (the only .tgz platform); shelling out beats
     // adding a tar dependency for one file.
@@ -243,7 +264,7 @@ async function _fetchManaged(onProgress) {
     const tmpFile = path.join(tmpDir, isTgz ? 'cloudflared.tgz' : 'cloudflared');
     try {
         dbg('tunnel', 'provision: downloading', url);
-        await _download(url, tmpFile, onProgress);
+        await _downloadWithRetry(url, tmpFile, onProgress);
         let binSrc = tmpFile;
         if (isTgz) {
             await _extractTgz(tmpFile, tmpDir);
@@ -299,4 +320,4 @@ async function ensureCloudflared(onProgress) {
     }
 }
 
-module.exports = { ensureCloudflared, assetName, MANAGED_BIN, __test: { _download, _proxyForUrl } };
+module.exports = { ensureCloudflared, assetName, MANAGED_BIN, __test: { _download, _downloadWithRetry, _proxyForUrl } };
