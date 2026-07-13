@@ -23,7 +23,7 @@
   color-scheme: dark;   /* native controls (select popups, scrollbars, carets) render dark */
   --soa-bg:        #0b0b0f;
   --soa-bg-deep:   #060608;
-  --soa-bg-panel:  rgba(255, 255, 255, 0.055);   /* the glass fill */
+  --soa-bg-panel:  rgba(255, 255, 255, 0.04);    /* the glass fill */
   --soa-bg-panel-rgb: 255, 255, 255;
   --soa-fg:        #f5f5f7;                        /* iOS off-white ink */
   --soa-accent:    #ffffff;
@@ -40,29 +40,26 @@
   --font-display:  -apple-system, "SF Pro Display", "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
 
   /* LIQUID-only material tokens */
-  --lq-glass:       rgba(255, 255, 255, 0.055);
-  --lq-glass-2:     rgba(255, 255, 255, 0.09);     /* raised / hover */
-  --lq-glass-3:     rgba(255, 255, 255, 0.14);     /* active / pressed */
-  /* Top-lit gradient — the single biggest "this is glass, not a flat card"
-     tell: the surface catches the ambient light along its upper edge. */
-  --lq-fill:        radial-gradient(140% 120% at 0% -8%, rgba(255,255,255,0.14), transparent 46%),
-                    linear-gradient(177deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.045) 58%, rgba(255,255,255,0.03) 100%);
-  --lq-fill-2:      radial-gradient(140% 120% at 0% -8%, rgba(255,255,255,0.2), transparent 46%),
-                    linear-gradient(177deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.075) 58%, rgba(255,255,255,0.05) 100%);
-  --lq-blur:        blur(22px) saturate(180%);
-  --lq-blur-lg:     blur(40px) saturate(180%);
-  --lq-edge:        rgba(255, 255, 255, 0.14);
-  /* Edge lensing — the signature liquid-glass rim: a bright top edge, a
-     hairline of light around the whole perimeter, light pooling softly at the
-     base, and a fine dark contour so the glass crisply separates from ground. */
-  --lq-rim:         inset 0 1px 0 rgba(255, 255, 255, 0.5),
-                    inset 0 0 0 0.5px rgba(255, 255, 255, 0.1),
-                    inset 0 -9px 18px -12px rgba(255, 255, 255, 0.09),
-                    inset 0 -1px 0 rgba(0, 0, 0, 0.28);
+  --lq-glass:       rgba(255, 255, 255, 0.04);
+  --lq-glass-2:     rgba(255, 255, 255, 0.07);     /* raised / hover */
+  --lq-glass-3:     rgba(255, 255, 255, 0.11);     /* active / pressed */
+  /* Top-lit fill — a single soft gradient catching ambient light along the
+     upper edge. One layer, kept translucent so the lit ground reads through
+     (was a radial+linear stack; simplified for a cleaner, flatter glass). */
+  --lq-fill:        linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.025));
+  --lq-fill-2:      linear-gradient(180deg, rgba(255,255,255,0.11), rgba(255,255,255,0.045));
+  --lq-blur:        blur(22px) saturate(140%);
+  --lq-blur-lg:     blur(40px) saturate(140%);
+  --lq-edge:        rgba(255, 255, 255, 0.12);
+  /* Edge highlight — a soft bright top edge plus a faint full-perimeter
+     hairline. Simplified to two layers (dropped the base light-pool and the
+     dark bottom contour) for a lighter, cleaner rim. */
+  --lq-rim:         inset 0 1px 0 rgba(255, 255, 255, 0.3),
+                    inset 0 0 0 0.5px rgba(255, 255, 255, 0.06);
   /* Two-layer elevation: a tight contact shadow + a wide ambient one, so glass
-     reads as floating rather than pasted on. */
-  --lq-shadow:      0 2px 6px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.44);
-  --lq-shadow-deep: 0 6px 16px rgba(0, 0, 0, 0.4), 0 24px 72px rgba(0, 0, 0, 0.6);
+     reads as floating rather than pasted on. Softened for a cleaner lift. */
+  --lq-shadow:      0 1px 4px rgba(0, 0, 0, 0.22), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --lq-shadow-deep: 0 4px 12px rgba(0, 0, 0, 0.3), 0 18px 52px rgba(0, 0, 0, 0.46);
   --lq-r:           22px;     /* squircle — panels/cards */
   --lq-r-sm:        14px;     /* buttons / inputs */
   --lq-r-xs:        10px;
@@ -75,13 +72,12 @@
   --lq-tint:        #0a84ff;
   --lq-tint-rgb:    10, 132, 255;
   --lq-tint-press:  #0a6fd6;
-  /* The lit ground — near-pure iOS OLED black, lit from within by soft neutral
-     blooms plus one faint systemBlue wash (iOS's "wallpaper behind the glass"). */
-  --lq-ground:      radial-gradient(1250px 860px at 6% -14%, rgba(255,255,255,0.16), transparent 60%),
-                    radial-gradient(1150px 780px at 114% 10%, rgba(10,132,255,0.12), transparent 55%),
-                    radial-gradient(1000px 1000px at 84% 124%, rgba(255,255,255,0.06), transparent 55%),
-                    radial-gradient(760px 520px at 50% 42%, rgba(255,255,255,0.03), transparent 70%),
-                    #050506;
+  /* The lit ground — near-pure iOS OLED black with one soft white bloom and a
+     faint systemBlue wash (iOS's "wallpaper behind the glass"). Simplified from
+     four stacked blooms to two, at lower intensity, for a calmer, cleaner field. */
+  --lq-ground:      radial-gradient(1200px 900px at 8% -16%, rgba(255,255,255,0.09), transparent 60%),
+                    radial-gradient(1050px 820px at 108% 8%, rgba(10,132,255,0.055), transparent 58%),
+                    #060608;
 }
 
 /* Reusable glass recipe. Applied to every floating surface below. */
@@ -139,8 +135,8 @@
 /* ── Boot ── */
 [data-ui="liquid"] .boot {
   background:
-    radial-gradient(900px 600px at 50% 30%, rgba(255,255,255,0.10), transparent 60%),
-    #08080b;
+    radial-gradient(900px 600px at 50% 30%, rgba(255,255,255,0.07), transparent 62%),
+    #07070a;
 }
 [data-ui="liquid"] .boot-grid { display: none; }
 [data-ui="liquid"] .boot-title {
@@ -199,13 +195,13 @@
   background: var(--lq-glass-3);
   border-color: rgba(255, 255, 255, 0.4);
   color: #fff;
-  box-shadow: 0 6px 22px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.5), inset 0 -1px 0 rgba(255,255,255,0.08);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.3);
   position: relative; overflow: hidden;
 }
-/* The "liquid" — a slow specular sweep across the active tab. */
+/* The "liquid" — a slow, faint specular sweep across the active tab. */
 [data-ui="liquid"] .tab.active::after {
   content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
-  background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.16) 48%, transparent 62%);
+  background: linear-gradient(115deg, transparent 34%, rgba(255,255,255,0.10) 50%, transparent 64%);
   background-size: 250% 100%;
   animation: lq-sheen 5.5s ease-in-out infinite;
 }
@@ -224,7 +220,7 @@
 [data-ui="liquid"] .terms .term {
   inset: 12px 14px 14px;
   padding: 14px 16px;
-  background: rgba(10, 10, 14, 0.62);
+  background: rgba(10, 10, 14, 0.55);
   -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 20px;
@@ -384,7 +380,7 @@
 
 /* ═══ Menus, trays & popovers — deep frosted glass ═════════════════════ */
 [data-ui="liquid"] :is(.more-menu, .actions-tray, .ctx-popover) {
-  background: rgba(28, 28, 32, 0.55);
+  background: rgba(28, 28, 32, 0.48);
   -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
   border: 1px solid var(--soa-line);
   border-radius: var(--lq-r);
@@ -398,7 +394,7 @@
 
 /* ═══ Modals + settings ════════════════════════════════════════════════ */
 [data-ui="liquid"] .soa-modal {
-  background: rgba(28, 28, 32, 0.62);
+  background: rgba(28, 28, 32, 0.55);
   -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
   border: 1px solid var(--soa-line);
   border-radius: 26px;
@@ -462,7 +458,7 @@
 /* ═══ Toasts / notes / mobile-sim ══════════════════════════════════════ */
 [data-ui="liquid"] .widget-note { color: var(--lq-ink-2); font-family: var(--font-display); }
 [data-ui="liquid"] .soa-toast {
-  background: rgba(28, 28, 32, 0.68);
+  background: rgba(28, 28, 32, 0.6);
   -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
   color: var(--soa-fg); border-radius: var(--lq-r); box-shadow: var(--lq-shadow-deep), var(--lq-rim);
   border: 1px solid var(--soa-line);
