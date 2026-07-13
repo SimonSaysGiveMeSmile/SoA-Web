@@ -1262,6 +1262,172 @@ button:active { background: var(--accent-bg-hover); }
     background: rgba(0,0,0,0.15);
 }
 
+/* ══ LIQUID · iOS — mobile port of the desktop LIQUID UI language ═══════════
+   Black & white. A lit OLED-black ground with soft blooms, and every surface a
+   frosted-glass card floating over it — backdrop-blurred, edge-lensed with a
+   bright specular rim, squircle corners, SF Pro. systemBlue is spent only on
+   what you TOUCH (active tab / nav, the you-bubble, send) and on status.
+   Scoped to [data-theme="liquid"] so every other theme is untouched. Live
+   backdrop-blur is reserved for the fixed chrome + a few cards; scrolling list
+   rows use the fill+rim recipe so they read as glass without a per-row cost. */
+[data-theme="liquid"] {
+    --lqm-blur:    blur(22px) saturate(140%);
+    --lqm-blur-lg: blur(34px) saturate(140%);
+    /* One soft top-lit layer, kept translucent so the lit ground reads through
+       (matches the desktop LIQUID's simplified, cleaner glass). */
+    --lqm-fill:    linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.025));
+    /* Edge highlight — soft bright top edge + a faint full-perimeter hairline. */
+    --lqm-rim:     inset 0 1px 0 rgba(255,255,255,0.3),
+                   inset 0 0 0 0.5px rgba(255,255,255,0.06);
+    --lqm-shadow:  0 1px 4px rgba(0,0,0,0.22), 0 8px 24px rgba(0,0,0,0.34);
+    --lqm-tint:        #0a84ff;   /* iOS systemBlue — the one interactive accent */
+    --lqm-tint-press:  #0a6fd6;
+    /* Calm field: one soft white bloom + a faint systemBlue wash over OLED black
+       (two blooms, low intensity — mirrors the desktop's simplified ground). */
+    --lqm-ground:  radial-gradient(720px 640px at 6% -12%, rgba(255,255,255,0.09), transparent 62%),
+                   radial-gradient(640px 560px at 112% 6%, rgba(10,132,255,0.055), transparent 58%),
+                   #060608;
+    letter-spacing: 0;
+}
+
+/* The lit ground — fixed, so the whole app floats over one calm field of light. */
+[data-theme="liquid"] body,
+[data-theme="liquid"] #app {
+    background: var(--lqm-ground);
+    background-attachment: fixed;
+}
+
+/* Top bar — a floating glass rail. */
+[data-theme="liquid"] #topbar {
+    background: rgba(255,255,255,0.05);
+    -webkit-backdrop-filter: var(--lqm-blur-lg); backdrop-filter: var(--lqm-blur-lg);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.05);
+}
+
+/* Tabs — glass pills; the active one brightens with a systemBlue rim + specular. */
+[data-theme="liquid"] #tabs { background: transparent; }
+[data-theme="liquid"] .tab {
+    background: rgba(255,255,255,0.055);
+    -webkit-backdrop-filter: var(--lqm-blur); backdrop-filter: var(--lqm-blur);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 999px;
+    box-shadow: var(--lqm-rim);
+}
+[data-theme="liquid"] .tab.active {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(10,132,255,0.6);
+    color: #fff;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.38), 0 3px 14px rgba(10,132,255,0.22);
+}
+
+/* Terminal — a near-opaque dark card (no blur: keeps mono text crisp + fast). */
+[data-theme="liquid"] #term {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: rgba(8,8,11,0.92);
+}
+
+/* Dashboard / widget cards — frosted glass with specular corner + edge lensing. */
+[data-theme="liquid"] .w-card {
+    background: var(--lqm-fill);
+    -webkit-backdrop-filter: var(--lqm-blur); backdrop-filter: var(--lqm-blur);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 20px;
+    box-shadow: var(--lqm-shadow), var(--lqm-rim);
+}
+
+/* Bottom nav — glass; the selected button lights systemBlue. */
+[data-theme="liquid"] #bottombar {
+    background: rgba(255,255,255,0.05);
+    -webkit-backdrop-filter: var(--lqm-blur-lg); backdrop-filter: var(--lqm-blur-lg);
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+[data-theme="liquid"] .bb-btn {
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    background: rgba(255,255,255,0.04);
+}
+[data-theme="liquid"] .bb-btn[aria-pressed="true"] {
+    background: var(--lqm-tint); border-color: var(--lqm-tint); color: #fff;
+}
+
+/* Keyboard — glass keys. */
+[data-theme="liquid"] #kbd {
+    background: rgba(255,255,255,0.045);
+    -webkit-backdrop-filter: var(--lqm-blur-lg); backdrop-filter: var(--lqm-blur-lg);
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+[data-theme="liquid"] .k {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 9px;
+    box-shadow: var(--lqm-rim);
+}
+[data-theme="liquid"] .k:active { background: rgba(255,255,255,0.16); }
+
+/* Sheets, menus, popovers — deep frosted glass. */
+[data-theme="liquid"] .tab-menu,
+[data-theme="liquid"] .reconnect-card,
+[data-theme="liquid"] .settings-sheet,
+[data-theme="liquid"] .bcast-sheet {
+    background: rgba(22,22,26,0.6);
+    -webkit-backdrop-filter: var(--lqm-blur-lg); backdrop-filter: var(--lqm-blur-lg);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 -6px 40px rgba(0,0,0,0.5), var(--lqm-rim);
+}
+[data-theme="liquid"] .settings-sheet { border-radius: 26px 26px 0 0; }
+[data-theme="liquid"] .reconnect-spinner,
+[data-theme="liquid"] .brand-mark { box-shadow: none; }
+[data-theme="liquid"] .pull-hint { background: rgba(255,255,255,0.14); }
+
+/* CHAT (the IM view) — iMessage on glass: agent bubble frosted, you-bubble and
+   the round send button systemBlue. */
+[data-theme="liquid"] .chat-composer {
+    background: rgba(255,255,255,0.04);
+    -webkit-backdrop-filter: var(--lqm-blur); backdrop-filter: var(--lqm-blur);
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+[data-theme="liquid"] .chat-input {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+}
+[data-theme="liquid"] .chat-input:focus { border-color: var(--lqm-tint); }
+[data-theme="liquid"] .chat-msg.agent {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.1);
+}
+[data-theme="liquid"] .chat-msg.you {
+    background: var(--lqm-tint); color: #fff; border-color: transparent;
+}
+[data-theme="liquid"] .chat-send {
+    background: var(--lqm-tint); color: #fff;
+    box-shadow: 0 4px 14px rgba(10,132,255,0.4);
+}
+[data-theme="liquid"] .chat-more { color: var(--lqm-tint); }
+
+/* FLEET / manager — glass rows, systemBlue selection (fill+rim, no per-row blur). */
+[data-theme="liquid"] .manager-bar {
+    background: rgba(255,255,255,0.04);
+    -webkit-backdrop-filter: var(--lqm-blur); backdrop-filter: var(--lqm-blur);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+[data-theme="liquid"] .fleet-seg-btn.active {
+    background: var(--lqm-tint); color: #fff; border-color: var(--lqm-tint);
+}
+[data-theme="liquid"] .fleet-row,
+[data-theme="liquid"] .todo-item,
+[data-theme="liquid"] .mon-cell {
+    background: var(--lqm-fill);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    box-shadow: var(--lqm-rim);
+}
+[data-theme="liquid"] .fleet-row.active { border-color: rgba(10,132,255,0.6); }
+[data-theme="liquid"] .fleet-ctx-bar { background: rgba(255,255,255,0.1); }
+
+/* Selection — monochrome. */
+[data-theme="liquid"] ::selection { background: rgba(255,255,255,0.24); color: #fff; }
+
 /* ── Microphone Settings ───────────────────────────── */
 
 .mic-control {

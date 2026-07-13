@@ -24,7 +24,7 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v54 · providers + auto-resume · 2026-06-11';
+const MOBILE_BUILD = 'v55 · LIQUID · iOS theme · 2026-07-13';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -214,6 +214,32 @@ const THEMES = {
     },
 
     // ── Liquid Glass family — translucent panels, SF font, rounded ────────
+    // LIQUID — the mobile face of the desktop LIQUID UI language: black & white,
+    // a near-pure OLED-black ground, systemBlue reserved for what you touch. The
+    // full glass treatment (ground blooms, frosted panels, edge-lensing rims and
+    // specular) lives in the [data-theme="liquid"] block in styles.css.
+    liquid: {
+        name: 'Liquid · iOS',
+        preview: ['#050506', '#0a84ff'],
+        vars: {
+            '--bg':             '#050506',
+            '--bg-alt':         '#0d0d12',
+            '--fg':             '#f5f5f7',
+            '--fg-dim':         'rgba(245,245,247,0.62)',
+            '--fg-faint':       'rgba(245,245,247,0.34)',
+            '--accent':         '#ffffff',
+            '--accent-glow':    'rgba(255,255,255,0.5)',
+            '--accent-bg':      'rgba(255,255,255,0.1)',
+            '--accent-bg-hover':'rgba(255,255,255,0.16)',
+            '--warn':           '#ff9f0a',
+            '--err':            '#ff453a',
+            '--line':           'rgba(255,255,255,0.12)',
+            '--radius':         '18px',
+            '--panel-bg':       'rgba(255,255,255,0.06)',
+            '--font':           "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif",
+        },
+        colorScheme: 'dark',
+    },
     'liquid-dark': {
         name: 'Liquid Dark',
         preview: ['#0a0c10', '#0a84ff'],
