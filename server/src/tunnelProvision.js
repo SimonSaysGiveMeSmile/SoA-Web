@@ -300,8 +300,17 @@ async function ensureCloudflared(onProgress) {
         const explicit = process.env.SOA_WEB_CLOUDFLARED;
         if (_exists(explicit)) return explicit;
     }
-    // 2. Our own managed copy (previous download).
-    if (_exists(MANAGED_BIN)) return MANAGED_BIN;
+    // 2. Our own managed copy (previous download) — but only if it still runs.
+    //    A once-good copy that later broke (disk corruption, an OS/dylib change)
+    //    would otherwise be handed back on every pair, wedging the tunnel with
+    //    no recovery. Verify cheaply and re-fetch if it fails.
+    if (_exists(MANAGED_BIN)) {
+        try { await _verifyRuns(MANAGED_BIN); return MANAGED_BIN; }
+        catch (err) {
+            dbg('tunnel', 'managed cloudflared no longer runs, re-fetching:', err.message);
+            try { fs.rmSync(MANAGED_BIN, { force: true }); } catch (_) {}
+        }
+    }
     // 3. System install (brew/apt/manual).
     if (!fresh) {
         const sys = await _findSystemBinary();
