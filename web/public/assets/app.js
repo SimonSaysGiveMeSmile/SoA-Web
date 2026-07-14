@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=38';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=39';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=24';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=24';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -4741,7 +4741,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=25');
+        await import('/assets/app-wc.js?v=26');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -4815,7 +4815,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=25').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=26').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.

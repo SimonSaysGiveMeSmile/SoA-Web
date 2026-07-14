@@ -1727,12 +1727,13 @@ function _widgetRegistry() {
 }
 
 const SIDEBAR_LAYOUT_KEY = 'soa-web:sidebar-layout';
+const SANDBOX_LAYOUT_KEY = 'soa-web:sidebar-layout-sandbox';   // sandbox keeps its own arrangement
 // Merge the saved layout with the registry: keep saved order + on/off, drop
 // unknown ids, and append any NEW widgets (on by default) at the end — so a
 // new release's widget shows up without wiping the user's arrangement.
-function _loadLayout(ids) {
+function _loadLayout(key, ids) {
     let saved = [];
-    try { saved = JSON.parse(localStorage.getItem(SIDEBAR_LAYOUT_KEY)) || []; } catch (_) {}
+    try { saved = JSON.parse(localStorage.getItem(key)) || []; } catch (_) {}
     const known = new Set(ids), seen = new Set(), out = [];
     for (const e of Array.isArray(saved) ? saved : []) {
         if (e && known.has(e.id) && !seen.has(e.id)) { out.push({ id: e.id, on: e.on !== false }); seen.add(e.id); }
@@ -1740,21 +1741,20 @@ function _loadLayout(ids) {
     for (const id of ids) if (!seen.has(id)) out.push({ id, on: true });
     return out;
 }
-function _saveLayout(layout) { try { localStorage.setItem(SIDEBAR_LAYOUT_KEY, JSON.stringify(layout)); } catch (_) {} }
+function _saveLayout(key, layout) { try { localStorage.setItem(key, JSON.stringify(layout)); } catch (_) {} }
 
-export function mountSidebar(parent, ctx = {}) {
-    const reg = _widgetRegistry();
+// Shared composition for both sidebars: a persistent tools row (CUSTOMIZE
+// button) + a host the widgets rebuild into whenever the layout changes.
+function _composeSidebar(parent, reg, layoutKey, ctx) {
     const byId = Object.fromEntries(reg.map(w => [w.id, w]));
     const ids = reg.map(w => w.id);
-    let layout = _loadLayout(ids);
+    let layout = _loadLayout(layoutKey, ids);
     let widgets = [];
 
-    // A persistent tools row + a host the widgets live in, so a layout change
-    // only rebuilds the widgets (the CUSTOMIZE button survives).
     const host = $el('div', { class: 'sidebar-widgets' });
     const editBtn = $el('button', {
         class: 'sidebar-edit-btn', text: '⚙ ' + tr('sidebar.customize'),
-        onclick: () => _openSidebarManager(reg, layout, next => { layout = next; _saveLayout(layout); build(); }),
+        onclick: () => _openSidebarManager(reg, layout, next => { layout = next; _saveLayout(layoutKey, layout); build(); }),
     });
     parent.replaceChildren($el('div', { class: 'sidebar-tools' }, [editBtn]), host);
 
@@ -1772,6 +1772,10 @@ export function mountSidebar(parent, ctx = {}) {
         destroy: () => { window.removeEventListener('soa:lang', relabel); widgets.forEach(w => w.destroy()); },
         widgets, rebuild: build,
     };
+}
+
+export function mountSidebar(parent, ctx = {}) {
+    return _composeSidebar(parent, _widgetRegistry(), SIDEBAR_LAYOUT_KEY, ctx);
 }
 
 // CUSTOMIZE panel — reorder (↑/↓) + show/hide each widget, applied live so the
@@ -1895,37 +1899,30 @@ class LocalSetupWidget extends Widget {
     }
 }
 
-export function mountSandboxSidebar(parent, ctx = {}) {
-    // Flag the page as sandbox so every widget's tick() takes its
-    // browser-only path and never pokes /api/*. Flipping this to false
-    // after an install would re-animate the sidebar against localhost,
-    // but today we simply reload into server mode instead (see app.js).
-    (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
-    // Same widget roster as server mode so the sidebar looks consistent
-    // before and after the user installs a local backend. Each widget
-    // detects isSandbox() and renders either browser-native data or a
-    // helpful "install the backend to see X" empty state.
-    const widgets = [
-        new ClockWidget({ parent }),
-        new LocalSetupWidget({
-            parent,
-            onInstall: ctx.onInstall,
-            onConnect: ctx.onConnect,
-        }),
-        new MusicPlayerWidget({ parent }),
-        new LocationGlobeWidget({ parent }),
-        new MobileQRWidget({ parent, audio: ctx.audio }),
-        new SysInfoWidget({ parent }),
-        new DeviceStatusWidget({ parent }),
-        new CpuInfoWidget({ parent }),
-        new RamWatcherWidget({ parent }),
-        new NetStatWidget({ parent }),
-        new NetChartWidget({ parent }),
-        new SandboxInfoWidget({ parent }),
+// Sandbox roster (no backend): LOCAL SETUP + SANDBOX in place of the
+// install-only widgets. Each widget detects isSandbox() and renders either
+// browser-native data or a "install the backend to see X" empty state.
+function _sandboxRegistry() {
+    return [
+        { id: 'clock',    titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
+        { id: 'local',    titleKey: 'widget.local',       make: (p, c) => new LocalSetupWidget({ parent: p, onInstall: c.onInstall, onConnect: c.onConnect }) },
+        { id: 'music',    titleKey: 'widget.music',       make: p => new MusicPlayerWidget({ parent: p }) },
+        { id: 'globe',    titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
+        { id: 'mobile',   titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
+        { id: 'sysinfo',  titleKey: 'widget.system',      make: p => new SysInfoWidget({ parent: p }) },
+        { id: 'device',   titleKey: 'widget.device',      make: p => new DeviceStatusWidget({ parent: p }) },
+        { id: 'cpu',      titleKey: 'widget.cpu',         make: p => new CpuInfoWidget({ parent: p }) },
+        { id: 'memory',   titleKey: 'widget.memory',      make: p => new RamWatcherWidget({ parent: p }) },
+        { id: 'network',  titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
+        { id: 'netchart', titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
+        { id: 'sandbox',  titleKey: 'widget.sandbox',     make: p => new SandboxInfoWidget({ parent: p }) },
     ];
-    widgets.forEach(w => w.start());
-    return {
-        destroy: () => widgets.forEach(w => w.destroy()),
-        widgets,
-    };
+}
+
+export function mountSandboxSidebar(parent, ctx = {}) {
+    // Flag the page as sandbox so every widget's tick() takes its browser-only
+    // path and never pokes /api/*. Same customize/reorder/hide + ⓘ machinery as
+    // server mode, under its own layout key.
+    (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
+    return _composeSidebar(parent, _sandboxRegistry(), SANDBOX_LAYOUT_KEY, ctx);
 }
