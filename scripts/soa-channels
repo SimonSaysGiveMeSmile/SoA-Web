@@ -86,6 +86,14 @@ except: pass" 2>/dev/null; }
 
 daemon_ok() { curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; }
 
+# A valid pairing token, read LOCALLY. The tunnel is now QR-holder-only, so the
+# through-tunnel /api/manager probe needs one (see AUTH_HDR); locally we're
+# allowed to mint it. Empty string if unavailable (probe then falls back to
+# unauthenticated, i.e. pre-hardening behavior).
+pair_token() { curl -fsS --max-time 6 "http://127.0.0.1:${PORT}/api/pair/status" 2>/dev/null | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('data',{}).get('pairToken','') or '')
+except: print('')" 2>/dev/null; }
+
 jget_total() { python3 -c "import sys,json
 try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
 except: print(0)" 2>/dev/null; }
@@ -197,11 +205,11 @@ except Exception: pass" 2>/dev/null
 # resolver fails the name, retry once pinning the DoH-resolved IP via --resolve.
 fleet_tabs() {
     local url="$1" hdr="${2:-}" host ip out
-    out="$(curl -fsS --max-time 12 ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
+    out="$(curl -fsS --max-time 12 ${AUTH_HDR:+-H "$AUTH_HDR"} ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
     if [ -z "$out" ]; then
         host="$(printf '%s' "$url" | sed -E 's#^https?://##; s#[:/].*$##')"
         ip="$(doh_a "$host")"
-        [ -n "$ip" ] && out="$(curl -fsS --max-time 12 --resolve "${host}:443:${ip}" ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
+        [ -n "$ip" ] && out="$(curl -fsS --max-time 12 --resolve "${host}:443:${ip}" ${AUTH_HDR:+-H "$AUTH_HDR"} ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
     fi
     printf '%s' "$out" | python3 -c "import sys,json
 try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
