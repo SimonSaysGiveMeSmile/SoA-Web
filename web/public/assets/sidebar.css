@@ -251,6 +251,34 @@
 .mus-spotify { border: 0; border-radius: 10px; margin-top: 8px; display: block; }
 .mus-note { font-family: var(--font-mono); font-size: 9px; color: var(--soa-yellow); letter-spacing: 0.04em; min-height: 12px; margin-top: 4px; }
 
+/* ── Sidebar tools + CUSTOMIZE (add/remove/reorder) ────────────────────── */
+.sidebar-tools { display: flex; }
+.sidebar-widgets { display: flex; flex-direction: column; gap: 10px; }
+.sidebar-edit-btn { width: 100%; background: transparent; color: var(--soa-accent-dim); border: 1px dashed var(--soa-line-soft); padding: 5px 8px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase; cursor: pointer; transition: color 80ms, border-color 80ms; }
+.sidebar-edit-btn:hover { color: var(--soa-accent); border-color: var(--soa-accent); }
+
+/* Per-widget header controls: ⓘ info toggle + the live pulse */
+.widget-h-ctl { display: flex; align-items: center; gap: 7px; }
+.widget-info-btn { background: transparent; border: none; color: var(--soa-accent-dim); font-size: 12px; line-height: 1; padding: 0; cursor: pointer; opacity: 0.7; }
+.widget-info-btn:hover, .widget-info-btn.open { color: var(--soa-accent); opacity: 1; text-shadow: 0 0 6px rgba(var(--soa-accent-rgb), 0.4); }
+.widget-info { padding: 8px 10px; font-family: var(--font-mono); font-size: 10px; line-height: 1.55; color: rgba(var(--soa-accent-rgb), 0.72); border-bottom: 1px solid var(--soa-line-soft); background: rgba(var(--soa-accent-rgb), 0.03); }
+
+/* CUSTOMIZE modal (reuses .soa-modal / .soa-modal-backdrop) */
+.sidebar-mgr { width: min(420px, 92vw); max-height: 82vh; display: flex; flex-direction: column; }
+.smgr-hint { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); margin: 4px 0 10px; letter-spacing: 0.04em; }
+.smgr-list { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.smgr-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--soa-line-soft); background: rgba(var(--soa-accent-rgb), 0.03); }
+.smgr-row.off { opacity: 0.5; }
+.smgr-name { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11px; color: var(--soa-fg); letter-spacing: 0.06em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.smgr-btns { display: flex; gap: 4px; flex-shrink: 0; }
+.smgr-mv { background: transparent; color: var(--soa-accent); border: 1px solid var(--soa-line-soft); width: 24px; height: 24px; font-size: 12px; cursor: pointer; }
+.smgr-mv:hover:not([disabled]) { border-color: var(--soa-accent); }
+.smgr-mv[disabled] { opacity: 0.3; cursor: default; }
+.smgr-eye { background: transparent; border: 1px solid var(--soa-line-soft); color: var(--soa-accent-dim); padding: 0 8px; height: 24px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; min-width: 64px; }
+.smgr-eye.on { color: var(--soa-green); border-color: rgba(var(--soa-accent-rgb), 0.3); }
+.smgr-foot { display: flex; gap: 8px; margin-top: 12px; }
+.smgr-foot .widget-btn { margin-top: 0; text-align: center; }
+
 /* ── WORLD VIEW (globe) ──────────────────────────────────────────── */
 .globe-canvas {
     position: relative;

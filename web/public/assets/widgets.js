@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=22';
+import { t as tr } from '/assets/i18n.js?v=23';
 import { getSettings } from '/assets/settings.js?v=24';
 
 const $el = (tag, props = {}, children = []) => {
@@ -145,21 +145,33 @@ export function setSidebarHidden(hidden) {
 }
 
 class Widget {
-    constructor({ title, titleKey, parent, intervalMs }) {
+    constructor({ title, titleKey, helpKey, parent, intervalMs }) {
         this.titleKey = titleKey || null;
+        this.helpKey = helpKey || null;   // instructional prose, hidden behind the ⓘ button
         this.title = titleKey ? tr(titleKey) : title;
         this.intervalMs = intervalMs || 0;
         // The '// ' prefix is applied via CSS ::before (sidebar.css) so the
         // MINIMAL UI language can drop it without touching this text node.
         this._titleEl = $el('span', { class: 'widget-title', text: this.title });
-        this.root = $el('section', { class: 'widget' }, [
-            $el('header', { class: 'widget-h' }, [
-                this._titleEl,
-                $el('span', { class: 'widget-pulse' }),
-            ]),
-            $el('div', { class: 'widget-body' }),
-        ]);
+        this._pulseEl = $el('span', { class: 'widget-pulse' });
+        // Header controls (info button + pulse) sit on the right; the title
+        // takes the left — justify-content:space-between keeps them apart.
+        this._headCtl = $el('span', { class: 'widget-h-ctl' }, [this._pulseEl]);
+        const header = $el('header', { class: 'widget-h' }, [this._titleEl, this._headCtl]);
+        this.root = $el('section', { class: 'widget' }, [header, $el('div', { class: 'widget-body' })]);
         this.body = this.root.querySelector('.widget-body');
+        // ⓘ — a per-widget help toggle. Keeps instructions out of the body
+        // (less clutter) until the user asks for them.
+        if (this.helpKey) {
+            this._infoEl = $el('div', { class: 'widget-info', text: tr(this.helpKey) });
+            this._infoEl.hidden = true;
+            this._infoBtn = $el('button', {
+                class: 'widget-info-btn', title: tr('widget.info'), 'aria-label': tr('widget.info'),
+                text: 'ⓘ', onclick: () => this._toggleInfo(),
+            });
+            this._headCtl.insertBefore(this._infoBtn, this._pulseEl);
+            header.after(this._infoEl);
+        }
         parent.appendChild(this.root);
         this._timer = null;
         this._destroyed = false;
@@ -168,11 +180,18 @@ class Widget {
             const retitle = () => {
                 this.title = tr(this.titleKey);
                 this._titleEl.textContent = this.title;
+                if (this._infoEl) this._infoEl.textContent = tr(this.helpKey);
                 if (typeof this.onLangChange === 'function') this.onLangChange();
             };
             window.addEventListener('soa:lang', retitle);
             this._langOff = () => window.removeEventListener('soa:lang', retitle);
         }
+    }
+
+    _toggleInfo() {
+        if (!this._infoEl) return;
+        this._infoEl.hidden = !this._infoEl.hidden;
+        if (this._infoBtn) this._infoBtn.classList.toggle('open', !this._infoEl.hidden);
     }
 
     start() {
@@ -1486,7 +1505,7 @@ class ConsoleLogWidget extends Widget {
 // run in a real terminal rather than blind-execing in the background.
 class InstallerWidget extends Widget {
     constructor({ parent }) {
-        super({ titleKey: 'widget.installer', parent, intervalMs: 0 });
+        super({ titleKey: 'widget.installer', helpKey: 'widget.installer.body', parent, intervalMs: 0 });
         this._cmd = 'curl -fsSL https://www.s0a.app/install.sh | sh';
         this._lastSentAt = 0;
     }
@@ -1511,9 +1530,9 @@ class InstallerWidget extends Widget {
         this._statusEl.classList.toggle('widget-note-warn', !!isWarn);
     }
     tick() {
+        // Instructions moved to the ⓘ help panel — body stays lean.
         this._statusEl = $el('div', { class: 'widget-note', text: '' });
         this.body.replaceChildren(
-            $el('div', { class: 'widget-note', text: tr('widget.installer.body') }),
             $el('button', {
                 class: 'widget-btn',
                 text: tr('widget.installer.run'),
@@ -1534,7 +1553,7 @@ class InstallerWidget extends Widget {
 // so playback survives re-renders and tab-visibility changes.
 class MusicPlayerWidget extends Widget {
     constructor({ parent }) {
-        super({ titleKey: 'widget.music', parent, intervalMs: 0 });
+        super({ titleKey: 'widget.music', helpKey: 'music.help', parent, intervalMs: 0 });
         this._mode = 'local';        // 'local' | 'spotify'
         this._tracks = [];           // [{ name, url }]
         this._idx = -1;
@@ -1658,7 +1677,7 @@ class MusicPlayerWidget extends Widget {
     }
 
     _renderSpotify() {
-        const out = [$el('div', { class: 'mus-hint', text: tr('music.spotify_hint') })];
+        const out = [];   // the "how Spotify playback works" note lives in the ⓘ help now
         const input = $el('input', { type: 'text', class: 'mus-spotify-in', placeholder: tr('music.spotify_ph') });
         input.addEventListener('keydown', e => { if (e.key === 'Enter') this._loadSpotify(input.value); });
         out.push(input);
@@ -1683,30 +1702,120 @@ class MusicPlayerWidget extends Widget {
     }
 }
 
-export function mountSidebar(parent, ctx = {}) {
-    const widgets = [
-        new ClockWidget({ parent }),
-        new ClaudeUsageWidget({ parent }),
-        new InstallerWidget({ parent }),
-        new MusicPlayerWidget({ parent }),
-        new LocationGlobeWidget({ parent }),
-        new MobileQRWidget({ parent, audio: ctx.audio }),
-        new SysInfoWidget({ parent }),
-        new DeviceStatusWidget({ parent }),
-        new CpuInfoWidget({ parent }),
-        new RamWatcherWidget({ parent }),
-        new PortScanWidget({ parent }),
-        new AutoPilotWidget({ parent }),
-        new ConsoleLogWidget({ parent }),
-        new NetStatWidget({ parent }),
-        new NetChartWidget({ parent }),
-        new GitCommitsWidget({ parent }),
+// ── Sidebar composition: registry + persisted layout ─────────────────────
+// Stable ids → constructors, in default order. Users hide/show and reorder
+// these via the CUSTOMIZE panel; the chosen layout persists in localStorage.
+function _widgetRegistry() {
+    return [
+        { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
+        { id: 'claude',    titleKey: 'widget.claude',      make: p => new ClaudeUsageWidget({ parent: p }) },
+        { id: 'installer', titleKey: 'widget.installer',   make: p => new InstallerWidget({ parent: p }) },
+        { id: 'music',     titleKey: 'widget.music',       make: p => new MusicPlayerWidget({ parent: p }) },
+        { id: 'globe',     titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
+        { id: 'mobile',    titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
+        { id: 'sysinfo',   titleKey: 'widget.system',      make: p => new SysInfoWidget({ parent: p }) },
+        { id: 'device',    titleKey: 'widget.device',      make: p => new DeviceStatusWidget({ parent: p }) },
+        { id: 'cpu',       titleKey: 'widget.cpu',         make: p => new CpuInfoWidget({ parent: p }) },
+        { id: 'memory',    titleKey: 'widget.memory',      make: p => new RamWatcherWidget({ parent: p }) },
+        { id: 'ports',     titleKey: 'widget.ports',       make: p => new PortScanWidget({ parent: p }) },
+        { id: 'autopilot', titleKey: 'widget.autopilot',   make: p => new AutoPilotWidget({ parent: p }) },
+        { id: 'console',   titleKey: 'widget.console',     make: p => new ConsoleLogWidget({ parent: p }) },
+        { id: 'network',   titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
+        { id: 'netchart',  titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
+        { id: 'commits',   titleKey: 'widget.commits',     make: p => new GitCommitsWidget({ parent: p }) },
     ];
-    widgets.forEach(w => w.start());
-    return {
-        destroy: () => widgets.forEach(w => w.destroy()),
-        widgets,
+}
+
+const SIDEBAR_LAYOUT_KEY = 'soa-web:sidebar-layout';
+// Merge the saved layout with the registry: keep saved order + on/off, drop
+// unknown ids, and append any NEW widgets (on by default) at the end — so a
+// new release's widget shows up without wiping the user's arrangement.
+function _loadLayout(ids) {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(SIDEBAR_LAYOUT_KEY)) || []; } catch (_) {}
+    const known = new Set(ids), seen = new Set(), out = [];
+    for (const e of Array.isArray(saved) ? saved : []) {
+        if (e && known.has(e.id) && !seen.has(e.id)) { out.push({ id: e.id, on: e.on !== false }); seen.add(e.id); }
+    }
+    for (const id of ids) if (!seen.has(id)) out.push({ id, on: true });
+    return out;
+}
+function _saveLayout(layout) { try { localStorage.setItem(SIDEBAR_LAYOUT_KEY, JSON.stringify(layout)); } catch (_) {} }
+
+export function mountSidebar(parent, ctx = {}) {
+    const reg = _widgetRegistry();
+    const byId = Object.fromEntries(reg.map(w => [w.id, w]));
+    const ids = reg.map(w => w.id);
+    let layout = _loadLayout(ids);
+    let widgets = [];
+
+    // A persistent tools row + a host the widgets live in, so a layout change
+    // only rebuilds the widgets (the CUSTOMIZE button survives).
+    const host = $el('div', { class: 'sidebar-widgets' });
+    const editBtn = $el('button', {
+        class: 'sidebar-edit-btn', text: '⚙ ' + tr('sidebar.customize'),
+        onclick: () => _openSidebarManager(reg, layout, next => { layout = next; _saveLayout(layout); build(); }),
+    });
+    parent.replaceChildren($el('div', { class: 'sidebar-tools' }, [editBtn]), host);
+
+    const build = () => {
+        widgets.forEach(w => w.destroy());
+        host.replaceChildren();
+        widgets = layout.filter(e => e.on).map(e => byId[e.id] && byId[e.id].make(host, ctx)).filter(Boolean);
+        widgets.forEach(w => w.start());
     };
+    build();
+
+    const relabel = () => { editBtn.textContent = '⚙ ' + tr('sidebar.customize'); };
+    window.addEventListener('soa:lang', relabel);
+    return {
+        destroy: () => { window.removeEventListener('soa:lang', relabel); widgets.forEach(w => w.destroy()); },
+        widgets, rebuild: build,
+    };
+}
+
+// CUSTOMIZE panel — reorder (↑/↓) + show/hide each widget, applied live so the
+// sidebar behind the modal updates as you go. apply(newLayout) persists +
+// rebuilds; we keep editing the same working array we hand back.
+function _openSidebarManager(reg, layout, apply) {
+    const byId = Object.fromEntries(reg.map(w => [w.id, w]));
+    let work = layout.map(e => ({ ...e }));
+
+    const backdrop = $el('div', { class: 'soa-modal-backdrop sidebar-mgr-drop' });
+    const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
+
+    const listEl = $el('div', { class: 'smgr-list' });
+    const commit = () => { apply(work.map(e => ({ ...e }))); render(); };
+    const move = (i, d) => { const j = i + d; if (j < 0 || j >= work.length) return; [work[i], work[j]] = [work[j], work[i]]; commit(); };
+    const render = () => {
+        listEl.replaceChildren(...work.map((e, i) => {
+            const w = byId[e.id]; if (!w) return null;
+            return $el('div', { class: 'smgr-row' + (e.on ? '' : ' off') }, [
+                $el('span', { class: 'smgr-name', text: tr(w.titleKey) }),
+                $el('span', { class: 'smgr-btns' }, [
+                    $el('button', { class: 'smgr-mv', text: '↑', title: tr('sidebar.up'), disabled: i === 0 ? '' : null, onclick: () => move(i, -1) }),
+                    $el('button', { class: 'smgr-mv', text: '↓', title: tr('sidebar.down'), disabled: i === work.length - 1 ? '' : null, onclick: () => move(i, 1) }),
+                    $el('button', { class: 'smgr-eye' + (e.on ? ' on' : ''), text: e.on ? tr('sidebar.shown') : tr('sidebar.hidden'), onclick: () => { e.on = !e.on; commit(); } }),
+                ]),
+            ]);
+        }).filter(Boolean));
+    };
+    render();
+
+    const panel = $el('div', { class: 'soa-modal sidebar-mgr' }, [
+        $el('div', { class: 'soa-modal-title', text: tr('sidebar.customize_title') }),
+        $el('div', { class: 'smgr-hint', text: tr('sidebar.customize_hint') }),
+        listEl,
+        $el('div', { class: 'smgr-foot' }, [
+            $el('button', { class: 'widget-btn widget-btn-ghost', text: tr('sidebar.reset'), onclick: () => { work = reg.map(w => ({ id: w.id, on: true })); commit(); } }),
+            $el('button', { class: 'widget-btn', text: tr('sidebar.done'), onclick: close }),
+        ]),
+    ]);
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
 }
 
 // ── SANDBOX (WC mode) ────────────────────────────────────────────────────
@@ -1734,14 +1843,14 @@ class SandboxInfoWidget extends Widget {
 // are wired by the WC shell to its modal flows.
 class LocalSetupWidget extends Widget {
     constructor({ parent, onInstall, onConnect }) {
-        super({ titleKey: 'widget.local', parent, intervalMs: 0 });
+        super({ titleKey: 'widget.local', helpKey: 'widget.local.body', parent, intervalMs: 0 });
         this.onInstall = onInstall;
         this.onConnect = onConnect;
     }
     onLangChange() { this.tick(); }
     tick() {
+        // Explanation moved to the ⓘ help panel.
         this.body.replaceChildren(
-            $el('div', { class: 'widget-note', text: tr('widget.local.body') }),
             $el('button', {
                 class: 'widget-btn',
                 text: tr('widget.local.install'),
