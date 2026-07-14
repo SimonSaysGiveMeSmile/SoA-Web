@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=23';
+import { t as tr } from '/assets/i18n.js?v=24';
 import { getSettings } from '/assets/settings.js?v=24';
 
 const $el = (tag, props = {}, children = []) => {
@@ -1790,10 +1790,15 @@ function _openSidebarManager(reg, layout, apply) {
     const listEl = $el('div', { class: 'smgr-list' });
     const commit = () => { apply(work.map(e => ({ ...e }))); render(); };
     const move = (i, d) => { const j = i + d; if (j < 0 || j >= work.length) return; [work[i], work[j]] = [work[j], work[i]]; commit(); };
+    // Drag-to-reorder (desktop). Touch devices fall back to the ↑/↓ buttons,
+    // which stay for precision + accessibility.
+    let dragId = null;
+    const clearDropHints = () => listEl.querySelectorAll('.smgr-row').forEach(r => r.classList.remove('drop-above', 'drop-below'));
     const render = () => {
         listEl.replaceChildren(...work.map((e, i) => {
             const w = byId[e.id]; if (!w) return null;
-            return $el('div', { class: 'smgr-row' + (e.on ? '' : ' off') }, [
+            const row = $el('div', { class: 'smgr-row' + (e.on ? '' : ' off'), draggable: 'true' }, [
+                $el('span', { class: 'smgr-grip', title: tr('sidebar.drag'), text: '⠿' }),
                 $el('span', { class: 'smgr-name', text: tr(w.titleKey) }),
                 $el('span', { class: 'smgr-btns' }, [
                     $el('button', { class: 'smgr-mv', text: '↑', title: tr('sidebar.up'), disabled: i === 0 ? '' : null, onclick: () => move(i, -1) }),
@@ -1801,6 +1806,31 @@ function _openSidebarManager(reg, layout, apply) {
                     $el('button', { class: 'smgr-eye' + (e.on ? ' on' : ''), text: e.on ? tr('sidebar.shown') : tr('sidebar.hidden'), onclick: () => { e.on = !e.on; commit(); } }),
                 ]),
             ]);
+            row.addEventListener('dragstart', ev => { dragId = e.id; row.classList.add('dragging'); try { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', e.id); } catch (_) {} });
+            row.addEventListener('dragend', () => { dragId = null; row.classList.remove('dragging'); clearDropHints(); });
+            row.addEventListener('dragover', ev => {
+                if (dragId == null || dragId === e.id) return;
+                ev.preventDefault();
+                const r = row.getBoundingClientRect();
+                const below = (ev.clientY - r.top) > r.height / 2;
+                clearDropHints();
+                row.classList.add(below ? 'drop-below' : 'drop-above');
+            });
+            row.addEventListener('drop', ev => {
+                ev.preventDefault();
+                if (dragId == null || dragId === e.id) return;
+                const r = row.getBoundingClientRect();
+                const below = (ev.clientY - r.top) > r.height / 2;
+                const from = work.findIndex(x => x.id === dragId);
+                if (from < 0) return;
+                const [moved] = work.splice(from, 1);
+                let to = work.findIndex(x => x.id === e.id);
+                if (to < 0) to = work.length;
+                if (below) to += 1;
+                work.splice(to, 0, moved);
+                commit();
+            });
+            return row;
         }).filter(Boolean));
     };
     render();
