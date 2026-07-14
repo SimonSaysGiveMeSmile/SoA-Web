@@ -79,6 +79,16 @@ instanceLock.acquireOrExit(PORT);
 const DEV  = process.env.SOA_WEB_DEV === '1';
 const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(1000 * 60 * 60 * 6), 10);
 
+// Saved scrollback replayed on restore can carry terminal-STATE sequences the
+// prior TUI left armed — mouse tracking (1000/1002/1003/1006/1015), the alt
+// screen (1049), bracketed paste (2004). Replaying those verbatim re-arms the
+// mode in xterm, and then stray mouse moves stream coordinate reports into the
+// fresh shell AS INPUT — the 2026-07-13 "random typing" flood. Bracketing every
+// replay with this reset makes the terminal end in a sane mode. (Cursor shown,
+// keypad normal too, belt-and-suspenders.)
+const SANE_TERM_RESET =
+    '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b>';
+
 const SIGN_KEY   = auth.resolveSignKey();
 const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
 const SESSION_TOKEN = process.env.SOA_WEB_SESSION_TOKEN || '';
@@ -722,7 +732,7 @@ function onWsConnect(ws, session, req) {
                 const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
                 const label = entry.userRenamed && entry.title ? entry.title : (cwd || 'tab');
                 const seed = prior
-                    ? prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n`
+                    ? SANE_TERM_RESET + prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n` + SANE_TERM_RESET
                     : '';
                 const tab = session.tabMgr.open({
                     title: entry.userRenamed ? entry.title : undefined,

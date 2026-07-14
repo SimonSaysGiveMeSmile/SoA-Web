@@ -200,13 +200,20 @@ export async function restoreSnapshot(ts, shell) {
     if (!snap || !shell) return false;
     const stamp = new Date(snap.ts).toLocaleString();
     const divider = `\r\n\x1b[36m─── time machine: restored from ${stamp} ───\x1b[0m\r\n`;
+    // Saved scrollback can carry terminal-STATE sequences (mouse tracking,
+    // alt-screen, bracketed paste). Replaying them into xterm re-arms the mode,
+    // and then mouse moves stream coordinate reports into the shell as input —
+    // the 2026-07-13 "random typing" flood. Bracket the replay with a reset so
+    // the terminal ends in a sane mode. (Mirrors SANE_TERM_RESET server-side.)
+    const SANE = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b>';
     let restored = 0;
     for (const sav of snap.tabs || []) {
         const rt = shell.tabs.get(sav.id);
         if (!rt) continue;
         const replay = (sav.scrollback || '').replace(/\n/g, '\r\n');
-        rt.write(divider);
+        rt.write(SANE + divider);
         if (replay) rt.write(replay + '\r\n');
+        rt.write(SANE);
         restored++;
     }
     if (snap.activeId != null && shell.tabs.get(snap.activeId)) {

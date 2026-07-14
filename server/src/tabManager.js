@@ -300,7 +300,12 @@ class TabManager {
         }
         if (!entry) return null;
         const divider = `\r\n\x1b[2m── ${entry.displayTitle} · restored from closed tab (fresh shell) ──\x1b[0m\r\n`;
-        const seed = (entry.scrollback || '') + divider;
+        // Bracket the replayed scrollback with a terminal-mode reset so any
+        // mouse-tracking / alt-screen / bracketed-paste mode the prior TUI left
+        // armed can't survive into the fresh shell (see SANE_TERM_RESET in
+        // index.js — the 2026-07-13 mouse-code input flood).
+        const SANE = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b>';
+        const seed = SANE + (entry.scrollback || '') + divider + SANE;
         const tab = this.open({
             title: entry.userRenamed ? entry.displayTitle : undefined,
             cwd: entry.cwd,

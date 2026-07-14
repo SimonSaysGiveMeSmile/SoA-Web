@@ -484,7 +484,7 @@ class Shell {
             tmBtn.addEventListener('click', async () => {
                 this.audio.play('panels');
                 try {
-                    const tm = await import('/assets/timemachine.js?v=1');
+                    const tm = await import('/assets/timemachine.js?v=2');
                     tm.openTimemachineModal(this);
                 } catch (err) {
                     console.warn('[timemachine] open failed', err);
@@ -4703,7 +4703,7 @@ async function bootServerMode({ backend, token }) {
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 
-    import('/assets/timemachine.js?v=1')
+    import('/assets/timemachine.js?v=2')
         .then(tm => tm.startTimemachine(shell))
         .catch(err => console.warn('[timemachine] boot failed', err));
 }
