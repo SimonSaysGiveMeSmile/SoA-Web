@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# soa-autocommit — periodic checkpoint of the canonical SoA-Web repo to origin/main.
+#
+# Installed as launchd job com.soa-web.autocommit (StartInterval 900s / 15 min).
+# Safe to run by hand at any time. Design goals:
+#   - Coexist with other committers (the #3 .soa-web agent pushes to the same
+#     main): rebase onto origin before pushing, NEVER force-push.
+#   - Never stomp an in-flight git operation: skip if a rebase/merge/cherry-pick
+#     is mid-flight or another process holds .git/index.lock.
+#   - No empty commits, no noise: commit only when the tree actually changed;
+#     when clean, just fast-forward the checkout so it doesn't drift behind.
+#   - Auto-checkpoints are greppable by message prefix "chore(auto): checkpoint".
+#
+# Env overrides: SOA_AUTOCOMMIT_REPO, SOA_AUTOCOMMIT_BRANCH, SOA_AUTOCOMMIT_LOG.
+set -uo pipefail
+
+REPO="${SOA_AUTOCOMMIT_REPO:-/Users/test/Desktop/Hireal/soa-web}"
+BRANCH="${SOA_AUTOCOMMIT_BRANCH:-main}"
+LOG="${SOA_AUTOCOMMIT_LOG:-$HOME/.soa-web-local/logs/autocommit.log}"
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+ts()  { date +%Y-%m-%dT%H:%M:%S%z; }
+log() { echo "[$(ts)] $*" >>"$LOG"; }
+
+cd "$REPO" 2>/dev/null || { log "ERR cannot cd $REPO"; exit 1; }
+
+cur="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || { log "ERR $REPO is not a git repo"; exit 1; }
+if [ "$cur" != "$BRANCH" ]; then log "skip: on '$cur' not '$BRANCH'"; exit 0; fi
+
+# Don't touch a repo mid-operation or while another git process is active.
+if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/MERGE_HEAD ] || [ -f .git/CHERRY_PICK_HEAD ]; then
+  log "skip: git operation in progress"; exit 0
+fi
+if [ -f .git/index.lock ]; then log "skip: index.lock present (another git process)"; exit 0; fi
+
+# Stage everything (respects .gitignore); commit only if something is staged.
+changed=0
+git add -A 2>>"$LOG"
+if ! git diff --cached --quiet 2>/dev/null; then
+  n="$(git diff --cached --name-only | wc -l | tr -d ' ')"
+  if git commit -q -m "chore(auto): checkpoint $(ts) — ${n} file(s)" 2>>"$LOG"; then
+    changed=1; log "committed ${n} file(s)"
+  else
+    log "ERR commit failed"
+  fi
+fi
+
+# Unpushed local commits (from this run or prior). If nothing to push, just keep
+# the checkout current with a fast-forward (never conflicts) and stop.
+ahead="$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)"
+if [ "$changed" = 0 ] && [ "${ahead:-0}" = 0 ]; then
+  if git pull --ff-only origin "$BRANCH" >>"$LOG" 2>&1; then log "clean — synced with origin/$BRANCH"
+  else log "clean — nothing to push (ff-only skipped: diverged)"; fi
+  exit 0
+fi
+
+# Integrate remote before pushing so we never force. On conflict, abort and bail.
+if ! git pull --rebase --autostash origin "$BRANCH" >>"$LOG" 2>&1; then
+  git rebase --abort >/dev/null 2>&1
+  log "ERR pull --rebase failed (conflict) — aborted, left tree for a human"
+  exit 1
+fi
+
+if git push origin "$BRANCH" >>"$LOG" 2>&1; then
+  log "pushed → origin/$BRANCH (changed=${changed}, was ahead ${ahead})"
+else
+  log "ERR push failed"; exit 1
+fi

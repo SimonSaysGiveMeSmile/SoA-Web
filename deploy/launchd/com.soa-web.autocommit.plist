@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Periodic CHECKPOINT of the canonical SoA-Web repo to origin/main — runs
+  scripts/soa-autocommit every 15 min (900s). Stages all tracked changes
+  (respects .gitignore), commits only when the tree changed, rebases onto
+  origin before pushing so it coexists with the #3 agent's own commits, and
+  never force-pushes. Auth: HTTPS + osxkeychain (works headless from launchd).
+  Unlike the other soa jobs this runs from the CANONICAL repo path, not the
+  ~/.soa-web install — it operates on the source repo it lives in.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.autocommit.plist
+  Stop: launchctl bootout    gui/$(id -u)/com.soa-web.autocommit
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.autocommit</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/Desktop/Hireal/soa-web/scripts/soa-autocommit</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/Desktop/Hireal/soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web-local/logs/autocommit.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web-local/logs/autocommit.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/test</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
