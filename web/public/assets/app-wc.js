@@ -16,7 +16,7 @@
 
 import { AudioFX } from '/assets/audiofx.js?v=18';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=17';
-import { mountSandboxSidebar } from '/assets/widgets.js?v=35';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=36';
 import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=24';
 // The WebContainer API is vendored into /assets/vendor (was esm.sh, but a
 // cross-origin static import makes the whole module graph — and therefore

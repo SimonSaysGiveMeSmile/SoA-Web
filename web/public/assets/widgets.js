@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=21';
+import { t as tr } from '/assets/i18n.js?v=22';
 import { getSettings } from '/assets/settings.js?v=24';
 
 const $el = (tag, props = {}, children = []) => {
@@ -38,6 +38,28 @@ const fmtUptime = s => {
     const h = Math.floor(s / 3600);  s %= 3600;
     const m = Math.floor(s / 60);
     return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m`;
+};
+
+// mm:ss for the music player's seek/time readout.
+const fmtTime = s => {
+    s = Math.floor(s || 0);
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, '0')}`;
+};
+
+// Turn any Spotify share link or URI into its official embed URL. Accepts
+// open.spotify.com/<type>/<id> (with optional /intl-xx/ locale prefix and
+// query string) and spotify:<type>:<id>. Returns null for anything else, so
+// the widget can reject junk without embedding a broken iframe.
+const spotifyEmbedUrl = raw => {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    const KIND = 'track|album|playlist|artist|episode|show';
+    let m = s.match(new RegExp(`^spotify:(${KIND}):([A-Za-z0-9]+)`));
+    if (m) return `https://open.spotify.com/embed/${m[1]}/${m[2]}`;
+    m = s.match(new RegExp(`open\\.spotify\\.com/(?:intl-[a-z-]+/)?(${KIND})/([A-Za-z0-9]+)`));
+    if (m) return `https://open.spotify.com/embed/${m[1]}/${m[2]}`;
+    return null;
 };
 
 // Route API URLs through the configured backend. The active backend + token
@@ -1502,11 +1524,171 @@ class InstallerWidget extends Widget {
     }
 }
 
+// ── MUSIC PLAYER ──────────────────────────────────────────────────────────
+// Fully client-side, works with or without a backend. LOCAL mode plays audio
+// files the user picks through an <audio> element fed by object URLs — nothing
+// is uploaded, it never leaves the browser. SPOTIFY mode embeds Spotify's
+// official iframe player for any track/album/playlist link (no OAuth, no SDK;
+// full tracks when you're signed into Spotify in this browser, 30s previews
+// otherwise). The <audio> lives on the instance (not in the re-rendered DOM),
+// so playback survives re-renders and tab-visibility changes.
+class MusicPlayerWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.music', parent, intervalMs: 0 });
+        this._mode = 'local';        // 'local' | 'spotify'
+        this._tracks = [];           // [{ name, url }]
+        this._idx = -1;
+        this._spotifyEmbed = null;
+        this._els = {};              // live refs updated in place by audio events
+        this._audio = new Audio();
+        this._audio.preload = 'metadata';
+        this._audio.volume = 0.8;
+        // Persistent listeners drive in-place updates so the seek bar / play
+        // state stay smooth without re-rendering the whole widget each frame.
+        this._audio.addEventListener('timeupdate', () => this._syncProgress());
+        this._audio.addEventListener('loadedmetadata', () => this._syncProgress());
+        this._audio.addEventListener('play',  () => this._syncPlayBtn());
+        this._audio.addEventListener('pause', () => this._syncPlayBtn());
+        this._audio.addEventListener('ended', () => this._next());
+        this._audio.addEventListener('error', () => this._setNote(tr('music.err')));
+    }
+
+    onLangChange() { this._render(); }
+    tick() { this._render(); }   // start() calls this once; intervalMs 0 → no polling
+
+    _addFiles(fileList) {
+        const files = [...(fileList || [])].filter(f =>
+            /^audio\//.test(f.type) || /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)$/i.test(f.name));
+        if (!files.length) return;
+        for (const f of files) this._tracks.push({ name: f.name.replace(/\.[^.]+$/, ''), url: URL.createObjectURL(f) });
+        if (this._idx < 0) this._load(0, false);
+        this._render();
+    }
+    _load(i, autoplay) {
+        if (i < 0 || i >= this._tracks.length) return;
+        this._idx = i;
+        this._audio.src = this._tracks[i].url;
+        if (autoplay) this._audio.play().catch(() => {});
+        this._render();
+    }
+    _toggle() {
+        if (this._idx < 0 && this._tracks.length) return this._load(0, true);
+        if (this._audio.paused) this._audio.play().catch(() => {}); else this._audio.pause();
+    }
+    _next() { if (this._tracks.length) this._load((this._idx + 1) % this._tracks.length, true); }
+    _prev() {
+        if (!this._tracks.length) return;
+        if (this._audio.currentTime > 3) { this._audio.currentTime = 0; return; }  // restart before skipping back
+        this._load((this._idx - 1 + this._tracks.length) % this._tracks.length, true);
+    }
+    _seek(frac) { if (this._audio.duration) this._audio.currentTime = Math.max(0, Math.min(1, frac)) * this._audio.duration; }
+    _clear() {
+        this._audio.pause();
+        for (const t of this._tracks) { try { URL.revokeObjectURL(t.url); } catch (_) {} }
+        this._tracks = []; this._idx = -1;
+        this._audio.removeAttribute('src'); try { this._audio.load(); } catch (_) {}
+        this._render();
+    }
+    _loadSpotify(raw) {
+        const embed = spotifyEmbedUrl(raw);
+        if (!embed) { this._setNote(tr('music.spotify_bad')); return; }
+        this._spotifyEmbed = embed;
+        this._render();
+    }
+
+    _syncProgress() {
+        const a = this._audio, e = this._els;
+        if (!e.fill) return;
+        const d = a.duration || 0, c = a.currentTime || 0;
+        e.fill.style.width = (d ? (c / d * 100) : 0) + '%';
+        if (e.time) e.time.textContent = `${fmtTime(c)} / ${fmtTime(d)}`;
+    }
+    _syncPlayBtn() { if (this._els.play) this._els.play.textContent = this._audio.paused ? '▶' : '⏸'; }
+    _setNote(txt) { if (this._els.note) this._els.note.textContent = txt || ''; }
+
+    _render() {
+        this._els = {};
+        const tab = (m, label) => $el('button', {
+            class: 'mus-tab' + (this._mode === m ? ' active' : ''), text: label,
+            onclick: () => { this._mode = m; this._render(); },
+        });
+        const parts = [$el('div', { class: 'mus-tabs' }, [tab('local', tr('music.local')), tab('spotify', 'Spotify')])];
+        parts.push(...(this._mode === 'local' ? this._renderLocal() : this._renderSpotify()));
+        this.body.replaceChildren(...parts);
+        this._syncProgress(); this._syncPlayBtn();
+    }
+
+    _renderLocal() {
+        const out = [];
+        const picker = $el('input', { type: 'file', accept: 'audio/*', multiple: '', style: 'display:none' });
+        picker.addEventListener('change', () => this._addFiles(picker.files));
+        out.push(picker);
+        if (!this._tracks.length) {
+            out.push($el('div', { class: 'mus-empty', text: tr('music.empty') }));
+            out.push($el('button', { class: 'widget-btn', text: tr('music.load'), onclick: () => picker.click() }));
+            return out;
+        }
+        const cur = this._tracks[this._idx] || this._tracks[0];
+        out.push($el('div', { class: 'mus-title', title: cur.name, text: cur.name }));
+        const fill = $el('div', { class: 'mus-fill' });
+        const bar = $el('div', { class: 'mus-seek' }, [fill]);
+        bar.addEventListener('click', ev => { const r = bar.getBoundingClientRect(); this._seek((ev.clientX - r.left) / r.width); });
+        this._els.fill = fill;
+        out.push(bar);
+        this._els.time = $el('div', { class: 'mus-time', text: '0:00 / 0:00' });
+        out.push(this._els.time);
+        this._els.play = $el('button', { class: 'mus-ctl mus-play', text: '▶', onclick: () => this._toggle() });
+        out.push($el('div', { class: 'mus-ctls' }, [
+            $el('button', { class: 'mus-ctl', text: '⏮', onclick: () => this._prev() }),
+            this._els.play,
+            $el('button', { class: 'mus-ctl', text: '⏭', onclick: () => this._next() }),
+        ]));
+        const vol = $el('input', { type: 'range', min: '0', max: '1', step: '0.01', value: String(this._audio.volume), class: 'mus-vol' });
+        vol.addEventListener('input', () => { this._audio.volume = parseFloat(vol.value); });
+        out.push($el('div', { class: 'mus-volrow' }, [$el('span', { class: 'mus-volicon', text: '🔊' }), vol]));
+        out.push($el('div', { class: 'mus-list' }, this._tracks.map((t, i) =>
+            $el('div', { class: 'mus-item' + (i === this._idx ? ' active' : ''), title: t.name, text: t.name, onclick: () => this._load(i, true) }))));
+        out.push($el('div', { class: 'mus-actions' }, [
+            $el('button', { class: 'widget-btn widget-btn-ghost', text: '+ ' + tr('music.load'), onclick: () => picker.click() }),
+            $el('button', { class: 'widget-btn widget-btn-ghost', text: tr('music.clear'), onclick: () => this._clear() }),
+        ]));
+        this._els.note = $el('div', { class: 'mus-note' });
+        out.push(this._els.note);
+        return out;
+    }
+
+    _renderSpotify() {
+        const out = [$el('div', { class: 'mus-hint', text: tr('music.spotify_hint') })];
+        const input = $el('input', { type: 'text', class: 'mus-spotify-in', placeholder: tr('music.spotify_ph') });
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') this._loadSpotify(input.value); });
+        out.push(input);
+        out.push($el('button', { class: 'widget-btn', text: tr('music.load'), onclick: () => this._loadSpotify(input.value) }));
+        this._els.note = $el('div', { class: 'mus-note' });
+        out.push(this._els.note);
+        if (this._spotifyEmbed) {
+            out.push($el('iframe', {
+                class: 'mus-spotify', src: this._spotifyEmbed, width: '100%', height: '152',
+                frameborder: '0', loading: 'lazy',
+                allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
+            }));
+        }
+        return out;
+    }
+
+    destroy() {
+        try { this._audio.pause(); } catch (_) {}
+        for (const t of this._tracks) { try { URL.revokeObjectURL(t.url); } catch (_) {} }
+        this._tracks = [];
+        super.destroy();
+    }
+}
+
 export function mountSidebar(parent, ctx = {}) {
     const widgets = [
         new ClockWidget({ parent }),
         new ClaudeUsageWidget({ parent }),
         new InstallerWidget({ parent }),
+        new MusicPlayerWidget({ parent }),
         new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),
         new SysInfoWidget({ parent }),
@@ -1591,6 +1773,7 @@ export function mountSandboxSidebar(parent, ctx = {}) {
             onInstall: ctx.onInstall,
             onConnect: ctx.onConnect,
         }),
+        new MusicPlayerWidget({ parent }),
         new LocationGlobeWidget({ parent }),
         new MobileQRWidget({ parent, audio: ctx.audio }),
         new SysInfoWidget({ parent }),
