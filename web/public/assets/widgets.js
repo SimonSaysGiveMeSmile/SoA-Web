@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=24';
+import { t as tr } from '/assets/i18n.js?v=26';
 import { getSettings } from '/assets/settings.js?v=24';
 
 const $el = (tag, props = {}, children = []) => {
@@ -1681,7 +1681,7 @@ class MusicPlayerWidget extends Widget {
         const input = $el('input', { type: 'text', class: 'mus-spotify-in', placeholder: tr('music.spotify_ph') });
         input.addEventListener('keydown', e => { if (e.key === 'Enter') this._loadSpotify(input.value); });
         out.push(input);
-        out.push($el('button', { class: 'widget-btn', text: tr('music.load'), onclick: () => this._loadSpotify(input.value) }));
+        out.push($el('button', { class: 'widget-btn', text: tr('music.spotify_load'), onclick: () => this._loadSpotify(input.value) }));
         this._els.note = $el('div', { class: 'mus-note' });
         out.push(this._els.note);
         if (this._spotifyEmbed) {
