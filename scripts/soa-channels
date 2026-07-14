@@ -365,6 +365,12 @@ if ! daemon_ok; then
     exit 0
 fi
 
+# Bearer token for the through-tunnel health probe (QR-holder-only gate). Minted
+# locally each run; if empty, probes stay unauthenticated (pre-hardening).
+TOKEN="$(pair_token)"
+AUTH_HDR=""
+[ -n "$TOKEN" ] && AUTH_HDR="Authorization: Bearer $TOKEN"
+
 # Save FIRST, always — before touching any door. Guarantees a fresh, clobber-proof
 # record of the fleet exists at this instant regardless of what happens next.
 snapshot_fleet
