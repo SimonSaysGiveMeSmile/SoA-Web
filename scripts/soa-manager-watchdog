@@ -131,22 +131,38 @@ spawn_manager() {
 }
 
 # ── Identify manager tab ───────────────────────────────────────────────────────
-MGR_ID=""
+# TITLE IS AUTHORITATIVE. The manager is *defined* as the tab titled "manager"
+# (the same rule the daemon's dashboard uses in sessionManager.snapshot). The
+# stored manager-id is only a short-lived fallback hint for the window right
+# after a spawn, before the new tab's title propagates into `soa-sessions list`.
+#
+# The old logic trusted the stored id whenever that tab merely still EXISTED —
+# without checking it was actually titled "manager". So a stale id (after a
+# restart reshuffled tab ids) silently pinned the watchdog to whatever agent now
+# held that id — e.g. a product agent like "Auralight" — which then looked
+# perpetually "alive" (a product agent flips working/idle constantly, resetting
+# the done→respawn counter), so the REAL manager loop could die with the watchdog
+# none the wiser and the fleet left effectively unsupervised.
+MGR_ID="$(find_by_title manager)"
 
-if [ -f "$ID_FILE" ]; then
-    stored="$(cat "$ID_FILE" 2>/dev/null | tr -d '[:space:]')"
-    if [ -n "$stored" ] && tab_exists "$stored"; then
-        MGR_ID="$stored"
-    else
-        log "stored manager-id '$stored' not in live sessions — scanning by title"
-    fi
-fi
-
-if [ -z "$MGR_ID" ]; then
-    MGR_ID="$(find_by_title manager)"
-    if [ -n "$MGR_ID" ]; then
-        log "found manager tab by title: #$MGR_ID"
+if [ -n "$MGR_ID" ]; then
+    # Self-heal the id file if it drifted from the live title-resolved manager.
+    stored=""
+    [ -f "$ID_FILE" ] && stored="$(cat "$ID_FILE" 2>/dev/null | tr -d '[:space:]')" || true
+    if [ "$stored" != "$MGR_ID" ]; then
+        [ -n "$stored" ] && log "manager-id was '$stored' but the tab titled 'manager' is #$MGR_ID — healing id file"
         echo "$MGR_ID" > "$ID_FILE"
+    fi
+else
+    # No tab is titled "manager" right now. Trust a stored id ONLY as a short-lived
+    # fallback, and ONLY while that tab still exists (covers the post-spawn window
+    # before the title lands). If it's gone, MGR_ID stays empty → spawn path below.
+    if [ -f "$ID_FILE" ]; then
+        stored="$(cat "$ID_FILE" 2>/dev/null | tr -d '[:space:]')"
+        if [ -n "$stored" ] && tab_exists "$stored"; then
+            MGR_ID="$stored"
+            log "no tab titled 'manager' yet — falling back to stored id #$MGR_ID (post-spawn window?)"
+        fi
     fi
 fi
 
@@ -184,7 +200,13 @@ case "${STATUS:-}" in
         # boundary. Only respawn if "done" PERSISTS across consecutive checks
         # (~3 runs ≈ 4.5m); a truly-exited tab is caught by the MISSING path above.
         DONE_FILE="$STATE_DIR/.manager-done-count"
-        prev_done="$(cat "$DONE_FILE" 2>/dev/null | tr -d '[:space:]')"
+        # `|| true`: on the FIRST "done" the count file is absent, so `cat` fails —
+        # and under `set -euo pipefail` a failing command-substitution in an
+        # assignment aborts the whole script (exit 1) BEFORE the counter is written.
+        # That silently killed the done→respawn recovery: the count never
+        # accumulated, so a manager stuck in "done" (loop stopped, tab still alive)
+        # was never respawned. Guard the read so a missing file just means count 0.
+        prev_done="$(cat "$DONE_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
         cur_done=$(( ${prev_done:-0} + 1 ))
         if [ "$cur_done" -ge 3 ]; then
             log "manager #$MGR_ID 'done' persisted ${cur_done}x — treating as exited, respawning"
