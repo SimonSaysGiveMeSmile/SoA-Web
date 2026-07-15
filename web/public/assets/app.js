@@ -360,6 +360,10 @@ class Shell {
         this.tabs = new Map();
         this.order = [];
         this.activeId = null;
+        // CHAT view state — IM-style messaging with any agent (or the manager).
+        this._chatThreads = new Map();   // targetId → [{ from:'you'|'agent', full, t }]
+        this._chatTarget  = null;        // session id the CHAT view is conversing with
+        this._chatUnread  = 0;           // agent messages arrived while away from CHAT
         // Per-device active tab is client-local: snapshots fire on the 3s cwd
         // poll, on device connect/disconnect, and on ANY device's switch, all
         // carrying the session-global activeId. Adopting it blindly yanks this
@@ -463,6 +467,12 @@ class Shell {
         if (mgrBtn) {
             mgrBtn.addEventListener('click', () => this._toggleManager());
             this._updateManagerBtn();
+        }
+
+        const chatBtn = $('#toggle-chat');
+        if (chatBtn) {
+            chatBtn.addEventListener('click', () => this._toggleChat());
+            this._updateChatBtn();
         }
         // Premium-feature gate: the fleet-manager view is manager-only. Default to
         // DISABLED so a slow/failed capabilities fetch fails safe to hidden, then
@@ -661,7 +671,7 @@ class Shell {
         bridge.addEventListener('term-data', e => this._onTermData(e.detail));
         bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
-        bridge.addEventListener('tts',       e => this._onTTS(e.detail));
+        bridge.addEventListener('tts',       e => { this._onTTS(e.detail); this._onAgentMessage(e.detail); });
         bridge.addEventListener('manager',   e => this._onManager(e.detail));
         bridge.addEventListener('tab-mem',   e => this._onTabMem(e.detail));
         bridge.addEventListener('browser-frame', e => this._onBrowserFrame(e.detail));
@@ -2800,6 +2810,7 @@ class Shell {
         // Leaving the monitor → stop its stream + poll before switching away.
         if (this.viewMode !== 'monitor') this._teardownMonitor();
         if (this.viewMode !== 'manager') this._teardownManager();
+        if (this.viewMode !== 'chat') this._teardownChat();
         if (this.viewMode === 'tiles') {
             shell.setAttribute('data-view', 'tiles');
             this._closeTileTerminal();
@@ -2817,6 +2828,12 @@ class Shell {
             this._removeTileOverlay();
             for (const [, rt] of this.tabs) rt.container.classList.remove('active');
             this._enterManager();
+        } else if (this.viewMode === 'chat') {
+            shell.setAttribute('data-view', 'chat');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterChat();
         } else {
             shell.removeAttribute('data-view');
             this._removeTilesGrid();
@@ -2830,6 +2847,7 @@ class Shell {
             }
         }
         this._updateManagerBtn();
+        this._updateChatBtn();
     }
 
     // ── MONITOR view ────────────────────────────────────────────────────────
@@ -3095,6 +3113,239 @@ class Shell {
         if (this._managerTimer) { clearInterval(this._managerTimer); this._managerTimer = null; }
         if (this._mgruTimer) { clearInterval(this._mgruTimer); this._mgruTimer = null; }
         if (this._managerEl) this._managerEl.style.display = 'none';
+    }
+
+    // ── CHAT view — IM-style messaging with any agent (or the manager) ──────────
+    // Desktop port of the mobile CHAT. Talk to a chosen session in plain bubbles
+    // instead of the raw terminal: your line is typed into that session's PTY
+    // (the same term-keys path the keyboard uses), and the agent's turn-final
+    // messages — the `tts` frames the Stop hook / soa-msg emit, each tagged with
+    // its source tab — come back as summarized bubbles in that agent's thread.
+    // A target picker lets you message the MANAGER agent from anywhere, regardless
+    // of which terminal tab happens to be active (the gap that made "where is the
+    // manager chat?" confusing).
+    _toggleChat() {
+        this.viewMode = this.viewMode === 'chat' ? 'tabs' : 'chat';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this._updateManagerBtn();
+        this.audio.play('panels');
+    }
+
+    _updateChatBtn() {
+        const btn = $('#toggle-chat');
+        if (!btn) return;
+        btn.classList.toggle('active', this.viewMode === 'chat');
+        const badge = btn.querySelector('.chat-badge');
+        if (badge) {
+            const n = (this.viewMode === 'chat') ? 0 : (this._chatUnread || 0);
+            badge.textContent = n > 99 ? '99+' : String(n);
+            badge.hidden = !n;
+        }
+    }
+
+    _enterChat() {
+        if (!this._chatEl) this._buildChatView();
+        // Land the conversation somewhere useful: the manager if there is one,
+        // else the tab you were just looking at.
+        if (this._chatTarget == null || !this._chatKnownTarget(this._chatTarget)) {
+            this._chatTarget = this._managerTabId() ?? this.activeId;
+        }
+        this._chatUnread = 0;
+        this._chatEl.style.display = '';
+        this._populateChatTargets();
+        this._renderChat();
+        this._renderChatStatus();
+        this._updateChatBtn();
+        if (this._chatInput) setTimeout(() => { try { this._chatInput.focus(); } catch (_) {} }, 0);
+    }
+
+    _teardownChat() {
+        if (this._chatEl) this._chatEl.style.display = 'none';
+    }
+
+    // Built once; only the log/targets/status re-render on frames, so typing in
+    // the composer never loses focus.
+    _buildChatView() {
+        this._chatTargetSel = el('select', { class: 'chat-target', title: 'Who you are chatting with',
+            onchange: () => {
+                this._chatTarget = Number(this._chatTargetSel.value);
+                this._chatUnread = 0;
+                this._renderChat();
+                this._renderChatStatus();
+                this._updateChatBtn();
+                if (this._chatInput) this._chatInput.focus();
+            } });
+        this._chatStatusEl = el('div', { class: 'chat-status' }, [
+            el('span', { class: 'chat-status-dot' }),
+            el('span', { class: 'chat-status-text' }),
+        ]);
+        this._chatHeadEl = el('div', { class: 'chat-head' }, [
+            el('span', { class: 'chat-head-label', text: 'TO' }),
+            this._chatTargetSel,
+            this._chatStatusEl,
+        ]);
+        this._chatLogEl = el('div', { class: 'chat-log' });
+        this._chatInput = el('textarea', { class: 'chat-input', rows: '1', autocomplete: 'off', spellcheck: 'true',
+            placeholder: 'Message this agent — lands in its terminal…' });
+        this._chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
+        });
+        const composer = el('form', { class: 'chat-composer',
+            onsubmit: (e) => { e.preventDefault(); this._sendChat(); } }, [
+            this._chatInput,
+            el('button', { class: 'chat-send', type: 'submit', title: 'Send', text: '➤' }),
+        ]);
+        this._chatEl = el('div', { class: 'chat-view' }, [
+            this._chatHeadEl,
+            this._chatLogEl,
+            composer,
+        ]);
+        this.termsEl.appendChild(this._chatEl);
+    }
+
+    // Sessions we can chat with: the fleet snapshot if present (covers every tab,
+    // even ones this device hasn't opened), else the local terminal tabs. The
+    // manager is pinned first and marked.
+    _chatTargetList() {
+        const mgrId = this._managerTabId();
+        const seen = new Set();
+        const out = [];
+        const add = (id, title) => {
+            if (id == null || seen.has(id)) return;
+            seen.add(id);
+            out.push({ id, title: title || ('tab ' + id), manager: id === mgrId });
+        };
+        for (const s of ((this._manager && this._manager.sessions) || [])) add(s.id, s.title);
+        for (const [id, rt] of this.tabs) add(id, rt.title);
+        out.sort((a, b) => (a.manager === b.manager ? a.id - b.id : (a.manager ? -1 : 1)));
+        return out;
+    }
+
+    _chatKnownTarget(id) {
+        return this._chatTargetList().some(t => t.id === id);
+    }
+
+    _populateChatTargets() {
+        if (!this._chatTargetSel) return;
+        const list = this._chatTargetList();
+        if ((this._chatTarget == null || !list.some(t => t.id === this._chatTarget)) && list.length) {
+            this._chatTarget = list[0].id;
+        }
+        this._chatTargetSel.replaceChildren(...list.map(t => {
+            const opt = el('option', { value: String(t.id) },
+                [(t.manager ? '🧭 ' : '') + '#' + t.id + ' ' + t.title + (t.manager ? '  (manager)' : '')]);
+            if (t.id === this._chatTarget) opt.selected = true;
+            return opt;
+        }));
+    }
+
+    _pushChat(tabId, msg) {
+        if (tabId == null) return;
+        if (!this._chatThreads.has(tabId)) this._chatThreads.set(tabId, []);
+        const thread = this._chatThreads.get(tabId);
+        thread.push(msg);
+        if (thread.length > 200) thread.shift();   // cap memory per thread
+    }
+
+    // Every agent turn-final message becomes a bubble in that agent's thread —
+    // independent of whether speech is on or which tab is live.
+    _onAgentMessage(d) {
+        const text = d && d.text;
+        if (!text) return;
+        const tab = (d.tab != null) ? d.tab : this.activeId;
+        if (tab == null) return;
+        this._pushChat(tab, { from: 'agent', full: String(text), t: Date.now() });
+        if (this.viewMode === 'chat' && tab === this._chatTarget) {
+            this._renderChat();
+        } else {
+            this._chatUnread++;
+            this._updateChatBtn();
+        }
+    }
+
+    _sendChat() {
+        const raw = (this._chatInput && this._chatInput.value || '').trim();
+        if (!raw) return;
+        const id = (this._chatTarget != null) ? this._chatTarget : this.activeId;
+        if (id == null) return;
+        // Type it into the PTY (newline submits, like Enter in the terminal).
+        this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: raw + '\r' });
+        this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
+        this._chatInput.value = '';
+        this._chatInput.style.height = 'auto';
+        this._renderChat();
+        this.audio.play('tabSwitch');
+    }
+
+    _summarizeChat(text, limit = 60) {
+        const clean = String(text).replace(/\s+/g, ' ').trim();
+        const words = clean.split(' ');
+        if (words.length <= limit) return { short: clean, truncated: false };
+        return { short: words.slice(0, limit).join(' ') + '…', truncated: true };
+    }
+
+    _renderChat() {
+        if (!this._chatLogEl) return;
+        const thread = this._chatThreads.get(this._chatTarget) || [];
+        if (!thread.length) {
+            this._chatLogEl.replaceChildren(el('div', { class: 'chat-empty' }, [
+                'No messages yet with this agent.', el('br'),
+                'Type below — your line goes into its terminal, and its replies appear here (summarized). Use the picker above to talk to the manager or another tab.',
+            ]));
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const m of thread) {
+            const bubble = el('div', { class: 'chat-msg ' + (m.from === 'you' ? 'you' : 'agent') });
+            if (m.from === 'agent') {
+                const { short, truncated } = this._summarizeChat(m.full);
+                if (truncated) {
+                    bubble.classList.add('expandable');
+                    bubble.dataset.expanded = '0';
+                    bubble.textContent = short;
+                    bubble.appendChild(el('span', { class: 'chat-more', text: ' more' }));
+                    bubble.addEventListener('click', () => {
+                        const exp = bubble.dataset.expanded === '1';
+                        bubble.dataset.expanded = exp ? '0' : '1';
+                        bubble.textContent = exp ? short : m.full.replace(/\s+/g, ' ').trim();
+                        if (exp) bubble.appendChild(el('span', { class: 'chat-more', text: ' more' }));
+                        this._scrollChatBottom();
+                    });
+                } else {
+                    bubble.textContent = short;
+                }
+            } else {
+                bubble.textContent = m.full;
+            }
+            frag.appendChild(bubble);
+        }
+        this._chatLogEl.replaceChildren(frag);
+        this._scrollChatBottom();
+    }
+
+    _scrollChatBottom() {
+        if (this._chatLogEl) this._chatLogEl.scrollTop = this._chatLogEl.scrollHeight;
+    }
+
+    // Reflect the target agent's live state (from the fleet snapshot) so you can
+    // see it's thinking / waiting on you even between final messages.
+    _renderChatStatus() {
+        if (!this._chatStatusEl) return;
+        const s = ((this._manager && this._manager.sessions) || []).find(x => x.id === this._chatTarget);
+        const textEl = this._chatStatusEl.querySelector('.chat-status-text');
+        let state = '', label = 'ready';
+        if (s) {
+            if (s.status === 'working')        { state = 'working';   label = 'working'; }
+            else if (s.status === 'attention') { state = 'input';     label = 'awaiting your input'; }
+            else if (s.status === 'done')      { state = 'completed'; label = 'done'; }
+            else                               { state = '';          label = 'idle'; }
+            if (s.ctxPct != null) label += ' · ctx ' + s.ctxPct + '%';
+        }
+        if (state) this._chatStatusEl.setAttribute('data-state', state);
+        else this._chatStatusEl.removeAttribute('data-state');
+        if (textEl) textEl.textContent = label;
     }
 
     _setManagerSub(sub) {
@@ -4349,6 +4600,7 @@ class Shell {
         this._agentModel = models;
         if (this.viewMode === 'tiles') this._renderFleetBar();
         if (this.viewMode === 'manager') this._renderManagerView();
+        if (this.viewMode === 'chat') { this._populateChatTargets(); this._renderChatStatus(); }
         if (sig !== this._groupSig) {
             this._groupSig = sig;
             if (this.viewMode === 'tiles') this._renderTiles();

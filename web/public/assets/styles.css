@@ -2698,6 +2698,96 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .mgrv-send:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.18); }
 
+/* ── CHAT view — IM-style messaging with any agent (or the manager) ─────────── */
+.chat-view {
+  position: absolute; inset: 0; z-index: 1;
+  display: flex; flex-direction: column;
+  background: var(--soa-bg);
+  overflow: hidden;
+}
+#toggle-chat.active { color: var(--soa-accent); border-color: var(--soa-accent); }
+.chat-badge {
+  display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 5px;
+  font-family: var(--font-mono); font-size: 10px; line-height: 15px; text-align: center;
+  color: var(--soa-bg); background: var(--soa-accent); border-radius: 8px; vertical-align: middle;
+}
+.chat-badge[hidden] { display: none; }
+
+.chat-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--soa-line-soft);
+}
+.chat-head-label {
+  font-family: var(--font-display); font-size: 11px; letter-spacing: 0.18em;
+  color: rgba(var(--soa-accent-rgb), 0.6);
+}
+.chat-target {
+  font-family: var(--font-mono); font-size: 12px; max-width: 340px;
+  padding: 7px 8px; color: var(--soa-fg); background: var(--soa-bg);
+  border: 1px solid var(--soa-line-soft); border-radius: 3px; outline: none;
+}
+.chat-target:focus { border-color: var(--soa-accent); }
+.chat-status {
+  margin-left: auto; display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 11px; color: rgba(var(--soa-accent-rgb), 0.7);
+}
+.chat-status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--soa-line-soft); flex: 0 0 auto;
+}
+.chat-status[data-state="working"] .chat-status-dot { background: var(--soa-accent); animation: chat-pulse 1.1s ease-in-out infinite; }
+.chat-status[data-state="input"] .chat-status-dot { background: #f1b24a; }
+.chat-status[data-state="completed"] .chat-status-dot { background: var(--soa-accent); }
+@keyframes chat-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.chat-log {
+  flex: 1 1 auto; overflow-y: auto; padding: 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  -webkit-user-select: text; user-select: text;
+}
+.chat-empty {
+  margin: auto; max-width: 460px; text-align: center; line-height: 1.7;
+  color: rgba(var(--soa-accent-rgb), 0.5);
+  font-family: var(--font-mono); font-size: 12px;
+}
+.chat-msg {
+  max-width: 78%; padding: 10px 13px; border-radius: 9px; line-height: 1.45;
+  font-family: var(--font-mono); font-size: 13px; word-break: break-word; white-space: pre-wrap;
+}
+.chat-msg.agent {
+  align-self: flex-start; color: var(--soa-fg);
+  background: rgba(var(--soa-accent-rgb), 0.08);
+  border: 1px solid var(--soa-line-soft); border-left: 3px solid var(--soa-accent);
+}
+.chat-msg.you {
+  align-self: flex-end; color: var(--soa-bg);
+  background: var(--soa-accent);
+}
+.chat-msg.expandable { cursor: pointer; }
+.chat-more { margin-left: 4px; opacity: 0.65; font-size: 11px; }
+
+.chat-composer {
+  flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-end;
+  padding: 12px 14px; border-top: 1px solid var(--soa-line-soft);
+}
+.chat-input {
+  flex: 1 1 auto; resize: none; min-height: 40px; max-height: 140px;
+  font-family: var(--font-mono); font-size: 13px; line-height: 1.4;
+  padding: 10px 12px; color: var(--soa-fg);
+  background: rgba(var(--soa-accent-rgb), 0.04);
+  border: 1px solid var(--soa-line-soft); border-radius: 4px; outline: none;
+}
+.chat-input:focus { border-color: var(--soa-accent); }
+.chat-send {
+  flex: 0 0 auto; width: 44px; height: 40px;
+  font-size: 15px; color: var(--soa-accent); cursor: pointer;
+  background: rgba(var(--soa-accent-rgb), 0.1);
+  border: 1px solid var(--soa-accent-dim); border-radius: 4px;
+  appearance: none; -webkit-appearance: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+.chat-send:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.18); }
+
 /* Toast */
 .mgrv-toast {
   position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%) translateY(6px);
