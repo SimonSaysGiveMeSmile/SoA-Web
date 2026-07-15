@@ -2006,13 +2006,28 @@ class App {
         if (!raw) return;
         const id = this._activeTabId;
         if (id == null) return;
+        // Chat-mode verbosity commands (/brief, /verbose, /details) rewrite to a
+        // plain instruction so the agent adjusts how it replies — the terminal
+        // stays clean and the bubble still shows what you typed.
+        const text = this._chatCommand(raw) || raw;
         // Type it into the PTY (newline submits, like pressing Enter in terminal).
-        this.socket.sendInput('term-keys', { id, text: raw + '\r' });
+        this.socket.sendInput('term-keys', { id, text: text + '\r' });
         this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
         this.chatInput.value = '';
         this.chatInput.style.height = 'auto';
         this._renderChat();
         sounds.play('tabSwitch');
+    }
+
+    // Chat-mode quick commands: map a typed slash-command to a plain-English
+    // instruction the agent understands. Returns null for normal messages.
+    _chatCommand(raw) {
+        const map = {
+            '/brief':   '[chat-mode] Keep replies brief: short, direct, proportional to my input — no tables or headers.',
+            '/verbose': '[chat-mode] Verbose replies are OK until I send /brief.',
+            '/details': '[chat-mode] Expand your previous reply with full detail.',
+        };
+        return map[raw.toLowerCase()] || null;
     }
 
     // Trim an agent message to ≤50 words for the bubble; the full text stays
