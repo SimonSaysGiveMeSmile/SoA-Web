@@ -222,38 +222,6 @@
     background: rgba(var(--soa-accent-rgb), 0.05);
 }
 
-/* ── MUSIC PLAYER ─────────────────────────────────────────────────────── */
-.mus-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
-.mus-tab { flex: 1; background: transparent; color: var(--soa-accent-dim); border: 1px solid var(--soa-line-soft); padding: 4px 6px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; cursor: pointer; }
-.mus-tab:hover { color: var(--soa-accent); }
-.mus-tab.active { color: var(--soa-accent); border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.08); }
-.mus-empty { font-size: 10px; opacity: 0.55; text-align: center; padding: 16px 8px; border: 1px dashed var(--soa-line-soft); margin-bottom: 6px; }
-.mus-title { font-family: var(--font-mono); font-size: 11px; color: var(--soa-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; margin-bottom: 6px; }
-.mus-seek { height: 6px; background: var(--soa-line-soft); cursor: pointer; overflow: hidden; }
-.mus-fill { height: 100%; width: 0; background: var(--soa-accent); box-shadow: 0 0 6px rgba(var(--soa-accent-rgb), 0.5); transition: width 0.15s linear; }
-.mus-time { font-family: var(--font-mono); font-size: 9px; color: var(--soa-accent-dim); letter-spacing: 0.06em; text-align: right; margin: 3px 0 6px; }
-.mus-ctls { display: flex; justify-content: center; align-items: center; gap: 14px; margin-bottom: 8px; }
-.mus-ctl { background: transparent; color: var(--soa-accent); border: none; font-size: 15px; line-height: 1; padding: 2px; cursor: pointer; }
-.mus-ctl:hover { text-shadow: 0 0 8px var(--soa-accent); }
-.mus-play { width: 30px; height: 30px; border: 1px solid var(--soa-accent); border-radius: 50%; font-size: 13px; display: grid; place-items: center; }
-.mus-volrow { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-.mus-volicon { font-size: 11px; opacity: 0.7; }
-.mus-vol { flex: 1; accent-color: var(--soa-accent); height: 3px; }
-.mus-list { max-height: 120px; overflow-x: hidden; overflow-y: auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; scrollbar-width: thin; scrollbar-color: var(--soa-accent-dim) transparent; }
-.mus-list::-webkit-scrollbar { width: 6px; }
-.mus-list::-webkit-scrollbar-thumb { background: var(--soa-accent-dim); border-radius: 3px; }
-.mus-list::-webkit-scrollbar-track { background: transparent; }
-.mus-item { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); padding: 3px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; border-left: 2px solid transparent; cursor: pointer; }
-.mus-item:hover { color: var(--soa-fg); background: rgba(var(--soa-accent-rgb), 0.05); }
-.mus-item.active { color: var(--soa-accent); border-left-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.08); }
-.mus-actions { display: flex; gap: 6px; }
-.mus-actions .widget-btn { margin-top: 0; text-align: center; font-size: 10px; }
-.mus-hint { font-size: 10px; opacity: 0.7; line-height: 1.5; margin-bottom: 6px; }
-.mus-spotify-in { width: 100%; box-sizing: border-box; background: rgba(var(--soa-accent-rgb), 0.04); border: 1px solid var(--soa-line-soft); color: var(--soa-fg); font-family: var(--font-mono); font-size: 10px; padding: 5px 7px; margin-bottom: 4px; }
-.mus-spotify-in:focus { outline: none; border-color: var(--soa-accent); }
-.mus-spotify { border: 0; border-radius: 10px; margin-top: 8px; display: block; }
-.mus-note { font-family: var(--font-mono); font-size: 9px; color: var(--soa-yellow); letter-spacing: 0.04em; min-height: 12px; margin-top: 4px; }
-
 /* ── Sidebar tools + CUSTOMIZE (add/remove/reorder) ────────────────────── */
 .sidebar-tools { display: flex; }
 .sidebar-widgets { display: flex; flex-direction: column; gap: 10px; }
