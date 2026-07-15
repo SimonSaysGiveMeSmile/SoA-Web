@@ -67,6 +67,8 @@ LOG="$STATE_DIR/logs/channels.log"
 NGROK_LOG="$STATE_DIR/logs/ngrok-${PORT}.log"
 CF_BACKOFF="$STATE_DIR/logs/.cf-backoff"   # epoch of last failed cloudflare probe
 CF_BACKOFF_SECS=600                        # don't re-probe a dead cloudflare for 10m
+FAILS="$STATE_DIR/logs/.channel-misses"    # consecutive failed-verify passes (anti-churn hysteresis)
+CHURN_HOLD_MISSES="${SOA_CHURN_HOLD_MISSES:-3}"  # hold a blipping tunnel this many ~60s passes before minting a NEW url
 LOCK="$STATE_DIR/logs/.channels.lock"
 S0A="https://s0a.app"
 
@@ -393,23 +395,37 @@ cur_ch="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget channel )"
 cur_url="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget url )"
 
 if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
-    # Current door still works. If we're on a lesser channel, try to UPGRADE back
-    # to cloudflare (nicer: s0a.app works, no interstitial) — but only outside the
-    # CF backoff, and only adopt it if it truly verifies.
-    if [ "$cur_ch" != "cloudflare" ]; then
-        last=0; [ -f "$CF_BACKOFF" ] && last="$(cat "$CF_BACKOFF" 2>/dev/null || echo 0)"
-        if [ "$(( $(now) - last ))" -ge "$CF_BACKOFF_SECS" ]; then
-            if url="$(ch_cloudflare)"; then
-                rm -f "$CF_BACKOFF" 2>/dev/null
-                log "upgraded ${cur_ch} → cloudflare"
-                adopt cloudflare "$url"; exit 0
-            fi
-            echo "$(now)" > "$CF_BACKOFF"
-        fi
-    fi
+    rm -f "$FAILS" 2>/dev/null            # reachable this pass — clear the miss streak
+    # STABILITY over prettiness: a HEALTHY door is kept AS-IS — we do NOT re-mint a
+    # fresh cloudflare quick tunnel just to move off ngrok. Each quick tunnel gets a
+    # NEW random *.trycloudflare.com hostname, so every gratuitous swap killed the
+    # backend that clients pin via s0a.app/?backend=<url>, dropping the WebSocket and
+    # throwing the terminal stream into a reconnect/refresh loop (48 distinct URLs
+    # churned in a single day → "kept refreshing"). failover() already prefers
+    # cloudflare when a door actually DIES, so we still recover onto cloudflare
+    # without rotating a working URL underneath a live session.
+    #
+    # For a URL that NEVER rotates, stand up the fixed named tunnel (m.s0a.app):
+    #   scripts/soa-named-tunnel-setup   (one-time; needs `cloudflared tunnel login`).
     log "channel healthy: ${cur_ch} ${cur_url}"
     exit 0
 fi
 
-[ -n "$cur_url" ] && log "channel DOWN: ${cur_ch:-none} ${cur_url} — failing over"
+# The current door missed this pass. Cloudflare quick-tunnels blip constantly and
+# get a NEW random hostname on every mint, so failing over on a SINGLE miss churns
+# the public URL and kicks every connected client into a reconnect/refresh loop.
+# HOLD the current tunnel across transient misses; only fail over (mint a new url)
+# after CHURN_HOLD_MISSES consecutive misses (~minutes), keeping s0a.app on the
+# SAME hostname through brief cloudflare outages.
+if [ -n "$cur_url" ]; then
+    misses=0; [ -f "$FAILS" ] && misses="$(cat "$FAILS" 2>/dev/null || echo 0)"
+    misses=$(( misses + 1 ))
+    if [ "$misses" -lt "$CHURN_HOLD_MISSES" ]; then
+        echo "$misses" > "$FAILS"
+        log "channel MISS ${misses}/${CHURN_HOLD_MISSES}: ${cur_ch:-none} ${cur_url} — holding (anti-churn), not failing over"
+        exit 0
+    fi
+    log "channel DOWN after ${misses} misses: ${cur_ch:-none} ${cur_url} — failing over"
+fi
+rm -f "$FAILS" 2>/dev/null
 failover
