@@ -3688,7 +3688,7 @@ class Shell {
                 title: `Open localhost:${p.port} (${p.process}) in the preview`,
                 text: `:${p.port} — ${p.process}`,
                 onclick: async () => {
-                    try { const wp = await import('/assets/previewPanel.js?v=2'); wp.openPreviewModal(this, String(p.port)); }
+                    try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(this, String(p.port)); }
                     catch (err) { console.warn('[manager] preview open failed', err); }
                 } }))
             : [el('div', { class: 'mgrv-empty', text: 'No open localhost ports.' })];
