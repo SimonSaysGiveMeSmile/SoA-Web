@@ -2721,12 +2721,10 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   font-family: var(--font-display); font-size: 11px; letter-spacing: 0.18em;
   color: rgba(var(--soa-accent-rgb), 0.6);
 }
-.chat-target {
-  font-family: var(--font-mono); font-size: 12px; max-width: 340px;
-  padding: 7px 8px; color: var(--soa-fg); background: var(--soa-bg);
-  border: 1px solid var(--soa-line-soft); border-radius: 3px; outline: none;
+.chat-head-target {
+  font-family: var(--font-mono); font-size: 13px; color: var(--soa-fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
 }
-.chat-target:focus { border-color: var(--soa-accent); }
 .chat-status {
   margin-left: auto; display: flex; align-items: center; gap: 7px;
   font-family: var(--font-mono); font-size: 11px; color: rgba(var(--soa-accent-rgb), 0.7);

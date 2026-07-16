@@ -360,10 +360,10 @@ class Shell {
         this.tabs = new Map();
         this.order = [];
         this.activeId = null;
-        // CHAT view state — IM-style messaging with any agent (or the manager).
-        this._chatThreads = new Map();   // targetId → [{ from:'you'|'agent', full, t }]
-        this._chatTarget  = null;        // session id the CHAT view is conversing with
-        this._chatUnread  = 0;           // agent messages arrived while away from CHAT
+        // CHAT view state — IM-style messaging with the active agent (the top tab
+        // strip selects who). Threads keyed by tab id + an away-unread counter.
+        this._chatThreads = new Map();   // tabId → [{ from:'you'|'agent', full, t }]
+        this._chatUnread  = 0;
         // Per-device active tab is client-local: snapshots fire on the 3s cwd
         // poll, on device connect/disconnect, and on ANY device's switch, all
         // carrying the session-global activeId. Adopting it blindly yanks this
@@ -948,6 +948,20 @@ class Shell {
         const prevId = this.activeId;
         const sameTab = this.activeId === id;
         this.activeId = id;
+        if (this.viewMode === 'chat') {
+            // In CHAT mode the top tab strip selects which agent you're messaging;
+            // skip painting/focusing the terminal hidden under the chat overlay.
+            if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
+            this._syncTabsUI();
+            this._chatUnread = 0;
+            this._renderChatHead();
+            this._renderChat();
+            this._renderChatStatus();
+            this._updateChatBtn();
+            if (this._chatInput) this._chatInput.focus();
+            if (switching) this.audio.play('panels');
+            return;
+        }
         if (this.viewMode === 'tiles') {
             this._openTileTerminal(id);
         } else {
@@ -3147,14 +3161,9 @@ class Shell {
 
     _enterChat() {
         if (!this._chatEl) this._buildChatView();
-        // Land the conversation somewhere useful: the manager if there is one,
-        // else the tab you were just looking at.
-        if (this._chatTarget == null || !this._chatKnownTarget(this._chatTarget)) {
-            this._chatTarget = this._managerTabId() ?? this.activeId;
-        }
         this._chatUnread = 0;
         this._chatEl.style.display = '';
-        this._populateChatTargets();
+        this._renderChatHead();
         this._renderChat();
         this._renderChatStatus();
         this._updateChatBtn();
@@ -3168,22 +3177,14 @@ class Shell {
     // Built once; only the log/targets/status re-render on frames, so typing in
     // the composer never loses focus.
     _buildChatView() {
-        this._chatTargetSel = el('select', { class: 'chat-target', title: 'Who you are chatting with',
-            onchange: () => {
-                this._chatTarget = Number(this._chatTargetSel.value);
-                this._chatUnread = 0;
-                this._renderChat();
-                this._renderChatStatus();
-                this._updateChatBtn();
-                if (this._chatInput) this._chatInput.focus();
-            } });
+        this._chatHeadLabel = el('span', { class: 'chat-head-target' });
         this._chatStatusEl = el('div', { class: 'chat-status' }, [
             el('span', { class: 'chat-status-dot' }),
             el('span', { class: 'chat-status-text' }),
         ]);
         this._chatHeadEl = el('div', { class: 'chat-head' }, [
-            el('span', { class: 'chat-head-label', text: 'TO' }),
-            this._chatTargetSel,
+            el('span', { class: 'chat-head-label', text: 'CHATTING WITH' }),
+            this._chatHeadLabel,
             this._chatStatusEl,
         ]);
         this._chatLogEl = el('div', { class: 'chat-log' });
@@ -3205,40 +3206,22 @@ class Shell {
         this.termsEl.appendChild(this._chatEl);
     }
 
-    // Sessions we can chat with: the fleet snapshot if present (covers every tab,
-    // even ones this device hasn't opened), else the local terminal tabs. The
-    // manager is pinned first and marked.
-    _chatTargetList() {
-        const mgrId = this._managerTabId();
-        const seen = new Set();
-        const out = [];
-        const add = (id, title) => {
-            if (id == null || seen.has(id)) return;
-            seen.add(id);
-            out.push({ id, title: title || ('tab ' + id), manager: id === mgrId });
-        };
-        for (const s of ((this._manager && this._manager.sessions) || [])) add(s.id, s.title);
-        for (const [id, rt] of this.tabs) add(id, rt.title);
-        out.sort((a, b) => (a.manager === b.manager ? a.id - b.id : (a.manager ? -1 : 1)));
-        return out;
+    // Who the CHAT is talking to = the active tab (selected via the top strip).
+    _chatTitleFor(id) {
+        if (id == null) return null;
+        const s = ((this._manager && this._manager.sessions) || []).find(x => x.id === id);
+        if (s && s.title) return s.title;
+        const rt = this.tabs.get(id);
+        return (rt && rt.title) || ('tab ' + id);
     }
 
-    _chatKnownTarget(id) {
-        return this._chatTargetList().some(t => t.id === id);
-    }
-
-    _populateChatTargets() {
-        if (!this._chatTargetSel) return;
-        const list = this._chatTargetList();
-        if ((this._chatTarget == null || !list.some(t => t.id === this._chatTarget)) && list.length) {
-            this._chatTarget = list[0].id;
-        }
-        this._chatTargetSel.replaceChildren(...list.map(t => {
-            const opt = el('option', { value: String(t.id) },
-                [(t.manager ? '🧭 ' : '') + '#' + t.id + ' ' + t.title + (t.manager ? '  (manager)' : '')]);
-            if (t.id === this._chatTarget) opt.selected = true;
-            return opt;
-        }));
+    _renderChatHead() {
+        if (!this._chatHeadLabel) return;
+        const id = this.activeId;
+        if (id == null) { this._chatHeadLabel.textContent = '—'; return; }
+        const isMgr = id === this._managerTabId();
+        this._chatHeadLabel.textContent =
+            (isMgr ? '🧭 ' : '') + '#' + id + ' ' + this._chatTitleFor(id) + (isMgr ? '  (manager)' : '');
     }
 
     _pushChat(tabId, msg) {
@@ -3257,7 +3240,7 @@ class Shell {
         const tab = (d.tab != null) ? d.tab : this.activeId;
         if (tab == null) return;
         this._pushChat(tab, { from: 'agent', full: String(text), t: Date.now() });
-        if (this.viewMode === 'chat' && tab === this._chatTarget) {
+        if (this.viewMode === 'chat' && tab === this.activeId) {
             this._renderChat();
         } else {
             this._chatUnread++;
@@ -3268,7 +3251,7 @@ class Shell {
     _sendChat() {
         const raw = (this._chatInput && this._chatInput.value || '').trim();
         if (!raw) return;
-        const id = (this._chatTarget != null) ? this._chatTarget : this.activeId;
+        const id = this.activeId;
         if (id == null) return;
         // Type it into the PTY (newline submits, like Enter in the terminal).
         this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: raw + '\r' });
@@ -3288,11 +3271,11 @@ class Shell {
 
     _renderChat() {
         if (!this._chatLogEl) return;
-        const thread = this._chatThreads.get(this._chatTarget) || [];
+        const thread = this._chatThreads.get(this.activeId) || [];
         if (!thread.length) {
             this._chatLogEl.replaceChildren(el('div', { class: 'chat-empty' }, [
                 'No messages yet with this agent.', el('br'),
-                'Type below — your line goes into its terminal, and its replies appear here (summarized). Use the picker above to talk to the manager or another tab.',
+                'Type below — your line goes into its terminal, and its replies appear here (summarized). Switch tabs up top to talk to the manager or another agent.',
             ]));
             return;
         }
@@ -3333,7 +3316,7 @@ class Shell {
     // see it's thinking / waiting on you even between final messages.
     _renderChatStatus() {
         if (!this._chatStatusEl) return;
-        const s = ((this._manager && this._manager.sessions) || []).find(x => x.id === this._chatTarget);
+        const s = ((this._manager && this._manager.sessions) || []).find(x => x.id === this.activeId);
         const textEl = this._chatStatusEl.querySelector('.chat-status-text');
         let state = '', label = 'ready';
         if (s) {
@@ -4600,7 +4583,7 @@ class Shell {
         this._agentModel = models;
         if (this.viewMode === 'tiles') this._renderFleetBar();
         if (this.viewMode === 'manager') this._renderManagerView();
-        if (this.viewMode === 'chat') { this._populateChatTargets(); this._renderChatStatus(); }
+        if (this.viewMode === 'chat') { this._renderChatHead(); this._renderChatStatus(); }
         if (sig !== this._groupSig) {
             this._groupSig = sig;
             if (this.viewMode === 'tiles') this._renderTiles();
