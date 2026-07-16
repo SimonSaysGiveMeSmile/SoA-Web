@@ -21,13 +21,22 @@
                 <span class="status-dot" data-state="connecting"></span>
                 <span class="status-text"></span>
             </div>
+            <!-- Current-tab chip: always shows which tab this phone is on (the
+                 active pill often scrolls off the strip) and opens a searchable
+                 jump sheet of every tab. -->
+            <button class="tabchip" id="btn-tabchip" title="All tabs — tap to jump" aria-label="Switch tab">
+                <span class="tabchip-glyph">≡</span>
+                <span class="tabchip-name" id="tabchip-name">—</span>
+                <span class="tabchip-count" id="tabchip-count"></span>
+            </button>
             <nav id="controls" class="controls" aria-label="Functions">
-                <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
+                <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERM</button>
                 <button class="bb-btn" data-view="chat-view">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
                 <!-- Manager-only (premium gate): hidden by default; app.js reveals it when /api/capabilities reports manager=true. -->
                 <button class="bb-btn" data-view="tiles-view" hidden>DASH</button>
-                <button class="bb-btn" data-view="web-view">BROWSER</button>
-                <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
+                <button class="bb-btn" data-view="web-view">WEB</button>
+                <button class="bb-btn" data-view="widgets-view">SYS</button>
+                <span class="bb-divider" aria-hidden="true"></span>
                 <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
                 <button class="bb-btn bb-icon" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
                 <button class="bb-btn bb-icon" id="btn-camera" title="Send a photo to the terminal">📷</button>
@@ -43,6 +52,7 @@
         <main id="stage">
             <section id="terminal-view" class="view active">
                 <pre id="term"></pre>
+                <button id="term-jump" class="term-jump" type="button" aria-label="Jump to latest output">↓ LATEST</button>
             </section>
             <section id="chat-view" class="view">
                 <div id="chat-status" class="chat-status" hidden>
@@ -219,6 +229,22 @@
                     <button class="settings-btn settings-btn-warn" id="btn-force-reload" type="button">FORCE RELOAD</button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div id="tabsheet-overlay">
+        <div class="tabsheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="tabsheet-header">
+                <div class="tabsheet-title">TABS</div>
+                <button class="settings-close" id="tabsheet-close">&times;</button>
+            </div>
+            <div class="tabsheet-search-wrap">
+                <input id="tabsheet-search" class="tabsheet-search" type="text"
+                       placeholder="Search tabs…" autocomplete="off" autocapitalize="off"
+                       autocorrect="off" spellcheck="false" inputmode="search" />
+            </div>
+            <div id="tabsheet-list" class="tabsheet-list"></div>
         </div>
     </div>
 

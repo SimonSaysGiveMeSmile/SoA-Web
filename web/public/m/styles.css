@@ -93,6 +93,47 @@ button:active { background: var(--accent-bg-hover); }
     flex: 0 0 auto; width: auto; min-width: 42px;
     padding: 9px 10px; text-align: center;
 }
+/* Divider between the primary view-switchers and the secondary action icons,
+   so the strip reads as "views | actions". */
+#controls .bb-divider {
+    flex: 0 0 auto;
+    align-self: center;
+    width: 1px; height: 20px;
+    margin: 0 2px;
+    background: var(--line);
+}
+
+/* Current-tab chip — pinned (never scrolls off), shows the tab this phone is
+   viewing + total count, and opens the searchable tab-jump sheet. */
+.tabchip {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 6px;
+    max-width: 42vw;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 100px;
+    background: var(--accent-bg);
+    color: var(--fg);
+    font: inherit;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+.tabchip:active { background: var(--accent-bg-hover); }
+.tabchip .tabchip-glyph { flex: 0 0 auto; font-size: 13px; opacity: 0.7; line-height: 1; }
+.tabchip .tabchip-name {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.tabchip .tabchip-count {
+    flex: 0 0 auto;
+    font-size: 10px; letter-spacing: 0.04em;
+    color: var(--fg-dim);
+    padding: 1px 6px;
+    border-radius: 100px;
+    background: rgba(224, 224, 224, 0.08);
+}
+.tabchip .tabchip-count:empty { display: none; }
 
 /* Focus / fullscreen mode — hide chrome, hand the terminal the whole screen */
 #app.focus-mode #topbar,
@@ -693,6 +734,35 @@ button:active { background: var(--accent-bg-hover); }
 #term a            { color: inherit; text-decoration: inherit; }
 #term a.ansi-link  { color: #5fa8ff; text-decoration: underline; text-decoration-color: rgba(95,168,255,0.4); }
 
+/* "Jump to latest" pill — floats bottom-center of the terminal only while the
+   user has scrolled up. Tapping snaps back to the live tail. */
+.term-jump {
+    position: absolute;
+    left: 50%;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 14px);
+    transform: translateX(-50%) translateY(8px);
+    z-index: 40;
+    display: none;
+    padding: 8px 16px;
+    border: 1px solid var(--accent);
+    border-radius: 100px;
+    background: var(--panel-bg);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    color: var(--accent);
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+.term-jump.visible {
+    display: block;
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+.term-jump:active { background: var(--accent-bg-hover); }
+
 /* Widgets view */
 #widgets-view { padding: 14px; overflow-y: auto; }
 .w-card {
@@ -1010,6 +1080,118 @@ button:active { background: var(--accent-bg-hover); }
 }
 #settings-overlay.open .settings-sheet {
     transform: translateY(0);
+}
+
+/* ── Tab jump sheet ── */
+#tabsheet-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 320;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0.2s;
+}
+#tabsheet-overlay.open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+.tabsheet {
+    width: 100%;
+    max-width: 460px;
+    max-height: 78vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    border-radius: 20px 20px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+    transform: translateY(100%);
+    transition: transform 0.3s ease-out;
+}
+#tabsheet-overlay.open .tabsheet { transform: translateY(0); }
+.tabsheet-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 16px 8px;
+}
+.tabsheet-title {
+    font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--fg-dim);
+}
+.tabsheet-search-wrap { padding: 0 12px 10px; }
+.tabsheet-search {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--fg);
+    font: inherit; font-size: 15px;   /* 16px-ish avoids iOS focus zoom */
+}
+.tabsheet-search:focus { outline: none; border-color: var(--accent); }
+.tabsheet-list {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 8px 8px;
+}
+.tabsheet-row {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%;
+    padding: 13px 12px;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--fg);
+    text-align: left;
+    font: inherit;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+.tabsheet-row:active { background: var(--accent-bg-hover); }
+.tabsheet-row.active { border-color: var(--accent); background: var(--accent-bg); }
+.tabsheet-dot {
+    flex: 0 0 auto;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--fg-faint);
+}
+.tabsheet-row[data-status="running"] .tabsheet-dot { background: #00e676; box-shadow: 0 0 6px rgba(0,230,118,0.6); }
+.tabsheet-row[data-status="input"]   .tabsheet-dot { background: var(--warn); box-shadow: 0 0 6px rgba(255,184,77,0.6); }
+.tabsheet-row[data-status="stuck"]   .tabsheet-dot { background: var(--err); }
+.tabsheet-row[data-status="exited"]  .tabsheet-dot { background: var(--fg-faint); opacity: 0.5; }
+.tabsheet-name {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 14px; letter-spacing: 0.04em;
+}
+.tabsheet-ctx {
+    flex: 0 0 auto;
+    font-size: 11px; color: var(--fg-dim);
+    font-variant-numeric: tabular-nums;
+}
+.tabsheet-here {
+    flex: 0 0 auto;
+    font-size: 9px; letter-spacing: 0.12em;
+    color: var(--accent);
+    padding: 2px 7px;
+    border: 1px solid var(--accent);
+    border-radius: 100px;
+}
+.tabsheet-empty {
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--fg-dim);
+    font-size: 13px;
 }
 
 .settings-handle {

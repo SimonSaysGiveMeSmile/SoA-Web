@@ -24,12 +24,18 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v55 · LIQUID · iOS theme · 2026-07-13';
+const MOBILE_BUILD = 'v56 · mobile UX · tab-jump + anti-flicker · 2026-07-16';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
 const MIC_SETTINGS_KEY = 'son-of-anton.mic-settings';
 const FONT_SCALE_KEY = 'son-of-anton.font-scale';
+// Grace period before the full-screen RECONNECTING overlay is raised. Tunnel
+// blips reconnect in well under a second; flashing the overlay on every micro
+// drop is the single jankiest thing on mobile. We keep the small status dot
+// live immediately but only raise the big overlay if we're STILL down after
+// this delay (and cancel it the instant we reconnect).
+const RECONNECT_OVERLAY_DELAY_MS = 1400;
 
 /* ── Theme definitions ──────────────────────────────── */
 
@@ -478,6 +484,15 @@ class App {
         this.btnFullscreen = document.getElementById('btn-fullscreen');
         this.cameraInput = document.getElementById('camera-input');
         this.btnSettings = document.getElementById('btn-settings');
+        // Tab jump: a persistent chip in the top bar shows the CURRENT tab (which
+        // otherwise scrolls off among 20+ pills) and opens a searchable sheet of
+        // every tab so you can jump straight to one instead of scrubbing the strip.
+        this.btnTabchip   = document.getElementById('btn-tabchip');
+        this.tabchipName  = document.getElementById('tabchip-name');
+        this.tabchipCount = document.getElementById('tabchip-count');
+        this.tabsheetOverlay = document.getElementById('tabsheet-overlay');
+        this.tabsheetList    = document.getElementById('tabsheet-list');
+        this.tabsheetSearch  = document.getElementById('tabsheet-search');
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
         this.reconnectSub     = document.getElementById('reconnect-sub');
         this.reconnectDiag    = document.getElementById('reconnect-diag');
@@ -555,6 +570,8 @@ class App {
         } catch (_) {}
         this._termCols = 80;
         this._userScrolledUp = false;
+        this._currentView = 'terminal-view';   // HTML default; kept in sync by _showView
+        this.termJump = document.getElementById('term-jump');
 
         this._micStream = null;
         this._micAnalyser = null;
@@ -574,6 +591,7 @@ class App {
         this._wireModelAccess();
         this._wireMicSettings();
         this._wireFleet();
+        this._wireTabSheet();
         this._wireIdleHide();
 
         const { token, backend, altOrigin } = readToken();
@@ -644,7 +662,18 @@ class App {
 
         this.termEl.addEventListener('scroll', () => {
             this._userScrolledUp = !this._isAtBottom();
+            this._updateTermJump();
         }, { passive: true });
+
+        // "Jump to latest" pill: when the user has scrolled up in the terminal
+        // and new output is streaming below, tap to snap back to the live tail.
+        if (this.termJump) {
+            this.termJump.addEventListener('click', () => {
+                this._userScrolledUp = false;
+                this._scrollTermBottom();
+                this._updateTermJump();
+            });
+        }
 
         this.socket.connect();
     }
@@ -1257,7 +1286,7 @@ class App {
             switch (state) {
                 case SocketState.CONNECTING:
                     this._setStatus('connecting', `connecting${attempt > 1 ? ` · try ${attempt}` : '…'}`);
-                    if (attempt > 1) this._showReconnect(`attempt ${attempt}`);
+                    if (attempt > 1) this._scheduleReconnect(`attempt ${attempt}`);
                     break;
                 case SocketState.CONNECTED:
                     this._setStatus('connected', 'paired');
@@ -1267,7 +1296,7 @@ class App {
                     break;
                 case SocketState.DISCONNECTED:
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
-                    this._showReconnect('link lost · retrying');
+                    this._scheduleReconnect('link lost · retrying');
                     this._releaseWakeLock();
                     if (this._prevSocketState === SocketState.CONNECTED) sounds.play('disconnect');
                     break;
@@ -1384,10 +1413,15 @@ class App {
         // Keyboard-aware layout: pin #app to the *visible* viewport so the bottom
         // bar / keyboard toolbar sit above the on-screen keyboard, not under it.
         if (window.visualViewport) {
+            const appEl = document.getElementById('app');
             const fit = () => {
                 const vv = window.visualViewport;
-                document.getElementById('app').style.height = vv.height + 'px';
-                this._scrollTermBottom();
+                appEl.style.height = vv.height + 'px';
+                // Keep the prompt in view as the keyboard animates — but ONLY if
+                // the user is already parked at the bottom. If they've scrolled up
+                // to read, yanking them back to the bottom on every keyboard
+                // open/close/scroll event is the classic mobile-terminal fight.
+                if (!this._userScrolledUp) this._scrollTermBottom();
             };
             window.visualViewport.addEventListener('resize', fit);
             window.visualViewport.addEventListener('scroll', fit);
@@ -1423,6 +1457,7 @@ class App {
         this._currentView = target;
         this.viewEls.forEach(v => v.classList.toggle('active', v.id === target));
         this.viewBtns.forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-view') === target ? 'true' : 'false'));
+        this._updateTermJump();
         if (target === 'terminal-view') {
             // Don't auto-raise the keyboard on entry (e.g. tapping a dashboard
             // tile). It appears only when the user taps the terminal to type.
@@ -2521,12 +2556,34 @@ class App {
         this._diagLogEl.textContent = lines.join('\n');
     }
 
+    // Debounced overlay: only raise RECONNECTING if we're STILL down after a
+    // grace period. If the link comes back first (the common case for a tunnel
+    // blip), _hideReconnect cancels the pending show and nothing ever flashes.
+    _scheduleReconnect(text) {
+        if (text) this._pendingReconnectText = text;
+        // Already visible → just keep the subtext fresh, no re-arm needed.
+        if (this.reconnectOverlay && !this.reconnectOverlay.hidden) {
+            if (text) this.reconnectSub.textContent = text;
+            return;
+        }
+        if (this._reconnectTimer) return;   // one pending show at a time
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            // Reconciled? Only show if we haven't recovered in the meantime.
+            if (!this.socket || this.socket.state !== SocketState.CONNECTED) {
+                this._showReconnect(this._pendingReconnectText || 'reconnecting…');
+            }
+        }, RECONNECT_OVERLAY_DELAY_MS);
+    }
+
     _showReconnect(text) {
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
         this.reconnectOverlay.hidden = false;
         if (text) this.reconnectSub.textContent = text;
         this.reconnectRetry.hidden = false;
     }
     _hideReconnect() {
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
         this.reconnectOverlay.hidden = true;
         this.reconnectDiag.hidden = true;
         this.reconnectRetry.hidden = true;
@@ -2539,6 +2596,10 @@ class App {
             this.reconnectOpenBrowser.hidden = true;
             return;
         }
+        // A real diagnosis (captive portal, server unreachable, offline) is a
+        // persistent problem, not a blip — surface the overlay now rather than
+        // waiting out the debounce.
+        this._showReconnect();
         this.reconnectDiag.hidden = false;
         this.reconnectRetry.hidden = false;
         this.reconnectOpenBrowser.hidden = true;
@@ -2692,6 +2753,8 @@ class App {
 
         this._connectedDevices = snap.connectedDevices || 0;
         this._renderTabs(tabs);
+        this._updateTabChip();
+        if (this.tabsheetOverlay && this.tabsheetOverlay.classList.contains('open')) this._renderTabSheet();
         this._renderActiveTerminal();
         this._updateDeviceCount();
         // Keep the dashboard in sync with tab add/remove/switch when it's open.
@@ -2735,6 +2798,82 @@ class App {
 
         this.tabsEl.innerHTML = '';
         this.tabsEl.appendChild(frag);
+    }
+
+    /* ── Tab jump sheet ── */
+
+    _wireTabSheet() {
+        if (this.btnTabchip) this.btnTabchip.addEventListener('click', () => this._openTabSheet());
+        if (this.tabsheetOverlay) {
+            this.tabsheetOverlay.addEventListener('click', (e) => {
+                if (e.target === this.tabsheetOverlay) this._closeTabSheet();
+            });
+            const closeBtn = document.getElementById('tabsheet-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this._closeTabSheet());
+        }
+        if (this.tabsheetSearch) {
+            this.tabsheetSearch.addEventListener('input', () => this._renderTabSheet());
+        }
+    }
+
+    // Keep the top-bar chip showing the tab this phone is viewing (the active
+    // pill often scrolls off the strip) plus the total count.
+    _updateTabChip() {
+        if (!this.btnTabchip) return;
+        const tabs = (this._snapshot && this._snapshot.tabs) || [];
+        if (this.tabchipName)  this.tabchipName.textContent = this._tabName(this._activeTabId) || '—';
+        if (this.tabchipCount) this.tabchipCount.textContent = tabs.length ? String(tabs.length) : '';
+    }
+
+    _openTabSheet() {
+        if (!this.tabsheetOverlay) return;
+        if (this.tabsheetSearch) this.tabsheetSearch.value = '';
+        this._renderTabSheet();
+        this.tabsheetOverlay.classList.add('open');
+    }
+
+    _closeTabSheet() {
+        if (this.tabsheetOverlay) this.tabsheetOverlay.classList.remove('open');
+        try { if (this.tabsheetSearch) this.tabsheetSearch.blur(); } catch (_) {}
+    }
+
+    _renderTabSheet() {
+        if (!this.tabsheetList) return;
+        const tabs = (this._snapshot && this._snapshot.tabs) || [];
+        const q = (this.tabsheetSearch && this.tabsheetSearch.value || '').trim().toLowerCase();
+        const frag = document.createDocumentFragment();
+        let shown = 0;
+        tabs.forEach((t, i) => {
+            const name = t.title || `TAB ${i + 1}`;
+            if (q && !name.toLowerCase().includes(q)) return;
+            shown++;
+            const mob = this._mobileStatus && this._mobileStatus.get(t.id);
+            const status = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
+            const pct = this._ctxPct && this._ctxPct.get(t.id);
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'tabsheet-row' + (t.id === this._activeTabId ? ' active' : '');
+            if (status) row.setAttribute('data-status', status);
+            row.innerHTML =
+                `<span class="tabsheet-dot"></span>` +
+                `<span class="tabsheet-name">${escapeHtml(name)}</span>` +
+                (pct != null ? `<span class="tabsheet-ctx">${pct}%</span>` : '') +
+                (t.id === this._activeTabId ? `<span class="tabsheet-here">VIEWING</span>` : '');
+            row.addEventListener('click', () => {
+                this._switchTabLocal(t.id);
+                this._showView('terminal-view');
+                this._closeTabSheet();
+            });
+            frag.appendChild(row);
+        });
+        if (!shown) {
+            const empty = document.createElement('div');
+            empty.className = 'tabsheet-empty';
+            empty.textContent = q ? 'No tabs match.' : 'No open tabs.';
+            frag.appendChild(empty);
+        }
+        this.tabsheetList.innerHTML = '';
+        this.tabsheetList.appendChild(frag);
     }
 
     _renderActiveTerminal() {
@@ -3098,6 +3237,14 @@ class App {
         requestAnimationFrame(() => {
             this.termEl.scrollTop = this.termEl.scrollHeight;
         });
+    }
+
+    // Show the "↓ latest" pill only while the user is scrolled up AND looking at
+    // the terminal. Snapping back to bottom fires a scroll event that clears it.
+    _updateTermJump() {
+        if (!this.termJump) return;
+        const show = !!this._userScrolledUp && this._currentView === 'terminal-view';
+        this.termJump.classList.toggle('visible', show);
     }
 
     _isAtBottom() {
