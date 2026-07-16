@@ -2705,11 +2705,36 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   background: var(--soa-bg);
   overflow: hidden;
 }
+#toggle-chat { position: relative; }
 #toggle-chat.active { color: var(--soa-accent); border-color: var(--soa-accent); }
+/* iOS-style unread badge — a red pill pinned to the chat icon's top-right
+   corner, cut out from the glyph by a bg-coloured ring, capped at "99+".
+   The button collapses to a 30×30 icon inside .actions-tray, which clips
+   overflow for its collapse slide; so the badge NESTS in the button corner
+   (top/right: 0) instead of floating outside it (which the tray would clip). */
 .chat-badge {
-  display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 5px;
-  font-family: var(--font-mono); font-size: 10px; line-height: 15px; text-align: center;
-  color: var(--soa-bg); background: var(--soa-accent); border-radius: 8px; vertical-align: middle;
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #fff;
+  background: #ff3b30;                 /* iOS notification red */
+  border: 1.5px solid var(--soa-bg);   /* cut-out ring over the glyph */
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
 }
 .chat-badge[hidden] { display: none; }
 
