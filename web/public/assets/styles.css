@@ -1529,6 +1529,18 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .soa-toast--agent .soa-toast-icon { background: var(--soa-orange); }
 
+/* IM banner — an incoming chat message surfaced as an iOS notification. Lives on
+   <body> (not in the overflow-hidden actions-tray), so it never clips like the
+   corner unread badge did. Title truncates to one line, preview clamps to two. */
+.soa-toast--im { cursor: pointer; }
+.soa-toast--im .soa-toast-icon { background: var(--soa-accent); color: var(--soa-bg); font-size: 15px; }
+.soa-toast--im .soa-toast-title {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.soa-toast--im .soa-toast-text {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
 /* Restore toast — surfaces right after a tab is closed, with an UNDO that
    re-spawns the shell at the saved cwd and re-seeds the scrollback. Re-uses
    .soa-toast for the container + slide-in animation. */

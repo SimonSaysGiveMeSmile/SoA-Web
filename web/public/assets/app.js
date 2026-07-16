@@ -3245,7 +3245,37 @@ class Shell {
         } else {
             this._chatUnread++;
             this._updateChatBtn();
+            this._showImBanner(tab, String(text));
         }
+    }
+
+    // iOS-style notification banner for an incoming IM. Rendered on <body> via the
+    // shared .soa-toast (fixed, top, safe-area-aware, width-capped) so it can never
+    // clip the way the in-tray corner badge does. Tap → open that agent's thread.
+    _showImBanner(tabId, text) {
+        const existing = document.getElementById('soa-im-banner');
+        if (existing) existing.remove();
+        const banner = el('div', { id: 'soa-im-banner', class: 'soa-toast soa-toast--im', role: 'alert', 'aria-live': 'polite' }, [
+            el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '💬' }),
+            el('div', { class: 'soa-toast-body' }, [
+                el('p', { class: 'soa-toast-title', text: '#' + tabId + ' ' + this._chatTitleFor(tabId) }),
+                el('p', { class: 'soa-toast-text', text: String(text).replace(/\s+/g, ' ').trim() }),
+            ]),
+        ]);
+        document.body.appendChild(banner);
+        requestAnimationFrame(() => banner.setAttribute('data-show', '1'));
+        const dismiss = () => {
+            banner.removeAttribute('data-show');
+            clearTimeout(this._imBannerTimer);
+            setTimeout(() => banner.remove(), 320);
+        };
+        banner.addEventListener('click', () => {
+            if (this.viewMode !== 'chat') this._toggleChat();
+            this._activate(tabId);
+            dismiss();
+        });
+        clearTimeout(this._imBannerTimer);
+        this._imBannerTimer = setTimeout(dismiss, 5000);
     }
 
     _sendChat() {
