@@ -147,9 +147,14 @@ launchd jobs):
 5. `com.soa-web.heartbeat` — every 600s produces the fleet blocker digest.
 6. `com.soa-web.nudge-stale-4010` — every 600s runs `scripts/soa-nudge-stale`:
    finds PARKED tabs (idle/done) that still carry an UNFINISHED Claude Code todo
-   list and types `continue` so they resume. Conservative — skips manager tabs,
-   skips tabs asking the USER a question (those are the user's to answer), and
-   holds a 20-min per-tab cooldown so nobody is spammed. Log:
+   list and types `continue` so they resume. Todo state is read from Claude
+   Code's on-disk task store, **not** the terminal — per tab: cwd →
+   newest `~/.claude/projects/<enc(cwd)>/<sid>.jsonl` → `~/.claude/tasks/<sid>/*.json`
+   (one file per task, `status` pending|in_progress|completed) — so it's
+   reliable even after the todo widget scrolls off. Conservative — skips manager
+   tabs, skips tabs asking the USER a question, holds a 20-min per-tab cooldown,
+   and a STALL GUARD stops nudging (and flags) a tab whose todo count doesn't
+   drop after repeated nudges (it needs the user, not another `continue`). Log:
    `~/.soa-web/logs/nudge-stale.log`.
 
 The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,

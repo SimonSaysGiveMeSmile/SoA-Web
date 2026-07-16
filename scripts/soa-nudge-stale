@@ -4,21 +4,32 @@
 # still carry an UNFINISHED Claude Code todo list, and types "continue" so they
 # resume working through it.
 #
+# Todo state is read from Claude Code's on-disk task store — NOT the terminal —
+# so it's reliable even after the todo widget scrolls out of view:
+#   tab (index in ~/.soa-web-local/tabs.json) → cwd
+#     → newest ~/.claude/projects/<enc(cwd)>/<sid>.jsonl  → sid
+#       → ~/.claude/tasks/<sid>/*.json  (one file per task; status pending|
+#         in_progress|completed) → count open(pending)+inprog
+# (enc: '/' and '.' → '-'. Tabs that SHARE a cwd resolve to the newest session
+# in that dir — fine here since the shared-cwd tabs are the manager/dev tabs,
+# which are skipped or carry no todos.)
+#
 # Deliberately conservative:
 #   - skips the manager tab(s) and the caller's own tab
-#   - skips a tab that ended by asking the USER a question (that's the user's to
-#     answer — see memory user-answers-agents-directly)
-#   - per-tab cooldown so a tab is never nudged twice inside COOLDOWN (default
-#     20m); without progress a done-with-no-todos tab is simply never matched
-#   - SOA_NUDGE_DRY=1 → log what it WOULD do, send nothing
+#   - skips a tab that ended by asking the USER a question (user-answers-agents-directly)
+#   - per-tab cooldown (default 20m) so nothing is spammed
+#   - STALL GUARD: if repeated nudges don't reduce a tab's todo count, stop
+#     nudging it and flag it (it needs the user, not another "continue")
+#   - SOA_NUDGE_DRY=1 → log/print what it WOULD do, send nothing
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$DIR/logs/nudge-stale.log"
-STATED="$DIR/logs/.nudge-stale"          # per-tab last-nudge unix stamps
+STATED="$DIR/logs/.nudge-stale"          # per-tab state: "<lastEpoch> <total> <ineffective>"
 mkdir -p "$STATED" 2>/dev/null
 TS="$(date '+%Y-%m-%dT%H:%M:%S')"
 NOW="$(date +%s)"
 COOLDOWN="${SOA_NUDGE_COOLDOWN:-1200}"    # secs — don't re-nudge same tab within this
+STALL_LIMIT="${SOA_NUDGE_STALL:-3}"       # after this many ineffective nudges, stop + flag
 NUDGE_TEXT="${SOA_NUDGE_TEXT:-continue}"
 DRY="${SOA_NUDGE_DRY:-0}"
 
@@ -27,49 +38,92 @@ log(){ echo "$TS $*" >> "$LOG"; }
 SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
 LIST="$(soa-sessions list 2>/dev/null)"
 [ -z "$LIST" ] && { log "no list (daemon down?) — nothing to do"; exit 0; }
-# every tab whose title is "manager" — never nudge a manager
 MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
 
 clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g; s/  +/ /g'; }
 
-# idle + done tabs are the "parked" candidates
-echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read -r id; do
+# status per tab id, from the list ("idle"/"done"/"working"/"attention"/"stuck")
+status_of(){ echo "$LIST" | sed -nE "s/^ *#$1 .* (idle|done|working|attention|stuck) +ctx.*/\1/p" | head -1; }
+
+# file-based todo counts → emits "<id> <open> <inprog>" per tab that has any
+COUNTS="$(python3 - "$HOME" <<'PY'
+import json, os, glob, re, sys
+HOME = sys.argv[1]
+try:
+    T = json.load(open(f'{HOME}/.soa-web-local/tabs.json'))
+except Exception:
+    sys.exit(0)
+tabs = T if isinstance(T, list) else T.get('tabs', [])
+def enc(c): return re.sub(r'[/.]', '-', c or '')
+def sid_for(cwd):
+    js = glob.glob(f'{HOME}/.claude/projects/{enc(cwd)}/*.jsonl')
+    if not js: return None
+    js.sort(key=os.path.getmtime, reverse=True)
+    return os.path.splitext(os.path.basename(js[0]))[0]
+for i, t in enumerate(tabs, start=1):
+    sid = sid_for(t.get('cwd'))
+    if not sid: continue
+    tdir = f'{HOME}/.claude/tasks/{sid}'
+    if not os.path.isdir(tdir): continue
+    o = ip = 0
+    for f in glob.glob(f'{tdir}/*.json'):
+        try: s = json.load(open(f)).get('status')
+        except Exception: continue
+        if s == 'pending': o += 1
+        elif s == 'in_progress': ip += 1
+    if o + ip > 0:
+        print(f'{i} {o} {ip}')
+PY
+)"
+[ -z "$COUNTS" ] && { log "no tabs with open todos"; exit 0; }
+
+printf '%s\n' "$COUNTS" | while read -r id open inprog; do
   [ -z "$id" ] && continue
-  skip=0
-  for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
+  skip=0; for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
   [ "$skip" = 1 ] && continue
 
+  # only nudge PARKED tabs — a tab actively working is already making progress
+  st="$(status_of "$id")"
+  case "$st" in idle|done) ;; *) continue;; esac
+
+  total=$(( open + inprog ))
+
+  # asking the USER a question? leave it — that's the user's to answer
   C="$(soa-sessions read "$id" 40 2>/dev/null | sed '1,2d' | clean)"
-  [ -z "$C" ] && continue
-
-  # unfinished todos? Claude Code renders "N tasks (X done, Y in progress, Z open)"
-  open="$(printf '%s' "$C"   | grep -oE '[0-9]+ open'        | grep -oE '[0-9]+' | tail -1)"
-  inprog="$(printf '%s' "$C" | grep -oE '[0-9]+ in progress' | grep -oE '[0-9]+' | tail -1)"
-  hastodo=0
-  [ -n "$open" ]   && [ "$open"   -gt 0 ] 2>/dev/null && hastodo=1
-  [ -n "$inprog" ] && [ "$inprog" -gt 0 ] 2>/dev/null && hastodo=1
-  [ "$hastodo" = 1 ] || continue
-
-  # ...but not if it's waiting on the USER — leave those for the user to answer
   if printf '%s' "$C" | tail -c 700 | grep -qiE 'want me to|say the word|which .*(prefer|want)|\(a\).*\(b\)|shall i|should i'; then
-    log "#$id open=${open:-0} inprog=${inprog:-0} but asking the user — skipping"
+    log "#$id open=$open inprog=$inprog but asking the user — skipping"
     continue
   fi
 
-  # per-tab cooldown
-  stamp="$STATED/$id"
-  if [ -f "$stamp" ]; then
-    last="$(cat "$stamp" 2>/dev/null || echo 0)"
-    [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
+  # read prior state: "<lastEpoch> <total> <ineffective>"
+  stamp="$STATED/$id"; last=0; ptotal=-1; ineff=0
+  if [ -f "$stamp" ]; then read -r last ptotal ineff < "$stamp" 2>/dev/null; fi
+  [ -z "$last" ]   && last=0
+  [ -z "$ptotal" ] && ptotal=-1
+  [ -z "$ineff" ]  && ineff=0
+
+  # cooldown
+  [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
+
+  # stall guard: did the last nudge fail to reduce the todo count?
+  if [ "$ptotal" -ge 0 ] && [ "$total" -ge "$ptotal" ]; then
+    ineff=$(( ineff + 1 ))
+  else
+    ineff=0
+  fi
+  if [ "$ineff" -ge "$STALL_LIMIT" ]; then
+    log "#$id STALLED (open=$open inprog=$inprog unchanged after $ineff nudges) — needs user, not nudging"
+    echo "$NOW $total $ineff" > "$stamp"
+    continue
   fi
 
   if [ "$DRY" = 1 ]; then
-    log "[dry] would nudge #$id (open=${open:-0} inprog=${inprog:-0})"
-    printf 'would nudge #%s (open=%s inprog=%s)\n' "$id" "${open:-0}" "${inprog:-0}"
+    log "[dry] would nudge #$id (open=$open inprog=$inprog ineff=$ineff)"
+    printf 'would nudge #%s (open=%s inprog=%s ineff=%s)\n' "$id" "$open" "$inprog" "$ineff"
     continue
   fi
   soa-sessions send "$id" "$NUDGE_TEXT" >/dev/null 2>&1
-  echo "$NOW" > "$stamp"
-  log "nudged #$id (open=${open:-0} inprog=${inprog:-0}) -> \"$NUDGE_TEXT\""
+  echo "$NOW $total $ineff" > "$stamp"
+  log "nudged #$id (open=$open inprog=$inprog ineff=$ineff) -> \"$NUDGE_TEXT\""
 done
 exit 0
