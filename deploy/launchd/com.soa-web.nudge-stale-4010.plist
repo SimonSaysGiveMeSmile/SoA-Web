@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  STALE-TODO NUDGER — runs scripts/soa-nudge-stale every 10 min (600s). Finds
+  tabs that are PARKED (idle/done) but still carry an UNFINISHED Claude Code todo
+  list and types "continue" so they resume. Conservative: skips manager tabs,
+  skips tabs asking the USER a question, and holds a 20-min per-tab cooldown so
+  nobody is spammed.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.nudge-stale-4010.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.nudge-stale-4010</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-nudge-stale</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/nudge-stale.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/nudge-stale.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

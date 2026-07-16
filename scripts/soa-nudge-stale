@@ -1,0 +1,75 @@
+#!/bin/bash
+# SoA STALE-TODO NUDGER — runs every ~10 min (launchd com.soa-web.nudge-stale-4010)
+# and is also safe to invoke by hand. Finds tabs that are PARKED (idle/done) but
+# still carry an UNFINISHED Claude Code todo list, and types "continue" so they
+# resume working through it.
+#
+# Deliberately conservative:
+#   - skips the manager tab(s) and the caller's own tab
+#   - skips a tab that ended by asking the USER a question (that's the user's to
+#     answer — see memory user-answers-agents-directly)
+#   - per-tab cooldown so a tab is never nudged twice inside COOLDOWN (default
+#     20m); without progress a done-with-no-todos tab is simply never matched
+#   - SOA_NUDGE_DRY=1 → log what it WOULD do, send nothing
+set -u
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="$DIR/logs/nudge-stale.log"
+STATED="$DIR/logs/.nudge-stale"          # per-tab last-nudge unix stamps
+mkdir -p "$STATED" 2>/dev/null
+TS="$(date '+%Y-%m-%dT%H:%M:%S')"
+NOW="$(date +%s)"
+COOLDOWN="${SOA_NUDGE_COOLDOWN:-1200}"    # secs — don't re-nudge same tab within this
+NUDGE_TEXT="${SOA_NUDGE_TEXT:-continue}"
+DRY="${SOA_NUDGE_DRY:-0}"
+
+log(){ echo "$TS $*" >> "$LOG"; }
+
+SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+LIST="$(soa-sessions list 2>/dev/null)"
+[ -z "$LIST" ] && { log "no list (daemon down?) — nothing to do"; exit 0; }
+# every tab whose title is "manager" — never nudge a manager
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+
+clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g; s/  +/ /g'; }
+
+# idle + done tabs are the "parked" candidates
+echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read -r id; do
+  [ -z "$id" ] && continue
+  skip=0
+  for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
+  [ "$skip" = 1 ] && continue
+
+  C="$(soa-sessions read "$id" 40 2>/dev/null | sed '1,2d' | clean)"
+  [ -z "$C" ] && continue
+
+  # unfinished todos? Claude Code renders "N tasks (X done, Y in progress, Z open)"
+  open="$(printf '%s' "$C"   | grep -oE '[0-9]+ open'        | grep -oE '[0-9]+' | tail -1)"
+  inprog="$(printf '%s' "$C" | grep -oE '[0-9]+ in progress' | grep -oE '[0-9]+' | tail -1)"
+  hastodo=0
+  [ -n "$open" ]   && [ "$open"   -gt 0 ] 2>/dev/null && hastodo=1
+  [ -n "$inprog" ] && [ "$inprog" -gt 0 ] 2>/dev/null && hastodo=1
+  [ "$hastodo" = 1 ] || continue
+
+  # ...but not if it's waiting on the USER — leave those for the user to answer
+  if printf '%s' "$C" | tail -c 700 | grep -qiE 'want me to|say the word|which .*(prefer|want)|\(a\).*\(b\)|shall i|should i'; then
+    log "#$id open=${open:-0} inprog=${inprog:-0} but asking the user — skipping"
+    continue
+  fi
+
+  # per-tab cooldown
+  stamp="$STATED/$id"
+  if [ -f "$stamp" ]; then
+    last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
+  fi
+
+  if [ "$DRY" = 1 ]; then
+    log "[dry] would nudge #$id (open=${open:-0} inprog=${inprog:-0})"
+    printf 'would nudge #%s (open=%s inprog=%s)\n' "$id" "${open:-0}" "${inprog:-0}"
+    continue
+  fi
+  soa-sessions send "$id" "$NUDGE_TEXT" >/dev/null 2>&1
+  echo "$NOW" > "$stamp"
+  log "nudged #$id (open=${open:-0} inprog=${inprog:-0}) -> \"$NUDGE_TEXT\""
+done
+exit 0
