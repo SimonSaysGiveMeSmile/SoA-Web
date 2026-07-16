@@ -3256,7 +3256,7 @@ class Shell {
         const existing = document.getElementById('soa-im-banner');
         if (existing) existing.remove();
         const banner = el('div', { id: 'soa-im-banner', class: 'soa-toast soa-toast--im', role: 'alert', 'aria-live': 'polite' }, [
-            el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '💬' }),
+            el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '🗨︎' }),
             el('div', { class: 'soa-toast-body' }, [
                 el('p', { class: 'soa-toast-title', text: '#' + tabId + ' ' + this._chatTitleFor(tabId) }),
                 el('p', { class: 'soa-toast-text', text: String(text).replace(/\s+/g, ' ').trim() }),
