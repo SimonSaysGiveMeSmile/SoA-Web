@@ -86,12 +86,25 @@ button:active { background: var(--accent-bg-hover); }
 #controls .bb-btn {
     flex: 0 0 auto;
     white-space: nowrap;
-    padding: 9px 13px;
+    padding: 8px 11px;
+    letter-spacing: 0.06em;   /* tighter than the 0.12em default so the 5 view
+                                 switchers fit a phone width without scrolling */
     width: auto;
 }
 #controls .bb-icon, #controls .bb-icon-sm {
     flex: 0 0 auto; width: auto; min-width: 42px;
     padding: 9px 10px; text-align: center;
+}
+/* Overflow trigger — pinned at the right of the top bar, outside the scrolling
+   #controls strip, so the actions sheet stays reachable if the view row scrolls. */
+#btn-overflow {
+    flex: 0 0 auto;
+    align-self: center;
+    min-width: 42px;
+    padding: 8px 10px;
+    text-align: center;
+    font-size: 15px;
+    line-height: 1;
 }
 /* Divider between the primary view-switchers and the secondary action icons,
    so the strip reads as "views | actions". */
@@ -108,7 +121,7 @@ button:active { background: var(--accent-bg-hover); }
 .tabchip {
     flex: 0 0 auto;
     display: flex; align-items: center; gap: 6px;
-    max-width: 42vw;
+    max-width: 34vw;
     padding: 7px 10px;
     border: 1px solid var(--line);
     border-radius: 100px;
@@ -1208,6 +1221,91 @@ button:active { background: var(--accent-bg-hover); }
     text-align: center;
     color: var(--fg-dim);
     font-size: 13px;
+}
+
+/* ── Overflow actions sheet ── */
+#overflow-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 330;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0.2s;
+}
+#overflow-overlay.open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+.overflow-sheet {
+    width: 100%;
+    max-width: 460px;
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    border-radius: 20px 20px 0 0;
+    padding-bottom: calc(env(safe-area-inset-bottom) + 14px);
+    transform: translateY(100%);
+    transition: transform 0.3s ease-out;
+}
+#overflow-overlay.open .overflow-sheet { transform: translateY(0); }
+.overflow-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 16px 8px;
+}
+.overflow-title {
+    font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--fg-dim);
+}
+.overflow-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    padding: 6px 14px 4px;
+}
+.overflow-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 6px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.03);
+}
+.overflow-btn {
+    width: 46px; height: 46px;
+    min-width: 46px;
+    padding: 0;
+    margin: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    line-height: 1;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--accent-bg);
+    color: var(--fg);
+}
+.overflow-btn:active { background: var(--accent-bg-hover); }
+.overflow-btn[aria-pressed="true"] {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg-hover);
+}
+.overflow-cap {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--fg-dim);
+    text-transform: uppercase;
 }
 
 .settings-handle {

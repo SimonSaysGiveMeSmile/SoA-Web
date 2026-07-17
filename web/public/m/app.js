@@ -493,6 +493,11 @@ class App {
         this.tabsheetOverlay = document.getElementById('tabsheet-overlay');
         this.tabsheetList    = document.getElementById('tabsheet-list');
         this.tabsheetSearch  = document.getElementById('tabsheet-search');
+        // Overflow sheet: the secondary action buttons (mic/speak/camera/…) were
+        // moved out of the top strip into this sheet so the view-switchers fit a
+        // phone; the buttons keep their IDs so their handlers wire unchanged.
+        this.btnOverflow     = document.getElementById('btn-overflow');
+        this.overflowOverlay = document.getElementById('overflow-overlay');
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
         this.reconnectSub     = document.getElementById('reconnect-sub');
         this.reconnectDiag    = document.getElementById('reconnect-diag');
@@ -592,6 +597,7 @@ class App {
         this._wireMicSettings();
         this._wireFleet();
         this._wireTabSheet();
+        this._wireOverflow();
         this._wireIdleHide();
 
         const { token, backend, altOrigin } = readToken();
@@ -2798,6 +2804,34 @@ class App {
 
         this.tabsEl.innerHTML = '';
         this.tabsEl.appendChild(frag);
+    }
+
+    /* ── Overflow actions sheet ── */
+
+    _wireOverflow() {
+        if (this.btnOverflow) this.btnOverflow.addEventListener('click', () => this._openOverflow());
+        if (this.overflowOverlay) {
+            this.overflowOverlay.addEventListener('click', (e) => {
+                if (e.target === this.overflowOverlay) this._closeOverflow();
+            });
+            const closeBtn = document.getElementById('overflow-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this._closeOverflow());
+            // Dismiss the sheet after any action button is tapped — the button's
+            // own handler still runs (this is a bubbled listener), so e.g. tapping
+            // Settings closes this sheet and opens the settings overlay.
+            const grid = this.overflowOverlay.querySelector('.overflow-grid');
+            if (grid) grid.addEventListener('click', (e) => {
+                if (e.target.closest('.overflow-btn')) this._closeOverflow();
+            });
+        }
+    }
+
+    _openOverflow() {
+        if (this.overflowOverlay) this.overflowOverlay.classList.add('open');
+    }
+
+    _closeOverflow() {
+        if (this.overflowOverlay) this.overflowOverlay.classList.remove('open');
     }
 
     /* ── Tab jump sheet ── */

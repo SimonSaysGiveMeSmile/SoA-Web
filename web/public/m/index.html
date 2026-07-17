@@ -36,14 +36,12 @@
                 <button class="bb-btn" data-view="tiles-view" hidden>DASH</button>
                 <button class="bb-btn" data-view="web-view">WEB</button>
                 <button class="bb-btn" data-view="widgets-view">SYS</button>
-                <span class="bb-divider" aria-hidden="true"></span>
-                <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
-                <button class="bb-btn bb-icon" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
-                <button class="bb-btn bb-icon" id="btn-camera" title="Send a photo to the terminal">📷</button>
-                <button class="bb-btn bb-icon" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
-                <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
-                <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>
             </nav>
+            <!-- Overflow trigger — pinned OUTSIDE the scrolling #controls strip so
+                 the secondary actions (mic/speak/camera/…) are always one tap away
+                 even if the view row scrolls. The buttons live in #overflow-overlay
+                 (same IDs → same JS handlers). -->
+            <button class="bb-btn bb-icon" id="btn-overflow" title="More actions" aria-label="More actions" aria-haspopup="true">⋯</button>
         </header>
         <input id="camera-input" type="file" accept="image/*" hidden />
 
@@ -245,6 +243,42 @@
                        autocorrect="off" spellcheck="false" inputmode="search" />
             </div>
             <div id="tabsheet-list" class="tabsheet-list"></div>
+        </div>
+    </div>
+
+    <div id="overflow-overlay">
+        <div class="overflow-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="overflow-header">
+                <div class="overflow-title">ACTIONS</div>
+                <button class="settings-close" id="overflow-close">&times;</button>
+            </div>
+            <div class="overflow-grid">
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-mic" title="Toggle microphone">🎤</button>
+                    <span class="overflow-cap">Mic</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
+                    <span class="overflow-cap">Speak</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-camera" title="Send a photo to the terminal">📷</button>
+                    <span class="overflow-cap">Photo</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
+                    <span class="overflow-cap">Fullscreen</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon-sm overflow-btn" id="btn-settings" title="Settings">&#9881;</button>
+                    <span class="overflow-cap">Settings</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-newtab" title="New tab">+</button>
+                    <span class="overflow-cap">New tab</span>
+                </div>
+            </div>
         </div>
     </div>
 
