@@ -125,6 +125,9 @@ printf '%s\n' "$COUNTS" | while IFS=$'\t' read -r id open inprog subjects; do
   if [ "$mode" = "continue" ] && printf '%s' "$tail_snip" | grep -qiE 'want me to|say the word|which .*(prefer|want)|\(a\).*\(b\)|shall i|should i|option [0-9ab]|\? *$'; then
     mode="decide"
   fi
+  # persistently stuck under plain continue -> plain continue clearly isn't
+  # working; let the decider read WHY it's stuck and make a real call instead
+  [ "$mode" = "continue" ] && [ "$ineff" -ge "$STALL_LIMIT" ] && mode="decide"
 
   # update ineffective streak (did the previous action move the needle?)
   if [ "$ptotal" -ge 0 ] && [ "$total" -ge "$ptotal" ]; then ineff=$(( ineff + 1 )); else ineff=0; fi
