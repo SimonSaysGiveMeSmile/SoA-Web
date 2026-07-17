@@ -512,20 +512,36 @@ button:active { background: var(--accent-bg-hover); }
     display: flex; align-items: center; justify-content: center;
 }
 .chat-send:disabled { opacity: 0.4; }
-/* Unread badge on the CHAT nav button */
+/* Unread badge on the CHAT nav button — iOS-style corner badge, matching the
+   desktop app's chat badge. A red pill pinned to the button's top-right corner
+   with a bg-coloured cut-out ring, capped at "99+" by _updateChatBadge. The
+   #controls strip clips overflow-y (for its horizontal scroll), so the badge
+   nests INSIDE the button corner rather than floating outside (which would clip). */
+#controls .bb-btn[data-view="chat-view"] { position: relative; }
 .bb-badge {
-    display: inline-block;
-    min-width: 16px;
-    margin-left: 4px;
+    position: absolute;
+    top: 2px;
+    right: 3px;
+    min-width: 15px;
+    height: 15px;
     padding: 0 4px;
-    border-radius: 8px;
-    background: var(--accent);
-    color: var(--bg);
-    font-size: 10px;
-    line-height: 16px;
-    text-align: center;
-    vertical-align: middle;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    border-radius: 999px;
+    background: #ff3b30;                /* iOS notification red */
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+    border: 1.5px solid var(--bg);      /* cut-out ring over the label */
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
 }
+.bb-badge[hidden] { display: none; }
 
 /* Fleet supervisor summary bar (top of dashboard) */
 .manager-bar {
