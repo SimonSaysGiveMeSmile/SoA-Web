@@ -2091,7 +2091,7 @@ class App {
             return;
         }
         const frag = document.createDocumentFragment();
-        for (const m of thread) {
+        thread.forEach((m, i) => {
             const bubble = document.createElement('div');
             bubble.className = 'chat-msg ' + (m.from === 'you' ? 'you' : 'agent');
             if (m.from === 'agent') {
@@ -2118,10 +2118,35 @@ class App {
                 bubble.textContent = m.full;
             }
             frag.appendChild(bubble);
-        }
+
+            // Timestamp at the end of each sender "run" — a sender change or a
+            // >2min gap ends a run, so rapid bursts collapse into one time label
+            // instead of a stamp under every bubble. Completes the long-defined
+            // but never-rendered .chat-meta style.
+            const next = thread[i + 1];
+            const endOfRun = !next || next.from !== m.from ||
+                (next.t && m.t && (next.t - m.t) > 2 * 60 * 1000);
+            if (endOfRun && m.t) {
+                const meta = document.createElement('div');
+                meta.className = 'chat-meta' + (m.from === 'you' ? ' you' : '');
+                meta.textContent = this._fmtTime(m.t);
+                frag.appendChild(meta);
+            }
+        });
         this.chatLog.innerHTML = '';
         this.chatLog.appendChild(frag);
         this._scrollChatBottom();
+    }
+
+    // Compact IM timestamp: "9:41 AM" today, "Jul 15, 9:41 AM" on earlier days.
+    _fmtTime(t) {
+        try {
+            const d = new Date(t);
+            const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            const sameDay = d.toDateString() === new Date().toDateString();
+            return sameDay ? time
+                : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
+        } catch (_) { return ''; }
     }
 
     _scrollChatBottom() {
