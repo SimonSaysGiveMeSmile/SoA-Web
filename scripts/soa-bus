@@ -1,0 +1,164 @@
+#!/bin/bash
+# soa-bus — LOCAL-ONLY agent-to-agent (A2A) message bus for the SoA fleet.
+#
+# Lets independent agents coordinate: publish/subscribe to channels and send
+# direct messages, and *react* to each other (watch blocks until new traffic).
+#
+# PRIVACY: this is pure local files under the state dir — it NEVER touches the
+# network, is never uploaded, and is never shared off this machine. Append-only
+# JSONL; no database, no daemon, no server. (macOS has no flock, so writes are
+# single atomic appends and messages are size-capped.)
+#
+#   soa-bus post   <channel> <msg...>      publish to a channel
+#   soa-bus read   <channel> [--since MS] [N]   last N (default 50) messages
+#   soa-bus dm     <id|title> <msg...>     direct message to one agent
+#   soa-bus inbox  [--since MS] [N] [--watch]    your direct messages
+#   soa-bus watch  <channel> [--from-start] [--once] [--interval S]  block for new msgs
+#   soa-bus channels                       list active channels
+#   soa-bus whoami                         your bus identity
+set -u
+
+# ---- resolve the shared local bus dir (every agent on this box agrees) -------
+if   [ -n "${SOA_BUS_DIR:-}" ];        then BUS="$SOA_BUS_DIR"
+elif [ -n "${SOA_WEB_STATE_DIR:-}" ];  then BUS="$SOA_WEB_STATE_DIR/a2a"
+elif [ -d "$HOME/.soa-web-local" ];    then BUS="$HOME/.soa-web-local/a2a"
+else                                        BUS="$HOME/.soa-web/a2a"
+fi
+mkdir -p "$BUS/dm" 2>/dev/null
+
+MAXLINES="${SOA_BUS_MAXLINES:-5000}"   # per-file soft cap; trimmed to last 2/5 on overflow
+MAXMSG="${SOA_BUS_MAXMSG:-4000}"       # chars; keeps a post a single atomic append
+
+norm(){ printf '%s' "$1" | tr -c 'A-Za-z0-9._@-' '_'; }
+chan_file(){ echo "$BUS/$(norm "$1").jsonl"; }
+dm_file(){   echo "$BUS/dm/$(norm "$1").jsonl"; }
+
+# identity "#<id> <title>" from soa-sessions whoami (overridable)
+me_str(){
+  if [ -n "${SOA_BUS_FROM:-}" ]; then echo "$SOA_BUS_FROM"; return; fi
+  local j id title
+  j="$(soa-sessions whoami 2>/dev/null)"
+  id="$(printf '%s' "$j"    | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+  title="$(printf '%s' "$j" | sed -n 's/.*"title":"\([^"]*\)".*/\1/p')"
+  if [ -n "$id" ]; then echo "#$id ${title}"; else echo "${USER:-agent}"; fi
+}
+me_id(){ printf '%s' "${SOA_BUS_ID:-$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')}"; }
+
+# resolve an <id|title> argument to a numeric tab id via the fleet list
+resolve_id(){
+  case "$1" in
+    '#'[0-9]*) echo "${1#\#}";;
+    [0-9]*)    echo "$1";;
+    *) soa-sessions list 2>/dev/null | sed -nE "s/^ *#([0-9]+) +$1 .*/\1/p" | head -1;;
+  esac
+}
+
+# render JSONL from stdin as "[MM-DD HH:MM:SS] from: msg"
+fmt(){ python3 -c '
+import json,sys,datetime
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: r=json.loads(line)
+    except Exception: continue
+    ts=datetime.datetime.fromtimestamp(r.get("t",0)/1000).strftime("%m-%d %H:%M:%S")
+    to=r.get("to"); tag=" -> "+str(to) if to else ""
+    print("["+ts+"] "+str(r.get("from","?"))+tag+": "+str(r.get("msg","")))
+'; }
+
+append(){  # append(file, from, chan_or_to_flag, to_value, msg)
+  python3 - "$1" "$2" "$3" "$4" "$5" "$MAXLINES" "$MAXMSG" <<'PY'
+import json,sys,os
+f,frm,kind,target,msg,maxl,maxm=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5],int(sys.argv[6]),int(sys.argv[7])
+msg=msg[:maxm]
+rec={"t":int(__import__("time").time()*1000),"from":frm,"msg":msg}
+if kind=="chan": rec["chan"]=target
+else: rec["to"]=target
+with open(f,"a") as fh:
+    fh.write(json.dumps(rec,ensure_ascii=False)+"\n")
+# soft size cap: keep the tail
+try:
+    with open(f) as fh: lines=fh.readlines()
+    if len(lines)>maxl:
+        with open(f,"w") as fh: fh.writelines(lines[-(maxl*2//5):])
+except Exception: pass
+PY
+}
+
+read_file(){  # read_file(file, since_ms, n)
+  local f="$1" since="${2:-0}" n="${3:-50}"
+  [ -f "$f" ] || { echo "(no messages)"; return; }
+  python3 - "$f" "$since" "$n" <<'PY' | fmt
+import json,sys
+f,since,n=sys.argv[1],int(sys.argv[2] or 0),int(sys.argv[3])
+rows=[]
+for line in open(f):
+    line=line.strip()
+    if not line: continue
+    try: r=json.loads(line)
+    except Exception: continue
+    if r.get("t",0)<=since: continue
+    rows.append(line)
+for l in rows[-n:]: print(l)
+PY
+}
+
+watch_file(){  # watch_file(file, from_start, once, interval)
+  local f="$1" fromstart="$2" once="$3" iv="$4"
+  local base=0
+  [ "$fromstart" = 1 ] || { [ -f "$f" ] && base="$(wc -l < "$f" | tr -d ' ')"; }
+  while :; do
+    local cur=0; [ -f "$f" ] && cur="$(wc -l < "$f" | tr -d ' ')"
+    if [ "$cur" -gt "$base" ]; then
+      sed -n "$((base+1)),${cur}p" "$f" | fmt
+      base="$cur"
+      [ "$once" = 1 ] && break
+    fi
+    sleep "$iv"
+  done
+}
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  post)
+    chan="${1:-}"; shift 2>/dev/null || true; msg="$*"
+    [ -z "$chan" ] || [ -z "$msg" ] && { echo "usage: soa-bus post <channel> <msg>"; exit 2; }
+    append "$(chan_file "$chan")" "$(me_str)" chan "$chan" "$msg"
+    echo "posted -> #$chan"
+    ;;
+  read)
+    chan="${1:-}"; shift 2>/dev/null || true
+    since=0; n=50
+    while [ $# -gt 0 ]; do case "$1" in --since) since="$2"; shift 2;; [0-9]*) n="$1"; shift;; *) shift;; esac; done
+    [ -z "$chan" ] && { echo "usage: soa-bus read <channel> [--since MS] [N]"; exit 2; }
+    read_file "$(chan_file "$chan")" "$since" "$n"
+    ;;
+  dm)
+    who="${1:-}"; shift 2>/dev/null || true; msg="$*"
+    [ -z "$who" ] || [ -z "$msg" ] && { echo "usage: soa-bus dm <id|title> <msg>"; exit 2; }
+    tid="$(resolve_id "$who")"
+    [ -z "$tid" ] && { echo "no such agent: $who"; exit 2; }
+    append "$(dm_file "$tid")" "$(me_str)" dm "$tid" "$msg"
+    echo "dm -> #$tid"
+    ;;
+  inbox)
+    since=0; n=50; watch=0; fromstart=0; iv=2
+    while [ $# -gt 0 ]; do case "$1" in --since) since="$2"; shift 2;; --watch) watch=1; shift;; --from-start) fromstart=1; shift;; [0-9]*) n="$1"; shift;; *) shift;; esac; done
+    mid="$(me_id)"; [ -z "$mid" ] && { echo "can't determine my id (run inside a tab)"; exit 2; }
+    if [ "$watch" = 1 ]; then watch_file "$(dm_file "$mid")" "$fromstart" 0 "$iv"
+    else read_file "$(dm_file "$mid")" "$since" "$n"; fi
+    ;;
+  watch)
+    chan="${1:-}"; shift 2>/dev/null || true
+    once=0; fromstart=0; iv=2
+    while [ $# -gt 0 ]; do case "$1" in --once) once=1; shift;; --from-start) fromstart=1; shift;; --interval) iv="$2"; shift 2;; *) shift;; esac; done
+    [ -z "$chan" ] && { echo "usage: soa-bus watch <channel> [--from-start] [--once] [--interval S]"; exit 2; }
+    watch_file "$(chan_file "$chan")" "$fromstart" "$once" "$iv"
+    ;;
+  channels)
+    ls -1 "$BUS"/*.jsonl 2>/dev/null | sed 's#.*/##; s/\.jsonl$//' | sed 's/^/  #/' || true
+    n=$(ls -1 "$BUS"/dm/*.jsonl 2>/dev/null | wc -l | tr -d ' '); [ "${n:-0}" -gt 0 ] && echo "  (+$n direct-message inboxes)"
+    ;;
+  whoami) echo "$(me_str)  (bus dir: $BUS)";;
+  help|--help|-h|*) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//';;
+esac

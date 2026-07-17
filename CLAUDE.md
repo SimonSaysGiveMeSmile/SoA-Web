@@ -92,6 +92,30 @@ or `interrupt`+`resume` if wedged. On `done` → assign the next goal. On
 Prefer `goal`/`btw` over raw `send` so the slash-prefix is correct; never bare
 `claude` after a restart (use `resume`). Keep your own running notes as context.
 
+## Agent-to-agent comms (soa-bus)
+
+`soa-bus` is a **local-only** message bus so agents can coordinate directly
+instead of only through the manager. It is pure append-only JSONL under the
+state dir (`~/.soa-web-local/a2a/`) — it **never touches the network, is never
+uploaded, and is never shared off this machine**. No database, no daemon.
+
+```bash
+soa-bus post   <channel> <msg>          # publish to a shared channel
+soa-bus read   <channel> [--since MS] [N]   # last N (default 50)
+soa-bus dm     <id|title> <msg>         # direct message to one agent
+soa-bus inbox  [--since MS] [--watch]   # your direct messages
+soa-bus watch  <channel> [--once]       # BLOCK until new traffic, then print it
+soa-bus channels                        # list active channels
+soa-bus whoami                          # your bus identity (#id title)
+```
+
+Identity is auto-derived from `soa-sessions whoami` (`#<id> <title>`), so
+messages are attributed to the sending tab. Use it to hand off work between
+projects (post a contract/decision to a shared channel), request something from
+a peer (`dm`), or make an agent **event-driven** on a channel (`watch` blocks at
+≈0 CPU until a peer posts — the A2A analog of `soa-sessions watch`). Keep
+messages short; channels are size-capped and trimmed to the tail.
+
 ## Driving an isolated browser
 
 `soa-browser` controls a headless Chromium the server manages (separate from the
