@@ -26,7 +26,7 @@
     <true/>
 
     <key>StartInterval</key>
-    <integer>600</integer>
+    <integer>900</integer>
 
     <key>AbandonProcessGroup</key>
     <true/>

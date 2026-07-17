@@ -145,17 +145,24 @@ launchd jobs):
    persists the active channel (`tunnel.json`/`channels.json` in the state
    dir).
 5. `com.soa-web.heartbeat` — every 600s produces the fleet blocker digest.
-6. `com.soa-web.nudge-stale-4010` — every 600s runs `scripts/soa-nudge-stale`:
-   finds PARKED tabs (idle/done) that still carry an UNFINISHED Claude Code todo
-   list and types `continue` so they resume. Todo state is read from Claude
-   Code's on-disk task store, **not** the terminal — per tab: cwd →
-   newest `~/.claude/projects/<enc(cwd)>/<sid>.jsonl` → `~/.claude/tasks/<sid>/*.json`
-   (one file per task, `status` pending|in_progress|completed) — so it's
-   reliable even after the todo widget scrolls off. Conservative — skips manager
-   tabs, skips tabs asking the USER a question, holds a 20-min per-tab cooldown,
-   and a STALL GUARD stops nudging (and flags) a tab whose todo count doesn't
-   drop after repeated nudges (it needs the user, not another `continue`). Log:
-   `~/.soa-web/logs/nudge-stale.log`.
+6. `com.soa-web.nudge-stale-4010` — every **900s (15 min)** runs
+   `scripts/soa-nudge-stale` (FLEET-CONTINUE): keeps the whole fleet moving.
+   Finds PARKED tabs (idle/done/attention/stuck) that still carry an UNFINISHED
+   Claude Code todo list — todo state read from the on-disk task store, **not**
+   the terminal: per tab cwd → newest `~/.claude/projects/<enc(cwd)>/<sid>.jsonl`
+   → `~/.claude/tasks/<sid>/*.json` (one file per task, `status`
+   pending|in_progress|completed), reliable even after the widget scrolls off.
+   Then: a tab that just stopped → types `continue`; a tab **waiting on a
+   decision** (attention/stuck, or a question in its tail) → a fast headless
+   `claude -p` (haiku) reads its context + todos and **AUTONOMOUSLY makes the
+   best call**, typing the answer in (a digit for numbered menus). It does NOT
+   escalate to the user (per standing directive — see memory
+   `fleet-autonomy-decide`). Guardrails: prefer safe/reversible actions; never
+   auto-authorize spending money, deleting data, or destructive deploys, and for
+   human-only secrets (API keys/logins) tell the agent to proceed with all
+   non-blocked todos and defer that item. Skips manager tabs + caller; ~14m
+   per-tab cooldown; a tab making NO progress backs off to hourly (never
+   abandoned). Log: `~/.soa-web/logs/nudge-stale.log`.
 
 The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
 `com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end

@@ -1,26 +1,28 @@
 #!/bin/bash
-# SoA STALE-TODO NUDGER — runs every ~10 min (launchd com.soa-web.nudge-stale-4010)
-# and is also safe to invoke by hand. Finds tabs that are PARKED (idle/done) but
-# still carry an UNFINISHED Claude Code todo list, and types "continue" so they
-# resume working through it.
+# SoA FLEET-CONTINUE — runs every 15 min (launchd com.soa-web.nudge-stale-4010)
+# and is also safe to invoke by hand. Keeps the whole fleet moving:
+#   - finds tabs that are PARKED (idle/done/attention/stuck) but still carry an
+#     UNFINISHED Claude Code todo list (read from the on-disk task store, NOT the
+#     terminal, so it's reliable even after the todo widget scrolls off)
+#   - if the tab just stopped with nothing to answer -> types "continue"
+#   - if the tab is waiting on a DECISION (asking a question / blocked) -> a fast
+#     headless `claude -p` reads the tab's context + todos and AUTONOMOUSLY makes
+#     the most sensible call, then types that answer in. It does NOT escalate to
+#     the user (per the user's standing directive: always make a best decision).
 #
-# Todo state is read from Claude Code's on-disk task store — NOT the terminal —
-# so it's reliable even after the todo widget scrolls out of view:
-#   tab (index in ~/.soa-web-local/tabs.json) → cwd
-#     → newest ~/.claude/projects/<enc(cwd)>/<sid>.jsonl  → sid
-#       → ~/.claude/tasks/<sid>/*.json  (one file per task; status pending|
-#         in_progress|completed) → count open(pending)+inprog
-# (enc: '/' and '.' → '-'. Tabs that SHARE a cwd resolve to the newest session
-# in that dir — fine here since the shared-cwd tabs are the manager/dev tabs,
-# which are skipped or carry no todos.)
+# Todo detection: tab (index in ~/.soa-web-local/tabs.json) -> cwd ->
+#   newest ~/.claude/projects/<enc(cwd)>/<sid>.jsonl -> ~/.claude/tasks/<sid>/*.json
+#   (one file per task, status pending|in_progress|completed). enc: '/' '.' -> '-'.
 #
-# Deliberately conservative:
+# Guardrails on the autonomous decider:
+#   - prefer safe, reversible actions
+#   - never authorize spending money, deleting data, or irreversible/destructive
+#     deploys; for those, tell the agent to proceed with everything else + defer
+#   - human-only secrets (API key / login) -> continue all non-blocked todos, skip
 #   - skips the manager tab(s) and the caller's own tab
-#   - skips a tab that ended by asking the USER a question (user-answers-agents-directly)
-#   - per-tab cooldown (default 20m) so nothing is spammed
-#   - STALL GUARD: if repeated nudges don't reduce a tab's todo count, stop
-#     nudging it and flag it (it needs the user, not another "continue")
-#   - SOA_NUDGE_DRY=1 → log/print what it WOULD do, send nothing
+#   - per-tab cooldown (default ~14m); a tab that keeps making NO progress backs
+#     off to hourly (never abandoned, never escalated)
+#   - SOA_NUDGE_DRY=1 -> log/print intent, send nothing, no model calls
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$DIR/logs/nudge-stale.log"
@@ -28,12 +30,17 @@ STATED="$DIR/logs/.nudge-stale"          # per-tab state: "<lastEpoch> <total> <
 mkdir -p "$STATED" 2>/dev/null
 TS="$(date '+%Y-%m-%dT%H:%M:%S')"
 NOW="$(date +%s)"
-COOLDOWN="${SOA_NUDGE_COOLDOWN:-1200}"    # secs — don't re-nudge same tab within this
-STALL_LIMIT="${SOA_NUDGE_STALL:-3}"       # after this many ineffective nudges, stop + flag
+COOLDOWN="${SOA_NUDGE_COOLDOWN:-840}"     # secs — normal per-tab spacing (~14m, so each 15m run can act)
+BACKOFF="${SOA_NUDGE_BACKOFF:-3600}"      # secs — spacing once a tab is stuck w/o progress
+STALL_LIMIT="${SOA_NUDGE_STALL:-3}"       # ineffective actions before backing off
+DECIDE_MODEL="${SOA_DECIDE_MODEL:-claude-haiku-4-5-20251001}"
+DECIDE_TIMEOUT="${SOA_DECIDE_TIMEOUT:-90}"
 NUDGE_TEXT="${SOA_NUDGE_TEXT:-continue}"
 DRY="${SOA_NUDGE_DRY:-0}"
 
 log(){ echo "$TS $*" >> "$LOG"; }
+# portable timeout (macOS has no `timeout`): perl alarm wrapper
+run_to(){ local t="$1"; shift; perl -e 'my $t=shift; alarm $t; exec @ARGV or exit 127' "$t" "$@"; }
 
 SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
 LIST="$(soa-sessions list 2>/dev/null)"
@@ -41,18 +48,31 @@ LIST="$(soa-sessions list 2>/dev/null)"
 MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
 
 clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g; s/  +/ /g'; }
-
-# status per tab id, from the list ("idle"/"done"/"working"/"attention"/"stuck")
 status_of(){ echo "$LIST" | sed -nE "s/^ *#$1 .* (idle|done|working|attention|stuck) +ctx.*/\1/p" | head -1; }
 
-# file-based todo counts → emits "<id> <open> <inprog>" per tab that has any
+# autonomous decision: read context + todos, emit ONE imperative line to send
+decide(){
+  local id="$1" ctx="$2" todos="$3"
+  local prompt="You are the autonomous supervisor of a fleet of AI coding agents. Agent #$id has stopped and is waiting for a decision. Make the most sensible call for it so it keeps working — the human is NOT available, do not defer to them.
+
+RECENT TERMINAL (agent #$id):
+${ctx}
+
+ITS UNFINISHED TODOS:
+${todos}
+
+Output ONLY the exact text to type into this agent — a single line, no preamble, no quotes, no explanation. Rules: pick the most reasonable option from its context; prefer safe, reversible actions; NEVER authorize spending money, deleting data, or irreversible/destructive deploys — for those tell it to proceed with everything else and defer that one item; if it is blocked on a human-only secret (API key, account login) tell it to continue all non-blocked todos and skip the credential-gated one for now. If the agent is showing a NUMBERED menu/selector (options like 1,2,3 with 'Enter to select'), output ONLY the single digit of the best option. If nothing specific is being asked, just answer: continue"
+  printf '%s' "$prompt" | run_to "$DECIDE_TIMEOUT" claude -p --model "$DECIDE_MODEL" 2>/dev/null \
+    | tr -d '\r' | grep -vE '^[[:space:]]*$' | head -1 \
+    | sed -E 's/^["'"'"' ]+//; s/["'"'"' ]+$//' | cut -c1-500
+}
+
+# file-based todo scan -> TSV "id<TAB>open<TAB>inprog<TAB>subject; subject; ..."
 COUNTS="$(python3 - "$HOME" <<'PY'
 import json, os, glob, re, sys
 HOME = sys.argv[1]
-try:
-    T = json.load(open(f'{HOME}/.soa-web-local/tabs.json'))
-except Exception:
-    sys.exit(0)
+try: T = json.load(open(f'{HOME}/.soa-web-local/tabs.json'))
+except Exception: sys.exit(0)
 tabs = T if isinstance(T, list) else T.get('tabs', [])
 def enc(c): return re.sub(r'[/.]', '-', c or '')
 def sid_for(cwd):
@@ -65,65 +85,70 @@ for i, t in enumerate(tabs, start=1):
     if not sid: continue
     tdir = f'{HOME}/.claude/tasks/{sid}'
     if not os.path.isdir(tdir): continue
-    o = ip = 0
+    o = ip = 0; subs = []
     for f in glob.glob(f'{tdir}/*.json'):
-        try: s = json.load(open(f)).get('status')
+        try: d = json.load(open(f))
         except Exception: continue
-        if s == 'pending': o += 1
-        elif s == 'in_progress': ip += 1
+        s = d.get('status')
+        if s == 'pending': o += 1; subs.append(d.get('subject',''))
+        elif s == 'in_progress': ip += 1; subs.append('[doing] '+d.get('subject',''))
     if o + ip > 0:
-        print(f'{i} {o} {ip}')
+        print(f"{i}\t{o}\t{ip}\t{'; '.join(x for x in subs if x)[:600]}")
 PY
 )"
 [ -z "$COUNTS" ] && { log "no tabs with open todos"; exit 0; }
 
-printf '%s\n' "$COUNTS" | while read -r id open inprog; do
+printf '%s\n' "$COUNTS" | while IFS=$'\t' read -r id open inprog subjects; do
   [ -z "$id" ] && continue
   skip=0; for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
   [ "$skip" = 1 ] && continue
 
-  # only nudge PARKED tabs — a tab actively working is already making progress
+  # only act on PARKED tabs — one actively working is already making progress
   st="$(status_of "$id")"
-  case "$st" in idle|done) ;; *) continue;; esac
+  case "$st" in idle|done|attention|stuck) ;; *) continue;; esac
 
   total=$(( open + inprog ))
-
-  # asking the USER a question? leave it — that's the user's to answer
-  C="$(soa-sessions read "$id" 40 2>/dev/null | sed '1,2d' | clean)"
-  if printf '%s' "$C" | tail -c 700 | grep -qiE 'want me to|say the word|which .*(prefer|want)|\(a\).*\(b\)|shall i|should i'; then
-    log "#$id open=$open inprog=$inprog but asking the user — skipping"
-    continue
-  fi
-
-  # read prior state: "<lastEpoch> <total> <ineffective>"
   stamp="$STATED/$id"; last=0; ptotal=-1; ineff=0
   if [ -f "$stamp" ]; then read -r last ptotal ineff < "$stamp" 2>/dev/null; fi
-  [ -z "$last" ]   && last=0
-  [ -z "$ptotal" ] && ptotal=-1
-  [ -z "$ineff" ]  && ineff=0
+  [ -z "$last" ] && last=0; [ -z "$ptotal" ] && ptotal=-1; [ -z "$ineff" ] && ineff=0
 
-  # cooldown
-  [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
+  # stuck-without-progress tabs back off to hourly (still acted on, never abandoned)
+  cd="$COOLDOWN"; [ "$ineff" -ge "$STALL_LIMIT" ] && cd="$BACKOFF"
+  [ $(( NOW - last )) -lt "$cd" ] && continue
 
-  # stall guard: did the last nudge fail to reduce the todo count?
-  if [ "$ptotal" -ge 0 ] && [ "$total" -ge "$ptotal" ]; then
-    ineff=$(( ineff + 1 ))
-  else
-    ineff=0
+  # decide vs plain continue. attention/stuck = supervisor already says it needs
+  # input -> always decide. idle/done -> decide only if the tail shows a question.
+  C="$(soa-sessions read "$id" 40 2>/dev/null | sed '1,2d' | clean)"
+  tail_snip="$(printf '%s' "$C" | tail -c 1400)"
+  mode="continue"
+  case "$st" in attention|stuck) mode="decide";; esac
+  if [ "$mode" = "continue" ] && printf '%s' "$tail_snip" | grep -qiE 'want me to|say the word|which .*(prefer|want)|\(a\).*\(b\)|shall i|should i|option [0-9ab]|\? *$'; then
+    mode="decide"
   fi
-  if [ "$ineff" -ge "$STALL_LIMIT" ]; then
-    log "#$id STALLED (open=$open inprog=$inprog unchanged after $ineff nudges) — needs user, not nudging"
+
+  # update ineffective streak (did the previous action move the needle?)
+  if [ "$ptotal" -ge 0 ] && [ "$total" -ge "$ptotal" ]; then ineff=$(( ineff + 1 )); else ineff=0; fi
+
+  if [ "$mode" = "decide" ]; then
+    if [ "$DRY" = 1 ]; then
+      log "[dry] would DECIDE #$id (open=$open inprog=$inprog ineff=$ineff)"
+      printf 'would DECIDE #%s (open=%s inprog=%s)\n' "$id" "$open" "$inprog"
+      continue
+    fi
+    ans="$(decide "$id" "$tail_snip" "$subjects")"
+    [ -z "$ans" ] && ans="$NUDGE_TEXT"
+    soa-sessions send "$id" "$ans" >/dev/null 2>&1
     echo "$NOW $total $ineff" > "$stamp"
-    continue
+    log "DECIDED #$id (open=$open inprog=$inprog ineff=$ineff) -> \"$ans\""
+  else
+    if [ "$DRY" = 1 ]; then
+      log "[dry] would continue #$id (open=$open inprog=$inprog ineff=$ineff)"
+      printf 'would continue #%s (open=%s inprog=%s)\n' "$id" "$open" "$inprog"
+      continue
+    fi
+    soa-sessions send "$id" "$NUDGE_TEXT" >/dev/null 2>&1
+    echo "$NOW $total $ineff" > "$stamp"
+    log "continued #$id (open=$open inprog=$inprog ineff=$ineff)"
   fi
-
-  if [ "$DRY" = 1 ]; then
-    log "[dry] would nudge #$id (open=$open inprog=$inprog ineff=$ineff)"
-    printf 'would nudge #%s (open=%s inprog=%s ineff=%s)\n' "$id" "$open" "$inprog" "$ineff"
-    continue
-  fi
-  soa-sessions send "$id" "$NUDGE_TEXT" >/dev/null 2>&1
-  echo "$NOW $total $ineff" > "$stamp"
-  log "nudged #$id (open=$open inprog=$inprog ineff=$ineff) -> \"$NUDGE_TEXT\""
 done
 exit 0
