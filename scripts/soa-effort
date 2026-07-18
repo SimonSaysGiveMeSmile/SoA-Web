@@ -1,0 +1,72 @@
+#!/bin/bash
+# soa-effort — keep every fleet agent at `/effort ultracode` (xhigh effort +
+# standing dynamic-workflow orchestration). ultracode is a SESSION-ONLY setting,
+# so it resets to the settings.json default (xhigh) whenever a session restarts/
+# resumes — this sweep re-asserts it. Runs every 15 min (launchd
+# com.soa-web.effort-4010); also safe by hand.
+#
+# Requires `enableWorkflows: true` in ~/.claude/settings.json (else /effort
+# ultracode errors "needs dynamic workflows enabled"); this script verifies it.
+#
+# Only touches PARKED tabs (idle/done) so it never interrupts a working agent.
+# Detects current effort from the live footer: the word "ultracode" there means
+# it's already set -> skip. Per-tab cooldown avoids re-sending too often.
+#   SOA_EFFORT_DRY=1 -> log/print intent, send nothing.
+set -u
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="$DIR/logs/effort.log"
+STATED="$DIR/logs/.effort"
+mkdir -p "$STATED" 2>/dev/null
+TS="$(date '+%Y-%m-%dT%H:%M:%S')"
+NOW="$(date +%s)"
+COOLDOWN="${SOA_EFFORT_COOLDOWN:-1200}"    # 20m — don't re-send to same tab within this
+TARGET="${SOA_EFFORT_TARGET:-ultracode}"
+DRY="${SOA_EFFORT_DRY:-0}"
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+log(){ echo "$TS $*" >> "$LOG"; }
+
+# preflight: ultracode needs dynamic workflows enabled globally
+if [ "$TARGET" = "ultracode" ] && [ -f "$SETTINGS" ]; then
+  ew="$(python3 -c "import json,sys;print(json.load(open('$SETTINGS')).get('enableWorkflows'))" 2>/dev/null)"
+  if [ "$ew" != "True" ]; then
+    log "WARN: enableWorkflows is $ew in settings.json — /effort ultracode will error until it's true"
+  fi
+fi
+
+SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+LIST="$(soa-sessions list 2>/dev/null)"
+[ -z "$LIST" ] && { log "no list (daemon down?) — skip"; exit 0; }
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g'; }
+
+# parked tabs only (idle/done) — never interrupt a working agent
+echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read -r id; do
+  [ -z "$id" ] && continue
+  skip=0; for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
+  [ "$skip" = 1 ] && continue
+
+  stamp="$STATED/$id"
+  if [ -f "$stamp" ]; then last="$(cat "$stamp" 2>/dev/null || echo 0)"; else last=0; fi
+  [ -z "$last" ] && last=0
+  [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
+
+  # current effort from the live footer (a footer status line with a "·" plus
+  # the effort word). The scrollback may echo a "/effort ..." command, so only
+  # look at footer-marker lines, and take the last one.
+  foot="$(soa-sessions read "$id" 30 2>/dev/null | clean | tr '\r' '\n' | grep -E '·' | grep -iE 'ultracode|effort' | tail -1)"
+  if printf '%s' "$foot" | grep -qi "$TARGET"; then
+    echo "$NOW" > "$stamp"          # already at target — reset cooldown, skip
+    continue
+  fi
+
+  if [ "$DRY" = 1 ]; then
+    log "[dry] would set #$id -> /effort $TARGET (footer: ${foot:0:60})"
+    printf 'would set #%s -> /effort %s\n' "$id" "$TARGET"
+    continue
+  fi
+  soa-sessions send "$id" "/effort $TARGET" >/dev/null 2>&1
+  echo "$NOW" > "$stamp"
+  log "set #$id -> /effort $TARGET"
+done
+exit 0

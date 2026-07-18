@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EFFORT ENFORCER — runs scripts/soa-effort every 15 min (900s). Keeps every
+  fleet agent at `/effort ultracode` (xhigh + standing dynamic-workflow
+  orchestration). ultracode is session-only and resets on restart, so this
+  re-asserts it. Only touches PARKED tabs; skips ones already at ultracode.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.effort-4010.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.effort-4010</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-effort</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/effort.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/effort.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

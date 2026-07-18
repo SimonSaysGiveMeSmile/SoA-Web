@@ -187,6 +187,15 @@ launchd jobs):
    non-blocked todos and defer that item. Skips manager tabs + caller; ~14m
    per-tab cooldown; a tab making NO progress backs off to hourly (never
    abandoned). Log: `~/.soa-web/logs/nudge-stale.log`.
+7. `com.soa-web.effort-4010` — every 900s runs `scripts/soa-effort`: keeps every
+   agent at `/effort ultracode` (xhigh effort + standing dynamic-workflow
+   orchestration). ultracode is **session-only** — it resets to the settings.json
+   default (`xhigh`) on restart/resume — so this re-asserts it. Requires
+   `enableWorkflows: true` in `~/.claude/settings.json` (else `/effort ultracode`
+   errors "needs dynamic workflows enabled"); the script warns if it's off. Only
+   touches PARKED tabs (never interrupts a working agent); detects current effort
+   from the footer (the word `ultracode`) and skips tabs already set; ~20m per-tab
+   cooldown. Log: `~/.soa-web/logs/effort.log`.
 
 The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
 `com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end
