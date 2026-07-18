@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Son of Anton — shared view</title>
+<!-- xterm.js: the SAME version the main app uses (index.html loads these
+     from jsdelivr). Matching the vendor + version keeps rendering identical
+     to what the owner sees. If the CDN is unreachable we fall back to a
+     minimal, XSS-safe ANSI <pre> renderer (see boot() below). -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+  :root {
+    --fg: #aacfd1;
+    --bg: #05080d;
+    --dim: #5c7275;
+    --line: rgba(170,207,209,0.14);
+    --ok: #50fa7b;
+    --warn: #f1fa8c;
+    --bad: #ff5555;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  header {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(170,207,209,0.05), transparent);
+    font-size: 13px;
+    user-select: none;
+  }
+  .brand { font-weight: 600; letter-spacing: 0.2px; }
+  .tab-title {
+    color: var(--dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 40vw;
+  }
+  .spacer { flex: 1 1 auto; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 9px; white-space: nowrap;
+  }
+  .badge b { color: var(--fg); font-weight: 600; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--warn); flex: 0 0 auto;
+    box-shadow: 0 0 6px currentColor; color: var(--warn);
+    transition: background .2s, color .2s;
+  }
+  .dot.on  { background: var(--ok);  color: var(--ok); }
+  .dot.off { background: var(--bad); color: var(--bad); }
+  .status-text { font-variant-numeric: tabular-nums; }
+  #term-wrap {
+    flex: 1 1 auto; position: relative; min-height: 0;
+    padding: 6px 8px 8px;
+  }
+  #term { position: absolute; inset: 6px 8px 8px; }
+  /* Minimal-renderer fallback surface. */
+  #fallback {
+    position: absolute; inset: 6px 8px 8px;
+    margin: 0; overflow: auto;
+    font-family: "Fira Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px; line-height: 1.35;
+    color: var(--fg); background: var(--bg);
+    white-space: pre-wrap; word-break: break-word;
+    display: none;
+  }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 13px; text-align: center; padding: 24px;
+    pointer-events: none; transition: opacity .3s;
+  }
+  #overlay.hidden { opacity: 0; }
+  .xterm { height: 100%; }
+  /* ANSI SGR classes for the fallback renderer (bounded palette). */
+  .a-b { font-weight: 700; }
+  .a-i { font-style: italic; }
+  .a-u { text-decoration: underline; }
+  .fg-0{color:#000}.fg-1{color:#ff5555}.fg-2{color:#50fa7b}.fg-3{color:#f1fa8c}
+  .fg-4{color:#6272a4}.fg-5{color:#ff79c6}.fg-6{color:#8be9fd}.fg-7{color:#f8f8f2}
+  .fg-8{color:#262828}.fg-9{color:#ff6e6e}.fg-10{color:#69ff94}.fg-11{color:#ffffa5}
+  .fg-12{color:#7b93bd}.fg-13{color:#ff92df}.fg-14{color:#a4ffff}.fg-15{color:#fff}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="brand">Son of Anton</span>
+    <span class="tab-title" id="tab-title"></span>
+    <span class="spacer"></span>
+    <span class="badge">read-only • shared view</span>
+    <span class="badge"><span class="dot" id="dot"></span><span class="status-text" id="status">connecting…</span></span>
+  </header>
+  <div id="term-wrap">
+    <div id="term"></div>
+    <pre id="fallback" aria-live="polite"></pre>
+    <div id="overlay">Connecting to shared terminal…</div>
+  </div>
+</div>
+
+<!-- xterm + fit addon, same CDN/version as the main app. Loaded WITHOUT
+     `defer`/`async` guarantees; boot() checks whether window.Terminal exists
+     and picks the renderer accordingly, so a blocked CDN degrades to the
+     minimal ANSI renderer rather than a blank page. -->
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script>
+"use strict";
+(function () {
+  // ── Wire protocol constants (mirror server/src/protocol.js). ────────────
+  var PROTOCOL_VERSION = 1;
+  var MSG = {
+    HELLO: 'hello', REPLAY: 'replay', TERM_DATA: 'term-data',
+    TERM_EXIT: 'term-exit', PING: 'ping', PONG: 'pong',
+  };
+  function frame(t, d) { return JSON.stringify({ v: PROTOCOL_VERSION, t: t, d: d || {} }); }
+  function parse(raw) {
+    try {
+      var o = JSON.parse(raw);
+      if (!o || typeof o !== 'object' || typeof o.t !== 'string') return null;
+      if (o.v && o.v !== PROTOCOL_VERSION) return null;
+      return o;
+    } catch (_) { return null; }
+  }
+
+  // ── Parse shareId from /share/<id> and token from ?st=. ─────────────────
+  function parseShareId() {
+    var m = location.pathname.match(/\/share\/([^\/?#]+)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+  var shareId = parseShareId();
+  var token = new URLSearchParams(location.search).get('st') || '';
+
+  // ── UI handles. ─────────────────────────────────────────────────────────
+  var dotEl = document.getElementById('dot');
+  var statusEl = document.getElementById('status');
+  var overlayEl = document.getElementById('overlay');
+  var titleEl = document.getElementById('tab-title');
+  var termEl = document.getElementById('term');
+  var fallbackEl = document.getElementById('fallback');
+
+  function setStatus(state, text) {
+    dotEl.className = 'dot' + (state === 'on' ? ' on' : state === 'off' ? ' off' : '');
+    statusEl.textContent = text;
+  }
+  function hideOverlay() { overlayEl.classList.add('hidden'); }
+  function showOverlay(t) { overlayEl.textContent = t; overlayEl.classList.remove('hidden'); }
+  function setTitle(t) { titleEl.textContent = t ? '— ' + t : ''; }
+
+  // The scoped share only ever streams ONE tab; we lock onto the first id we
+  // see (from HELLO meta / replay) and ignore frames for any other id as a
+  // defensive measure.
+  var boundTabId = null;
+  function accept(id) {
+    if (id == null) return true;
+    if (boundTabId == null) { boundTabId = id; return true; }
+    return id === boundTabId;
+  }
+
+  // ── Renderer: xterm.js when available, else a minimal ANSI <pre>. ────────
+  var writer = null; // function(str)
+
+  var TRON_THEME = {
+    foreground: '#aacfd1', background: '#05080d',
+    cursor: '#aacfd1', cursorAccent: '#aacfd1',
+    selectionBackground: 'rgba(170,207,209,0.3)',
+    black: '#000000', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
+    blue: '#6272a4', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
+    brightBlack: '#262828', brightRed: '#ff6e6e', brightGreen: '#69ff94',
+    brightYellow: '#ffffa5', brightBlue: '#7b93bd', brightMagenta: '#ff92df',
+    brightCyan: '#a4ffff', brightWhite: '#ffffff',
+  };
+
+  function makeXterm() {
+    var term = new window.Terminal({
+      fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
+      fontSize: 13,
+      theme: TRON_THEME,
+      cursorBlink: false,
+      disableStdin: true,   // hard read-only: no keyboard capture into the buffer
+      scrollback: 5000,
+      convertEol: false,
+    });
+    var fit = null;
+    try { fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); } catch (_) {}
+    term.open(termEl);
+    // xterm's textarea would still grab focus/keystrokes even with
+    // disableStdin (it just ignores them). Remove it so nothing is typeable.
+    try {
+      var ta = termEl.querySelector('.xterm-helper-textarea');
+      if (ta) { ta.setAttribute('readonly', 'readonly'); ta.tabIndex = -1; ta.style.display = 'none'; }
+    } catch (_) {}
+    function doFit() { try { if (fit) fit.fit(); } catch (_) {} }
+    doFit();
+    window.addEventListener('resize', doFit);
+    return { write: function (s) { term.write(s); }, kind: 'xterm' };
+  }
+
+  // Minimal, XSS-safe ANSI renderer into <pre>. Never uses innerHTML on raw
+  // bytes: text is inserted as DOM text nodes; only bounded, self-built SGR
+  // <span> wrappers (whose class list we control) carry color. Handles
+  // CR, LF, BS, and CSI SGR (colors/bold/underline); other CSI/escape
+  // sequences are consumed and dropped so control bytes never reach the DOM.
+  function makeMinimal() {
+    fallbackEl.style.display = 'block';
+    termEl.style.display = 'none';
+    // Line model: array of lines, each an array of {text, cls}. A cursor
+    // (row/col) so CR/BS overwrite in place the way a terminal does.
+    var lines = [[]];
+    var row = 0, col = 0;
+    var cur = { fg: null, bold: false, italic: false, underline: false };
+    var pend = ''; // partial escape sequence spillover across frames
+
+    function classFor(a) {
+      var c = [];
+      if (a.bold) c.push('a-b');
+      if (a.italic) c.push('a-i');
+      if (a.underline) c.push('a-u');
+      if (a.fg != null) c.push('fg-' + a.fg);
+      return c.join(' ');
+    }
+    function ensureRow(r) { while (lines.length <= r) lines.push([]); }
+    function putChar(ch) {
+      ensureRow(row);
+      var line = lines[row];
+      var cell = { text: ch, cls: classFor(cur) };
+      if (col < line.length) line[col] = cell; else { while (line.length < col) line.push({ text: ' ', cls: '' }); line.push(cell); }
+      col++;
+    }
+    function applySGR(params) {
+      var ps = params.length ? params : [0];
+      for (var i = 0; i < ps.length; i++) {
+        var n = ps[i] | 0;
+        if (n === 0) { cur = { fg: null, bold: false, italic: false, underline: false }; }
+        else if (n === 1) cur.bold = true;
+        else if (n === 3) cur.italic = true;
+        else if (n === 4) cur.underline = true;
+        else if (n === 22) cur.bold = false;
+        else if (n === 23) cur.italic = false;
+        else if (n === 24) cur.underline = false;
+        else if (n === 39) cur.fg = null;
+        else if (n >= 30 && n <= 37) cur.fg = n - 30;
+        else if (n >= 90 && n <= 97) cur.fg = n - 90 + 8;
+      }
+    }
+
+    function feed(s) {
+      s = pend + s; pend = '';
+      var i = 0, n = s.length;
+      while (i < n) {
+        var ch = s[i];
+        if (ch === '\x1b') {
+          // Escape sequence. Only handle CSI (\x1b[ … final-byte); consume
+          // and drop others. If truncated at frame end, stash in `pend`.
+          if (i + 1 >= n) { pend = s.slice(i); break; }
+          if (s[i + 1] === '[') {
+            var j = i + 2, params = '';
+            while (j < n && !((s[j] >= '@' && s[j] <= '~'))) { params += s[j]; j++; }
+            if (j >= n) { pend = s.slice(i); break; } // incomplete CSI
+            var final = s[j];
+            if (final === 'm') {
+              applySGR(params.split(';').map(function (x) { return x === '' ? 0 : parseInt(x, 10); }));
+            }
+            // All other CSI (cursor moves, clears, etc.) are dropped — a
+            // read-only log view doesn't need full cursor addressing, and
+            // dropping keeps output monotonic + safe.
+            i = j + 1; continue;
+          } else {
+            // Two-char escape (e.g. ESC c) or OSC — skip ESC and next byte;
+            // for OSC (ESC ]) consume up to BEL/ST.
+            if (s[i + 1] === ']') {
+              var k = i + 2;
+              while (k < n && s[k] !== '\x07' && !(s[k] === '\x1b' && s[k + 1] === '\\')) k++;
+              if (k >= n) { pend = s.slice(i); break; }
+              i = (s[k] === '\x07') ? k + 1 : k + 2; continue;
+            }
+            i += 2; continue;
+          }
+        }
+        if (ch === '\n') { row++; col = 0; ensureRow(row); i++; continue; }
+        if (ch === '\r') { col = 0; i++; continue; }
+        if (ch === '\b') { if (col > 0) col--; i++; continue; }
+        if (ch === '\t') { var next = (col + 8) & ~7; while (col < next) putChar(' '); i++; continue; }
+        // Drop remaining C0 control chars (except handled above).
+        if (ch < ' ' && ch !== '\x1b') { i++; continue; }
+        putChar(ch); i++;
+      }
+      render();
+    }
+
+    function render() {
+      // Rebuild via DOM text nodes + controlled spans — NEVER innerHTML of
+      // raw PTY bytes. Cap displayed lines to bound memory.
+      var MAX = 5000;
+      if (lines.length > MAX) { lines = lines.slice(lines.length - MAX); row = lines.length - 1; }
+      var frag = document.createDocumentFragment();
+      for (var r = 0; r < lines.length; r++) {
+        var line = lines[r];
+        // Coalesce adjacent cells with the same class.
+        var buf = '', cls = null, first = true;
+        for (var c = 0; c < line.length; c++) {
+          var cell = line[c];
+          if (cell.cls !== cls) {
+            if (!first) emit(frag, buf, cls);
+            buf = cell.text; cls = cell.cls; first = false;
+          } else { buf += cell.text; }
+        }
+        if (!first) emit(frag, buf, cls);
+        if (r < lines.length - 1) frag.appendChild(document.createTextNode('\n'));
+      }
+      fallbackEl.textContent = '';
+      fallbackEl.appendChild(frag);
+      fallbackEl.scrollTop = fallbackEl.scrollHeight;
+    }
+    function emit(frag, text, cls) {
+      if (cls) {
+        var span = document.createElement('span');
+        span.className = cls;            // only our own bounded class names
+        span.appendChild(document.createTextNode(text)); // text node → no HTML parse
+        frag.appendChild(span);
+      } else {
+        frag.appendChild(document.createTextNode(text));
+      }
+    }
+
+    return { write: feed, kind: 'minimal' };
+  }
+
+  function boot() {
+    if (!shareId || !token) {
+      setStatus('off', 'invalid link');
+      showOverlay('This share link is missing its id or token.');
+      return;
+    }
+    if (window.Terminal && window.FitAddon) {
+      try { writer = makeXterm(); } catch (_) { writer = makeMinimal(); }
+    } else {
+      writer = makeMinimal();
+    }
+    connect();
+  }
+
+  // ── WebSocket to /ws?share=<id>&st=<token> on the same host. ─────────────
+  var ws = null, pingTimer = null, reconnectTimer = null, reconnectDelay = 1000;
+
+  function wsUrl() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return proto + '//' + location.host + '/ws?share=' + encodeURIComponent(shareId) +
+      '&st=' + encodeURIComponent(token);
+  }
+
+  function connect() {
+    clearTimeout(reconnectTimer);
+    setStatus('', 'connecting…');
+    try { ws = new WebSocket(wsUrl()); } catch (_) { scheduleReconnect(); return; }
+
+    ws.onopen = function () {
+      reconnectDelay = 1000;
+      setStatus('on', 'live');
+      // Keepalive: ping every ~4s; server replies PONG.
+      clearInterval(pingTimer);
+      pingTimer = setInterval(function () {
+        if (ws && ws.readyState === 1) {
+          try { ws.send(frame(MSG.PING, { ts: Date.now() })); } catch (_) {}
+        }
+      }, 4000);
+    };
+
+    ws.onmessage = function (ev) {
+      var msg = parse(typeof ev.data === 'string' ? ev.data : '');
+      if (!msg) return;
+      var d = msg.d || {};
+      switch (msg.t) {
+        case MSG.HELLO: {
+          var meta = (d.tabs && d.tabs[0]) || null;
+          if (meta) { boundTabId = meta.id; setTitle(meta.title || ('tab ' + meta.id)); }
+          if (d.activeId != null && boundTabId == null) boundTabId = d.activeId;
+          if (Array.isArray(d.replay)) {
+            d.replay.forEach(function (r) {
+              if (r && accept(r.id) && typeof r.data === 'string') writer.write(r.data);
+            });
+          }
+          hideOverlay();
+          break;
+        }
+        case MSG.REPLAY:
+          if (accept(d.id) && typeof d.data === 'string') writer.write(d.data);
+          hideOverlay();
+          break;
+        case MSG.TERM_DATA:
+          if (accept(d.id) && typeof d.data === 'string') writer.write(d.data);
+          hideOverlay();
+          break;
+        case MSG.TERM_EXIT:
+          if (accept(d.id)) {
+            writer.write('\r\n\x1b[90m[shared session ended' +
+              (d.code != null ? ' — exit ' + d.code : '') + ']\x1b[0m\r\n');
+            setStatus('off', 'session ended');
+          }
+          break;
+        case MSG.PONG:
+          break; // keepalive ack
+        default:
+          break; // ignore anything else (read-only: no other frames expected)
+      }
+    };
+
+    ws.onclose = function (ev) {
+      clearInterval(pingTimer);
+      if (ev && (ev.code === 1008 || ev.code === 4001)) {
+        setStatus('off', 'access revoked');
+        showOverlay('This share link is no longer valid.');
+        return; // don't hammer-reconnect an unauthorized socket
+      }
+      setStatus('off', 'reconnecting…');
+      scheduleReconnect();
+    };
+
+    ws.onerror = function () { try { ws.close(); } catch (_) {} };
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.6, 15000);
+  }
+
+  // The upgrade handler rejects a bad token with a plain 401 (no WS), so the
+  // first connect throws/closes fast; the reconnect backoff + the 'invalid
+  // link' guard above cover both cases.
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else { boot(); }
+
+  // Expose a tiny test seam so a headless check can drive the frame handler
+  // without a live socket (used by the self-verify step).
+  window.__shareViewer = {
+    get writer() { return writer; },
+    parse: parse, frame: frame, parseShareId: parseShareId,
+    _injectMinimal: function () { writer = makeMinimal(); return writer; },
+  };
+})();
+</script>
+</body>
+</html>

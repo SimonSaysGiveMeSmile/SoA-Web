@@ -489,15 +489,26 @@ app.get('/m/*', (req, res) => {
     res.sendFile(path.join(MOBILE_DIR, 'index.html'));
 });
 
+// Read-only share links (feature-flagged). Registered before the SPA fallback so
+// /share/:id serves the viewer instead of the app shell. Additive route subtree.
+if (process.env.SOA_WEB_SHARE === '1') {
+    try { require('./shareLinks').mount(app, { requireAuthed, publicDir: PUBLIC_DIR, closeViewersForShare }); }
+    catch (e) { console.error('share mount failed:', e && e.message); }
+}
+
 // SPA fallback — any unknown GET serves index.html so client-side routes work.
 app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/') || req.path.startsWith('/_') || req.path.startsWith('/m')) return next();
+    if (req.path.startsWith('/api/') || req.path.startsWith('/_') || req.path.startsWith('/m') || req.path.startsWith('/share')) return next();
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
 // ── HTTP + WS server ────────────────────────────────────────────────────
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
+
+// ── Read-only per-tab share links (feature-flagged; default OFF) ──────────────
+const shareRegistry = require('./shareRegistry');
+const SHARE_ENABLED = process.env.SOA_WEB_SHARE === '1';
 
 server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
@@ -507,6 +518,28 @@ server.on('upgrade', (req, socket, head) => {
     // Dev-server HMR websockets for the local-web preview proxy.
     if (url.pathname.startsWith('/preview/') && preview.proxyUpgrade(req, socket, head)) return;
     if (url.pathname !== '/ws') { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
+
+    // ── Share-link viewer: a scoped, read-only socket bound to ONE tab. The
+    // share token is its own authorization, so this branch runs BEFORE the
+    // session-token / origin / cookie gates and hands off to a restricted
+    // connect handler that never joins session.sockets.
+    if (SHARE_ENABLED && (url.searchParams.get('share') || url.searchParams.get('st'))) {
+        const rec = shareRegistry.resolve(url.searchParams.get('share'), url.searchParams.get('st'));
+        if (!rec) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+        // A share token is a bearer capability, but still refuse a cross-origin WS
+        // from an arbitrary third-party page (embedding/clickjacking). In cross-
+        // site (tunnel) mode only the served origin + tunnel origin may open it.
+        const _shareOrigin = req.headers.origin;
+        if (CROSS_SITE && _shareOrigin && !ALLOWED_ORIGINS.includes(_shareOrigin)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return;
+        }
+        const shareSession = sessions.get(rec.sessionId);
+        if (!shareSession || !shareSession.tabMgr || !shareSession.tabMgr.get(rec.tabId)) {
+            socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return;
+        }
+        wss.handleUpgrade(req, socket, head, ws => onShareConnect(ws, shareSession, rec, req));
+        return;
+    }
 
     if (SESSION_TOKEN) {
         const presented = url.searchParams.get('t') || '';
@@ -639,7 +672,9 @@ function onWsConnect(ws, session, req) {
         session.tabMgr = new TabManager({
             onData: (tabId, data) => {
                 agg('term-out', 'session=' + session.id.slice(0, 8) + ' tab=' + tabId, data.length, '→ ' + session.sockets.size + ' socket(s)');
-                session.send(frame(MSG.TERM_DATA, { id: tabId, data }));
+                const _tf = frame(MSG.TERM_DATA, { id: tabId, data });
+                session.send(_tf);
+                if (SHARE_ENABLED && session.shareViewers.size) session.sendToShareViewers(tabId, _tf);
                 // Feed the always-on supervisor so it tracks status + context
                 // for every tab regardless of which client is watching.
                 try { sessionManager.ensure(session).feed(tabId, data); } catch (_) {}
@@ -664,7 +699,9 @@ function onWsConnect(ws, session, req) {
                 // (status, stuck latch). forget() was never called before — a
                 // latent leak the event/stuck machinery would otherwise inherit.
                 try { sessionManager.ensure(session).noteExit(tabId); } catch (_) {}
-                session.send(frame(MSG.TERM_EXIT, { id: tabId, code }));
+                const _ef = frame(MSG.TERM_EXIT, { id: tabId, code });
+                session.send(_ef);
+                if (SHARE_ENABLED && session.shareViewers.size) session.sendToShareViewers(tabId, _ef);
             },
         });
 
@@ -832,6 +869,74 @@ function onWsConnect(ws, session, req) {
         _broadcastDeviceCount(session);
     });
     ws.on('error', () => { /* close handler will fire too */ });
+}
+
+// A read-only share socket: bound to ONE tab, receives only that tab's output,
+// accepts NO input. Deliberately NOT added to session.sockets, so it never sees
+// the full broadcast (other tabs, manager frames, snapshots, device counts).
+function onShareConnect(ws, session, rec, req) {
+    const tabId = Number(rec.tabId);
+    ws._shareMode = true;
+    ws._shareTabId = tabId;
+    ws._shareId = rec.shareId;   // so revoke/expiry can find + close THIS socket
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+    session.addShareViewer(tabId, ws);
+    try {
+        const meta = (session.tabMgr.list() || []).find(t => t.id === tabId);
+        const scroll = session.tabMgr.scrollback(tabId);
+        ws.send(frame(MSG.HELLO, {
+            serverVersion: 1,
+            serverTime: Date.now(),
+            tabs: meta ? [meta] : [],
+            activeId: tabId,
+            replay: (scroll && scroll.length) ? [{ id: tabId, data: scroll }] : [],
+            graveyard: [],
+            connectedDevices: 1,
+            shareMode: 'read',
+        }));
+    } catch (_) {}
+    ws.on('message', raw => {
+        // Read-only: honor keepalive ping only; drop everything else (no input).
+        const msg = parse(raw.toString());
+        if (msg && msg.t === MSG.PING) { try { ws.send(frame(MSG.PONG, { ts: Date.now() })); } catch (_) {} }
+    });
+    ws.on('close', () => { try { session.removeShareViewer(tabId, ws); } catch (_) {} });
+    ws.on('error', () => {});
+}
+
+// Revocation/expiry must cut the LIVE socket, not just flip a registry flag —
+// else a connected viewer keeps streaming the terminal forever. Close every
+// viewer socket carrying this shareId across all sessions.
+function closeViewersForShare(shareId) {
+    let closed = 0;
+    for (const s of sessions.sessions.values()) {
+        if (!s.shareViewers) continue;
+        for (const set of s.shareViewers.values()) {
+            for (const ws of set) {
+                if (ws._shareId === shareId) { try { ws.close(1008, 'share revoked'); closed++; } catch (_) {} }
+            }
+        }
+    }
+    return closed;
+}
+
+// Belt-and-braces: periodically close any viewer whose share is no longer live
+// (revoked or past its TTL), so expiry is enforced on the wire too.
+if (SHARE_ENABLED) {
+    const _shareSweep = setInterval(() => {
+        for (const s of sessions.sessions.values()) {
+            if (!s.shareViewers) continue;
+            for (const set of s.shareViewers.values()) {
+                for (const ws of set) {
+                    if (ws._shareId && !shareRegistry.isLive(ws._shareId)) {
+                        try { ws.close(1008, 'share expired'); } catch (_) {}
+                    }
+                }
+            }
+        }
+    }, 5000);
+    if (_shareSweep.unref) _shareSweep.unref();
 }
 
 // Stream each background tab's scrollback as its own REPLAY frame, one at a

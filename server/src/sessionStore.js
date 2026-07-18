@@ -31,6 +31,11 @@ class Session {
         this.tabs = [];              // array of Tab instances (see tabManager.js)
         this.activeTab = 0;
         this.sockets = new Set();    // all live browser sockets for this session
+        // Read-only share viewers, keyed by tabId. These are NOT in `sockets`,
+        // so they never receive the full session broadcast (other tabs, manager
+        // frames, etc.) — only the one tab's output, fanned in via
+        // sendToShareViewers(). Kept separate so the normal hot path is untouched.
+        this.shareViewers = new Map(); // tabId -> Set<ws>
     }
 
     touch() { this.lastSeen = Date.now(); }
@@ -46,6 +51,29 @@ class Session {
             try { ws.send(frameStr); delivered++; } catch (_) { /* drop */ }
         }
         return delivered > 0;
+    }
+
+    addShareViewer(tabId, ws) {
+        const key = Number(tabId);
+        if (!this.shareViewers.has(key)) this.shareViewers.set(key, new Set());
+        this.shareViewers.get(key).add(ws);
+    }
+
+    removeShareViewer(tabId, ws) {
+        const set = this.shareViewers.get(Number(tabId));
+        if (!set) return;
+        set.delete(ws);
+        if (!set.size) this.shareViewers.delete(Number(tabId));
+    }
+
+    // Fan a single tab's frame out to its read-only viewers only.
+    sendToShareViewers(tabId, frameStr) {
+        const set = this.shareViewers.get(Number(tabId));
+        if (!set) return;
+        for (const ws of set) {
+            if (!ws || ws.readyState !== 1 /* OPEN */) continue;
+            try { ws.send(frameStr); } catch (_) { /* drop */ }
+        }
     }
 }
 
