@@ -286,6 +286,12 @@ ch_cloudflare() {
               | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('publicUrl',''))" 2>/dev/null)"
     fi
     [ -z "$url" ] && return 1
+    # Only adopt a GENUINE cloudflare quick-tunnel host under the cloudflare label.
+    # When no cloudflared can be minted the daemon sometimes echoes back the existing
+    # tunnel (e.g. an ngrok url); adopting that as "cloudflare" mislabels channels.json
+    # and tells the user "works on s0a.app" for a host whose free interstitial blocks
+    # the cross-origin call. Fail here so failover adopts it under the CORRECT channel.
+    case "$url" in *trycloudflare.com*) ;; *) return 1;; esac
     for i in 1 2 3 4 5 6 7 8; do
         verify "$url" && { echo "$url"; return 0; }
         sleep 4
