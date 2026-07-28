@@ -100,18 +100,55 @@ jget_total() { python3 -c "import sys,json
 try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
 except: print(0)" 2>/dev/null; }
 
+# Snapshot tuning. The ring was 30 snaps ≈ 30m at the 60s cadence — too shallow
+# to survive a clobber that isn't noticed for half an hour (the 2026-07-27
+# incident: last 20-tab snap 22:05, clobber 22:08, all good snaps rotated out by
+# ~22:40, noticed ~23:20 → nothing left to restore). Deepen it to ~8h and make
+# the guards SIZE-AWARE so a degraded reboot can't quietly poison the record.
+SNAP_KEEP="${SOA_SNAP_KEEP:-500}"     # ~8h of history at 60s (was 30 ≈ 30m)
+CLOBBER_ARM_MIN=8                     # only guard against collapse when the fleet was at least this big
+CLOBBER_GRACE=15                      # hold the good record this many suspicious passes (~15m) before believing a smaller fleet is real
+LGT="$SNAP_DIR/.last-good-total"      # last healthy fleet size (baseline for "collapsed")
+DEGC="$SNAP_DIR/.degraded-count"      # consecutive suspicious passes
+
 # Continuous save: capture the live fleet manifest every pass. NEVER overwrites a
-# good snapshot with an empty/transient read (the tabs.json-clobber guard). Keeps
-# the last 30 + a stable latest.json so recovery is instant and clobber-proof.
+# good snapshot with an empty/transient read (total==0) OR a degraded reboot
+# (total collapsed far below the last-good size — the total==1 clobber that used
+# to sail straight through and poison latest.json + tabs-latest.json + the ring).
+# Keeps the last $SNAP_KEEP + a stable latest.json so recovery is clobber-proof.
 snapshot_fleet() {
     mkdir -p "$SNAP_DIR" 2>/dev/null
     curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/manager" -o "$SNAP_DIR/.mgr.tmp" 2>/dev/null || return 0
     local total; total="$(jget_total < "$SNAP_DIR/.mgr.tmp")"; [ -z "$total" ] && total=0
+    local last_good; last_good="$(cat "$LGT" 2>/dev/null || echo 0)"; [ -z "$last_good" ] && last_good=0
+
+    # (a) empty/transient read — never overwrite a good record (original guard).
     if ! [ "$total" -gt 0 ] 2>/dev/null; then
         rm -f "$SNAP_DIR/.mgr.tmp" 2>/dev/null
         log "snapshot SKIPPED (manager total=${total}) — keeping last good record"
         return 0
     fi
+
+    # (b) size-aware clobber guard. A daemon that reboots from a clobbered
+    # tabs.json comes up with a tiny fleet (typically 1) while last_good was
+    # large. Hold the good record through a grace window so restore_fleet_if_lost
+    # can rebuild from it; if the small fleet persists past the window, the user
+    # genuinely downsized — accept it as the new baseline and resume saving.
+    local floor=$(( last_good / 4 )); [ "$floor" -lt 2 ] && floor=2
+    local closed_by_user=0
+    grep -q '"closedByUser"[[:space:]]*:[[:space:]]*true' "$STATE_DIR/tabs.json" 2>/dev/null && closed_by_user=1
+    if [ "$last_good" -ge "$CLOBBER_ARM_MIN" ] && [ "$total" -lt "$floor" ] && [ "$closed_by_user" -eq 0 ]; then
+        local deg; deg="$(cat "$DEGC" 2>/dev/null || echo 0)"; deg=$(( deg + 1 ))
+        if [ "$deg" -le "$CLOBBER_GRACE" ]; then
+            echo "$deg" > "$DEGC"
+            rm -f "$SNAP_DIR/.mgr.tmp" 2>/dev/null
+            log "snapshot HELD (total=${total} << last-good=${last_good}, suspected clobber ${deg}/${CLOBBER_GRACE}) — preserving good record for recovery"
+            return 0
+        fi
+        log "snapshot: degraded total=${total} persisted ${deg} passes — accepting as the new baseline"
+    fi
+    rm -f "$DEGC" 2>/dev/null   # healthy (or accepted) — clear the suspicion counter
+
     local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
     mv "$SNAP_DIR/.mgr.tmp" "$SNAP_DIR/fleet-${stamp}.json"
     cp "$SNAP_DIR/fleet-${stamp}.json" "$SNAP_DIR/latest.json"
@@ -122,7 +159,8 @@ snapshot_fleet() {
     else
         rm -f "$SNAP_DIR/.tabs.tmp" 2>/dev/null
     fi
-    ls -1t "$SNAP_DIR"/fleet-*.json 2>/dev/null | tail -n +31 | xargs rm -f 2>/dev/null
+    echo "$total" > "$LGT"      # remember the current healthy size as the baseline
+    ls -1t "$SNAP_DIR"/fleet-*.json 2>/dev/null | tail -n +$(( SNAP_KEEP + 1 )) | xargs rm -f 2>/dev/null
     log "snapshot saved: ${total} tabs → fleet-${stamp}.json"
 }
 
@@ -139,7 +177,15 @@ RECOVER_COOLDOWN="$STATE_DIR/logs/.fleet-recover"
 restore_fleet_if_lost() {
     local total; total="$(curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/manager" 2>/dev/null | jget_total)"
     [ -z "$total" ] && total=0
-    [ "$total" -gt 0 ] 2>/dev/null && return 0    # fleet healthy — nothing to do
+    local last_good; last_good="$(cat "$LGT" 2>/dev/null || echo 0)"; [ -z "$last_good" ] && last_good=0
+    # "Lost" = all tabs gone (total==0) OR a degraded reboot: total collapsed to
+    # ≤2 while last_good was large (the 1-tab clobber, which the old `total>0`
+    # check wrongly treated as healthy). Conservative absolute cap (≤2) so a
+    # deliberate downsize to a handful of tabs never trips a re-add.
+    local lost=0
+    if [ "$total" -le 0 ] 2>/dev/null; then lost=1
+    elif [ "$last_good" -ge "$CLOBBER_ARM_MIN" ] && [ "$total" -le 2 ]; then lost=1; fi
+    [ "$lost" -eq 1 ] || return 0                 # fleet healthy — nothing to do
 
     # Respect an intentional close-all (the daemon's intent marker).
     if [ -f "$STATE_DIR/tabs.json" ] && grep -q '"closedByUser"[[:space:]]*:[[:space:]]*true' "$STATE_DIR/tabs.json" 2>/dev/null; then
