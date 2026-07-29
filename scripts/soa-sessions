@@ -68,6 +68,131 @@ function post(body, opts = {}) {
     });
 }
 
+// Loopback GET (for read-only feeds the manager joins into its view:
+// /api/claude-usage token spend, /api/tabs for cwd→tab correlation). Loopback
+// is auto-trusted; the per-daemon local key also works behind a local proxy.
+function get(pathname) {
+    return new Promise((resolve) => {
+        const u = new URL(base() + pathname);
+        const headers = {};
+        if (process.env.SOA_WEB_LOCAL_KEY) headers['x-soa-local-key'] = process.env.SOA_WEB_LOCAL_KEY;
+        const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'GET', headers, timeout: 8000 }, (res) => {
+            let b = ''; res.on('data', d => b += d);
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+    });
+}
+
+// ── Token-usage feed (the manager's resource-consumption dial) ────────────────
+const _fmtUsd = n => { n = n || 0; return n >= 1000 ? '$' + (n / 1000).toFixed(1) + 'k' : (n >= 100 ? '$' + n.toFixed(0) : '$' + n.toFixed(2)); };
+const _fmtTok = n => { n = n || 0; if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (n >= 1e3) return (n / 1e3).toFixed(0) + 'k'; return String(Math.round(n)); };
+function budgetsPath() { return path.join(stateDir(), 'usage-budgets.json'); }
+// Per-project budgets (USD estimate). Defaults mirror the soa-usage-alert
+// watchdog so the manager, the dashboard highlight, and the phone push agree.
+function loadBudgets() {
+    const b = { default: { blockCost: 20, todayCost: 60, burnCost: 1.5 }, projects: {} };
+    try {
+        const j = JSON.parse(fs.readFileSync(budgetsPath(), 'utf8'));
+        if (j.default) b.default = { ...b.default, ...j.default };
+        if (j.projects) b.projects = j.projects;
+    } catch (_) {}
+    return b;
+}
+function saveBudgets(b) {
+    fs.mkdirSync(stateDir(), { recursive: true });
+    fs.writeFileSync(budgetsPath(), JSON.stringify({
+        note: 'Per-project token/cost budgets (USD estimate) for `soa-sessions usage`. blockCost = cost in the active 5h usage-limit window; todayCost = since local midnight.',
+        default: b.default, projects: b.projects,
+    }, null, 2));
+}
+function overBudget(blockCost, todayCost, bud) {
+    return (bud.blockCost > 0 && blockCost >= bud.blockCost) || (bud.todayCost > 0 && todayCost >= bud.todayCost);
+}
+// Per-session cost velocity ($/min), reused from the soa-usage-alert watchdog's
+// state (it diffs successive 120s polls). Keyed by Claude sessionId → $/min.
+// Best-effort: empty when the alerter hasn't run. This is the "burning too fast"
+// signal the throttle loop reacts to.
+function loadVelocity(usage) {
+    const vel = new Map();
+    let st;
+    try { st = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.soa-web', 'logs', '.usage-alert-state.json'), 'utf8')); } catch (_) { return vel; }
+    const now = (usage && usage.data && usage.data.now) || Date.now();
+    for (const s of (usage && usage.data && usage.data.sessions) || []) {
+        const p = st.sessions && st.sessions[s.id];
+        if (!p || !p.ts || now <= p.ts) continue;
+        const dCost = ((s.block || {}).cost || 0) - (p.costBlock || 0);
+        const dMin = (now - p.ts) / 60000;
+        if (dCost > 0 && dMin > 0) vel.set(s.id, dCost / dMin);
+    }
+    return vel;
+}
+
+// tabId → {block,today} cost, by matching the usage engine's per-session cwd to
+// the live tab cwd. Sessions sharing a cwd fold together (same project).
+function costByTabFrom(usage, tabs) {
+    const m = new Map();
+    const d = usage && usage.data; if (!d) return m;
+    const byCwd = new Map();
+    for (const s of d.sessions || []) {
+        if (!s.cwd) continue;
+        const c = byCwd.get(s.cwd) || { block: 0, today: 0 };
+        c.block += (s.block || {}).cost || 0; c.today += (s.today || {}).cost || 0;
+        byCwd.set(s.cwd, c);
+    }
+    for (const t of (tabs && tabs.tabs) || []) { if (t.cwd && byCwd.has(t.cwd)) m.set(t.id, byCwd.get(t.cwd)); }
+    return m;
+}
+
+// Build the consumption view once (shared by `usage` and `throttle`): per-session
+// + per-project block/today cost + $/min velocity + tab correlation + budget
+// verdicts. `over` = cost past budget; `fast` = velocity past burnCost. The
+// throttle targets are `overIds` (over budget) and `hotIds` (over OR fast).
+async function usageView(scope) {
+    const [usage, tabs] = await Promise.all([get('/api/claude-usage'), get('/api/tabs')]);
+    const d = usage && usage.data;
+    const budgets = loadBudgets();
+    const velById = loadVelocity(usage);
+    const tabByCwd = new Map();
+    for (const t of (tabs && tabs.tabs) || []) {
+        if (!t.cwd) continue;
+        if (!tabByCwd.has(t.cwd)) tabByCwd.set(t.cwd, []);
+        tabByCwd.get(t.cwd).push({ id: t.id, title: t.title });
+    }
+    const sessRows = [];
+    for (const s of (d && d.sessions) || []) {
+        const proj = s.project || (s.cwd ? s.cwd.split('/').pop() : '?') || '?';
+        const bud = budgets.projects[proj] || budgets.default;
+        const tabsFor = (s.cwd && tabByCwd.get(s.cwd)) || [];
+        sessRows.push({
+            id: s.id, proj, slug: s.slug, shortId: s.shortId, cwd: s.cwd,
+            tabIds: tabsFor.map(t => t.id),
+            blockCost: (s.block || {}).cost || 0, todayCost: (s.today || {}).cost || 0,
+            tok: (s[scope] || {}).tok || 0, req: (s[scope] || {}).req || 0,
+            burn: velById.get(s.id) || 0, bud,
+        });
+    }
+    const pm = new Map();
+    for (const r of sessRows) {
+        let p = pm.get(r.proj);
+        if (!p) { p = { proj: r.proj, blockCost: 0, todayCost: 0, tok: 0, burn: 0, tabIds: new Set(), bud: r.bud }; pm.set(r.proj, p); }
+        p.blockCost += r.blockCost; p.todayCost += r.todayCost; p.tok += r.tok; p.burn += r.burn;
+        r.tabIds.forEach(i => p.tabIds.add(i));
+    }
+    const projList = [...pm.values()].map(p => ({
+        proj: p.proj, blockCost: p.blockCost, todayCost: p.todayCost, tok: p.tok, burn: p.burn,
+        tabIds: [...p.tabIds].sort((a, b) => a - b), bud: p.bud,
+        over: overBudget(p.blockCost, p.todayCost, p.bud),
+        fast: p.burn >= (p.bud.burnCost || 1.5),
+    })).sort((a, b) => scope === 'today' ? b.todayCost - a.todayCost : b.blockCost - a.blockCost);
+    const overIds = [...new Set(projList.filter(p => p.over).flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
+    const hotIds = [...new Set(projList.filter(p => p.over || p.fast).flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
+    const allIds = [...new Set(projList.flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
+    return { d, budgets, sessRows, projList, overIds, hotIds, allIds };
+}
+
 // ── Manager-agent helpers ────────────────────────────────────────────────────
 // The caller's own tab id (env-injected into every SoA shell). Forwarded as
 // `self` so a manager hides its own events and is excluded from cohort fan-outs.
@@ -106,7 +231,7 @@ function renderEvent(e) {
     return parts.join(' ');
 }
 
-function fmtList(snap) {
+function fmtList(snap, costByTab) {
     if (!snap.sessions || !snap.sessions.length) return '(no sessions)';
     const c = snap.counts || {};
     const head = `${c.total} sessions · ${c.working || 0} working · ${c.attention || 0} need input · ${c.stuck || 0} stuck · ${c.idle || 0} idle · ${c.highContext || 0} high-context · ${c.limited || 0} limited`;
@@ -120,7 +245,11 @@ function fmtList(snap) {
             s.resumeAt ? `RESUME@${hhmm(s.resumeAt)}` : '',
         ].filter(Boolean).join(' ');
         const ctx = s.ctxPct != null ? s.ctxPct + '%' : '—';
-        return `  #${s.id}  ${(s.title || '').padEnd(20).slice(0, 20)}  ${String(s.status).padEnd(9)}  ctx ${ctx.padStart(4)}  ${flags}`;
+        // Optional spend column (soa-sessions list --cost) — appended AFTER the
+        // flags so existing line parsers (heartbeat/regex) are unaffected.
+        let cost = '';
+        if (costByTab) { const cc = costByTab.get(s.id); if (cc) cost = ` · ${_fmtUsd(cc.block > 0 ? cc.block : cc.today)}${cc.block > 0 ? '/5h' : '/day'}`; }
+        return `  #${s.id}  ${(s.title || '').padEnd(20).slice(0, 20)}  ${String(s.status).padEnd(9)}  ctx ${ctx.padStart(4)}  ${flags}${cost}`;
     });
     return head + '\n' + rows.join('\n');
 }
@@ -130,7 +259,12 @@ function fmtList(snap) {
     try {
         if (!cmd || cmd === 'list' || cmd === 'ls') {
             const r = await post({ action: 'list' });
-            console.log(r.ok ? fmtList(r) : JSON.stringify(r));
+            let costByTab;
+            if (r.ok && (hasFlag('--cost') || hasFlag('-$'))) {
+                const [usage, tabs] = await Promise.all([get('/api/claude-usage'), get('/api/tabs')]);
+                costByTab = costByTabFrom(usage, tabs);
+            }
+            console.log(r.ok ? fmtList(r, costByTab) : JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
         if (cmd === 'read') {
@@ -353,7 +487,104 @@ function fmtList(snap) {
             console.log(JSON.stringify(r, null, 2));
             process.exit(r.ok ? 0 : 1);
         }
-        console.error('usage: soa-sessions list | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>\n' +
+        // ── Token-usage control (the manager's resource dial) ────────────────
+        // usage — live per-project / per-session token spend + $/min burn +
+        // budget verdicts. The manager reads this each loop to keep projects
+        // within the usage limit. --over / --ids <over|hot|all> print just the
+        // tab ids (for fan-out); --by session for detail; --json for raw.
+        if (cmd === 'usage') {
+            const scope = argval('--scope') === 'today' ? 'today' : 'block';
+            const by = argval('--by') || 'project';
+            const { d, budgets, sessRows, projList, overIds, hotIds, allIds } = await usageView(scope);
+            if (!d || !d.hasData) { console.log(hasFlag('--over') || argval('--ids') ? '' : '(no usage data — is the daemon up?)'); process.exit(0); }
+            if (hasFlag('--over')) { console.log(overIds.join(',')); process.exit(0); }
+            if (argval('--ids')) { const w = argval('--ids'); console.log((w === 'hot' ? hotIds : w === 'all' ? allIds : overIds).join(',')); process.exit(0); }
+            if (hasFlag('--json')) { console.log(JSON.stringify({ scope, block: d.block, today: d.today, projects: projList, sessions: sessRows, budgets, overIds, hotIds }, null, 2)); process.exit(0); }
+            const b = d.block || {};
+            const reset = b.active ? new Date(b.endTs) : null;
+            const hhmm = dt => dt ? dt.getHours() + ':' + String(dt.getMinutes()).padStart(2, '0') : '—';
+            const fleetFast = (b.burnRatePerMin || 0) >= 800000;   // fleet tok/min heuristic
+            const throttle = overIds.length || hotIds.length || fleetFast;
+            console.log(`USAGE · 5h ${_fmtUsd(b.cost || 0)} · burn ${_fmtTok(b.burnRatePerMin || 0)}tok/min · ${Math.round(b.pct || 0)}% elapsed · resets ${hhmm(reset)} · proj ${_fmtUsd(b.projectedCost || 0)} · today ${_fmtUsd((d.today || {}).cost || 0)}${throttle ? '   ⚠ THROTTLE' : ''}`);
+            console.log(`budgets: default ${_fmtUsd(budgets.default.blockCost)}/5h · ${_fmtUsd(budgets.default.todayCost)}/day · ${_fmtUsd(budgets.default.burnCost)}/min  (soa-sessions budget set <project> <blk> [day])`);
+            if (by === 'session') {
+                console.log('  ' + 'session'.padEnd(22) + 'tab'.padEnd(9) + '5h$'.padStart(8) + 'day$'.padStart(8) + '$/min'.padStart(8) + '  status');
+                for (const r of sessRows.slice().sort((a, c) => scope === 'today' ? c.todayCost - a.todayCost : c.blockCost - a.blockCost)) {
+                    const over = overBudget(r.blockCost, r.todayCost, r.bud), fast = r.burn >= (r.bud.burnCost || 1.5);
+                    const nm = (r.proj + (r.slug ? ' · ' + r.slug.split('-')[0] : '')).slice(0, 21);
+                    const tab = r.tabIds.length ? '#' + r.tabIds.join(',#') : '—';
+                    console.log('  ' + (over || fast ? '⚠ ' : '  ') + nm.padEnd(20) + tab.slice(0, 8).padEnd(9) + _fmtUsd(r.blockCost).padStart(8) + _fmtUsd(r.todayCost).padStart(8) + (r.burn ? _fmtUsd(r.burn) : '—').padStart(8) + '  ' + (over ? 'OVER' : fast ? 'FAST' : 'ok'));
+                }
+            } else {
+                console.log('  ' + 'project'.padEnd(18) + 'tabs'.padEnd(11) + '5h$'.padStart(8) + 'day$'.padStart(8) + '$/min'.padStart(8) + '  status');
+                for (const p of projList) {
+                    const tab = p.tabIds.length ? '#' + p.tabIds.join(',#') : '—';
+                    console.log('  ' + (p.over || p.fast ? '⚠ ' : '  ') + p.proj.slice(0, 16).padEnd(18) + tab.slice(0, 10).padEnd(11) + _fmtUsd(p.blockCost).padStart(8) + _fmtUsd(p.todayCost).padStart(8) + (p.burn ? _fmtUsd(p.burn) : '—').padStart(8) + '  ' + (p.over ? `OVER(${_fmtUsd(p.bud.blockCost)}/${_fmtUsd(p.bud.todayCost)})` : p.fast ? 'FAST' : 'ok'));
+                }
+            }
+            if (throttle) {
+                const ids = (hotIds.length ? hotIds : overIds).join(',');
+                console.log(`\n⚠ approaching/over budget → THROTTLE, never stop:  soa-sessions throttle ${ids || 'hot'}`);
+                console.log(`  /compact keeps work going at a lower burn · add --pause to interrupt + auto-resume the fastest`);
+            } else console.log('\n✓ within budget · fleet not burning fast');
+            process.exit(0);
+        }
+        // budget — view/set per-project caps (USD est.): list | set <project|default> <blockCost> [todayCost]
+        if (cmd === 'budget') {
+            const sub = rest[0] || 'list';
+            const budgets = loadBudgets();
+            if (sub === 'set') {
+                const name = rest[1], blk = parseFloat(rest[2]), day = rest[3] != null ? parseFloat(rest[3]) : undefined;
+                if (!name || !Number.isFinite(blk)) { console.error('usage: soa-sessions budget set <project|default> <blockCost> [todayCost]'); process.exit(1); }
+                const entry = { blockCost: blk }; if (Number.isFinite(day)) entry.todayCost = day;
+                if (name === 'default') budgets.default = { ...budgets.default, ...entry };
+                else budgets.projects[name] = { ...(budgets.projects[name] || {}), ...entry };
+                try { saveBudgets(budgets); } catch (e) { console.error('budget save failed:', e.message); process.exit(1); }
+                console.log(`set budget ${name}: ${JSON.stringify(name === 'default' ? budgets.default : budgets.projects[name])}`);
+                process.exit(0);
+            }
+            console.log(JSON.stringify(budgets, null, 2));
+            process.exit(0);
+        }
+        // throttle <id|list|over|hot|all> [--pause [Nm]] [--dry-run] — the
+        // NON-STOPPING resource dial. Default: /compact each target (clears
+        // context → cheaper turns, work continues). --pause: interrupt + schedule
+        // a resume in Nm (default 15) so it idles then auto-continues. NEVER stops.
+        if (cmd === 'throttle') {
+            const sel = rest.find(a => !a.startsWith('--')) || 'over';
+            const pause = hasFlag('--pause');
+            const dry = hasFlag('--dry-run');
+            let mins = 15;
+            const pIdx = process.argv.indexOf('--pause');
+            if (pIdx !== -1 && /^\+?\d+m?$/.test(process.argv[pIdx + 1] || '')) mins = parseInt(process.argv[pIdx + 1], 10);
+            let ids;
+            if (/^\d+$/.test(sel)) ids = [Number(sel)];
+            else if (/^\d+(,\d+)+$/.test(sel)) ids = sel.split(',').map(Number);
+            else {
+                const v = await usageView('block');
+                if (!v.d || !v.d.hasData) { console.log('(no usage data — is the daemon up?)'); process.exit(0); }
+                ids = sel === 'hot' ? v.hotIds : sel === 'all' ? v.allIds : v.overIds;
+            }
+            ids = [...new Set(ids)].filter(id => Number.isFinite(id) && id !== SELF);
+            if (!ids.length) { console.log(`throttle: no target tabs (${sel === 'over' ? 'nothing over budget' : sel === 'hot' ? 'nothing over budget / burning fast' : 'none'})`); process.exit(0); }
+            if (dry) { console.log(`throttle ${pause ? `--pause ${mins}m` : '/compact'} → ${ids.map(i => '#' + i).join(',')}`); process.exit(0); }
+            const done = [];
+            for (const id of ids) {
+                if (pause) {
+                    await post({ action: 'interrupt', id });
+                    await post({ action: 'schedule', id, at: '+' + mins + 'm', text: 'continue', self: SELF });
+                    done.push(`#${id} paused → resume in ${mins}m`);
+                } else {
+                    const r = await post({ action: 'compact', id });
+                    done.push(`#${id} ${r && r.ok ? '/compact' : 'compact-failed'}`);
+                }
+            }
+            console.log(`throttled (work continues, nothing stopped): ${done.join(' · ')}`);
+            process.exit(0);
+        }
+        console.error('usage: soa-sessions list [--cost] | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>\n' +
+                      '       usage [--by project|session] [--scope block|today] [--over|--ids hot|all|over|--json] | budget [list|set <proj|default> <blk> [day]]\n' +
+                      '       throttle <id|list|over|hot|all> [--pause [Nm]] [--dry-run]   (never stops — /compact or interrupt+auto-resume)\n' +
                       '       schedule <id|all|limited> <+15m|2:30am|epochMs> [text] | resume-all [when] [text]\n' +
                       '       schedules | unschedule <scheduleId> | config autoResume on|off | config closeInactive on|off | config text <text>\n' +
                       '   manager-agent:\n' +

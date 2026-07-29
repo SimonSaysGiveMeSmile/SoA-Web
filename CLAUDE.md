@@ -92,6 +92,41 @@ or `interrupt`+`resume` if wedged. On `done` → assign the next goal. On
 Prefer `goal`/`btw` over raw `send` so the slash-prefix is correct; never bare
 `claude` after a restart (use `resume`). Keep your own running notes as context.
 
+### Token-usage control — throttle, never stop
+
+The manager also keeps the fleet under Claude's usage limit so agents don't burn
+the 5h/weekly quota and get `limited` (which *stops* their work). Live spend is a
+first-class input: `soa-sessions usage` reads the same v2 engine the dashboard
+shows and folds it per **project** (and `--by session`), tab-correlated, with a
+`$/min` burn rate and budget verdicts:
+
+```bash
+soa-sessions usage                 # per-project 5h$ / day$ / $/min + OVER/FAST flags + a ⚠ THROTTLE header
+soa-sessions usage --by session    # per-session detail
+soa-sessions usage --over          # just the over-budget tab ids (comma-list, for fan-out)
+soa-sessions usage --ids hot       # over-budget OR burning fast (the throttle set)
+soa-sessions list --cost           # the normal fleet view + a spend column
+soa-sessions budget set <project> <blockCost> [todayCost]   # per-project caps ($ est.; default 20/5h · 60/day · 1.5/min)
+```
+
+When a project is **OVER** budget or **FAST**, or the 5h block is projected to
+blow the limit, **THROTTLE — never `stop`** (stopping loses the work; the goal is
+to slow burn, not halt it):
+
+```bash
+soa-sessions throttle <id|list|over|hot|all>            # /compact each → clears context → cheaper turns, work continues
+soa-sessions throttle <id|hot> --pause [Nm]             # interrupt + auto-resume in Nm (default 15): pauses burn, resumes itself
+```
+
+Policy: prefer **`/compact`** (safe — the agent keeps working, just at a lower
+per-turn cost; best on high-context tabs). Use **`--pause`** only for the
+*fastest* burners when the block is close to the cap — it interrupts the current
+turn and schedules a `continue`, so nothing is ever abandoned. **Never `stop`**
+an agent to save tokens. Re-check `usage` after throttling; on `limited` the tab
+still auto-resumes at the reset. Thresholds live in
+`~/.soa-web-local/usage-budgets.json` (defaults mirror the `soa-usage-alert`
+push watchdog and the dashboard's ⚠ hot-row highlight, so all three agree).
+
 ## Agent-to-agent comms (soa-bus)
 
 `soa-bus` is a **local-only** message bus so agents can coordinate directly
