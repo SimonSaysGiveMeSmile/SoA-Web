@@ -38,6 +38,9 @@
 .claude-sess-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-family: var(--font-mono); font-size: 10.5px; }
 .claude-sess-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soa-fg); }
 .claude-sess-val { flex-shrink: 0; color: var(--soa-accent); letter-spacing: 0.02em; }
+/* A session leaning hard on the model (>= soa-usage-alert thresholds) — the phone got a push too. */
+.claude-sess-row.hot .claude-sess-name { color: #ff6b6b; }
+.claude-sess-row.hot .claude-sess-val { color: #ff5b5b; font-weight: 600; }
 .claude-clickable { cursor: pointer; }
 .claude-clickable:hover .claude-head-l { color: var(--soa-accent); }
 

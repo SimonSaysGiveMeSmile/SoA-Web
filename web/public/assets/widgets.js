@@ -260,6 +260,10 @@ const _fmtUsd = n => {
     if (n >= 100) return '$' + n.toFixed(0);
     return '$' + n.toFixed(2);
 };
+// Per-session "leaning hard on the model" thresholds (est. USD) — mirror the
+// soa-usage-alert push watchdog's defaults so the dashboard highlight and the
+// phone alert agree. block = the active 5h usage-limit window, today = midnight.
+const HOT_COST = { block: 20, today: 60 };
 const _fmtDur = ms => {
     const s = Math.max(0, Math.round(ms / 1000));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
@@ -392,14 +396,19 @@ class ClaudeUsageWidget extends Widget {
             const slugBit = s.slug ? s.slug.split('-')[0] : (s.shortId || '').slice(0, 4);
             const label = (s.project || '?') + (slugBit ? ' · ' + slugBit : '');
             const b = s.block || {}, t = s.today || {};
+            // Flag a session leaning hard on the model — same per-session
+            // thresholds as the soa-usage-alert push watchdog (block $20 / today
+            // $60), so the dashboard and the phone alert agree on "too much".
+            const hot = (sc.cost || 0) >= (scope === 'block' ? HOT_COST.block : HOT_COST.today);
             const tip = [
                 (s.project || '?') + ' — ' + (s.slug || s.shortId || ''),
                 `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
                 `today: ${_fmtTok(t.tok)} tok · ≈${_fmtUsd(t.cost)} · ${t.req || 0} req`,
             ];
             if (t.subCost > 0.01) tip.push(`of which subagents today: ≈${_fmtUsd(t.subCost)}`);
-            return $el('div', { class: 'claude-sess-row', title: tip.join('\n') }, [
-                $el('span', { class: 'claude-sess-name', text: label }),
+            if (hot) tip.push(`⚠ heavy this ${scope === 'block' ? '5h block' : 'day'} — the token-usage alerter has flagged this session`);
+            return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.join('\n') }, [
+                $el('span', { class: 'claude-sess-name', text: (hot ? '⚠ ' : '') + label }),
                 $el('span', { class: 'claude-sess-val', text: `${_fmtTok(sc.tok)} · ≈${_fmtUsd(sc.cost)}` }),
             ]);
         }));
