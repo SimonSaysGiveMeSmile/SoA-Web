@@ -186,10 +186,10 @@ async function main() {
 
     // Deliver (one push per over-threshold session).
     for (const a of alerts) {
+        // reasons already names the threshold(s) crossed (incl. $/min when the
+        // velocity trigger fired), so the parenthetical is just the raw stats.
         const body = `⚠ Token watch: “${a.label}” is heavy — ${a.reasons.join(', ')} `
-            + `(${mtok(a.tok)} tok, ${a.req} reqs`
-            + (a.burn >= CFG.burnCost ? `, ~${money(a.burn)}/min` : '')
-            + `). 5h block resets in ${a.remainMin}m.`;
+            + `(${mtok(a.tok)} tok, ${a.req} reqs). 5h block resets in ${a.remainMin}m.`;
         if (DRY) { console.log('WOULD ALERT: ' + body); log('DRY would-alert: ' + body); }
         else { await notify('SoA token alert', body, 'high', 'warning,fire', 'https://s0a.app'); log('ALERT: ' + body); }
     }
