@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TOKEN-USAGE ALERTER — runs scripts/soa-usage-alert every 120s. Polls the
+  daemon's /api/claude-usage (the same v2 engine the dashboard shows) and pushes
+  the user an alert (soa-notify OS push + in-app CHAT) when a SINGLE session is
+  "using too much token": leaning hard on the model in the active 5h usage-limit
+  block (>= $20 est.), heavy today (>= $60), or suddenly burning fast (velocity
+  >= $1.5/min, derived by diffing successive polls). Edge-triggered with a 30-min
+  per-session cooldown so it never spams; re-fires on a 2x escalation. Correlates
+  each Claude session to a tab (#N title) for a friendly label. Read-only over
+  loopback — never touches the daemon, tabs, or agents; no restart needed.
+  Thresholds are env-overridable (SOA_USAGE_BLOCK_COST / _TODAY_COST / _BURN_COST
+  / _COOLDOWN — see the script header).
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.usage-alert.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.usage-alert</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/test/.soa-web/scripts/soa-usage-alert</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/usage-alert.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/usage-alert.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

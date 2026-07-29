@@ -1,0 +1,202 @@
+#!/usr/bin/env node
+/**
+ * soa-usage-alert — per-session token-spend watchdog + user alert.
+ *
+ * The dashboard usage widget shows *which* session is burning most, but only
+ * while the user is looking. This runs headless from launchd every ~120s
+ * (com.soa-web.usage-alert) and pushes the user an alert when a SINGLE session
+ * is "using too much token" — leaning hard on the model within the active
+ * 5-hour usage-limit block (or today), or suddenly burning fast.
+ *
+ * It reuses the daemon's own numbers (GET /api/claude-usage — the same v2 engine
+ * the widget shows, so alerts never disagree with the UI), and adds the piece
+ * the stateless snapshot lacks: a per-session VELOCITY signal, derived by
+ * diffing successive polls (state file). Edge-triggered with a per-session
+ * cooldown so it never spams; re-fires on a real escalation. Correlates the
+ * Claude session to a tab (by cwd) for a friendly "#N title" label, and delivers
+ * via soa-notify (OS push — seen even when SoA is closed) + the in-app CHAT.
+ *
+ * No daemon restart needed — it's an independent poller over loopback.
+ *
+ * Thresholds (env-overridable; dollars are list-price ESTIMATES, the same unit
+ * the widget uses for "how hard am I leaning on the model"):
+ *   SOA_USAGE_BLOCK_COST   per-session cost in the active 5h block   (default 20)
+ *   SOA_USAGE_TODAY_COST   per-session cost since local midnight      (default 60)
+ *   SOA_USAGE_BURN_COST    per-session cost velocity, $/min           (default 1.5)
+ *   SOA_USAGE_MIN_COST     floor before a velocity-only alert fires   (default 3)
+ *   SOA_USAGE_COOLDOWN     seconds between alerts for one session      (default 1800)
+ *   SOA_USAGE_ESCALATE     re-alert inside cooldown if cost grows Nx   (default 2)
+ *   SOA_WEB_PORT           daemon port (else daemon.lock, else 4010)
+ *
+ * Flags:
+ *   --dry-run   compute + print decisions, send nothing
+ *   --status    print the per-session table and exit (no alerts, no state write)
+ *   --test      send a canned alert to verify the delivery channel, then exit
+ */
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+
+const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
+const LOG_DIR = path.join(os.homedir(), '.soa-web', 'logs');
+const LOG = path.join(LOG_DIR, 'usage-alert.log');
+const STATE = path.join(LOG_DIR, '.usage-alert-state.json');
+const NOTIFY = path.join(__dirname, 'soa-notify');   // sibling script
+
+const num = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+const CFG = {
+    blockCost: num(process.env.SOA_USAGE_BLOCK_COST, 20),
+    todayCost: num(process.env.SOA_USAGE_TODAY_COST, 60),
+    burnCost:  num(process.env.SOA_USAGE_BURN_COST, 1.5),
+    minCost:   num(process.env.SOA_USAGE_MIN_COST, 3),
+    cooldown:  num(process.env.SOA_USAGE_COOLDOWN, 1800),
+    escalate:  num(process.env.SOA_USAGE_ESCALATE, 2),
+};
+const args = new Set(process.argv.slice(2));
+const DRY = args.has('--dry-run');
+const STATUS = args.has('--status');
+const TEST = args.has('--test');
+
+function port() {
+    if (process.env.SOA_WEB_PORT) return parseInt(process.env.SOA_WEB_PORT, 10);
+    try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'daemon.lock'), 'utf8')).port || 4010; }
+    catch (_) { return 4010; }
+}
+const PORT = port();
+
+function ts() { return new Date().toISOString().replace('T', ' ').slice(0, 19); }
+function log(line) { try { fs.mkdirSync(LOG_DIR, { recursive: true }); fs.appendFileSync(LOG, ts() + ' ' + line + '\n'); } catch (_) {} }
+
+function getJSON(p) {
+    return new Promise((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: PORT, path: p, method: 'GET', timeout: 8000 }, res => {
+            let b = ''; res.on('data', d => b += d);
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+    });
+}
+
+function loadState() { try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch (_) { return { blockStartTs: 0, sessions: {} }; } }
+function saveState(s) { try { fs.mkdirSync(LOG_DIR, { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s)); } catch (_) {} }
+
+function notify(title, body, priority, tags, click) {
+    return new Promise((resolve) => {
+        const argv = ['-t', title, '-p', priority || 'high', '-T', tags || 'warning', '--also-msg'];
+        if (click) argv.push('--click', click);
+        argv.push('--', body);
+        execFile(NOTIFY, argv, { timeout: 20000 }, (err, so, se) => {
+            if (err) log('notify FAILED: ' + (se || err.message || err).toString().trim().slice(0, 200));
+            resolve(!err);
+        });
+    });
+}
+
+const money = n => '$' + (n || 0).toFixed(2);
+const mtok = n => (n / 1e6).toFixed(1) + 'M';
+
+async function main() {
+    if (TEST) {
+        const ok = await notify('SoA token alert — test', '✅ soa-usage-alert delivery works. A real alert fires when a session leans hard on the model in the 5h block.', 'high', 'warning,robot', 'https://s0a.app');
+        log('test alert sent=' + ok);
+        console.log('test alert sent=' + ok);
+        return;
+    }
+
+    const resp = await getJSON('/api/claude-usage');
+    if (!resp || !resp.ok || !resp.data) { log('no usage data (daemon down or endpoint changed) — skipping'); return; }
+    const d = resp.data;
+    if (!d.hasData) { log('no usage records yet — skipping'); return; }
+    const scope = d.sessionScope;                       // 'block' while the 5h window is live, else 'today'
+    const blockStartTs = d.block && d.block.active ? d.block.startTs : 0;
+    const remainMin = d.block && d.block.active ? Math.round(d.block.remainingMs / 60000) : 0;
+
+    // cwd -> {id,title} for a friendly label (loopback, best-effort).
+    const tabsResp = await getJSON('/api/tabs');
+    const byCwd = new Map();
+    if (tabsResp && Array.isArray(tabsResp.tabs)) {
+        for (const t of tabsResp.tabs) {
+            if (!t.cwd) continue;
+            const cur = byCwd.get(t.cwd);
+            // prefer a tab with a user-facing title
+            if (!cur || (!cur.title && t.title)) byCwd.set(t.cwd, { id: t.id, title: t.title });
+        }
+    }
+
+    const state = loadState();
+    // New 5h block → velocity baselines and cooldowns from the old block are stale.
+    if (blockStartTs && state.blockStartTs !== blockStartTs) { state.blockStartTs = blockStartTs; state.sessions = {}; }
+    const now = d.now || Date.now();
+    const next = { blockStartTs: state.blockStartTs, sessions: {} };
+
+    const rows = [];
+    const alerts = [];
+    for (const s of d.sessions) {
+        const sc = scope === 'block' ? s.block : s.today;
+        const costBlock = s.block ? s.block.cost : 0;
+        const costToday = s.today ? s.today.cost : 0;
+        const prev = state.sessions[s.id];
+        // Velocity from the delta since the last poll (the piece the snapshot lacks).
+        let burn = 0;
+        if (prev && prev.ts && now > prev.ts) {
+            const dCost = costBlock - (prev.costBlock || 0);
+            const dMin = (now - prev.ts) / 60000;
+            if (dCost > 0 && dMin > 0) burn = dCost / dMin;
+        }
+        const label = (() => {
+            const tab = s.cwd ? byCwd.get(s.cwd) : null;
+            const name = (tab && tab.title) || s.slug || s.project || s.shortId;
+            return (tab ? `#${tab.id} ` : '') + name;
+        })();
+        rows.push({ id: s.id, label, costBlock, costToday, tok: sc.tok, req: sc.req, sub: sc.subCost || 0, burn });
+
+        const reasons = [];
+        if (costBlock >= CFG.blockCost) reasons.push(`${money(costBlock)} in the 5h block`);
+        if (costToday >= CFG.todayCost) reasons.push(`${money(costToday)} today`);
+        if (burn >= CFG.burnCost && costBlock >= CFG.minCost) reasons.push(`${money(burn)}/min`);
+
+        let fired = false;
+        if (reasons.length) {
+            const last = prev && prev.lastAlert;
+            const coolExpired = !last || (now - last.at) / 1000 >= CFG.cooldown;
+            const escalated = last && costBlock >= CFG.escalate * (last.cost || 0);
+            if (coolExpired || escalated) {
+                fired = true;
+                alerts.push({ label, reasons, costBlock, costToday, tok: sc.tok, req: sc.req, burn, remainMin });
+            }
+        }
+        next.sessions[s.id] = {
+            ts: now, costBlock, costToday, tok: sc.tok,
+            lastAlert: fired ? { at: now, cost: costBlock } : (prev && prev.lastAlert) || null,
+        };
+    }
+
+    if (STATUS) {
+        console.log(`scope=${scope} block=${money(d.block.cost)} burn/min=${d.block.burnRatePerMin} remain=${remainMin}m  today=${money(d.today.cost)}`);
+        console.log('  ' + 'session'.padEnd(26) + 'block$'.padStart(9) + 'today$'.padStart(9) + 'tok'.padStart(8) + '$/min'.padStart(8));
+        for (const r of rows.sort((a, b) => b.costBlock - a.costBlock))
+            console.log('  ' + r.label.slice(0, 25).padEnd(26) + money(r.costBlock).padStart(9) + money(r.costToday).padStart(9) + mtok(r.tok).padStart(8) + money(r.burn).padStart(8));
+        return;
+    }
+
+    // Deliver (one push per over-threshold session).
+    for (const a of alerts) {
+        const body = `⚠ Token watch: “${a.label}” is heavy — ${a.reasons.join(', ')} `
+            + `(${mtok(a.tok)} tok, ${a.req} reqs`
+            + (a.burn >= CFG.burnCost ? `, ~${money(a.burn)}/min` : '')
+            + `). 5h block resets in ${a.remainMin}m.`;
+        if (DRY) { console.log('WOULD ALERT: ' + body); log('DRY would-alert: ' + body); }
+        else { await notify('SoA token alert', body, 'high', 'warning,fire', 'https://s0a.app'); log('ALERT: ' + body); }
+    }
+
+    if (!DRY && !STATUS) saveState(next);
+    log(`scope=${scope} sessions=${d.sessions.length} block=${money(d.block.cost)} today=${money(d.today.cost)} alerted=${alerts.length}`
+        + (alerts.length ? ' [' + alerts.map(a => a.label).join(', ') + ']' : ''));
+}
+
+main().catch(e => { log('error: ' + (e && e.message || e)); process.exit(0); });
