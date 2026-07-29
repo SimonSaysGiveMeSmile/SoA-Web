@@ -196,6 +196,19 @@ launchd jobs):
    touches PARKED tabs (never interrupts a working agent); detects current effort
    from the footer (the word `ultracode`) and skips tabs already set; ~20m per-tab
    cooldown. Log: `~/.soa-web/logs/effort.log`.
+8. `com.soa-web.usage-alert` — every 120s runs `scripts/soa-usage-alert`: polls
+   `/api/claude-usage` (loopback, no auth) and pushes the user when a SINGLE
+   session is "using too much token" — leaning hard on the model in the active
+   5h usage-limit block (≥ $20 est.), heavy today (≥ $60), or suddenly burning
+   fast (cost-**velocity** ≥ $1.5/min, derived by diffing successive polls; the
+   piece the stateless snapshot engine lacks). Edge-triggered with a 30-min
+   per-session cooldown (never spams), re-fires on a 2× escalation, resets on a
+   new block. Correlates each Claude session → tab (`#N title`) via `/api/tabs`.
+   Delivers via `soa-notify` (ntfy OS push) + in-app CHAT. Read-only over
+   loopback — never touches the daemon/tabs/agents; **no restart needed**.
+   Thresholds env-tunable (`SOA_USAGE_BLOCK_COST`/`_TODAY_COST`/`_BURN_COST`/
+   `_COOLDOWN`). The dashboard TOP SESSIONS widget flags the same sessions with a
+   ⚠ red row. Log: `~/.soa-web/logs/usage-alert.log`.
 
 The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
 `com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end
