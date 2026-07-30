@@ -51,14 +51,31 @@ echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read 
   [ -z "$last" ] && last=0
   [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
 
-  # current effort from the live footer (a footer status line with a "·" plus
-  # the effort word). The scrollback may echo a "/effort ..." command, so only
-  # look at footer-marker lines, and take the last one.
-  foot="$(soa-sessions read "$id" 30 2>/dev/null | clean | tr '\r' '\n' | grep -E '·' | grep -iE 'ultracode|effort' | tail -1)"
-  if printf '%s' "$foot" | grep -qi "$TARGET"; then
+  # already at ultracode? ultracode is SESSION-ONLY Claude-process state, not
+  # terminal state — the "✦ ultracode · xhigh" footer banner only renders when
+  # the composer is on-screen, so it false-negatives on settled parked tabs
+  # (agent output fills the frame). The reliable on-screen marker is the
+  # one-time success line Claude prints in the scrollback when /effort is
+  # accepted: "Set effort level to ultracode (this session only): ...".
+  #
+  # We look ONLY at the recent tail (~last 40 rendered lines near the bottom),
+  # so a STALE pre-restart confirmation that's scrolled up is NOT matched — a
+  # genuine reset (restart/resume/spawn) re-seeds fresh scrollback whose tail
+  # lacks a recent confirmation, and we re-assert. We must NOT reuse clean()
+  # here: its `s/[[:cntrl:]]/ /g` eats CRs before the CR→NL split and blobs the
+  # buffer. Strip ANSI, then fold CR→NL so "rendered lines" ≈ real lines.
+  tail40="$(soa-sessions read "$id" 60 2>/dev/null \
+              | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tr '\r' '\n' | tail -40)"
+  # Match both the spaced form and the CR-collapsed twin
+  # ("Seteffortleveltoultracode(thissessiononly)…") by stripping all whitespace
+  # and grepping the whitespace-free needle "Setefflevelto<TARGET>" as a fixed
+  # string (so a TARGET with regex metachars can't break the match).
+  needle="Seteffortlevelto${TARGET}"
+  if printf '%s' "$tail40" | tr -d '[:space:]' | grep -qiF "$needle"; then
     echo "$NOW" > "$stamp"          # already at target — reset cooldown, skip
     continue
   fi
+  foot="$(printf '%s' "$tail40" | grep -iE 'ultracode|effort' | tail -1)"
 
   if [ "$DRY" = 1 ]; then
     log "[dry] would set #$id -> /effort $TARGET (footer: ${foot:0:60})"
