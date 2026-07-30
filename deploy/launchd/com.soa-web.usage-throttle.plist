@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TOKEN-USAGE THROTTLE — runs scripts/soa-usage-throttle every 180s. Keeps the
+  fleet under Claude's 5h usage limit by /compact-ing the heaviest HIGH-CONTEXT
+  tabs when the block is approaching the limit (fleet 5h cost >= $120) or a
+  project is over budget — clearing context so turns cost less while the agent
+  keeps working. NEVER stops, interrupts, or pauses an agent, and never touches
+  effort (no conflict with soa-effort). Conservative: <=3 tabs/run, 20-min
+  per-tab cooldown, high-context only, skips manager/self/limited tabs; logs +
+  soa-msg's what it did. Kill switch: SOA_THROTTLE_ENABLE=0 (or bootout).
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.usage-throttle.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.usage-throttle</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/test/.soa-web/scripts/soa-usage-throttle</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>180</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/usage-throttle.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/usage-throttle.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

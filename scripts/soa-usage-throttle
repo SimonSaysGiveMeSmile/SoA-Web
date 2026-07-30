@@ -1,0 +1,153 @@
+#!/usr/bin/env node
+/**
+ * soa-usage-throttle — keep the fleet under Claude's 5h usage limit by THROTTLING
+ * the heaviest sessions, WITHOUT ever stopping their work.
+ *
+ * This enacts the manager's standing policy automatically with the single
+ * always-safe lever: `/compact`. When the active 5h block is approaching the
+ * limit (or a project is over budget), it runs `/compact` on the heaviest
+ * HIGH-CONTEXT tabs — which clears context so subsequent turns cost far less
+ * while the agent keeps working. It NEVER stops, interrupts, or pauses an agent
+ * (pausing is left to the manager/user via `soa-sessions throttle --pause`), and
+ * NEVER touches effort (so it doesn't fight the soa-effort ultracode watchdog).
+ *
+ * Runs headless from launchd (com.soa-web.usage-throttle) every ~180s. Read-only
+ * except for the /compact it issues; conservative (few tabs/run, long per-tab
+ * cooldown, high-context only); logs + soa-msg's what it did. Disable instantly
+ * with SOA_THROTTLE_ENABLE=0 (or bootout the launchd job).
+ *
+ * Triggers (uses ACTUAL accumulated cost — the early-block projection overstates):
+ *   - a project's 5h cost >= its budget (usage-budgets.json; default $20), OR
+ *   - the whole 5h block cost >= SOA_THROTTLE_FLEET (default $120 — headroom
+ *     under the ~$167 that hit the weekly limit last time).
+ * Target filter: ctx >= SOA_THROTTLE_CTX% (compact only helps high-context tabs),
+ *   status not limited/exited, not a manager/self tab, not in cooldown.
+ *
+ * Env: SOA_THROTTLE_ENABLE(1) FLEET(120) CTX(45) MAX(3) COOLDOWN(1200) SOA_WEB_PORT
+ * Flags: --dry-run (decide + print, compact nothing) · --status
+ */
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+
+const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
+const LOG_DIR = path.join(os.homedir(), '.soa-web', 'logs');
+const LOG = path.join(LOG_DIR, 'usage-throttle.log');
+const STATE = path.join(LOG_DIR, '.usage-throttle-state.json');
+const MSG = path.join(__dirname, 'soa-msg');
+
+const num = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+const CFG = {
+    enable: process.env.SOA_THROTTLE_ENABLE !== '0',
+    fleet: num(process.env.SOA_THROTTLE_FLEET, 120),   // fleet 5h $ = "approaching limit"
+    ctx: num(process.env.SOA_THROTTLE_CTX, 45),        // min ctx% worth compacting
+    max: num(process.env.SOA_THROTTLE_MAX, 3),         // compacts per run
+    cooldown: num(process.env.SOA_THROTTLE_COOLDOWN, 1200),
+};
+const args = new Set(process.argv.slice(2));
+const DRY = args.has('--dry-run');
+const STATUS = args.has('--status');
+
+function port() {
+    if (process.env.SOA_WEB_PORT) return parseInt(process.env.SOA_WEB_PORT, 10);
+    try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'daemon.lock'), 'utf8')).port || 4010; } catch (_) { return 4010; }
+}
+const PORT = port();
+const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+const log = l => { try { fs.mkdirSync(LOG_DIR, { recursive: true }); fs.appendFileSync(LOG, ts() + ' ' + l + '\n'); } catch (_) {} };
+const money = n => '$' + (n || 0).toFixed(2);
+
+function req(method, p, body) {
+    return new Promise((resolve) => {
+        const data = body ? JSON.stringify(body) : null;
+        const headers = {};
+        if (data) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(data); }
+        if (process.env.SOA_WEB_LOCAL_KEY) headers['x-soa-local-key'] = process.env.SOA_WEB_LOCAL_KEY;
+        const r = http.request({ host: '127.0.0.1', port: PORT, path: p, method, headers, timeout: 9000 }, res => {
+            let b = ''; res.on('data', d => b += d); res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve(null); } });
+        });
+        r.on('error', () => resolve(null)); r.on('timeout', () => { r.destroy(); resolve(null); });
+        if (data) r.write(data); r.end();
+    });
+}
+const loadState = () => { try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch (_) { return { blockStartTs: 0, cd: {} }; } };
+const saveState = s => { try { fs.mkdirSync(LOG_DIR, { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s)); } catch (_) {} };
+const loadBudgets = () => { const b = { default: { blockCost: 20, todayCost: 60 }, projects: {} }; try { const j = JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'usage-budgets.json'), 'utf8')); if (j.default) b.default = { ...b.default, ...j.default }; if (j.projects) b.projects = j.projects; } catch (_) {} return b; };
+const managerId = () => { try { return parseInt(fs.readFileSync(path.join(STATE_DIR, 'manager-id'), 'utf8').trim(), 10); } catch (_) { return null; } };
+function soaMsg(text) { return new Promise(r => execFile(MSG, [text], { timeout: 15000 }, () => r())); }
+
+async function main() {
+    if (!CFG.enable) { log('disabled (SOA_THROTTLE_ENABLE=0)'); return; }
+    const usage = await req('GET', '/api/claude-usage');
+    const d = usage && usage.data;
+    if (!d || !d.hasData || !d.block || !d.block.active) { log('no active 5h block / no data — nothing to throttle'); return; }
+    const [tabsR, listR] = await Promise.all([req('GET', '/api/tabs'), req('POST', '/api/sessions', { action: 'list' })]);
+    const budgets = loadBudgets();
+    const mgr = managerId();
+
+    // cwd -> {block,today} cost (fold sessions sharing a cwd = same project)
+    const costByCwd = new Map();
+    for (const s of d.sessions || []) { if (!s.cwd) continue; const c = costByCwd.get(s.cwd) || { block: 0, today: 0, proj: s.project || s.cwd.split('/').pop() }; c.block += (s.block || {}).cost || 0; c.today += (s.today || {}).cost || 0; costByCwd.set(s.cwd, c); }
+    // tab id -> cwd/title
+    const tabById = new Map();
+    for (const t of (tabsR && tabsR.tabs) || []) tabById.set(t.id, { cwd: t.cwd, title: t.title, exited: t.exited });
+    // tab id -> ctx/status/limited/title (ground truth from the supervisor)
+    const metaById = new Map();
+    for (const s of (listR && listR.sessions) || []) metaById.set(s.id, { ctxPct: s.ctxPct, status: s.status, limited: s.limited, title: s.title });
+
+    const fleetCost = d.block.cost || 0;
+    const fleetDanger = fleetCost >= CFG.fleet;
+
+    // Build throttle candidates: a tab whose project is over budget (or, in fleet
+    // danger, any heavy tab), that is high-context and safe to compact.
+    const cands = [];
+    for (const [id, tab] of tabById) {
+        const cost = tab.cwd && costByCwd.get(tab.cwd);
+        if (!cost) continue;
+        const meta = metaById.get(id) || {};
+        const bud = budgets.projects[cost.proj] || budgets.default;
+        const over = cost.block >= (bud.blockCost || 20) || cost.today >= (bud.todayCost || 60);
+        if (!(over || fleetDanger)) continue;                       // no pressure on this project
+        if (id === mgr) continue;                                    // never the manager tab
+        if (/manager|\.soa-web/i.test(meta.title || tab.title || '')) continue;
+        if (tab.exited || meta.limited) continue;                    // already stopped / limited
+        if ((meta.ctxPct || 0) < CFG.ctx) continue;                  // compact only helps high-context
+        cands.push({ id, proj: cost.proj, title: meta.title || tab.title, block: cost.block, today: cost.today, ctx: meta.ctxPct, over });
+    }
+    cands.sort((a, b) => b.block - a.block);
+
+    if (STATUS) {
+        console.log(`fleet 5h ${money(fleetCost)} (limit ${money(CFG.fleet)}${fleetDanger ? ' — DANGER' : ''}) · ctx>=${CFG.ctx}% · candidates:`);
+        for (const c of cands) console.log(`  #${c.id} ${(c.proj || '').padEnd(16)} 5h ${money(c.block)} · ctx ${c.ctx}% ${c.over ? 'OVER' : 'heavy'}`);
+        if (!cands.length) console.log('  (none — nothing over budget / no high-context heavy tab)');
+        return;
+    }
+
+    const state = loadState();
+    if (d.block.startTs && state.blockStartTs !== d.block.startTs) { state.blockStartTs = d.block.startTs; state.cd = {}; }  // new block → reset cooldowns
+    const now = Date.now();
+    const pick = cands.filter(c => { const last = state.cd[c.id] || 0; return (now - last) / 1000 >= CFG.cooldown; }).slice(0, CFG.max);
+
+    if (!pick.length) {
+        log(`fleet 5h ${money(fleetCost)}${fleetDanger ? ' DANGER' : ''} · ${cands.length} candidate(s), none actionable (cooldown/none) — no throttle`);
+        return;
+    }
+    const done = [];
+    for (const c of pick) {
+        if (DRY) { done.push(`#${c.id} ${c.proj} (${money(c.block)}, ctx ${c.ctx}%)`); continue; }
+        const r = await req('POST', '/api/sessions', { action: 'compact', id: c.id });
+        if (r && r.ok) { state.cd[c.id] = now; done.push(`#${c.id} ${c.proj} (${money(c.block)}, ctx ${c.ctx}%)`); }
+        else log(`compact #${c.id} failed: ${JSON.stringify(r)}`);
+    }
+    if (DRY) { console.log(`WOULD /compact (throttle, no stop): ${done.join(', ')}  [fleet ${money(fleetCost)}${fleetDanger ? ' DANGER' : ''}]`); log(`DRY would-throttle: ${done.join(', ')}`); return; }
+    if (done.length) {
+        saveState(state);
+        const summary = `🪫 Auto-throttle: /compact ${done.map(x => x.split(' ')[0]).join(', ')} — 5h block ${money(fleetCost)} approaching limit; context cleared to lower burn, work continues (nothing stopped).`;
+        await soaMsg(summary);
+        log(`THROTTLED (/compact, work continues): ${done.join(', ')} · fleet ${money(fleetCost)}${fleetDanger ? ' DANGER' : ''}`);
+    }
+}
+main().catch(e => { log('error: ' + (e && e.message || e)); process.exit(0); });
