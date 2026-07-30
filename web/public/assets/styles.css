@@ -314,6 +314,25 @@ html, body {
   color: var(--soa-bg); border-color: rgba(0,0,0,0.25); background: rgba(0,0,0,0.12);
 }
 
+/* Effort badge — sits beside the model tier. Parsed live from the /effort footer. */
+.tab-effort {
+  flex: 0 0 auto; font-family: var(--font-mono); font-size: 9px;
+  letter-spacing: 0.04em; line-height: 1; text-transform: lowercase;
+  padding: 2px 5px; border-radius: 8px;
+  border: 1px solid var(--soa-line-soft); background: rgba(255,255,255,0.03);
+  color: var(--soa-accent-dim); white-space: nowrap;
+  max-width: 60px; overflow: hidden; text-overflow: ellipsis;
+}
+.tab-effort[data-effort="ultracode"] { color: #ff5555; border-color: rgba(255,85,85,0.5); }   /* hottest */
+.tab-effort[data-effort="xhigh"]     { color: #ffb86c; border-color: rgba(255,184,108,0.5); }
+.tab-effort[data-effort="high"]      { color: #f1fa8c; border-color: rgba(241,250,140,0.42); }
+.tab-effort[data-effort="medium"]    { color: #50fa7b; border-color: rgba(80,250,123,0.4); }
+.tab-effort[data-effort="low"]       { color: #8be9fd; border-color: rgba(139,233,253,0.4); }
+.tab-effort[data-effort="minimal"]   { color: var(--soa-accent-dim); }
+.tab.active .tab-effort {
+  color: var(--soa-bg); border-color: rgba(0,0,0,0.25); background: rgba(0,0,0,0.12);
+}
+
 /* Drag-to-reorder: the tab being dragged fades, and the drop target shows a
    thin accent-colored bar on the edge where the dragged tab will land. */
 .tab { position: relative; }

@@ -388,6 +388,7 @@ class Shell {
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
         this._agentGroup = new Map();  // tabId → group name (from the manager snapshot)
         this._agentModel = new Map();  // tabId → raw model id (from the manager snapshot)
+        this._agentEffort = new Map(); // tabId → effort level (ultracode/xhigh/…) parsed client-side from the /effort footer
         this._collapsedGroups = new Set(); // group names collapsed in the tiles view
         this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
         // Tabs whose PTY emitted output since the last status scan. The 500ms
@@ -1027,6 +1028,7 @@ class Shell {
             const main = el('span', { class: 'tab-main' }, [label, sub, pvBtn]);
             const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
             const modelBadge = this._makeModelBadge(t.id);
+            const effortBadge = this._makeEffortBadge(t.id);
             // No group chip here: the auto-group is the cwd folder name, which
             // just duplicated the (folder-named) title on most tabs. Groups
             // still show in the tiles + manager views. Rename is dblclick or
@@ -1045,7 +1047,7 @@ class Shell {
                 onclick: () => this._activate(t.id),
                 ondblclick: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
-            }, [dot, main, modelBadge, x].filter(Boolean));
+            }, [dot, main, modelBadge, effortBadge, x].filter(Boolean));
             this._attachTabDrag(root, t.id);
             this._attachTabLongPress(root, t.id);
             return root;
@@ -1127,6 +1129,44 @@ class Shell {
             'data-tier': tier,
             title: `Model: ${raw}\n(live — reflects in-session /model switches)`,
             text: tier,
+        });
+    }
+
+    // Effort level, parsed from the Claude Code footer ("◉ xhigh · /effort" /
+    // "/effort ultracode") in the tab's stream buffer — the transcript carries
+    // the model but not the effort, so this is client-side. Shown as a badge
+    // beside the model badge. Whitespace-flexible: the cursor-positioned footer
+    // strips to no spaces ("◉xhigh·/effort"), so match without relying on gaps.
+    _detectEffort(id, recent) {
+        if (!recent) return;
+        const t = recent.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').slice(-900);
+        const LV = 'ultracode|xhigh|high|medium|low|minimal';
+        let m, eff = null;
+        if ((m = t.match(new RegExp('[◉●]\\s*(' + LV + ')\\b', 'i')))) eff = m[1];               // persistent footer bullet
+        else if ((m = t.match(new RegExp('\\b(' + LV + ')\\b\\s*[·|]?\\s*/effort', 'i')))) eff = m[1];
+        else if ((m = t.match(new RegExp('effort\\s*(?:level\\s*to\\s*)?[:·|]?\\s*(' + LV + ')\\b', 'i')))) eff = m[1]; // /effort echo
+        if (!eff) return;
+        eff = eff.toLowerCase();
+        if (this._agentEffort.get(id) === eff) return;    // unchanged — no rebuild
+        this._agentEffort.set(id, eff);
+        // Effort changed (rare — only on /effort). Debounced tab-row rebuild so
+        // the badge updates without thrashing on every stream frame.
+        if (!this._effortDirtyTimer) {
+            this._effortDirtyTimer = setTimeout(() => { this._effortDirtyTimer = null; this._tabsUISig = null; this._syncTabsUI(); }, 250);
+        }
+    }
+
+    // Short, colored effort badge. ultracode is the fleet default (xhigh + dynamic
+    // workflows); the shorter labels keep the tab compact next to the model tier.
+    _makeEffortBadge(id) {
+        const eff = this._agentEffort.get(id);
+        if (!eff) return null;
+        const label = { ultracode: 'ultra', xhigh: 'xhigh', high: 'high', medium: 'med', low: 'low', minimal: 'min' }[eff] || eff;
+        return el('span', {
+            class: 'tab-effort',
+            'data-effort': eff,
+            title: `Effort: ${eff}\n(live — from the /effort footer)`,
+            text: label,
         });
     }
 
@@ -1363,6 +1403,7 @@ class Shell {
 
         sb.recent += data;
         if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
+        this._detectEffort(id, sb.recent);   // effort badge — parsed from the /effort footer in the stream
 
         // Throttle: at most one detection per 200ms for the tab you're looking
         // at; back-tabs run far less often (~700ms) since their status only
@@ -1562,6 +1603,14 @@ class Shell {
             if (sess.model && sess.model !== this._agentModel.get(id)) {
                 this._agentModel.set(id, sess.model);
                 tabsDirty = true;   // model badge changed → rebuild the tab row below
+            }
+            // Effort badge — server-detected effort covers EVERY tab (client-side
+            // footer parsing only covers tabs whose stream is buffered). Only set
+            // when the server actually has a value, so it never wipes a
+            // client-detected effort before the server ships the field.
+            if (sess.effort && sess.effort !== this._agentEffort.get(id)) {
+                this._agentEffort.set(id, sess.effort);
+                tabsDirty = true;
             }
             if (sess.ctxPct != null && sess.ctxPct !== this._ctxPct.get(id)) {
                 this._ctxPct.set(id, sess.ctxPct);
@@ -4416,6 +4465,8 @@ class Shell {
         // Model badge sits in the head alongside the (later-appended) group chip.
         const badge = this._makeModelBadge(id);
         if (badge) head.appendChild(badge);
+        const effBadge = this._makeEffortBadge(id);
+        if (effBadge) head.appendChild(effBadge);
         return head;
     }
 
@@ -4605,9 +4656,10 @@ class Shell {
             const g = s.group || 'ungrouped';
             groups.set(s.id, g);
             if (s.model) models.set(s.id, s.model);
-            // Model folds into the signature too: a /model switch is rare but
-            // must rebuild the tab row so the badge re-colors.
-            sig += s.id + ':' + g + ':' + (s.model || '') + ';';
+            if (s.effort) this._agentEffort.set(s.id, s.effort);   // server-detected effort (all tabs)
+            // Model + effort fold into the signature too: a /model or /effort
+            // switch is rare but must rebuild the tab row so the badge updates.
+            sig += s.id + ':' + g + ':' + (s.model || '') + ':' + (this._agentEffort.get(s.id) || '') + ';';
         }
         this._agentGroup = groups;
         this._agentModel = models;

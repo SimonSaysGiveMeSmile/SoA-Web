@@ -163,6 +163,20 @@ function extractCtxPct(text) {
     }
     return null;
 }
+// Effort level from the Claude Code footer ("◉ xhigh · /effort" / "/effort
+// ultracode") — the transcript carries the model but not the effort, so we read
+// it off the same footer the status detector sees. Whitespace-flexible: the
+// cursor-positioned footer strips to no spaces ("◉xhigh·/effort").
+const EFFORT_LV = 'ultracode|xhigh|high|medium|low|minimal';
+function extractEffort(text) {
+    if (!text) return null;
+    const t = strip(String(text)).slice(-1000);
+    let m;
+    if ((m = t.match(new RegExp('[◉●]\\s*(' + EFFORT_LV + ')\\b', 'i')))) return m[1].toLowerCase();
+    if ((m = t.match(new RegExp('\\b(' + EFFORT_LV + ')\\b\\s*[·|]?\\s*/effort', 'i')))) return m[1].toLowerCase();
+    if ((m = t.match(new RegExp('effort\\s*(?:level\\s*to\\s*)?[:·|]?\\s*(' + EFFORT_LV + ')\\b', 'i')))) return m[1].toLowerCase();
+    return null;
+}
 
 // ── Reliable submit ─────────────────────────────────────────────────────────
 // A glued "text\r" written into a Claude TUI in one chunk is intermittently
@@ -446,6 +460,8 @@ class SessionManager {
         const prevPct = s.ctxPct;
         const pct = extractCtxPct(s.recent);
         if (pct != null) s.ctxPct = pct;
+        const eff = extractEffort(s.recent);
+        if (eff) s.effort = eff;
         // Edge-trigger high-context only on the UPWARD crossing of the threshold
         // (was below/unknown, now at/above) so it fires once, not every chunk.
         if (s.ctxPct != null && (prevPct == null || prevPct < HIGH_CTX) && s.ctxPct >= HIGH_CTX) {
@@ -612,6 +628,7 @@ class SessionManager {
                 // live transcript so it tracks in-session /model switches. The
                 // client renders it as a tier-colored badge on the tab/tile.
                 model: sessionModel.modelFor(tab && tab.cwd),
+                effort: s.effort || null,   // effort level from the /effort footer (all tabs, server-detected)
                 status: s.status,
                 ctxPct: s.ctxPct,
                 attention: s.status === 'attention',
