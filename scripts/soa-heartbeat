@@ -88,12 +88,19 @@ noself() { grep -vE "^ *#(${SELF:-x}|${MGR:-x}) "; }
 working="$(echo "$LIST" | grep -E ' working ' | noself | sed -nE 's/^ *#([0-9]+) .*/#\1/p' | tr '\n' ' ')"
 idle="$(echo "$LIST" | grep -E ' idle | done ' | noself | sed -nE 's/^ *#([0-9]+) .*/#\1/p' | tr '\n' ' ')"
 
+# Token spend the manager should act on: the 5h window header + projection and
+# any over-budget projects (from `soa-sessions usage`). Keeps the manager aware
+# of "approaching the usage limit" so it can throttle (/compact or pause) BEFORE
+# agents hit the cap and stop. Trimmed so it stays cheap in the manager's context.
+USAGE_DIGEST="$(soa-sessions usage 2>/dev/null | grep -E '^USAGE ·|approaching/over|✓ within|OVER\(' | head -6)"
+
 # ---- report ----
 {
   echo "=== SoA HEARTBEAT $TS ==="
   echo "FLEET: $SUMMARY"
   if [ -n "$blockers" ]; then echo "-- BLOCKERS --"; printf '%s' "$blockers"; else echo "-- BLOCKERS -- none"; fi
   [ -n "$watch_lines" ] && { echo "-- WATCH --"; printf '%s' "$watch_lines"; }
+  [ -n "$USAGE_DIGEST" ] && { echo "-- USAGE (throttle if approaching limit; never stop) --"; printf '%s\n' "$USAGE_DIGEST"; }
   echo "-- WORKING -- $working"
   echo "-- IDLE/DONE -- $idle"
 } | tee -a "$LOG"
