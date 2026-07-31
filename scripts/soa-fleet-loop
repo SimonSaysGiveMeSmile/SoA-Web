@@ -1,0 +1,125 @@
+#!/bin/bash
+# soa-fleet-loop — autonomous, event-driven fleet reactor.
+#
+# Blocks on `soa-sessions watch` (≈0 CPU between events) and reacts the INSTANT a
+# session changes state — the always-on complement to the manager AGENT's event
+# loop (this runs even when no manager agent is alive) and to the TIMER watchdogs
+# (nudge-stale / usage-throttle / effort), adding zero-latency observability +
+# notification without fighting them.
+#
+# It is deliberately CONSERVATIVE on a live fleet:
+#   • journals EVERY event → the only persistent fleet-event log
+#   • notifies you on `limited` (an agent hit its cap and STOPPED) and on an
+#     unexpected `exited` (a working agent's process died)
+#   • OPTIONAL (SOA_FLEETLOOP_COMPACT=1): the instant a PARKED tab crosses the
+#     high-context line, /compact it — the one always-safe throttle. Off by
+#     default so usage-throttle stays the sole compactor until you opt in.
+# It NEVER interrupts a WORKING agent, NEVER stops anything, and always skips the
+# manager tab. Kill switch SOA_FLEETLOOP_ENABLE=0; SOA_FLEETLOOP_DRY=1 logs intent
+# only. Runs under launchd com.soa-web.fleet-loop (KeepAlive → restarts if the
+# watch stream ever ends). Log: ~/.soa-web/logs/fleet-loop.log
+set -u
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="${SOA_FLEETLOOP_LOG:-$DIR/logs/fleet-loop.log}"
+STATED="${SOA_FLEETLOOP_STATE:-$DIR/logs/.fleet-loop}"
+mkdir -p "$STATED" "$(dirname "$LOG")" 2>/dev/null
+
+ENABLE="${SOA_FLEETLOOP_ENABLE:-1}"
+DRY="${SOA_FLEETLOOP_DRY:-0}"
+DO_COMPACT="${SOA_FLEETLOOP_COMPACT:-0}"        # opt-in: immediate compact on highContext
+NOTIFY_COOLDOWN="${SOA_FLEETLOOP_NOTIFY_COOLDOWN:-1800}"    # 30m per-tab notify cooldown
+COMPACT_COOLDOWN="${SOA_FLEETLOOP_COMPACT_COOLDOWN:-1200}"  # 20m per-tab compact cooldown
+KINDS="${SOA_FLEETLOOP_KINDS:-limited,exited,highContext}"
+
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+now() { date +%s; }
+log() { echo "$(ts) $*" >> "$LOG" 2>/dev/null; }
+
+cooldown_ok() { local last=0; [ -f "$1" ] && last="$(cat "$1" 2>/dev/null || echo 0)"; [ -z "$last" ] && last=0; [ $(( $(now) - last )) -ge "$2" ]; }
+stamp()       { echo "$(now)" > "$1"; }
+
+# React to one rendered event line: "[ev N] #ID \"title\" kind (was x) ctx P% — d"
+dispatch() {
+    local line="$1" id kind ctx title snap mids st m
+    id="$(printf '%s' "$line" | sed -nE 's/.*#([0-9]+).*/\1/p' | head -1)"
+    [ -z "$id" ] && return 0
+    kind="$(printf '%s' "$line" | grep -oE 'limited|exited|highContext|stuck|attention|done|idle|working|spawned' | head -1)"
+    ctx="$(printf '%s' "$line" | grep -oE 'ctx [0-9]+%' | grep -oE '[0-9]+' | head -1)"
+    title="$(printf '%s' "$line" | sed -nE 's/.*#[0-9]+ "([^"]*)".*/\1/p')"
+    log "EVENT $line"
+
+    # One `list` snapshot per event = ground truth for manager-exclusion + status
+    # (events are advisory; list never lies). Cheap; events aren't hot enough to matter.
+    snap="$(soa-sessions list 2>/dev/null)"
+    mids="$(printf '%s' "$snap" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+    for m in $mids; do [ "$id" = "$m" ] && { log "  skip #$id (manager tab)"; return 0; }; done
+    st="$(printf '%s' "$snap" | grep -E "^ *#$id " | grep -oE '(working|idle|attention|stuck|done)' | head -1)"
+
+    case "$kind" in
+        limited)
+            # The agent hit its usage cap and STOPPED. The daemon auto-resumes at
+            # the reset; we just surface it (no timer watchdog notifies on this).
+            local sf="$STATED/notify-$id"
+            if cooldown_ok "$sf" "$NOTIFY_COOLDOWN"; then
+                stamp "$sf"
+                local msg="⛔ #$id ${title:+\"$title\" }hit its usage limit — work paused, auto-resumes at reset. If this repeats, throttle harder or add a backup credential."
+                if [ "$DRY" = 1 ]; then log "  [dry] notify(limited): $msg";
+                else soa-msg "$msg" >/dev/null 2>&1 || true; log "  notified user — limited #$id"; fi
+            else log "  limited #$id — notify cooldown"; fi
+            ;;
+        exited)
+            # A process died. Surface only an UNEXPECTED death (was working); a
+            # parked/idle tab exiting is usually an intentional close.
+            if [ "$st" = "working" ]; then
+                local sf="$STATED/notify-$id"
+                if cooldown_ok "$sf" "$NOTIFY_COOLDOWN"; then
+                    stamp "$sf"
+                    local msg="⚠️ #$id ${title:+\"$title\" }exited while working — its process died. Check the tab."
+                    if [ "$DRY" = 1 ]; then log "  [dry] notify(exited): $msg";
+                    else soa-msg "$msg" >/dev/null 2>&1 || true; log "  notified user — exited #$id (was working)"; fi
+                fi
+            else log "  #$id exited (status=${st:-parked}) — likely intentional, journal only"; fi
+            ;;
+        highContext)
+            if [ "$DO_COMPACT" != 1 ]; then
+                log "  highContext #$id ctx${ctx:-?}% — compact disabled (usage-throttle owns it; set SOA_FLEETLOOP_COMPACT=1 to enable)"
+                return 0
+            fi
+            # Immediate throttle — but ONLY a PARKED tab (never interrupt work).
+            case "$st" in
+                idle|done)
+                    local sf="$STATED/compact-$id"
+                    if cooldown_ok "$sf" "$COMPACT_COOLDOWN"; then
+                        stamp "$sf"
+                        if [ "$DRY" = 1 ]; then log "  [dry] would /compact #$id (parked, ctx${ctx:-?}%)";
+                        else soa-sessions compact "$id" >/dev/null 2>&1 || true; log "  /compact #$id (parked, ctx${ctx:-?}%)"; fi
+                    else log "  highContext #$id — compact cooldown"; fi
+                    ;;
+                *) log "  highContext #$id but status=${st:-?} — NOT compacting a working agent (defer to reset/park)";;
+            esac
+            ;;
+        *) : ;;   # journalled above; no action
+    esac
+}
+
+main() {
+    [ "$ENABLE" = "1" ] || { log "disabled (SOA_FLEETLOOP_ENABLE=0) — exiting"; sleep 5; exit 0; }
+    command -v soa-sessions >/dev/null 2>&1 || { log "soa-sessions not on PATH — exiting"; sleep 5; exit 0; }
+    log "=== fleet-loop START (kinds=$KINDS compact=$DO_COMPACT dry=$DRY) ==="
+    # Drain the stale backlog so we don't react to history on (re)start.
+    soa-sessions events >/dev/null 2>&1 || true
+    # Block on the event stream; dispatch each rendered event line as it arrives.
+    soa-sessions watch --kinds "$KINDS" 2>/dev/null | while IFS= read -r line; do
+        case "$line" in
+            *'[ev '*) dispatch "$line" ;;   # a real event
+            *) : ;;                          # heartbeat / reconcile hints — ignore
+        esac
+    done
+    log "watch stream ended — exiting (launchd KeepAlive restarts; brief sleep to avoid a hot loop)"
+    sleep 5
+    exit 0
+}
+
+# Only run the loop when executed directly — sourcing (for unit tests) must not block.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then main; fi

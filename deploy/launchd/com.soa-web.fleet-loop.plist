@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  FLEET EVENT LOOP — runs scripts/soa-fleet-loop as a PERSISTENT daemon (not a
+  timer): it blocks on `soa-sessions watch` (≈0 CPU between events) and reacts the
+  instant a session changes state, complementing the timer watchdogs
+  (nudge-stale / usage-throttle / effort) with zero-latency observability +
+  notification. Always-on, so the fleet reacts even when no manager agent is alive.
+
+  KeepAlive → if the watch stream ever ends (soa-sessions/daemon bounce) launchd
+  restarts it; the script sleeps 5s before exit so restarts never hot-loop.
+
+  SAFE BY DEFAULT: journals every event + notifies you on `limited`/`exited`; it
+  does NOT compact or mutate the fleet unless you set SOA_FLEETLOOP_COMPACT=1
+  below. Kill switch: SOA_FLEETLOOP_ENABLE=0. Dry-run: SOA_FLEETLOOP_DRY=1.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.fleet-loop.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.fleet-loop</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-fleet-loop</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/fleet-loop.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/fleet-loop.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- Opt in to immediate high-context compaction of PARKED tabs by
+             changing this to 1 (usage-throttle otherwise owns compaction): -->
+        <key>SOA_FLEETLOOP_COMPACT</key>
+        <string>0</string>
+    </dict>
+</dict>
+</plist>

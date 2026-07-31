@@ -244,6 +244,19 @@ launchd jobs):
    Thresholds env-tunable (`SOA_USAGE_BLOCK_COST`/`_TODAY_COST`/`_BURN_COST`/
    `_COOLDOWN`). The dashboard TOP SESSIONS widget flags the same sessions with a
    ⚠ red row. Log: `~/.soa-web/logs/usage-alert.log`.
+9. `com.soa-web.fleet-loop` — a PERSISTENT daemon (KeepAlive, not a timer) running
+   `scripts/soa-fleet-loop`: blocks on `soa-sessions watch` (≈0 CPU between events)
+   and reacts the INSTANT a session changes state — the always-on complement to the
+   manager AGENT's event loop (works even with no manager alive) and to the timer
+   watchdogs. SAFE BY DEFAULT: journals every event (the only persistent fleet-event
+   log) + notifies you on `limited` (an agent hit its cap and stopped) and an
+   unexpected `exited` (a working agent's process died), each with a 30m per-tab
+   cooldown; skips the manager tab; NEVER interrupts a working agent or stops
+   anything. Immediate high-context `/compact` of PARKED tabs is OPT-IN
+   (`SOA_FLEETLOOP_COMPACT=1` in the plist; usage-throttle otherwise owns compaction).
+   Kill switch `SOA_FLEETLOOP_ENABLE=0`; dry-run `SOA_FLEETLOOP_DRY=1`. On a watch-
+   stream end launchd restarts it (5s sleep guards against hot-looping). Log:
+   `~/.soa-web/logs/fleet-loop.log`.
 
 The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
 `com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end
