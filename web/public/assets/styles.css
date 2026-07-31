@@ -2734,6 +2734,27 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .mgru-insight-bar { height: 4px; background: var(--soa-line-soft); overflow: hidden; margin: 5px 0 4px; }
 .mgru-insight-fill { display: block; height: 100%; background: rgba(var(--soa-accent-rgb), 0.6); transition: width 0.5s ease; }
 .mgru-insight-tip { font-family: var(--font-mono); font-size: 9.5px; line-height: 1.35; color: var(--soa-accent-dim); }
+/* USAGE CAP — "how much until the cap" gauges, calibrated to /usage. */
+.mgru-cap { display: flex; flex-direction: column; gap: 12px; }
+.mgru-cap-row { display: flex; flex-direction: column; gap: 5px; }
+.mgru-cap-top { display: flex; align-items: baseline; gap: 8px; }
+.mgru-cap-label { font-family: var(--font-display); font-size: 10px; letter-spacing: 0.2em; color: var(--soa-accent-dim); }
+.mgru-cap-pct {
+  font-family: var(--font-display); font-size: 22px; line-height: 1; margin-left: auto;
+  color: var(--soa-fg); letter-spacing: 0.01em;
+}
+.mgru-cap-pct[data-level="warn"] { color: #ffb86c; }
+.mgru-cap-pct[data-level="crit"] { color: #ff5555; }
+.mgru-cap-cal {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.06em;
+  color: var(--soa-accent-dim); background: transparent;
+  border: 1px solid var(--soa-line-soft); border-radius: 8px;
+  padding: 2px 7px; cursor: pointer; white-space: nowrap;
+}
+.mgru-cap-cal:hover { color: var(--soa-accent); border-color: var(--soa-accent); }
+.mgru-cap-gauge[data-level="warn"] .mgru-gauge-fill { background: #ffb86c; box-shadow: 0 0 8px rgba(255,184,108,0.5); }
+.mgru-cap-gauge[data-level="crit"] .mgru-gauge-fill { background: #ff5555; box-shadow: 0 0 8px rgba(255,85,85,0.55); }
+.mgru-cap-sub { font-family: var(--font-mono); font-size: 10px; color: var(--soa-accent-dim); }
 .mgru-scopes { display: inline-flex; gap: 4px; }
 .mgru-scope { letter-spacing: 0.12em; }
 .mgru-scope.active { color: var(--soa-accent); border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.1); }

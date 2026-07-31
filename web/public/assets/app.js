@@ -3621,6 +3621,42 @@ class Shell {
         return h ? `${h}h ${m}m` : `${m}m`;
     }
 
+    // ── Usage-cap calibration ────────────────────────────────────────────────
+    // "How much until the cap" needs the cap value, which /usage knows (from
+    // Anthropic) but the local cost engine doesn't. We calibrate it: the user
+    // enters the % /usage currently shows, and we back-solve cap = liveCost /
+    // (pct/100). Cost is a fine proxy for cap-share (the limit is ~proportional
+    // to weighted consumption, and this fleet is opus-dominated). Stored in
+    // localStorage so it's live with no daemon restart; the user re-enters a %
+    // anytime to re-calibrate. Seeded with a rough estimate so it works day-one.
+    _usageCapCfg() {
+        if (this._usageCap) return this._usageCap;
+        let c = null;
+        try { c = JSON.parse(localStorage.getItem('soa-web:usage-cap') || 'null'); } catch (_) {}
+        if (!c || typeof c !== 'object') c = {};
+        if (!(c.block5hUsd > 0)) { c.block5hUsd = 313; c.estimated = true; }  // ≈ calibrated 2026-07-30
+        return (this._usageCap = c);
+    }
+    _saveUsageCap(patch) {
+        const c = { ...this._usageCapCfg(), ...patch };
+        this._usageCap = c;
+        try { localStorage.setItem('soa-web:usage-cap', JSON.stringify(c)); } catch (_) {}
+    }
+    // Prompt for the current /usage % and back-solve the cap from live cost.
+    _calibrateUsageCap(scope, liveCost) {
+        const label = scope === 'week' ? 'weekly' : '5-hour';
+        const raw = window.prompt(`What % does /usage show for the ${label} limit right now?\n(Enter just the number, e.g. 44)`, '');
+        if (raw == null) return;
+        const pct = parseFloat(String(raw).replace('%', '').trim());
+        if (!(pct > 0) || pct > 100 || !(liveCost > 0)) { this._mgrvToast && this._mgrvToast('Calibration needs a live cost + a 1–100 %'); return; }
+        const cap = liveCost / (pct / 100);
+        this._saveUsageCap(scope === 'week'
+            ? { weekUsd: cap, weekCalibAt: Date.now(), weekEstimated: false }
+            : { block5hUsd: cap, calibAt: Date.now(), estimated: false });
+        this._renderManagerUsage();
+        this._mgrvToast && this._mgrvToast(`Calibrated ${label} cap ≈ ${this._mgruFmtUsd(cap)} (${pct}% = ${this._mgruFmtUsd(liveCost)})`);
+    }
+
     async _refreshManagerUsage() {
         if (this._mgruBusy) return;
         this._mgruBusy = true;
@@ -3756,6 +3792,51 @@ class Shell {
             el('div', { class: 'mgru-note', text: 'cost is an API-list-price estimate — a flat-rate seat does not pay per token' }),
         ]);
 
+        // USAGE CAP — the headline "how much until the cap" the user cares about.
+        // % of the plan limit spent, computed live from cost / a cap calibrated to
+        // /usage. The 5h block works with no restart (block.cost is already live);
+        // the weekly row appears once the engine ships d.week (7-day window).
+        const cap = this._usageCapCfg();
+        const bcost = b.cost || 0;
+        const blockCapUsd = cap.block5hUsd || 0;
+        const blockPct = blockCapUsd > 0 ? (bcost / blockCapUsd) * 100 : 0;
+        const tokTotal = (b.tokens && b.tokens.total) || 0;
+        const burnUsdMin = tokTotal > 0 ? (bcost / tokTotal) * (b.burnRatePerMin || 0) : 0;
+        const leftUsd = Math.max(0, blockCapUsd - bcost);
+        const etaCapMin = burnUsdMin > 0 ? leftUsd / burnUsdMin : Infinity;
+        const resetMin = (b.remainingMs || 0) / 60000;
+        const projPct = blockCapUsd > 0 ? ((b.projectedCost || bcost) / blockCapUsd) * 100 : 0;
+        const capLevel = (p) => p >= 90 ? 'crit' : p >= 70 ? 'warn' : 'ok';
+        const capRow = (label, pct, sub, onCalibrate, estimated) => el('div', { class: 'mgru-cap-row' }, [
+            el('div', { class: 'mgru-cap-top' }, [
+                el('span', { class: 'mgru-cap-label', text: label }),
+                el('span', { class: 'mgru-cap-pct', 'data-level': capLevel(pct || 0), text: (pct != null ? Math.round(pct) : '—') + '%' + (estimated ? ' est' : '') }),
+                el('button', { class: 'mgru-cap-cal', type: 'button', title: 'Calibrate to the % /usage shows now', text: 'calibrate', onclick: onCalibrate }),
+            ]),
+            el('div', { class: 'mgru-gauge mgru-cap-gauge', 'data-level': capLevel(pct || 0) }, [
+                el('span', { class: 'mgru-gauge-fill', style: `width:${Math.min(100, pct || 0)}%` }),
+            ]),
+            el('div', { class: 'mgru-cap-sub', text: sub }),
+        ]);
+        const blockSub = !b.active ? 'block idle — resets on the next request'
+            : blockCapUsd > 0
+                ? `≈${fmtUsd(bcost)} of ≈${fmtUsd(blockCapUsd)} · ≈${fmtUsd(leftUsd)} left`
+                  + (isFinite(etaCapMin) && etaCapMin < resetMin ? ` · cap in ~${Math.round(etaCapMin)}m` : ` · resets in ${this._mgruFmtDur(b.remainingMs || 0)}`)
+                : 'calibrate to see headroom';
+        const capCard = el('div', { class: 'mgru-card mgru-cap' }, [
+            head('USAGE CAP', el('span', { class: 'mgru-reset', text: 'calibrated to /usage' })),
+            capRow('5H BLOCK', b.active ? blockPct : 0, blockSub, () => this._calibrateUsageCap('block', bcost), cap.estimated),
+        ]);
+        if (d.week && d.week.cost != null) {
+            const wcost = d.week.cost;
+            const wcap = cap.weekUsd || d.week.capUsd || 0;
+            const wpct = wcap > 0 ? (wcost / wcap) * 100 : (d.week.pctOfCap || 0);
+            const wsub = `≈${fmtUsd(wcost)}` + (wcap ? ` of ≈${fmtUsd(wcap)} · ≈${fmtUsd(Math.max(0, wcap - wcost))} left` : '')
+                + (d.week.resetTs ? ` · resets ${new Date(d.week.resetTs).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '');
+            capCard.appendChild(capRow('WEEK', wpct, wsub, () => this._calibrateUsageCap('week', wcost), cap.weekEstimated));
+        }
+        if (b.active && projPct > 0) capCard.appendChild(el('div', { class: 'mgru-note', text: `projected ≈${Math.round(projPct)}% of the 5h cap by reset at the current burn` + (cap.estimated ? ' · cap is an estimate — hit “calibrate”' : '') }));
+
         // WHAT'S DRIVING USAGE — the /usage "what's contributing to your limits"
         // breakdown, estimated from local transcripts over a rolling 24h. Shares
         // are independent characteristics (not a partition), so they don't sum to
@@ -3789,6 +3870,7 @@ class Shell {
 
         root.replaceChildren(...[
             el('div', { class: 'mgru-grid' }, [windowCard, todayCard]),
+            capCard,
             insightsCard,
             burnCard,
             sessCard,
