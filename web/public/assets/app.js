@@ -3690,7 +3690,8 @@ class Shell {
             big(t.cost),
             el('div', { class: 'mgru-dim', text: `${fmtTok((t.tokens || {}).total)} tok · ${t.requests} req` }),
             el('div', { class: 'mgru-models' }, models.slice(0, 4).map(m =>
-                el('div', { class: 'mgru-model', title: `${m.tier}: ${fmtTok(m.tokens)} tok · ${m.requests} req` }, [
+                el('div', { class: 'mgru-model', title: `${m.tier}: ${fmtTok(m.tokens)} tok · ${m.requests} req`
+                    + (m.input != null ? `\n${fmtTok(m.input)} in · ${fmtTok(m.output)} out · ${fmtTok(m.cacheRead)} cache-read · ${fmtTok(m.cacheCreate)} cache-write` : '') }, [
                     el('span', { class: 'mgru-model-name', text: m.tier }),
                     el('span', { class: 'mgru-model-bar' }, [
                         el('span', { class: 'mgru-model-fill', style: `width:${Math.max(2, (m.cost / maxModel) * 100)}%` }),
@@ -3755,11 +3756,43 @@ class Shell {
             el('div', { class: 'mgru-note', text: 'cost is an API-list-price estimate — a flat-rate seat does not pay per token' }),
         ]);
 
-        root.replaceChildren(
+        // WHAT'S DRIVING USAGE — the /usage "what's contributing to your limits"
+        // breakdown, estimated from local transcripts over a rolling 24h. Shares
+        // are independent characteristics (not a partition), so they don't sum to
+        // 100. Only appears once the engine ships it (needs a daemon restart).
+        const ins = d.insights;
+        let insightsCard = null;
+        if (ins && ins.cost > 0) {
+            const defs = [
+                ['subagentPct',     'from subagent-heavy sessions', 'Each subagent runs its own requests — be deliberate about spawning them, and consider a cheaper model for simple ones.'],
+                ['highContextPct',  'at >150k context',            'Longer sessions cost more even when cached. /compact mid-task; /clear when switching tasks.'],
+                ['longSessionPct',  'from 8+ hour sessions',       'Often background/loop sessions — continuous burn adds up, so make sure it is intentional.'],
+                ['parallelPct',     'while 4+ sessions ran in parallel', 'All sessions share one limit — queue when you don’t need them all at once.'],
+            ].map(([k, label, tip]) => ({ pct: ins[k] || 0, label, tip }))
+             .filter(r => r.pct > 0)
+             .sort((a, z) => z.pct - a.pct);
+            insightsCard = el('div', { class: 'mgru-card mgru-insights' }, [
+                head("WHAT’S DRIVING USAGE", el('span', { class: 'mgru-reset', text: `est · last ${ins.windowHours || 24}h` })),
+                ...defs.map(r => el('div', { class: 'mgru-insight', title: r.tip }, [
+                    el('span', { class: 'mgru-insight-pct', text: r.pct + '%' }),
+                    el('div', { class: 'mgru-insight-main' }, [
+                        el('div', { class: 'mgru-insight-label', text: r.label }),
+                        el('div', { class: 'mgru-insight-bar' }, [
+                            el('span', { class: 'mgru-insight-fill', style: `width:${Math.min(100, r.pct)}%` }),
+                        ]),
+                        el('div', { class: 'mgru-insight-tip', text: r.tip }),
+                    ]),
+                ])),
+                el('div', { class: 'mgru-note', text: 'approximate, from local transcripts — independent characteristics, not a 100% split' }),
+            ]);
+        }
+
+        root.replaceChildren(...[
             el('div', { class: 'mgru-grid' }, [windowCard, todayCard]),
+            insightsCard,
             burnCard,
             sessCard,
-        );
+        ].filter(Boolean));
     }
 
     _paintUsageSpark(canvas, series) {

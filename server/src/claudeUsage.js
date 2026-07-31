@@ -296,10 +296,42 @@ function compute() {
     const series = new Array(SERIES_MINUTES).fill(0);
     const seriesStart = now - SERIES_MINUTES * 60000;
 
+    // "What's contributing to your limits" — the same independent-characteristic
+    // breakdown Claude Code's /usage shows, over a rolling 24h, computed from the
+    // record stream. Each is a share of the 24h cost (not mutually exclusive).
+    const INSIGHTS_MS = 24 * 3600 * 1000;
+    const HIGH_CTX_TOK = 150000;        // >150k context threshold (/usage's bar)
+    const LONG_SESSION_MS = 8 * 3600 * 1000;
+    const PARALLEL_MIN = 4;             // 4+ sessions active in the same minute
+    const insDayAgo = now - INSIGHTS_MS;
+    const SUBAGENT_HEAVY_SHARE = 0.15;  // a session is "subagent-heavy" once ≥15% of its cost is subagents
+    const ins = { cost: 0, highCtxCost: 0 };
+    const insSess = new Map();          // sid -> { first, last, cost, subCost }
+    const insMinuteSids = new Map();    // minuteIdx -> Set(sid)  (concurrency)
+    const insRecs = [];                 // { minute, cost } for the parallel pass
+
     for (const { r, meta } of all) {
         const c = costOf(r);
         const inToday = r.ts >= midnight;
         const inBlock = r.ts >= blockStart;
+
+        // 24h insight accumulation (independent of block/today scoping above).
+        if (r.ts >= insDayAgo) {
+            const isid = meta.sess || 'unknown';
+            ins.cost += c;
+            if ((r.input + r.cacheRead) >= HIGH_CTX_TOK) ins.highCtxCost += c;
+            let es = insSess.get(isid);
+            if (!es) { es = { first: r.ts, last: r.ts, cost: 0, subCost: 0 }; insSess.set(isid, es); }
+            if (r.ts < es.first) es.first = r.ts;
+            if (r.ts > es.last) es.last = r.ts;
+            es.cost += c;
+            if (meta.side || r.side) es.subCost += c;
+            const minute = Math.floor(r.ts / 60000);
+            let set = insMinuteSids.get(minute);
+            if (!set) { set = new Set(); insMinuteSids.set(minute, set); }
+            set.add(isid);
+            insRecs.push({ minute, cost: c });
+        }
         if (inToday) {
             addTokens(today.tokens, r);
             today.cost += c;
@@ -384,8 +416,41 @@ function compute() {
         block = { active: false, remainingMs: 0, tokens: tokenBucket(), cost: 0, requests: 0, burnRatePerMin: 0 };
     }
 
+    // Finish the insight passes: long-running sessions (span ≥ 8h) and
+    // high-concurrency minutes (≥ 4 sessions active), each as a share of 24h cost.
+    let longCost = 0, subHeavyCost = 0;
+    for (const es of insSess.values()) {
+        if ((es.last - es.first) >= LONG_SESSION_MS) longCost += es.cost;
+        // Whole-session cost counts when subagents are a meaningful share of it
+        // (mirrors /usage's "usage from subagent-heavy sessions", not raw
+        // subagent requests).
+        if (es.cost > 0 && (es.subCost / es.cost) >= SUBAGENT_HEAVY_SHARE) subHeavyCost += es.cost;
+    }
+    let parallelCost = 0;
+    for (const rec of insRecs) {
+        const set = insMinuteSids.get(rec.minute);
+        if (set && set.size >= PARALLEL_MIN) parallelCost += rec.cost;
+    }
+    const insPct = (x) => ins.cost > 0 ? Math.round((x / ins.cost) * 100) : 0;
+    const insights = {
+        windowHours: 24,
+        cost: ins.cost,
+        sessionCount: insSess.size,
+        subagentPct: insPct(subHeavyCost),
+        highContextPct: insPct(ins.highCtxCost),
+        longSessionPct: insPct(longCost),
+        parallelPct: insPct(parallelCost),
+    };
+
     const modelList = [...models.values()]
-        .map(m => ({ tier: m.tier, tokens: m.tokens.total, cost: m.cost, requests: m.requests, lastTs: m.lastTs }))
+        .map(m => ({
+            tier: m.tier, tokens: m.tokens.total,
+            // Per-operation breakdown so the UI can mirror /usage's
+            // "N input, N output, N cache read, N cache write" line.
+            input: m.tokens.input, output: m.tokens.output,
+            cacheRead: m.tokens.cacheRead, cacheCreate: m.tokens.cacheCreate,
+            cost: m.cost, requests: m.requests, lastTs: m.lastTs,
+        }))
         .sort((a, b) => b.tokens - a.tokens);
 
     // Session breakdown, most expensive first in the scope that matters now.
@@ -410,6 +475,7 @@ function compute() {
         today,
         models: modelList,
         sessions: sessionList,
+        insights,
         sessionScope: blockActive ? 'block' : 'today',
         series,
         seriesMinutes: SERIES_MINUTES,

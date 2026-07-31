@@ -2721,6 +2721,19 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .mgru-model-fill { display: block; height: 100%; background: rgba(var(--soa-accent-rgb), 0.65); }
 .mgru-model-val { color: var(--soa-accent-dim); }
 .mgru-spark { display: block; width: 100%; height: 64px; background: rgba(var(--soa-accent-rgb), 0.03); border: 1px solid rgba(var(--soa-accent-rgb), 0.12); }
+/* WHAT'S DRIVING USAGE — the /usage "what's contributing" breakdown. */
+.mgru-insights { display: flex; flex-direction: column; gap: 10px; }
+.mgru-insight { display: grid; grid-template-columns: 46px 1fr; gap: 12px; align-items: start; }
+.mgru-insight-pct {
+  font-family: var(--font-display); font-size: 20px; line-height: 1;
+  color: var(--soa-fg); letter-spacing: 0.01em; text-align: right;
+  text-shadow: 0 0 12px rgba(var(--soa-accent-rgb), 0.25);
+}
+.mgru-insight-main { min-width: 0; }
+.mgru-insight-label { font-family: var(--font-mono); font-size: 11px; color: var(--soa-fg); letter-spacing: 0.04em; }
+.mgru-insight-bar { height: 4px; background: var(--soa-line-soft); overflow: hidden; margin: 5px 0 4px; }
+.mgru-insight-fill { display: block; height: 100%; background: rgba(var(--soa-accent-rgb), 0.6); transition: width 0.5s ease; }
+.mgru-insight-tip { font-family: var(--font-mono); font-size: 9.5px; line-height: 1.35; color: var(--soa-accent-dim); }
 .mgru-scopes { display: inline-flex; gap: 4px; }
 .mgru-scope { letter-spacing: 0.12em; }
 .mgru-scope.active { color: var(--soa-accent); border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.1); }
