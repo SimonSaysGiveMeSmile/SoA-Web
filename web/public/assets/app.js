@@ -3824,7 +3824,11 @@ class Shell {
                 onerror: () => icon.remove(),
             });
             const group = s.group || this._agentGroup.get(s.id) || '';
-            const grpChip = (group && group !== 'ungrouped')
+            // Hide the chip when the title already ends with the group name
+            // (e.g. "#23 iPlan" + "iPlan") — avoid showing the name twice.
+            const gl = group.trim().toLowerCase();
+            const grpRedundant = gl && String(s.title || '').trim().toLowerCase().endsWith(gl);
+            const grpChip = (group && group !== 'ungrouped' && !grpRedundant)
                 ? el('span', { class: 'tile-group-chip mgrv-grp', text: group }) : null;
             const pre = el('pre', { class: 'tile-preview', text: this._mgrvTailFor(s.id) });
             this._mgrvPreEls.set(s.id, pre);
@@ -4458,15 +4462,24 @@ class Shell {
             onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
             onerror: () => icon.remove(),
         });
-        const head = el('div', { class: 'tile-head' }, [
+        // Two-line head: the NAME gets the full first line (was being crushed to
+        // "so…"/"P." by the fixed-width badges); model/effort/group chips drop to
+        // a compact meta line below. Right-click the head reassigns the group
+        // (the chip — the usual affordance — is hidden when it just echoes the
+        // name, so this keeps grouping reachable). See _syncTileGroupChip.
+        const head = el('div', {
+            class: 'tile-head',
+            oncontextmenu: (e) => { e.preventDefault(); e.stopPropagation(); this._promptSetGroup(id); },
+        }, [
             icon,
             el('span', { class: 'tile-title', text: title }),
         ]);
-        // Model badge sits in the head alongside the (later-appended) group chip.
+        const meta = el('div', { class: 'tile-meta' });
         const badge = this._makeModelBadge(id);
-        if (badge) head.appendChild(badge);
+        if (badge) meta.appendChild(badge);
         const effBadge = this._makeEffortBadge(id);
-        if (effBadge) head.appendChild(effBadge);
+        if (effBadge) meta.appendChild(effBadge);
+        head.appendChild(meta);   // group chip is appended into .tile-meta later
         return head;
     }
 
@@ -4532,16 +4545,23 @@ class Shell {
     _syncTileGroupChip(node, id) {
         const head = node.querySelector('.tile-head');
         if (!head) return;
+        const meta = head.querySelector('.tile-meta') || head;
         const group = this._agentGroup.get(id) || '';
-        let chip = head.querySelector('.tile-group-chip');
-        if (group && group !== 'ungrouped') {
+        const rt = this.tabs.get(id);
+        const title = (rt && rt.title) || '';
+        // Suppress the chip when it would just echo the tab name — the title line
+        // already shows it, so a redundant "socialrizz · socialrizz" is noise.
+        // Right-clicking the head still reassigns the group (see _tileHead).
+        const redundant = group && title && group.trim().toLowerCase() === title.trim().toLowerCase();
+        let chip = meta.querySelector('.tile-group-chip');
+        if (group && group !== 'ungrouped' && !redundant) {
             if (!chip) {
                 chip = el('span', {
                     class: 'tile-group-chip',
                     title: "Click to set this agent's group",
                     onclick: (e) => { e.stopPropagation(); this._promptSetGroup(id); },
                 });
-                head.appendChild(chip);
+                meta.appendChild(chip);
             }
             if (chip.textContent !== group) chip.textContent = group;
         } else if (chip) {
