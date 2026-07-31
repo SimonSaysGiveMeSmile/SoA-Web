@@ -71,6 +71,10 @@ FAILS="$STATE_DIR/logs/.channel-misses"    # consecutive failed-verify passes (a
 CHURN_HOLD_MISSES="${SOA_CHURN_HOLD_MISSES:-3}"  # hold a blipping tunnel this many ~60s passes before minting a NEW url
 LOCK="$STATE_DIR/logs/.channels.lock"
 S0A="https://s0a.app"
+# Stable named cloudflare tunnel (soa-named-tunnel-setup). A FIXED hostname that
+# never rotates → the ideal door. Everything below no-ops until it's set up.
+NAMED_HOST="${SOA_TUNNEL_HOSTNAME:-m.s0a.app}"
+NAMED_CFG="$HOME/.cloudflared/config.yml"
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
@@ -369,6 +373,23 @@ for t in d.get('tunnels',[]):
     return 1
 }
 
+# 0. STABLE named cloudflare tunnel (m.s0a.app) — a FIXED hostname that never
+#    rotates. Detected ONLY once soa-named-tunnel-setup has written the cloudflared
+#    config for it, so this is a fast no-op (returns 1) until then. Kickstarts the
+#    KeepAlive service in case it died. Adopted under the "cloudflare" label so the
+#    client still gets the s0a.app/?backend=… convenience URL.
+ch_named() {
+    local url i
+    { [ -f "$NAMED_CFG" ] && grep -q "$NAMED_HOST" "$NAMED_CFG" 2>/dev/null; } || return 1
+    launchctl kickstart "gui/$(id -u)/com.soa-web.named-tunnel" 2>/dev/null || true
+    url="https://${NAMED_HOST}"
+    for i in 1 2 3 4 5 6; do
+        verify "$url" && { echo "$url"; return 0; }
+        sleep 3
+    done
+    return 1
+}
+
 # 3. LAN — first private IPv4 the daemon (bound 0.0.0.0) is reachable on.
 ch_lan() {
     local ip url
@@ -382,6 +403,8 @@ ch_lan() {
 
 failover() {
     local ch url
+    # 0. Prefer the STABLE named tunnel (never rotates). No-op until it's set up.
+    if url="$(ch_named)"; then adopt cloudflare "$url"; return 0; fi
     for ch in cloudflare ngrok lan; do
         # Skip a recently-failed cloudflare so a multi-hour CF outage doesn't burn
         # ~70s of every cycle re-minting dead tunnels.
@@ -448,6 +471,17 @@ cur_url="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget url )"
 
 if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
     rm -f "$FAILS" 2>/dev/null            # reachable this pass — clear the miss streak
+    # CONVERGE ON STABILITY: if we're on a ROTATING door (quick cloudflare / ngrok)
+    # but the FIXED named tunnel is up, upgrade to it. Safe — the named host never
+    # rotates, so this is a one-time move to permanence, not URL churn. Skipped once
+    # we're already on it (and a no-op entirely until the named tunnel is set up).
+    case "$cur_url" in
+        *"$NAMED_HOST"*) : ;;                       # already on the stable door
+        *)  if nurl="$(ch_named)"; then
+                log "UPGRADE ${cur_ch} ${cur_url} → stable named tunnel ${nurl}"
+                adopt cloudflare "$nurl"; exit 0
+            fi ;;
+    esac
     # STABILITY over prettiness: a HEALTHY door is kept AS-IS — we do NOT re-mint a
     # fresh cloudflare quick tunnel just to move off ngrok. Each quick tunnel gets a
     # NEW random *.trycloudflare.com hostname, so every gratuitous swap killed the
