@@ -430,6 +430,59 @@ html, body {
     -webkit-mask: var(--soa-icon-clock) center / contain no-repeat;
             mask: var(--soa-icon-clock) center / contain no-repeat;
 }
+
+/* ── Unified VIEW SWITCHER ─────────────────────────────────────────────────
+   One segmented control that switches between every view (terminal, tiles,
+   manager, chat, monitor). Each cell is an icon-only 30px square carrying a
+   CSS-mask SVG glyph; the active view's cell fills with the accent. Cells are
+   individually hideable via Settings → Appearance → View switcher. */
+.view-switch {
+    display: inline-flex;
+    align-items: stretch;
+    height: 30px;
+    border: 1px solid var(--soa-accent-dim);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.view-switch:empty { display: none; }
+/* Override the generic .topbar-actions button chrome — cells share one border. */
+.topbar-actions .view-switch .view-btn {
+    width: 30px; height: 100%;
+    padding: 0; margin: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; color: var(--soa-accent);
+    border: none; border-left: 1px solid var(--soa-accent-dim);
+    border-radius: 0;
+    font-size: 0; letter-spacing: 0;
+    cursor: pointer; box-sizing: border-box; position: relative;
+    transition: background .12s ease, color .12s ease;
+}
+.topbar-actions .view-switch .view-btn:first-child { border-left: none; }
+.view-switch .view-btn::before {
+    content: ""; display: block; width: 17px; height: 17px;
+    background: currentColor;
+    -webkit-mask: var(--vb-icon) center / contain no-repeat;
+            mask: var(--vb-icon) center / contain no-repeat;
+}
+.view-switch .view-btn[data-vicon="terminal"] { --vb-icon: var(--soa-icon-terminal); }
+.view-switch .view-btn[data-vicon="tiles"]    { --vb-icon: var(--soa-icon-tiles); }
+.view-switch .view-btn[data-vicon="manager"]  { --vb-icon: var(--soa-icon-manager); }
+.view-switch .view-btn[data-vicon="chat"]     { --vb-icon: var(--soa-icon-chat); }
+.view-switch .view-btn[data-vicon="monitor"]  { --vb-icon: var(--soa-icon-monitor); }
+.topbar-actions .view-switch .view-btn:hover { background: rgba(var(--soa-accent-rgb), 0.12); border-color: var(--soa-accent-dim); }
+.topbar-actions .view-switch .view-btn.active { background: var(--soa-accent); color: var(--soa-bg); }
+.view-switch .view-btn[hidden] { display: none; }
+
+/* View-switcher customization checkboxes (Settings → Appearance). */
+.set-viewbtns { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.set-viewbtn-lbl {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--font-mono); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.set-viewbtn-lbl--fixed { opacity: 0.55; cursor: default; }
+.set-viewbtn { cursor: pointer; }
+.set-viewbtn:disabled { cursor: default; }
+
 :root {
     --soa-icon-clock: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='9'/><path d='M12 7v5l3.5 2'/></svg>");
     /* Crisp monochrome line icons for the More submenu — same CSS-mask
@@ -440,6 +493,12 @@ html, body {
     --soa-icon-audio-off: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 9.5v5h3.5L12 18V6L7.5 9.5H4z'/><path d='m16 9.5 4 5'/><path d='m20 9.5-4 5'/></svg>");
     --soa-icon-tts: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5h16v10H9l-4 3.5V15H4z'/><path d='M8 9h8'/><path d='M8 12h5'/></svg>");
     --soa-icon-monitor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4.5' width='18' height='11.5' rx='1.5'/><path d='M9 20h6'/><path d='M12 16v4'/></svg>");
+    /* View-switcher icons — one crisp monochrome line glyph per view, same
+       CSS-mask technique so each inherits currentColor / the active-cell ink. */
+    --soa-icon-terminal: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4.5' width='18' height='15' rx='1.5'/><path d='m7 9.5 3 2.5-3 2.5'/><path d='M12.5 15h4'/></svg>");
+    --soa-icon-tiles: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3.5' y='3.5' width='7' height='7' rx='1'/><rect x='13.5' y='3.5' width='7' height='7' rx='1'/><rect x='3.5' y='13.5' width='7' height='7' rx='1'/><rect x='13.5' y='13.5' width='7' height='7' rx='1'/></svg>");
+    --soa-icon-manager: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='2.6'/><circle cx='12' cy='4.5' r='1.7'/><circle cx='12' cy='19.5' r='1.7'/><circle cx='4.5' cy='12' r='1.7'/><circle cx='19.5' cy='12' r='1.7'/><path d='M12 9.4V6.2M12 14.6v3.2M9.4 12H6.2M14.6 12h3.2'/></svg>");
+    --soa-icon-chat: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5h16v10.5H9.5L5.5 19v-3.5H4z'/><path d='M8 9h8'/><path d='M8 12h5'/></svg>");
 }
 
 /* ── "More" overflow submenu ───────────────────────────────────────────────

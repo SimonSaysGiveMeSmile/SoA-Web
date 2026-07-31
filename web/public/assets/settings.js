@@ -32,7 +32,19 @@ export const DEFAULTS = Object.freeze({
     disableFeedbackAudio: false,
     agentDoneSound: true,
     clockHours: 24,
+    // Which cells the unified view switcher shows. Terminal (tabs) is the
+    // always-available escape hatch; the rest are user-customizable.
+    viewButtons: { tabs: true, tiles: true, manager: true, chat: true, monitor: true },
 });
+
+const VIEW_KEYS = ['tabs', 'tiles', 'manager', 'chat', 'monitor'];
+function asViewButtons(v) {
+    const src = (v && typeof v === 'object') ? v : {};
+    const out = {};
+    for (const k of VIEW_KEYS) out[k] = src[k] !== false;   // default: shown
+    out.tabs = true;                                        // terminal always on
+    return out;
+}
 
 const THEMES = ['auto', 'dark', 'light', 'dim'];
 function asTheme(v) { return THEMES.includes(v) ? v : DEFAULTS.theme; }
@@ -69,6 +81,7 @@ function normalize(raw) {
         disableFeedbackAudio: asBool(s.disableFeedbackAudio, DEFAULTS.disableFeedbackAudio),
         agentDoneSound: asBool(s.agentDoneSound, DEFAULTS.agentDoneSound),
         clockHours: asHours(s.clockHours ?? DEFAULTS.clockHours),
+        viewButtons: asViewButtons(s.viewButtons),
     };
 }
 
@@ -221,6 +234,28 @@ function themeSelect(id, value) {
     return sel;
 }
 
+// View-switcher customization — a checkbox per toggleable view. Instant-apply
+// (same pipeline as the theme/uiLang selects): each change writes viewButtons
+// back and app.js re-applies cell visibility via the 'soa:settings' event.
+function viewButtonsControl(s) {
+    const wrap = el('div', { class: 'set-viewbtns' });
+    const defs = [['tiles', 'Tiles'], ['manager', 'Manager'], ['chat', 'Chat'], ['monitor', 'Monitor']];
+    const cur = (s && s.viewButtons) || {};
+    // Terminal is always available — show it disabled+checked for clarity.
+    const term = el('input', { type: 'checkbox', class: 'set-viewbtn', checked: 'checked', disabled: 'disabled' });
+    wrap.appendChild(el('label', { class: 'set-viewbtn-lbl set-viewbtn-lbl--fixed', title: 'Always shown' }, [term, ' Terminal']));
+    for (const [key, label] of defs) {
+        const cb = el('input', { type: 'checkbox', class: 'set-viewbtn', id: 'set-viewbtn-' + key });
+        cb.checked = cur[key] !== false;
+        cb.addEventListener('change', () => {
+            const next = { ...getSettings().viewButtons, [key]: cb.checked };
+            saveSettings({ viewButtons: next });
+        });
+        wrap.appendChild(el('label', { class: 'set-viewbtn-lbl', for: 'set-viewbtn-' + key }, [cb, ' ' + label]));
+    }
+    return wrap;
+}
+
 // A read-only settings row (label / description / static value).
 function staticRow(label, desc, valueText) {
     return el('tr', {}, [
@@ -252,6 +287,11 @@ function buildAppearancePane(s) {
             kvRow('cursorBlink',  'settings.desc.cursorBlink',  boolSelect('set-cursorBlink', s.cursorBlink)),
             kvRow('nocursor',     'settings.desc.nocursor',     boolSelect('set-nocursor', s.nocursor)),
             kvRow('nointro',      'settings.desc.nointro',      boolSelect('set-nointro', s.nointro)),
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'viewButtons' })]),
+                el('td', { class: 'd', text: 'View switcher — choose which view buttons appear in the toolbar switcher (Terminal is always shown; Manager also needs the fleet entitlement). Applies instantly.' }),
+                el('td', { class: 'v' }, [viewButtonsControl(s)]),
+            ]),
             staticRow('version', 'SoA-Web build', 'v' + ((window.__SOA_WEB__ || {}).version || 'dev')),
         ]),
     ]);

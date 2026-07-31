@@ -18,9 +18,9 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=42';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=43';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=27';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=24';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
 
@@ -452,29 +452,17 @@ class Shell {
         this._previewVisible = new Map();    // tabId → boolean (pane open?)
         this._ownPort = parseInt(location.port, 10) || 7332;
 
-        const viewBtn = $('#toggle-view');
-        if (viewBtn) {
-            viewBtn.addEventListener('click', () => this._toggleViewMode());
-            this._updateViewBtn();
+        // Unified view switcher — one segmented control; each cell selects its
+        // view via _setView (the standalone TILES/FLEET/CHAT/MON buttons folded
+        // in). Which cells appear is customizable in Settings → Appearance.
+        const viewSwitch = $('#view-switch');
+        if (viewSwitch) {
+            viewSwitch.querySelectorAll('.view-btn').forEach(btn => {
+                btn.addEventListener('click', () => this._setView(btn.dataset.view));
+            });
         }
-
-        const monBtn = $('#toggle-monitor');
-        if (monBtn) {
-            monBtn.addEventListener('click', () => this._toggleMonitor());
-            this._updateMonitorBtn();
-        }
-
-        const mgrBtn = $('#toggle-manager');
-        if (mgrBtn) {
-            mgrBtn.addEventListener('click', () => this._toggleManager());
-            this._updateManagerBtn();
-        }
-
-        const chatBtn = $('#toggle-chat');
-        if (chatBtn) {
-            chatBtn.addEventListener('click', () => this._toggleChat());
-            this._updateChatBtn();
-        }
+        this._applyViewButtonsVisibility(getSettings());
+        this._syncViewSwitch();
         // Premium-feature gate: the fleet-manager view is manager-only. Default to
         // DISABLED so a slow/failed capabilities fetch fails safe to hidden, then
         // reveal it only once the server confirms the entitlement.
@@ -2744,6 +2732,8 @@ class Shell {
             audioBtn.dataset.state = s.audio ? 'on' : 'off';
             audioBtn.textContent = s.audio ? tr('topbar.audio_on') : tr('topbar.audio_off');
         }
+        // Re-apply which view-switcher cells the user chose to show.
+        this._applyViewButtonsVisibility(s);
     }
 
     // ── User profile chip ──────────────────────────────────────────────────
@@ -2852,21 +2842,65 @@ class Shell {
         this.audio.play('panels');
     }
 
-    _updateViewBtn() {
-        const btn = $('#toggle-view');
-        if (!btn) return;
-        // Icon shows the NEXT view in the cycle.
-        if (this.viewMode !== 'tiles') {
-            btn.setAttribute('data-icon', '⊞');
-            btn.title = 'Switch to dashboard view';
-        } else if (!this.tilesGrouped) {
-            btn.setAttribute('data-icon', '▤');
-            btn.title = 'Switch to grouped view';
+    // Direct view selection from the unified switcher. SELECT semantics (unlike
+    // the toggle-* methods the keyboard shortcuts use): a cell click enters that
+    // view; clicking TILES again toggles the grouped sub-layout.
+    _setView(mode) {
+        if (mode === 'manager' && !this._managerEnabled()) return;
+        if (mode === 'tiles') {
+            if (this.viewMode !== 'tiles') { this.viewMode = 'tiles'; this.tilesGrouped = false; }
+            else { this.tilesGrouped = !this.tilesGrouped; }
+        } else if (!mode || mode === 'tabs') {
+            this.viewMode = 'tabs'; this.tilesGrouped = false;
         } else {
-            btn.setAttribute('data-icon', '☰');
-            btn.title = 'Switch to tabs view';
+            this.viewMode = mode;   // manager | chat | monitor
         }
+        try {
+            localStorage.setItem('soa_web_view_mode', this.viewMode);
+            localStorage.setItem('soa_web_tiles_grouped', this.tilesGrouped ? '1' : '0');
+        } catch (_) {}
+        this._applyViewMode();
+        this._syncViewSwitch();
+        this.audio.play('panels');
     }
+
+    // Single source of truth for the switcher chrome: highlight the active
+    // view's cell, refresh the chat unread badge, and re-apply cell visibility
+    // (settings + manager entitlement). Every legacy _update*Btn name delegates
+    // here so all existing call sites keep the switcher in sync.
+    _syncViewSwitch() {
+        const sw = $('#view-switch');
+        if (!sw) return;
+        const active = this.viewMode || 'tabs';
+        sw.querySelectorAll('.view-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.view === active);
+        });
+        const badge = sw.querySelector('#view-chat .chat-badge');
+        if (badge) {
+            const n = (active === 'chat') ? 0 : (this._chatUnread || 0);
+            badge.textContent = n > 99 ? '99+' : String(n);
+            badge.hidden = !n;
+        }
+        this._applyViewButtonsVisibility(getSettings());
+    }
+
+    // Show/hide each switcher cell per the user's Settings preference (all shown
+    // by default). The manager cell is additionally gated on the entitlement.
+    _applyViewButtonsVisibility(s) {
+        const sw = $('#view-switch');
+        if (!sw) return;
+        const pref = (s && s.viewButtons) || {};
+        sw.querySelectorAll('.view-btn').forEach(btn => {
+            const v = btn.dataset.view;           // tabs|tiles|manager|chat|monitor
+            let show = pref[v] !== false;         // default: shown unless explicitly off
+            if (v === 'manager') show = show && this._managerEnabled();
+            if (v === 'tabs') show = true;        // never hide the escape hatch to the terminal
+            btn.hidden = !show;
+        });
+    }
+
+    // Back-compat shims — the toggle-* flows and entitlement code call these.
+    _updateViewBtn()    { this._syncViewSwitch(); }
 
     _applyViewMode() {
         const shell = $('#shell');
@@ -2926,10 +2960,7 @@ class Shell {
         this.audio.play('panels');
     }
 
-    _updateMonitorBtn() {
-        const btn = $('#toggle-monitor');
-        if (btn) btn.classList.toggle('active', this.viewMode === 'monitor');
-    }
+    _updateMonitorBtn() { this._syncViewSwitch(); }
 
     _enterMonitor() {
         if (!this._monitorEl) {
@@ -3089,15 +3120,14 @@ class Shell {
     // bounce out of the manager view if we somehow landed there unentitled
     // (e.g. a stale localStorage view mode).
     _applyManagerEntitlement() {
-        const btn = $('#toggle-manager');
-        if (btn) btn.hidden = !this._managerEnabled();
         if (!this._managerEnabled() && this.viewMode === 'manager') {
             this.viewMode = 'tabs';
             try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
             this._applyViewMode();
-            this._updateViewBtn();
-            this._updateMonitorBtn();
         }
+        // _syncViewSwitch re-applies cell visibility, which gates the manager
+        // cell on the entitlement (and the user's Settings preference).
+        this._syncViewSwitch();
     }
 
     // ── MANAGER view — interactive fleet dashboard ──────────────────────────
@@ -3118,10 +3148,7 @@ class Shell {
         this.audio.play('panels');
     }
 
-    _updateManagerBtn() {
-        const btn = $('#toggle-manager');
-        if (btn) btn.classList.toggle('active', this.viewMode === 'manager');
-    }
+    _updateManagerBtn() { this._syncViewSwitch(); }
 
     async _managerApi(path, body) {
         const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
@@ -3196,17 +3223,7 @@ class Shell {
         this.audio.play('panels');
     }
 
-    _updateChatBtn() {
-        const btn = $('#toggle-chat');
-        if (!btn) return;
-        btn.classList.toggle('active', this.viewMode === 'chat');
-        const badge = btn.querySelector('.chat-badge');
-        if (badge) {
-            const n = (this.viewMode === 'chat') ? 0 : (this._chatUnread || 0);
-            badge.textContent = n > 99 ? '99+' : String(n);
-            badge.hidden = !n;
-        }
-    }
+    _updateChatBtn() { this._syncViewSwitch(); }
 
     _enterChat() {
         if (!this._chatEl) this._buildChatView();
@@ -5078,7 +5095,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=28');
+        await import('/assets/app-wc.js?v=29');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -5152,7 +5169,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=28').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=29').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.
