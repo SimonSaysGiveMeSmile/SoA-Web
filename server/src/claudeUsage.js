@@ -36,9 +36,11 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 // Rolling usage-limit window Claude Code enforces.
 const BLOCK_MS = 5 * 3600 * 1000;
-// How far back we retain per-record data. Needs to cover "today" in any
-// timezone (up to ~24h) plus a full block; 30h is a safe margin.
-const WINDOW_MS = 30 * 3600 * 1000;
+// How far back we retain per-record data. Needs to cover the 5h block, "today"
+// in any timezone (~24h), the 24h insight window, AND the weekly-cap total —
+// so retain a full 7 days. Records are tiny ({ts,model,tokens…}); a heavy week
+// is tens of thousands, a few MB, aged out by ts every poll.
+const WINDOW_MS = 7 * 24 * 3600 * 1000;
 // Don't re-stat/re-read more often than this; the widget polls ~4s anyway.
 const MIN_RECOMPUTE_MS = 1200;
 // Sparkline resolution.
@@ -291,6 +293,9 @@ function compute() {
 
     const midnight = localMidnight(now);
     const today = { tokens: tokenBucket(), cost: 0, requests: 0 };
+    // Whole-window (rolling 7-day) totals — the denominator for the weekly cap
+    // gauge (client applies a /usage-calibrated cap to this cost).
+    const week = { tokens: tokenBucket(), cost: 0, requests: 0 };
     const models = new Map();
     const sessions = new Map();
     const series = new Array(SERIES_MINUTES).fill(0);
@@ -337,6 +342,10 @@ function compute() {
             today.cost += c;
             today.requests++;
         }
+        // Every retained record is within the 7-day window.
+        addTokens(week.tokens, r);
+        week.cost += c;
+        week.requests++;
         const tier = tierOf(r.model);
         let mm = models.get(tier);
         if (!mm) { mm = { tier, tokens: tokenBucket(), cost: 0, requests: 0, lastTs: 0 }; models.set(tier, mm); }
@@ -473,6 +482,7 @@ function compute() {
         now,
         block,
         today,
+        week: { cost: week.cost, tokens: week.tokens, requests: week.requests, windowDays: 7, startTs: cutoff },
         models: modelList,
         sessions: sessionList,
         insights,

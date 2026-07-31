@@ -3634,7 +3634,8 @@ class Shell {
         let c = null;
         try { c = JSON.parse(localStorage.getItem('soa-web:usage-cap') || 'null'); } catch (_) {}
         if (!c || typeof c !== 'object') c = {};
-        if (!(c.block5hUsd > 0)) { c.block5hUsd = 313; c.estimated = true; }  // ≈ calibrated 2026-07-30
+        if (!(c.block5hUsd > 0)) { c.block5hUsd = 313; c.estimated = true; }   // ≈ 5h cap, calibrated 2026-07-30
+        if (!(c.weekUsd > 0)) { c.weekUsd = 6300; c.weekEstimated = true; }    // ≈ weekly cap (needs engine d.week)
         return (this._usageCap = c);
     }
     _saveUsageCap(patch) {
