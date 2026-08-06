@@ -1,0 +1,154 @@
+#!/usr/bin/env node
+/**
+ * soa-restore-fleet — one-command fleet recovery.
+ *
+ * Rebuilds the terminal fleet after a loss/collapse by re-spawning each project
+ * tab (soa-sessions spawn → new PTY + claude --resume). Adaptive: it picks the
+ * best available source of truth, in priority order, so it works even when the
+ * daemon's own state files have collapsed:
+ *
+ *   1. tabs.json.lastgood   — the protected multi-tab snapshot tabPersist keeps
+ *                             (never overwritten by a 1-tab collapse).
+ *   2. newest tabs.json.bak-*  — the rotating deep-history ring.
+ *   3. tabs.json            — only if it still holds a real fleet (≥2 tabs).
+ *   4. ~/.claude transcript recency — reconstructs the live set from which
+ *                             project dirs had Claude activity in the last
+ *                             --window hours (reads each transcript's own `cwd`
+ *                             field, so no lossy path-decoding). This is the
+ *                             source that survives *everything* short of losing
+ *                             ~/.claude, and is how the 2026-08-06 loss was
+ *                             actually recovered.
+ *
+ * Tabs whose cwd is already open are skipped, so it's safe to re-run. Spawns are
+ * staggered so we don't cold-start a dozen agents at once.
+ *
+ * Usage:
+ *   soa-restore-fleet [--dry-run] [--window <hours>] [--stagger <sec>]
+ *                     [--source lastgood|backup|tabs|transcripts]
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const http = require('http');
+const { execFileSync } = require('child_process');
+
+const args = process.argv.slice(2);
+const has = (f) => args.includes(f);
+const val = (f, d) => { const i = args.indexOf(f); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
+const DRY = has('--dry-run');
+const WINDOW_H = parseFloat(val('--window', '6'));
+const STAGGER = parseFloat(val('--stagger', '3'));
+const FORCE_SRC = val('--source', '');
+
+function stateDir() {
+    if (process.env.SOA_WEB_STATE_DIR) return process.env.SOA_WEB_STATE_DIR.replace(/^~/, os.homedir());
+    const local = path.join(os.homedir(), '.soa-web-local');
+    if (fs.existsSync(path.join(local, 'tabs.json')) || fs.existsSync(local)) return local;
+    return path.join(os.homedir(), '.soa-web');
+}
+const SD = stateDir();
+
+function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) { return null; } }
+function tabsFrom(obj) {
+    if (!obj || !Array.isArray(obj.tabs)) return [];
+    return obj.tabs
+        .filter(t => t && typeof t.cwd === 'string' && t.cwd)
+        .map(t => ({ cwd: t.cwd, title: t.userRenamed && t.title ? t.title : (t.title || path.basename(t.cwd)) }));
+}
+
+// --- Source selection ---------------------------------------------------------
+function fromLastGood() { return tabsFrom(readJson(path.join(SD, 'tabs.json.lastgood'))); }
+function fromNewestBackup() {
+    let baks = [];
+    try { baks = fs.readdirSync(SD).filter(f => /^tabs\.json\.bak-/.test(f)).sort(); } catch (_) {}
+    for (const b of baks.reverse()) { const t = tabsFrom(readJson(path.join(SD, b))); if (t.length) return t; }
+    return [];
+}
+function fromTabsJson() { const t = tabsFrom(readJson(path.join(SD, 'tabs.json'))); return t.length >= 2 ? t : []; }
+function fromTranscripts() {
+    const base = path.join(os.homedir(), '.claude', 'projects');
+    let dirs = [];
+    try { dirs = fs.readdirSync(base).map(d => path.join(base, d)); } catch (_) { return []; }
+    const cutoff = Date.now() - WINDOW_H * 3600 * 1000;
+    const byCwd = new Map();
+    for (const d of dirs) {
+        let js = [];
+        try { js = fs.readdirSync(d).filter(f => f.endsWith('.jsonl')).map(f => path.join(d, f)); } catch (_) { continue; }
+        if (!js.length) continue;
+        let newest = 0, newestFile = null;
+        for (const j of js) { const m = fs.statSync(j).mtimeMs; if (m > newest) { newest = m; newestFile = j; } }
+        if (newest < cutoff) continue;
+        // Pull the real cwd from the transcript body (first line carrying one).
+        let cwd = null;
+        try {
+            const lines = fs.readFileSync(newestFile, 'utf8').split('\n');
+            for (const ln of lines) { if (!ln) continue; try { const o = JSON.parse(ln); if (o && typeof o.cwd === 'string' && o.cwd) { cwd = o.cwd; break; } } catch (_) {} }
+        } catch (_) {}
+        if (!cwd) continue;
+        // Skip transient / system scratch dirs — never real project tabs.
+        const JUNK = new Set(['/', '/tmp', '/private/tmp', '/var/tmp', os.homedir(), os.tmpdir()]);
+        if (JUNK.has(cwd) || cwd.startsWith('/private/tmp/') || cwd.startsWith('/tmp/')) continue;
+        const prev = byCwd.get(cwd) || 0;
+        if (newest > prev) byCwd.set(cwd, newest);
+    }
+    return [...byCwd.entries()]
+        .sort((a, b) => a[1] - b[1])
+        .map(([cwd]) => ({ cwd, title: path.basename(cwd) }));
+}
+
+function pickSource() {
+    const order = FORCE_SRC ? [FORCE_SRC] : ['lastgood', 'backup', 'tabs', 'transcripts'];
+    const fns = { lastgood: fromLastGood, backup: fromNewestBackup, tabs: fromTabsJson, transcripts: fromTranscripts };
+    for (const name of order) {
+        const t = (fns[name] || (() => []))();
+        if (t.length) return { name, tabs: t };
+    }
+    return { name: 'none', tabs: [] };
+}
+
+// --- Live tabs (skip already-open cwds) --------------------------------------
+function liveCwds() {
+    const lock = readJson(path.join(SD, 'daemon.lock'));
+    const port = (lock && lock.port) || 4010;
+    return new Promise((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port, path: '/api/tabs', timeout: 3000 }, (res) => {
+            let b = ''; res.on('data', c => b += c); res.on('end', () => {
+                try { const j = JSON.parse(b); const arr = Array.isArray(j) ? j : (j.tabs || []); resolve(new Set(arr.map(t => t.cwd).filter(Boolean))); }
+                catch (_) { resolve(new Set()); }
+            });
+        });
+        req.on('error', () => resolve(new Set()));
+        req.on('timeout', () => { req.destroy(); resolve(new Set()); });
+    });
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+(async () => {
+    const src = pickSource();
+    if (!src.tabs.length) { console.error('soa-restore-fleet: no fleet source found (lastgood/backup/tabs/transcripts all empty). Nothing to restore.'); process.exit(2); }
+
+    // Dedupe by cwd, keep order, drop missing dirs.
+    const seen = new Set(); const want = [];
+    for (const t of src.tabs) { if (seen.has(t.cwd)) continue; seen.add(t.cwd); if (fs.existsSync(t.cwd)) want.push(t); else console.error(`  skip (missing dir): ${t.cwd}`); }
+
+    const live = await liveCwds();
+    const todo = want.filter(t => !live.has(t.cwd));
+    console.error(`soa-restore-fleet: source=${src.name} · ${want.length} project(s), ${live.size} already open → restoring ${todo.length}${DRY ? ' (dry-run)' : ''}`);
+    if (!todo.length) { console.error('  fleet already whole — nothing to do.'); process.exit(0); }
+
+    let n = 0;
+    for (const t of todo) {
+        n++;
+        if (DRY) { console.error(`  [dry] spawn ${t.title}  (${t.cwd})`); continue; }
+        try {
+            const out = execFileSync('soa-sessions', ['spawn', t.cwd, '--title', t.title], { encoding: 'utf8' }).trim();
+            console.error(`  [${n}/${todo.length}] ${t.title} -> ${out}`);
+        } catch (e) {
+            console.error(`  [${n}/${todo.length}] ${t.title} FAILED: ${(e && e.message) || e}`);
+        }
+        if (n < todo.length) await sleep(STAGGER * 1000);
+    }
+    console.error(`soa-restore-fleet: done (${n} spawned).`);
+})();

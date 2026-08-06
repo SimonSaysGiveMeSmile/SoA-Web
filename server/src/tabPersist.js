@@ -29,6 +29,18 @@ const { STATE_DIR } = require('./stateDir');
 const STATE_FILE = path.join(STATE_DIR, 'tabs.json');
 const SCROLLBACK_FILE = path.join(STATE_DIR, 'scrollback.json');
 const SESSION_FILE = path.join(STATE_DIR, 'session.json');
+// Protected copy of the last HEALTHY tab list. Written only when we persist a
+// real fleet (≥ MIN_HEALTHY_TABS), so a fleet *collapse* — tabs.json shrinking
+// to a lone default shell, the signature that lost the fleet on 2026-08-06 —
+// can never overwrite it. reconcileTabs() restores from here on the next boot.
+// Unlike scrollback.json this survives the same incident that clobbers tabs.json.
+const LASTGOOD_FILE = path.join(STATE_DIR, 'tabs.json.lastgood');
+// A real session has ≥2 tabs; a single tab (usually the state-dir default shell)
+// is the collapse signature, not a fleet. Recovery triggers at/below this.
+const MIN_HEALTHY_TABS = 2;
+// Deep-history ring of timestamped healthy snapshots (tabs.json.bak-*), capped.
+const MAX_TAB_BACKUPS = 12;
+const ROTATE_MS = 5 * 60 * 1000;
 
 // Cap per-tab scrollback at 128 KiB on disk. The in-memory ring is 256 KiB —
 // halve it on disk so a session with 30 tabs doesn't push 8 MB of JSON every
@@ -121,6 +133,42 @@ function saveSession({ id, token }) {
     } catch (_) { /* best-effort */ }
 }
 
+function loadLastGood() {
+    try {
+        const data = JSON.parse(fs.readFileSync(LASTGOOD_FILE, 'utf8'));
+        if (!Array.isArray(data.tabs)) return null;
+        return data;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Persist the protected healthy snapshot. Only ever called with a real (≥2 tab)
+// list, so a 1-tab collapse or empty write can never erase it. Also rotates a
+// capped, throttled ring of timestamped backups for deeper point-in-time history.
+let _lastRotateAt = 0;
+function _writeLastGood(data) {
+    try {
+        ensureDir();
+        const blob = JSON.stringify(data, null, 2) + '\n';
+        const tmp = LASTGOOD_FILE + '.tmp';
+        fs.writeFileSync(tmp, blob);
+        fs.renameSync(tmp, LASTGOOD_FILE);
+        const now = Date.now();
+        if (now - _lastRotateAt >= ROTATE_MS) {
+            _lastRotateAt = now;
+            const stamp = new Date(now).toISOString().replace(/[:.]/g, '').replace('T', '-').slice(0, 15);
+            try { fs.writeFileSync(path.join(STATE_DIR, `tabs.json.bak-${stamp}`), blob); } catch (_) {}
+            try {
+                const baks = fs.readdirSync(STATE_DIR).filter(f => /^tabs\.json\.bak-/.test(f)).sort();
+                for (let i = 0; i < baks.length - MAX_TAB_BACKUPS; i++) {
+                    fs.unlinkSync(path.join(STATE_DIR, baks[i]));
+                }
+            } catch (_) {}
+        }
+    } catch (_) { /* best-effort */ }
+}
+
 function save(tabMgr) {
     if (_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(() => {
@@ -191,8 +239,8 @@ function _writeMetaSync(tabMgr) {
             // empty in that window (e.g. a probe/second session) would wrongly
             // mark the fleet user-closed and block self-heal on the next boot.
             const prior = load();
-            if (prior && prior.recoveredFrom === 'scrollback') {
-                console.log('tabPersist: refused close-all tombstone over a scrollback-recovered tabs.json (transient empty post-recovery)');
+            if (prior && prior.recoveredFrom) {
+                console.log(`tabPersist: refused close-all tombstone over a ${prior.recoveredFrom}-recovered tabs.json (transient empty post-recovery)`);
                 return;
             }
             data.closedByUser = true;
@@ -200,6 +248,9 @@ function _writeMetaSync(tabMgr) {
         const tmp = STATE_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
         fs.renameSync(tmp, STATE_FILE);
+        // Snapshot the protected copy only for a real fleet, so a later collapse
+        // can self-heal from it. A lone/empty list never touches lastgood.
+        if (tabs.length >= MIN_HEALTHY_TABS) _writeLastGood(data);
     } catch (_) { /* best-effort */ }
 }
 
@@ -212,32 +263,65 @@ function _writeMetaSync(tabMgr) {
 // user intentionally cleared them. Returns a small report for the boot log.
 function reconcileTabsFromScrollback() {
     const meta = load();
-    if (meta && Array.isArray(meta.tabs) && meta.tabs.length > 0) {
-        return { action: 'noop', reason: 'tabs.json intact', count: meta.tabs.length };
-    }
+    // Respect an explicit user close-all above all else.
     if (meta && meta.closedByUser) {
         return { action: 'noop', reason: 'closedByUser — respecting intent' };
     }
+    const metaCount = (meta && Array.isArray(meta.tabs)) ? meta.tabs.length : 0;
+    // A real fleet (≥2 tabs) is ALWAYS trusted as-is: backups can legitimately
+    // lag a user who just closed tabs, so we never second-guess a multi-tab
+    // list. Recovery fires only on the collapse signature — empty (0) or a lone
+    // tab (1) — which no normal multi-project session sits at.
+    if (metaCount >= MIN_HEALTHY_TABS) {
+        return { action: 'noop', reason: 'tabs.json intact', count: metaCount };
+    }
+
+    // Collapsed. Rebuild from the richest known-good source. Prefer lastgood — a
+    // real persisted list that, unlike scrollback.json, is never overwritten by
+    // the same collapse that clobbered tabs.json. Fall back to scrollback (its
+    // per-tab cwd survives an empty tabs.json) when no lastgood exists yet, e.g.
+    // the first boot after this upgrade.
+    const lastgood = loadLastGood();
+    const lgCount = (lastgood && Array.isArray(lastgood.tabs)) ? lastgood.tabs.length : 0;
     const sb = loadScrollback();
-    if (!sb || !Array.isArray(sb.tabs) || sb.tabs.length === 0) {
-        return { action: 'noop', reason: 'no scrollback to recover from' };
+    const sbCount = (sb && Array.isArray(sb.tabs)) ? sb.tabs.length : 0;
+
+    let tabs = null, from = null;
+    if (lgCount >= MIN_HEALTHY_TABS) {
+        tabs = lastgood.tabs
+            .filter(t => t && typeof t.cwd === 'string' && t.cwd)
+            .map(t => ({ title: t.userRenamed ? t.title : null, cwd: t.cwd, userRenamed: !!t.userRenamed }));
+        from = 'lastgood';
+    } else if (sbCount >= MIN_HEALTHY_TABS) {
+        tabs = [];
+        for (const t of sb.tabs) {
+            if (!t || typeof t.cwd !== 'string' || !t.cwd) continue;
+            // scrollback.json carries the live title but not userRenamed; treat a
+            // title that differs from the cwd basename as a user rename so custom
+            // names survive, otherwise let the daemon re-derive it from the cwd.
+            const base = path.basename(t.cwd);
+            const renamed = !!(t.title && t.title !== base);
+            tabs.push({ title: renamed ? t.title : null, cwd: t.cwd, userRenamed: renamed });
+        }
+        from = 'scrollback';
     }
-    const tabs = [];
-    for (const t of sb.tabs) {
-        if (!t || typeof t.cwd !== 'string' || !t.cwd) continue;
-        // scrollback.json carries the live title but not userRenamed; treat a
-        // title that differs from the cwd basename as a user rename so custom
-        // names survive, otherwise let the daemon re-derive it from the cwd.
-        const base = path.basename(t.cwd);
-        const renamed = !!(t.title && t.title !== base);
-        tabs.push({ title: renamed ? t.title : null, cwd: t.cwd, userRenamed: renamed });
+    if (!tabs || tabs.length === 0) {
+        return { action: 'noop', reason: metaCount ? 'collapsed but no richer source' : 'no scrollback to recover from', count: metaCount };
     }
-    if (tabs.length === 0) {
-        return { action: 'noop', reason: 'scrollback had no usable cwds' };
+    // Union in the collapsed file's lone tab if it names a distinct real cwd, so
+    // a genuinely-new tab that outlived the collapse isn't dropped on recovery.
+    if (meta && Array.isArray(meta.tabs)) {
+        const have = new Set(tabs.map(t => t.cwd));
+        for (const t of meta.tabs) {
+            if (t && typeof t.cwd === 'string' && t.cwd && !have.has(t.cwd)) {
+                tabs.push({ title: t.userRenamed ? t.title : null, cwd: t.cwd, userRenamed: !!t.userRenamed });
+                have.add(t.cwd);
+            }
+        }
     }
     try {
         ensureDir();
-        const data = { savedAt: new Date().toISOString(), tabs, recoveredFrom: 'scrollback' };
+        const data = { savedAt: new Date().toISOString(), tabs, recoveredFrom: from };
         const tmp = STATE_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
         fs.renameSync(tmp, STATE_FILE);
@@ -248,7 +332,7 @@ function reconcileTabsFromScrollback() {
         // closedByUser tombstone over this recovered fleet (cross-session poison)
         // — the recurring "self-heal recovered but the next boot won't". The latch
         // is earned legitimately the first time a real tab is persisted.
-        return { action: 'recovered', count: tabs.length };
+        return { action: 'recovered', count: tabs.length, from, over: metaCount };
     } catch (e) {
         return { action: 'error', reason: (e && e.message) || String(e) };
     }
@@ -301,7 +385,7 @@ function _writeScrollbackSync(tabMgr) {
 }
 
 module.exports = {
-    load, loadScrollback, loadSession, saveSession,
+    load, loadScrollback, loadLastGood, loadSession, saveSession,
     save, saveImmediate, saveAll, reconcileTabsFromScrollback,
     noteUserClose,
     STATE_FILE, SCROLLBACK_FILE, SESSION_FILE,

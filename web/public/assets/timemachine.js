@@ -273,7 +273,7 @@ export async function openTimemachineModal(shell) {
                     <button class="soa-tm-close" type="button" aria-label="Close">✕</button>
                 </div>
             </header>
-            <p class="soa-tm-sub">Auto-saves every 5 minutes to your browser. Up to ${MAX_SNAPSHOTS} kept.</p>
+            <p class="soa-tm-sub">Auto-saves your on-screen <em>view</em> every 5 minutes to this browser (up to ${MAX_SNAPSHOTS}). Restoring replays history into open tabs — it does <strong>not</strong> reopen closed terminals. To rebuild lost terminals, restart the daemon or run <code>soa-restore-fleet</code>.</p>
             <div class="soa-tm-list" data-empty="Loading…"></div>
             <footer class="soa-tm-foot">
                 <small>Restoring replays scrollback into matching tabs. The daemon's own session restore handles PTY respawn.</small>
@@ -317,7 +317,21 @@ export async function openTimemachineModal(shell) {
                 </div>
             `;
             row.querySelector('.soa-tm-restore').addEventListener('click', async () => {
-                if (!confirm(`Restore IDE view from ${_fmt(r.ts)}? This replays scrollback into matching tabs.`)) return;
+                // Time Machine is a VIEW replay — it can only write history into
+                // tabs that still exist, never reopen closed terminals. If the
+                // snapshot holds more tabs than are open, say so plainly and
+                // point at the real recovery path so nobody burns time here (the
+                // 2026-08-06 "restore does nothing" confusion).
+                const liveCount = shell && shell.tabs ? shell.tabs.size : 0;
+                if (r.tabCount > liveCount) {
+                    alert(
+                        `This snapshot has ${r.tabCount} tabs but only ${liveCount} ${liveCount === 1 ? 'is' : 'are'} open.\n\n` +
+                        `Time Machine only replays on-screen history into tabs that still exist — it cannot reopen closed terminals.\n\n` +
+                        `Closed terminals come back automatically: the daemon rebuilds them from tabs.json (or tabs.json.lastgood) on restart. ` +
+                        `To rebuild them now, run in a terminal:  soa-restore-fleet`
+                    );
+                }
+                if (!confirm(`Replay the saved view from ${_fmt(r.ts)} into matching open tabs? (This does not reopen closed terminals.)`)) return;
                 await restoreSnapshot(r.ts, shell);
                 close();
             });

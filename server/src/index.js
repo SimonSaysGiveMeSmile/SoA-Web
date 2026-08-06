@@ -152,7 +152,7 @@ const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
 try {
     const _rec = tabPersist.reconcileTabsFromScrollback();
     if (_rec.action === 'recovered') {
-        console.log(`tabPersist: RECOVERED ${_rec.count} tab(s) from scrollback.json — tabs.json was lost (clobber self-heal)`);
+        console.log(`tabPersist: RECOVERED ${_rec.count} tab(s) from ${_rec.from || 'backup'} — tabs.json had collapsed to ${_rec.over || 0} (self-heal)`);
     } else if (_rec.action === 'error') {
         console.log('tabPersist: fleet reconcile failed:', _rec.reason);
     }
