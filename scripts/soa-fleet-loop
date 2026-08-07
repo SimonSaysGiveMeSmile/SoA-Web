@@ -52,8 +52,13 @@ dispatch() {
     # One `list` snapshot per event = ground truth for manager-exclusion + status
     # (events are advisory; list never lies). Cheap; events aren't hot enough to matter.
     snap="$(soa-sessions list 2>/dev/null)"
-    mids="$(printf '%s' "$snap" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+    mids="$(printf '%s' "$snap" | grep -iE '^ *#[0-9]+ +(manager|\.soa-web-[0-9])' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
     for m in $mids; do [ "$id" = "$m" ] && { log "  skip #$id (manager tab)"; return 0; }; done
+    # skip non-active projects (inactive/archive) — still journaled above (line 50),
+    # just not acted on, so the manager leaves paused/retired projects alone.
+    case "$(printf '%s' "$snap" | grep -E "^ *#$id ")" in
+        *INACTIVE*|*ARCHIVED*) log "  skip #$id (non-active lifecycle)"; return 0;;
+    esac
     st="$(printf '%s' "$snap" | grep -E "^ *#$id " | grep -oE '(working|idle|attention|stuck|done)' | head -1)"
 
     case "$kind" in

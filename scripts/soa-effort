@@ -37,7 +37,7 @@ fi
 SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
 LIST="$(soa-sessions list 2>/dev/null)"
 [ -z "$LIST" ] && { log "no list (daemon down?) — skip"; exit 0; }
-MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +(manager|\.soa-web-[0-9])' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
 clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g'; }
 
 # parked tabs only (idle/done) — never interrupt a working agent
@@ -45,6 +45,10 @@ echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read 
   [ -z "$id" ] && continue
   skip=0; for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
   [ "$skip" = 1 ] && continue
+
+  # skip non-active projects (inactive/archive) — the manager only spends tokens on
+  # ACTIVE tabs. soa-sessions list flags non-active tabs with INACTIVE/ARCHIVED.
+  case "$(echo "$LIST" | grep -E "^ *#$id ")" in *INACTIVE*|*ARCHIVED*) continue;; esac
 
   stamp="$STATED/$id"
   if [ -f "$stamp" ]; then last="$(cat "$stamp" 2>/dev/null || echo 0)"; else last=0; fi

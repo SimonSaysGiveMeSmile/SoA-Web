@@ -52,9 +52,15 @@ function loadManagerState() {
             // auto-derived from its cwd (the project folder name). Keyed by cwd
             // because tab ids are reassigned on every daemon restart.
             groups: (d.groups && typeof d.groups === 'object' && !Array.isArray(d.groups)) ? d.groups : {},
+            // Per-project lifecycle labels keyed by cwd ({ "<cwd>": "inactive"|"archive" }).
+            // Absent → 'active' (the default). Keyed by cwd like groups so it survives
+            // the tab-id reassignment every daemon restart / soa-restore-fleet respawn
+            // brings. Non-active projects are skipped by cohort fan-outs + supervisors,
+            // so the manager stops spending tokens (and the weekly quota) on them.
+            lifecycles: (d.lifecycles && typeof d.lifecycles === 'object' && !Array.isArray(d.lifecycles)) ? d.lifecycles : {},
         };
     } catch (_) {
-        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, schedules: [], todos: [], groups: {} };
+        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, schedules: [], todos: [], groups: {}, lifecycles: {} };
     }
 }
 
@@ -289,8 +295,31 @@ function resolveCohort(snapshot, sel) {
         done: x => x.status === 'done',
         highContext: x => x.highContext,
         limited: x => x.limited,
+        // Lifecycle cohorts — target projects by their manager label.
+        active: x => (x.lifecycle || 'active') === 'active',
+        inactive: x => x.lifecycle === 'inactive',
+        archive: x => x.lifecycle === 'archive',
     }[str];
     return flag ? snapshot.sessions.filter(flag).map(x => x.id) : [];
+}
+
+// Restrict a resolved id set to ACTIVE projects — the DEFAULT for cohort fan-outs
+// (goal/btw/clear/resume/broadcast) so the manager never spends tokens (or the
+// weekly quota) on inactive/archived projects. Left untouched — the caller's exact
+// targets are honored — when the selector was explicit ids (a number or id array),
+// an explicit lifecycle cohort ('active'/'inactive'/'archive'), or includeInactive
+// was passed. `sel` is the ORIGINAL selector the caller sent (body.id / body.to).
+function activeOnlyIds(sel, ids, snapshot, includeInactive) {
+    if (includeInactive === true) return ids;
+    if (Array.isArray(sel)) return ids;                                          // explicit id list
+    const str = String(sel == null ? '' : sel).trim();
+    if (/^\d+$/.test(str)) return ids;                                           // explicit single id
+    if (str === 'active' || str === 'inactive' || str === 'archive') return ids; // explicit lifecycle cohort
+    const byId = new Map(snapshot.sessions.map(x => [x.id, x]));
+    return ids.filter(id => {
+        const x = byId.get(id);
+        return x && (x.lifecycle || 'active') === 'active';
+    });
 }
 
 // Build a manager-event filter from {self, kinds}. Hides the caller's own tab (so
@@ -349,6 +378,30 @@ class SessionManager {
         if (g) this.state.groups[cwd] = g; else delete this.state.groups[cwd];
         this._saveState();
         return g || autoGroupFromCwd(cwd);
+    }
+
+    // Resolved lifecycle for a cwd: 'active' (default) | 'inactive' | 'archive'.
+    // Keyed by cwd (like groups) so it survives the tab-id churn of every restart
+    // and every soa-restore-fleet respawn. 'active' is implicit (no stored entry).
+    _lifecycleFor(cwd) {
+        const m = this.state.lifecycles || {};
+        return (cwd && m[cwd]) || 'active';
+    }
+
+    // Set/clear a project's lifecycle label (keyed by cwd). Returns the resolved
+    // value, or null if `lifecycle` is invalid. Storing 'active' (the default)
+    // clears the entry so manager.json stays tidy — an absent cwd already reads
+    // 'active'. Non-active projects are excluded from cohort fan-outs and the
+    // always-on supervisors, throttling the manager's token spend on them.
+    setLifecycle(cwd, lifecycle) {
+        if (!cwd) return null;
+        const lc = String(lifecycle == null ? '' : lifecycle).trim().toLowerCase();
+        if (lc && lc !== 'active' && lc !== 'inactive' && lc !== 'archive') return null;
+        if (!this.state.lifecycles) this.state.lifecycles = {};
+        if (!lc || lc === 'active') delete this.state.lifecycles[cwd];
+        else this.state.lifecycles[cwd] = lc;
+        this._saveState();
+        return lc || 'active';
     }
 
     // ── One-shot "send text to tab at time" schedules ──
@@ -624,6 +677,9 @@ class SessionManager {
                 title: (tab && tab.title) || `tab ${id}`,
                 cwd: (tab && tab.cwd) || null,
                 group: this._groupFor(tab && tab.cwd),
+                // Manager-only lifecycle label (active|inactive|archive), keyed by
+                // cwd. Cohort fan-outs + supervisors act on ACTIVE projects only.
+                lifecycle: this._lifecycleFor(tab && tab.cwd),
                 // Current model (raw id, e.g. "claude-opus-4-8"), read from the
                 // live transcript so it tracks in-session /model switches. The
                 // client renders it as a tier-colored badge on the tab/tile.
@@ -924,6 +980,10 @@ function mount(app, requireAuthed, sessions) {
                 const verb = String(body.verb || 'goal');
                 const text = String(body.text || '');
                 let ids = resolveTargets(body.id);
+                // Cohort fan-outs skip non-active projects by default (token/quota
+                // guard). Explicit ids + `active`/`inactive`/`archive` cohorts, or
+                // includeInactive:true, bypass the filter.
+                ids = activeOnlyIds(body.id, ids, man.snapshot(), body.includeInactive);
                 if (self != null) ids = ids.filter(x => x !== self);
                 const buildLine = (tab) => {
                     switch (verb) {
@@ -957,6 +1017,7 @@ function mount(app, requireAuthed, sessions) {
                 const text = String(body.text || '');
                 const submit = body.submit !== false;
                 let ids = resolveTargets(body.to);
+                ids = activeOnlyIds(body.to, ids, man.snapshot(), body.includeInactive);
                 if (self != null) ids = ids.filter(x => x !== self);
                 const hit = [];
                 ids.forEach((id, i) => {
@@ -983,6 +1044,9 @@ function mount(app, requireAuthed, sessions) {
                 let tab;
                 try { tab = mgr.open({ title, cwd, env: envStore.getEnvForShell(), silent: false }); }
                 catch (e) { return res.status(500).json({ ok: false, error: (e && e.message) || 'spawn failed' }); }
+                // Optional: create the tab with a non-active lifecycle (soa-sessions
+                // spawn --lifecycle …). Keyed by cwd, so it sticks across respawns.
+                if (body.lifecycle && tab.cwd) man.setLifecycle(tab.cwd, body.lifecycle);
                 if (wantClaude) {
                     const tm = setTimeout(() => {
                         try { launchClaude(tab, tab.cwd, { resume, model }); } catch (_) {}
@@ -1032,6 +1096,20 @@ function mount(app, requireAuthed, sessions) {
                 man.broadcast();
                 return res.json({ ok: true, cwd, group });
             }
+            // label: set a project's lifecycle (active|inactive|archive), keyed by
+            // cwd like setGroup so it survives restarts + soa-restore-fleet respawns.
+            // Non-active projects are skipped by cohort fan-outs (goal/btw/clear/
+            // resume/broadcast) and by the always-on supervisors, so the manager
+            // stops spending tokens on them. {action:'label', id?|cwd?, lifecycle}
+            if (action === 'label') {
+                let cwd = (typeof body.cwd === 'string' && body.cwd) ? body.cwd : null;
+                if (!cwd && body.id != null) { const tab = mgr.get(Number(body.id)); if (tab) cwd = tab.cwd; }
+                if (!cwd) return res.status(400).json({ ok: false, error: 'need id or cwd' });
+                const lifecycle = man.setLifecycle(cwd, body.lifecycle);
+                if (!lifecycle) return res.status(400).json({ ok: false, error: 'lifecycle must be active|inactive|archive' });
+                man.broadcast();
+                return res.json({ ok: true, cwd, lifecycle });
+            }
             return res.status(400).json({ ok: false, error: 'unknown action: ' + action });
         } catch (err) {
             return res.status(500).json({ ok: false, error: (err && err.message) || 'failed' });
@@ -1042,5 +1120,5 @@ function mount(app, requireAuthed, sessions) {
 module.exports = {
     SessionManager, ensure, mount,
     classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
-    resolveCohort, makeEventFilter, isLocalRequest, autoGroupFromCwd,
+    resolveCohort, activeOnlyIds, makeEventFilter, isLocalRequest, autoGroupFromCwd,
 };

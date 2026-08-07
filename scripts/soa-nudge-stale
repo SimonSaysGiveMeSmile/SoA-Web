@@ -45,7 +45,7 @@ run_to(){ local t="$1"; shift; perl -e 'my $t=shift; alarm $t; exec @ARGV or exi
 SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
 LIST="$(soa-sessions list 2>/dev/null)"
 [ -z "$LIST" ] && { log "no list (daemon down?) — nothing to do"; exit 0; }
-MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +(manager|\.soa-web-[0-9])' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
 
 clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g; s/  +/ /g'; }
 status_of(){ echo "$LIST" | sed -nE "s/^ *#$1 .* (idle|done|working|attention|stuck) +ctx.*/\1/p" | head -1; }
@@ -106,6 +106,10 @@ printf '%s\n' "$COUNTS" | while IFS=$'\t' read -r id open inprog subjects; do
   # only act on PARKED tabs — one actively working is already making progress
   st="$(status_of "$id")"
   case "$st" in idle|done|attention|stuck) ;; *) continue;; esac
+
+  # skip non-active projects (inactive/archive) — the manager only nudges (and burns
+  # tokens on) ACTIVE tabs. soa-sessions list flags non-active tabs INACTIVE/ARCHIVED.
+  case "$(echo "$LIST" | grep -E "^ *#$id ")" in *INACTIVE*|*ARCHIVED*) continue;; esac
 
   total=$(( open + inprog ))
   stamp="$STATED/$id"; last=0; ptotal=-1; ineff=0

@@ -20,8 +20,8 @@ TS="$(date '+%Y-%m-%dT%H:%M:%S')"
 SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
 
 LIST="$(soa-sessions list 2>/dev/null)"
-MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | head -1)"
-skip() { [ "$1" = "$SELF" ] || [ "$1" = "$MGR" ]; }
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +(manager|\.soa-web-[0-9])' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+skip() { [ "$1" = "$SELF" ] && return 0; for m in $MGR; do [ "$1" = "$m" ] && return 0; done; return 1; }
 SUMMARY="$(echo "$LIST" | head -1)"
 
 # strip spinner glyphs / control seqs / collapse whitespace → readable digest
@@ -40,6 +40,9 @@ ids="$(echo "$LIST" | sed -nE 's/^ *#([0-9]+) .*/\1/p')"
 for id in $ids; do
   skip "$id" && continue
   line="$(echo "$LIST" | grep -E "^ *#$id ")"
+  # skip non-active projects (inactive/archive) — don't scan/flag blockers on paused
+  # or retired projects; keeps the manager's heartbeat digest focused on ACTIVE work.
+  case "$line" in *INACTIVE*|*ARCHIVED*) continue;; esac
   title="$(echo "$line" | sed -E 's/^ *#[0-9]+ +([^ ].*[^ ]) {2,}(working|idle|attention|stuck|done).*/\1/')"
   status="$(echo "$line" | grep -oE '(working|idle|attention|stuck|done)' | head -1)"
   ctx="$(echo "$line" | grep -oE 'ctx +[0-9—-]+%?' | grep -oE '[0-9]+%|—' | head -1)"

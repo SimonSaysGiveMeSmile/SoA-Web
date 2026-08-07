@@ -208,6 +208,7 @@ function cohort(arg) {
     if (/^\d+$/.test(arg)) return Number(arg);
     if (/^\d+(,\d+)+$/.test(arg)) return arg.split(',').map(Number);
     // all | working | attention | stuck | idle | done | highContext | limited
+    // | active | inactive | archive  (lifecycle cohorts; resolved server-side)
     // | group:<name>  (a user-defined static group; resolved server-side)
     return arg;
 }
@@ -238,6 +239,10 @@ function fmtList(snap, costByTab) {
     const hhmm = ms => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
     const rows = snap.sessions.map(s => {
         const flags = [
+            // Lifecycle flag first so non-active projects are obvious at a glance.
+            // The always-on supervisors (nudge-stale/effort/fleet-loop/heartbeat)
+            // grep these tokens to skip non-active tabs — keep them in sync.
+            s.lifecycle === 'inactive' ? 'INACTIVE' : s.lifecycle === 'archive' ? 'ARCHIVED' : '',
             s.attention ? 'NEEDS-INPUT' : '',
             s.stuck ? 'STUCK' : '',
             s.highContext ? 'HIGH-CTX' : '',
@@ -289,6 +294,22 @@ function fmtList(snap, costByTab) {
         // to its auto project group). Groups are targetable as `group:<name>`.
         if (cmd === 'group') {
             const r = await post({ action: 'setGroup', id: Number(rest[0]), group: rest.slice(1).join(' ') });
+            console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // label <id> <active|inactive|archive> — set a project's lifecycle. Inactive
+        // and archived projects are skipped by cohort fan-outs (goal/btw/clear/resume/
+        // broadcast) and by the always-on supervisors, so the manager stops spending
+        // tokens (and the weekly quota) on them. Keyed by cwd → stable across restarts
+        // and soa-restore-fleet respawns. Target ACTIVE-cohort work: `goal active …`.
+        if (cmd === 'label') {
+            const id = Number(rest[0]);
+            const lc = (rest[1] || '').toLowerCase();
+            if (!Number.isFinite(id) || !/^(active|inactive|archive)$/.test(lc)) {
+                console.error('usage: soa-sessions label <id> <active|inactive|archive>');
+                process.exit(1);
+            }
+            const r = await post({ action: 'label', id, lifecycle: lc });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
@@ -403,37 +424,45 @@ function fmtList(snap, costByTab) {
             }
             process.exit(0);
         }
+        // Cohort fan-outs skip inactive/archived projects by default (token/quota
+        // guard). `--include-inactive` overrides for a one-off fleet-wide reach; it's
+        // stripped from the positional args so it never leaks into the goal/btw text.
+        const inclInactive = hasFlag('--include-inactive');
         // goal / btw — fan a per-session goal (or aside) to one tab or a cohort.
         if (cmd === 'goal' || cmd === 'btw') {
-            const id = cohort(rest[0]);
-            const text = rest.slice(1).join(' ');
-            const r = await post({ action: 'goal', verb: cmd, id, text, self: SELF });
+            const args = rest.filter(a => a !== '--include-inactive');
+            const id = cohort(args[0]);
+            const text = args.slice(1).join(' ');
+            const r = await post({ action: 'goal', verb: cmd, id, text, self: SELF, includeInactive: inclInactive });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
         // clear — send /clear to a tab or cohort.
         if (cmd === 'clear') {
-            const r = await post({ action: 'goal', verb: 'clear', id: cohort(rest[0]), self: SELF });
+            const args = rest.filter(a => a !== '--include-inactive');
+            const r = await post({ action: 'goal', verb: 'clear', id: cohort(args[0]), self: SELF, includeInactive: inclInactive });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
         // resume — type 'claude --resume <id> || claude --continue' into tab(s).
         if (cmd === 'resume') {
-            const r = await post({ action: 'goal', verb: 'resume', id: cohort(rest[0]), self: SELF });
+            const args = rest.filter(a => a !== '--include-inactive');
+            const r = await post({ action: 'goal', verb: 'resume', id: cohort(args[0]), self: SELF, includeInactive: inclInactive });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
         // broadcast — fleet-wide plain-text nudge to a cohort.
         if (cmd === 'broadcast' || cmd === 'bcast') {
-            const to = cohort(rest[0]);
-            const text = rest.slice(1).join(' ');
-            const r = await post({ action: 'broadcast', to, text, self: SELF });
+            const args = rest.filter(a => a !== '--include-inactive');
+            const to = cohort(args[0]);
+            const text = args.slice(1).join(' ');
+            const r = await post({ action: 'broadcast', to, text, self: SELF, includeInactive: inclInactive });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
         }
         // spawn — open a new tab + start/resume a Claude agent in it.
         if (cmd === 'spawn') {
-            const flagsWithVal = new Set(['--title', '--goal', '--model']);
+            const flagsWithVal = new Set(['--title', '--goal', '--model', '--lifecycle']);
             const positional = [];
             for (let i = 0; i < rest.length; i++) {
                 const a = rest[i];
@@ -448,6 +477,7 @@ function fmtList(snap, costByTab) {
                 claude: !hasFlag('--no-claude'),
                 goal: argval('--goal'),
                 model: argval('--model'),
+                lifecycle: argval('--lifecycle'),
             });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
@@ -589,9 +619,11 @@ function fmtList(snap, costByTab) {
                       '       schedules | unschedule <scheduleId> | config autoResume on|off | config closeInactive on|off | config text <text>\n' +
                       '   manager-agent:\n' +
                       '       whoami | events [--since N] [--kinds a,b] | watch [--kinds a,b] [--timeout 25] [--once] [--catchup] [--raw]\n' +
-                      '       goal <id|all|attention|stuck|idle|done|highContext|limited> <text> | btw <id|cohort> <note> | clear <id|cohort>\n' +
+                      '       label <id> <active|inactive|archive>   (inactive/archive → skipped by cohort fan-outs + supervisors, saves tokens)\n' +
+                      '       goal <id|all|active|inactive|archive|attention|stuck|idle|done|highContext|limited> <text> | btw <id|cohort> <note> | clear <id|cohort>\n' +
+                      '         (cohort fan-outs skip inactive/archived by default; add --include-inactive to reach every tab)\n' +
                       '       resume <id|all|limited> | broadcast <all|working|attention|idle|limited> <text>\n' +
-                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] | stop <id> [--force] | interrupt <id>\n' +
+                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] [--lifecycle active|inactive|archive] | stop <id> [--force] | interrupt <id>\n' +
                       '       todo add <text…> | todo done <id> | todo toggle <id> | todo del <id> | todo list');
         process.exit(1);
     } catch (e) {
