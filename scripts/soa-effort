@@ -14,13 +14,17 @@
 #   SOA_EFFORT_DRY=1 -> log/print intent, send nothing.
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
 LOG="$DIR/logs/effort.log"
 STATED="$DIR/logs/.effort"
 mkdir -p "$STATED" 2>/dev/null
 TS="$(date '+%Y-%m-%dT%H:%M:%S')"
 NOW="$(date +%s)"
 COOLDOWN="${SOA_EFFORT_COOLDOWN:-1200}"    # 20m — don't re-send to same tab within this
-TARGET="${SOA_EFFORT_TARGET:-ultracode}"
+# TOKEN CRISIS (2026-08-07): weekly at 80% w/ 4 days left. Fleet default dropped
+# ultracode→high to kill the dynamic-workflow subagent multiplier (was ~43% of
+# burn). REVERT to ultracode after the weekly resets (Aug 11 6pm) if desired.
+TARGET="${SOA_EFFORT_TARGET:-high}"
 DRY="${SOA_EFFORT_DRY:-0}"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
@@ -40,6 +44,13 @@ LIST="$(soa-sessions list 2>/dev/null)"
 MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +(manager|\.soa-web-[0-9])' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
 clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g'; }
 
+# ids the burn governor (soa-usage-throttle) has intentionally throttled to a
+# LOWER effort while the 5h block is in DANGER. Skip them here so we don't
+# re-raise them to ultracode and undo the throttle — the two watchdogs must not
+# fight. The governor CLEARS this file once burn is healthy / the block rolls
+# over, and we resume asserting ultracode on the next pass.
+THROTTLED_IDS="$(python3 -c "import json;print(' '.join(str(i) for i in json.load(open('$STATE_DIR/effort-throttled.json')).get('ids',[])))" 2>/dev/null || true)"
+
 # parked tabs only (idle/done) — never interrupt a working agent
 echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read -r id; do
   [ -z "$id" ] && continue
@@ -49,6 +60,9 @@ echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read 
   # skip non-active projects (inactive/archive) — the manager only spends tokens on
   # ACTIVE tabs. soa-sessions list flags non-active tabs with INACTIVE/ARCHIVED.
   case "$(echo "$LIST" | grep -E "^ *#$id ")" in *INACTIVE*|*ARCHIVED*) continue;; esac
+
+  # skip tabs the burn governor is holding at a lower effort (don't fight it)
+  case " $THROTTLED_IDS " in *" $id "*) log "skip #$id — burn-throttled (governor owns effort)"; continue;; esac
 
   stamp="$STATED/$id"
   if [ -f "$stamp" ]; then last="$(cat "$stamp" 2>/dev/null || echo 0)"; else last=0; fi
@@ -87,6 +101,13 @@ echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read 
     continue
   fi
   soa-sessions send "$id" "/effort $TARGET" >/dev/null 2>&1
+  # Claude Code prompts "Change effort level? 1.Yes 2.No" on every switch — the
+  # agent BLOCKS on it (a service interruption) until answered. Auto-confirm, but
+  # ONLY if the prompt actually rendered, else a stray "1" gets injected as input.
+  sleep 1
+  case "$(soa-sessions read "$id" 14 2>/dev/null)" in
+    *"Change effort level"*|*"Yes, switch"*) soa-sessions send "$id" "1" >/dev/null 2>&1; log "auto-confirmed effort switch #$id" ;;
+  esac
   echo "$NOW" > "$stamp"
   log "set #$id -> /effort $TARGET"
 done

@@ -408,6 +408,35 @@ app.get('/api/user/stats', requireAuthed, async (req, res) => {
 consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
 claudeUsage.mount(app, requireAuthed);
+
+// Manual daemon restart from the ⋯ MORE menu (authed — the paired user can fire
+// it from their phone over the tunnel). Graceful: launchd `kickstart -k` sends
+// SIGTERM → our shutdown() flushes tabs + scrollback and DETACHES the tunnel
+// (re-adopted on boot), then KeepAlive brings us right back and boot-resume
+// rehydrates the fleet (respawns PTYs + auto-resumes Claude). We spawn kickstart
+// DETACHED so it outlives our own termination; a 4s fallback self-exits (so a
+// KeepAlive supervisor restarts us) if kickstart is unavailable (non-launchd dev
+// run). Idempotent-safe: double shutdown() is guarded.
+app.post('/api/daemon/restart', requireAuthed, (req, res) => {
+    console.log('daemon: manual restart requested via /api/daemon/restart');
+    res.json({ ok: true, restarting: true });
+    const uid = (process.getuid && process.getuid()) || 501;
+    const label = process.env.SOA_WEB_LAUNCHD_LABEL || 'app.s0a.web.local';
+    setTimeout(() => {
+        try {
+            const { spawn } = require('child_process');
+            const p = spawn('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`],
+                            { detached: true, stdio: 'ignore' });
+            p.unref();
+        } catch (e) {
+            console.log('daemon restart: kickstart spawn failed:', e && e.message);
+        }
+        // Fallback in case kickstart didn't SIGTERM us (e.g. not under launchd):
+        // flush + exit and let the supervisor restart us. Harmless if kickstart
+        // already fired — shutdown() is a no-op the second time.
+        setTimeout(() => { try { shutdown(0); } catch (_) { process.exit(0); } }, 4000).unref();
+    }, 200);
+});
 // bindHost matters: a loopback-bound daemon (the curl|sh install default)
 // must not advertise LAN interface IPs in the pairing widget — they
 // connection-refuse from a phone, a dead link dressed up as an option.
@@ -1351,6 +1380,19 @@ function scheduleBootResume() {
     const attempt = (n) => {
         try {
             if (_diskRestoreRan) { console.log(`boot-resume[${n}]: restore-on-connect already ran — nothing to do`); return; }
+            // Self-heal a collapsed tabs.json HERE, at rehydrate time — not only at
+            // module-eval (line ~153). A restart landing inside a collapse window,
+            // or a runtime collapse that happened AFTER the early reconcile ran,
+            // would otherwise leave tabs.json at 0/1 the instant boot-resume reads
+            // it, and the fleet would stay dead on disk even though tabs.json.lastgood
+            // (immune to the same collapse that clobbered tabs.json) still holds the
+            // full list. reconcile prefers lastgood, then scrollback, respects an
+            // intentional close-all (closedByUser), and no-ops on an already-healthy
+            // list — so it is safe to call on every attempt.
+            const rec = tabPersist.reconcileTabsFromScrollback();
+            if (rec && rec.action === 'recovered') {
+                console.log(`boot-resume[${n}]: self-healed ${rec.count} tab(s) from ${rec.from} (tabs.json had collapsed to ${rec.over || 0}) before rehydrate`);
+            }
             const saved = tabPersist.load();
             if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) {
                 console.log(`boot-resume[${n}]: no saved tabs on disk — nothing to rehydrate`);

@@ -264,6 +264,12 @@ const _fmtUsd = n => {
 // soa-usage-alert push watchdog's defaults so the dashboard highlight and the
 // phone alert agree. block = the active 5h usage-limit window, today = midnight.
 const HOT_COST = { block: 20, today: 60 };
+// Estimated weekly usage-limit ceiling (USD-equiv) for the WEEKLY bar's 100%.
+// The local transcript engine can't read Claude's real weekly cap, so we
+// approximate it from an observed calibration point: ≈82% ⇔ ≈$3002 → 100% ≈
+// $3660. Only affects the bar's fill %/label; the tok+cost figures are exact.
+// Tune if the ceiling drifts (or the plan changes).
+const WEEK_LIMIT_USD = 3660;
 const _fmtDur = ms => {
     const s = Math.max(0, Math.round(ms / 1000));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
@@ -281,6 +287,11 @@ class ClaudeUsageWidget extends Widget {
         this._reset = $el('span', { class: 'claude-reset', text: '—' });
         this._fill = $el('span', { class: 'bar-fill' });
         this._sub = $el('div', { class: 'claude-sub', text: '—' });
+        // Weekly usage-limit window (mirrors the 5H block above it). The weekly
+        // is the constraint that resets slowest, so surface it alongside the 5H.
+        this._weekPct = $el('span', { class: 'claude-reset', text: '—' });
+        this._weekFill = $el('span', { class: 'bar-fill' });
+        this._weekSub = $el('div', { class: 'claude-sub', text: '—' });
         this._spark = $el('canvas', { class: 'claude-spark', width: 240, height: 34 });
         this._series = new Array(30).fill(0);
         const kv = (k) => {
@@ -316,6 +327,12 @@ class ClaudeUsageWidget extends Widget {
             ]),
             $el('div', { class: 'bar claude-bar' }, [this._fill]),
             this._sub,
+            $el('div', { class: 'claude-head claude-head-week' }, [
+                $el('span', { class: 'claude-head-l', text: 'WEEKLY' }),
+                this._weekPct,
+            ]),
+            $el('div', { class: 'bar claude-bar' }, [this._weekFill]),
+            this._weekSub,
             this._spark,
             this._burn.row, this._today.row, this._model.row,
             this._sessHead, this._sessList,
@@ -357,6 +374,17 @@ class ClaudeUsageWidget extends Widget {
             this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
             this._burn.v.textContent = '0 ' + tr('widget.claude.tokmin');
         }
+        // Weekly window — the slow-reset ceiling. No server-side pct (the local
+        // engine has no cap), so estimate against WEEK_LIMIT_USD; tok+cost exact.
+        const wk = d.week || {};
+        const wkCost = wk.cost || 0;
+        const wkTok = (wk.tokens && wk.tokens.total) || 0;
+        const wkPct = Math.min(100, Math.round((wkCost / WEEK_LIMIT_USD) * 100));
+        this._weekPct.textContent = `${wkPct}% used`;
+        this._weekPct.classList.toggle('warn', wkPct >= 80);
+        this._weekFill.style.width = `${wkPct}%`;
+        this._weekFill.classList.toggle('hot', wkPct >= 80);
+        this._weekSub.textContent = `${_fmtTok(wkTok)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(wkCost)}`;
         const today = d.today || { tokens: { total: 0 }, cost: 0 };
         this._today.v.textContent = `${_fmtTok(today.tokens.total)} · ≈${_fmtUsd(today.cost)}`;
         const top = (d.models || [])[0];

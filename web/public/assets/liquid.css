@@ -218,12 +218,16 @@
 
 /* ═══ The stage — dark glass terminal cards ════════════════════════════ */
 [data-ui="liquid"] .terms .term {
-  inset: 12px 14px 14px;
-  padding: 14px 16px;
+  /* Big-band single terminal: hug the panel edges so the grid uses the full
+     width. The old 14px inset + 16px h-padding stranded a fixed ~30px dark
+     gutter on the right (most visible where lines end). Tightened to a thin
+     glass rim (inset 4px sides · 6px h-padding) so the void is ~10px, not 30. */
+  inset: 6px 4px 8px 5px;
+  padding: 8px 6px;
   background: rgba(10, 10, 14, 0.55);
   -webkit-backdrop-filter: var(--lq-blur-lg); backdrop-filter: var(--lq-blur-lg);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
+  border-radius: 12px;
   overflow: hidden;
   box-shadow: var(--lq-shadow-deep), var(--lq-rim);
 }

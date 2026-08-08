@@ -151,6 +151,37 @@ a peer (`dm`), or make an agent **event-driven** on a channel (`watch` blocks at
 ≈0 CPU until a peer posts — the A2A analog of `soa-sessions watch`). Keep
 messages short; channels are size-capped and trimmed to the tail.
 
+## Not stepping on each other (soa-work)
+
+`soa-work` is a **local-only work-claim ledger** built on the `soa-bus` substrate
+(same privacy: pure append-only JSONL under the state dir, never networked) so two
+agents never blindly edit the same directory tree or shared asset. **Before any
+multi-file edit, refactor, or commit that touches shared or ambient state**, run
+the claim → check → release loop:
+
+```bash
+soa-work check   <scope>                          # conflict? exit 3 + who holds it · clear? exit 0
+soa-work claim   <scope> [--ttl 30m] [--note "…"] # register it for the duration
+soa-work beat    <scope>                          # keep a long job's claim fresh
+soa-work release <scope>                          # the instant you finish — and before going idle
+soa-work ls                                       # every live claim (who owns what)
+soa-work conflicts                                # all live overlaps (manager view)
+```
+
+`<scope>` is the **narrowest** thing you'll modify: an absolute path (your repo
+root or a subtree — overlap is by **ancestor/descendant**, so a claim on
+`…/Summer-2026` collides with `…/Summer-2026/iPlan` in *both* directions) or a tag
+like `asset:@macncheese/desktop-ui` / `project:anthropic-proxy` (exact match). If
+`check` reports `[CONFLICT]`, do **not** proceed — narrow to a non-overlapping
+subdir, `soa-bus dm #<id> "coordinating on <scope>?"` the owner, or ask the
+manager; never double-edit a claimed scope. Claims are **advisory** (the non-zero
+exit is the signal; nothing is force-locked) and **self-expire** (default 30m TTL,
+and a crashed/exited agent's claims are reaped immediately via the fleet snapshot),
+so a forgotten release only blocks briefly — but release promptly so peers aren't
+stalled. Make yourself event-driven on peers' claims with
+`soa-bus watch work-events --once` (never bare `watch`). The manager runs
+`soa-work conflicts` in its loop and heads off overlaps before assigning goals.
+
 ## Driving an isolated browser
 
 `soa-browser` controls a headless Chromium the server manages (separate from the

@@ -16,6 +16,12 @@ const path = require('node:path');
 
 const TMP = path.join(os.tmpdir(), `soa-web-tabpersist-test-${process.pid}`);
 process.env.SOA_WEB_STATE_DIR = TMP;
+// These unit tests assert the INTENT-based guards (closedByUser, _liveTabsSeen,
+// recoveredFrom, and the lastgood-preference in reconcile). Disable the separate
+// TIME-based shrink boot-window guard (default 10 min) so a genuine close-all
+// (shrink to 0) isn't refused simply because the test runs inside that window —
+// the boot-window clobber guard is an integration concern, tested via uptime.
+process.env.SOA_WEB_TAB_SHRINK_GUARD_MS = '0';
 
 const tabPersist = require('../src/tabPersist');
 
@@ -37,9 +43,21 @@ function mkMgr(tabs) {
 }
 
 function reset() {
-    for (const f of [tabPersist.STATE_FILE, tabPersist.SCROLLBACK_FILE, tabPersist.SESSION_FILE]) {
+    // Include the protected lastgood snapshot: reconcile now PREFERS it over
+    // scrollback, so a lastgood left behind by an earlier test (any healthy ≥2-tab
+    // save writes one) would leak into the next test's recovery. Also sweep the
+    // rotating bak-* ring for the same reason.
+    for (const f of [tabPersist.STATE_FILE, tabPersist.SCROLLBACK_FILE, tabPersist.SESSION_FILE,
+                     tabPersist.STATE_FILE + '.lastgood']) {
         try { fs.rmSync(f); } catch (_) { /* absent */ }
     }
+    try {
+        for (const f of fs.readdirSync(path.dirname(tabPersist.STATE_FILE))) {
+            if (f.startsWith(path.basename(tabPersist.STATE_FILE) + '.bak-')) {
+                try { fs.rmSync(path.join(path.dirname(tabPersist.STATE_FILE), f)); } catch (_) {}
+            }
+        }
+    } catch (_) { /* dir absent */ }
     tabPersist._resetLiveTabsSeen();
 }
 

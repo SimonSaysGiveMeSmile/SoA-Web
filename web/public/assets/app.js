@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=43';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=44';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=27';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -308,9 +308,22 @@ class TabRuntime {
             const core = this.term._core;
             const dims = core && core._renderService && core._renderService.dimensions;
             const cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
-            const elW = this.term.element && this.term.element.clientWidth;
-            if (!cellW || cellW < 1 || !elW) return;
-            const cols = Math.max(2, Math.floor(elW / cellW));
+            // Fill the CONTAINER's content box (the space between its padding),
+            // measured independently of xterm's own element. xterm's root shrinks to
+            // its content (cols×cellW), so measuring `this.term.element` makes
+            // floor(width/cellW) === cols and the grid NEVER grows — stranding a wide
+            // "black void" on the right (tens of columns on a wide screen, not just a
+            // scrollbar gutter). clientWidth includes padding, so subtract it; the
+            // floor guarantees cols×cellW ≤ availW so we never overflow into a
+            // horizontal scrollbar.
+            const el = this.container;
+            if (!el || !cellW || cellW < 1) return;
+            const cs = getComputedStyle(el);
+            const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+            if (!(availW > 0)) return;
+            const cols = Math.max(2, Math.floor(availW / cellW));
+            // Grow-only: fill the void, but never transiently shrink (a mid-layout
+            // narrow measurement would otherwise reflow Claude's TUI for a frame).
             if (cols > this.term.cols) this.term.resize(cols, this.term.rows);
         } catch (_) {}
     }
@@ -457,8 +470,35 @@ class Shell {
         // in). Which cells appear is customizable in Settings → Appearance.
         const viewSwitch = $('#view-switch');
         if (viewSwitch) {
+            // Tap-to-toggle collapse. Idle, the switcher is a single ‹ handle; the
+            // CSS reveal is :hover/:focus-within only — which never fires on touch
+            // and STICKS OPEN after a cell is tapped (it keeps :focus-within). So
+            // drive the reveal explicitly with a `.vs-open` class and blur the cell
+            // after selecting, so it actually re-collapses. Cells are 0-width when
+            // collapsed, so a tap there lands on the container → expand (touch).
+            // The hover CSS still works as a desktop fallback.
+            const collapse = () => {
+                viewSwitch.classList.remove('vs-open');
+                document.removeEventListener('pointerdown', onOutside, true);
+            };
+            const onOutside = (e) => { if (!viewSwitch.contains(e.target)) collapse(); };
+            const expand = () => {
+                if (viewSwitch.classList.contains('vs-open')) return;
+                viewSwitch.classList.add('vs-open');
+                document.addEventListener('pointerdown', onOutside, true);
+            };
             viewSwitch.querySelectorAll('.view-btn').forEach(btn => {
-                btn.addEventListener('click', () => this._setView(btn.dataset.view));
+                // A cell is only hittable once revealed (hover or vs-open), so a
+                // real cell click always means "select this view".
+                btn.addEventListener('click', () => {
+                    this._setView(btn.dataset.view);
+                    btn.blur();
+                    collapse();
+                });
+            });
+            // Collapsed, cells are 0-width so this fires on the ‹ handle → reveal.
+            viewSwitch.addEventListener('click', (e) => {
+                if (!e.target.closest('.view-btn')) expand();
             });
         }
         this._applyViewButtonsVisibility(getSettings());
@@ -491,6 +531,41 @@ class Shell {
             });
         }
 
+
+        // Restart the SoA server (⋯ MORE menu). Interrupts every tab's in-flight
+        // turn for a few seconds, but tabs + tunnel + Claude sessions re-adopt on
+        // boot (boot-resume respawns PTYs and auto-resumes Claude), so it's safe.
+        // Confirm first, then POST; the WS drops during the restart and the client
+        // auto-reconnects on its own.
+        const restartBtn = $('#restart-daemon');
+        if (restartBtn) {
+            restartBtn.addEventListener('click', async () => {
+                this.audio.play('panels');
+                const ok = window.confirm(
+                    'Restart the SoA server now?\n\n' +
+                    'Every tab flushes and re-adopts (Claude sessions auto-resume) and ' +
+                    'the tunnel stays up — but in-flight turns are interrupted for a few ' +
+                    'seconds while the server comes back.');
+                if (!ok) return;
+                const prev = restartBtn.textContent;
+                restartBtn.disabled = true;
+                restartBtn.textContent = '↻ RESTARTING…';
+                try {
+                    const r = await fetch('/api/daemon/restart', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    });
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    // Server is going down; the socket will drop and the client
+                    // reconnects automatically once it's back. Leave the label as
+                    // RESTARTING… — the page effectively reloads state on reconnect.
+                } catch (err) {
+                    console.warn('[restart] request failed', err);
+                    restartBtn.disabled = false;
+                    restartBtn.textContent = prev;
+                    window.alert('Restart request failed: ' + (err && err.message || err));
+                }
+            });
+        }
 
         const audioBtn = $('#toggle-audio');
         const initialAudio = getSettings().audio;
@@ -634,6 +709,7 @@ class Shell {
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
+        this._initHelpLongPress();   // press-and-hold any control → a help popover
         // Image paste: Claude Code grabs clipboard images on Ctrl+V (it ignores
         // Cmd+V for images). Browsers map Cmd/Ctrl+V to a TEXT paste, so an
         // image yields no text and nothing happens. Capture the paste before
@@ -1301,6 +1377,84 @@ class Shell {
         const dismiss = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); } };
         pop.querySelector('.ctx-pop-close').onclick = () => { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); };
         setTimeout(() => document.addEventListener('pointerdown', dismiss, true), 0);
+    }
+
+    // ── Long-press help ──────────────────────────────────────────────────────
+    // Press-and-hold (~500ms) any labelled control to see what it does, in a
+    // small popover sourced from the element's own help text (data-help → title
+    // → aria-label). One Pointer-Events handler covers mouse (desktop) and touch
+    // (mobile browsers). Tab tiles keep their own long-press menu
+    // (_attachTabLongPress), so we bail inside a tab node to avoid double-firing.
+    _initHelpLongPress() {
+        const HOLD = 500, MOVE = 8;
+        let timer = null, sx = 0, sy = 0, fired = false;
+        const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        const helpFor = (target) => {
+            const t = target && target.closest && target.closest('[data-help],[title],[aria-label]');
+            if (!t) return null;
+            if (t.closest('[data-tab-id], #tabs')) return null;          // tabs own their long-press
+            if (t.closest('#help-popover, #ctx-popover')) return null;   // don't explain the popover itself
+            const txt = (t.dataset && t.dataset.help) || t.getAttribute('title') || t.getAttribute('aria-label');
+            return txt && txt.trim() ? { el: t, text: txt.trim() } : null;
+        };
+        document.addEventListener('pointerdown', (e) => {
+            if (e.button && e.button !== 0) return;   // primary button / touch only
+            clear();
+            fired = false;
+            const hit = helpFor(e.target);
+            if (!hit) return;
+            sx = e.clientX; sy = e.clientY;
+            timer = setTimeout(() => {
+                timer = null; fired = true;
+                try { navigator.vibrate && navigator.vibrate(10); } catch (_) {}
+                this._showHelpPopover(hit.el, hit.text);
+            }, HOLD);
+        }, true);
+        document.addEventListener('pointermove', (e) => {
+            if (timer && (Math.abs(e.clientX - sx) > MOVE || Math.abs(e.clientY - sy) > MOVE)) clear();
+        }, true);
+        document.addEventListener('pointerup', clear, true);
+        document.addEventListener('pointercancel', clear, true);
+        window.addEventListener('scroll', clear, true);
+        // A fired long-press must not also trigger the control's click.
+        document.addEventListener('click', (e) => {
+            if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); }
+        }, true);
+    }
+
+    // Popover explaining a control, anchored under it (flips above near the
+    // viewport edge). Dismiss: × / outside pointerdown / Escape — mirrors
+    // _showCtxModal's teardown.
+    _showHelpPopover(anchor, text) {
+        document.getElementById('help-popover')?.remove();
+        const pop = document.createElement('div');
+        pop.id = 'help-popover';
+        pop.className = 'ctx-popover help-popover';
+        pop.setAttribute('role', 'tooltip');
+        pop.innerHTML = '<div class="ctx-pop-head"><span></span><button class="ctx-pop-close" aria-label="Close help">×</button></div><p class="help-pop-body"></p>';
+        const label = (anchor.getAttribute('aria-label') || anchor.textContent || '').trim();
+        pop.querySelector('.ctx-pop-head span').textContent = (label && label !== text) ? label : 'What this does';
+        pop.querySelector('.help-pop-body').textContent = text;
+        document.body.appendChild(pop);
+        const r = anchor.getBoundingClientRect();
+        const pw = pop.offsetWidth, ph = pop.offsetHeight;
+        const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+        let top = r.bottom + 6;
+        if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+        pop.style.left = left + 'px';
+        pop.style.top = top + 'px';
+        const close = () => {
+            pop.remove();
+            document.removeEventListener('pointerdown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+        };
+        const onDown = (e) => { if (!pop.contains(e.target)) close(); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+        pop.querySelector('.ctx-pop-close').onclick = close;
+        setTimeout(() => {
+            document.addEventListener('pointerdown', onDown, true);
+            document.addEventListener('keydown', onKey, true);
+        }, 0);
     }
 
     _pollCtxLines() {

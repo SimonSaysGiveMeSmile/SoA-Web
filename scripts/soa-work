@@ -1,0 +1,190 @@
+#!/bin/bash
+# soa-work — LOCAL-ONLY work-claim ledger so SoA fleet agents don't step on each
+# other. Agents CLAIM the scope they're about to modify (a path or an
+# asset:/project: tag), CHECK before starting, and RELEASE when done — so two
+# agents never blindly edit the same directory tree or shared asset.
+#
+# Rides the soa-bus substrate (same privacy guarantees: pure local append-only
+# JSONL under the state dir, never networked). Each action is one soa-bus post to
+# the `work-claims` channel; live state = fold the tail, last-writer-wins per
+# canonicalized scope, minus releases / TTL-expired / dead-owner claims.
+#
+#   soa-work claim   <scope> [--ttl 30m|2h|Nms] [--note "…"]   register a claim
+#   soa-work release <scope>                                   drop your claim
+#   soa-work beat    <scope> [--ttl …]                         keep a long claim fresh
+#   soa-work check   <scope>                                   conflict? exit 3, else 0
+#   soa-work mine                                              your live claims
+#   soa-work ls                                                every live claim (who owns what)
+#   soa-work conflicts                                         all live-claim overlaps (for the manager)
+#   soa-work reap [--post]                                     show (or release) dead/expired claims
+#
+# Scope = an absolute path (repo root or subtree — overlaps by ancestor/descendant)
+# or a tag like asset:@macncheese/desktop-ui or project:anthropic-proxy (exact
+# match). Advisory: check's non-zero exit is the signal; nothing is force-locked.
+set -u
+
+# ---- shared bus dir (identical resolution to soa-bus) ------------------------
+if   [ -n "${SOA_BUS_DIR:-}" ];        then BUS="$SOA_BUS_DIR"
+elif [ -n "${SOA_WEB_STATE_DIR:-}" ];  then BUS="$SOA_WEB_STATE_DIR/a2a"
+elif [ -d "$HOME/.soa-web-local" ];    then BUS="$HOME/.soa-web-local/a2a"
+else                                        BUS="$HOME/.soa-web/a2a"
+fi
+CHAN="${SOA_WORK_CHAN:-work-claims}"
+EVCHAN="${SOA_WORK_EVCHAN:-work-events}"
+LEDGER="$BUS/$(printf '%s' "$CHAN" | tr -c 'A-Za-z0-9._@-' '_').jsonl"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
+SNAP="${SOA_WORK_SNAP:-$STATE_DIR/fleet-snapshots/tabs-latest.json}"
+DEFAULT_TTL="${SOA_WORK_TTL_MS:-1800000}"   # 30m
+
+# owner id: SOA_WORK_ID > SOA_BUS_ID > soa-sessions whoami
+me_id(){ printf '%s' "${SOA_WORK_ID:-${SOA_BUS_ID:-$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')}}"; }
+
+parse_ttl(){ # arg -> ms
+  local v="$1"
+  case "$v" in
+    *ms) echo "${v%ms}";;
+    *h)  echo $(( ${v%h} * 3600000 ));;
+    *m)  echo $(( ${v%m} * 60000 ));;
+    *s)  echo $(( ${v%s} * 1000 ));;
+    ''|*[!0-9]*) echo "$DEFAULT_TTL";;
+    *)   echo $(( v * 60000 ));;   # bare number = minutes
+  esac
+}
+
+# write a claim/release/beat record via soa-bus (reuses identity + atomic append)
+post_record(){ # v scope ttl_ms note
+  local payload
+  payload="$(python3 -c 'import json,sys,time
+print(json.dumps({"v":sys.argv[1],"scope":sys.argv[2],"owner":sys.argv[3],"ttl":int(sys.argv[4]),"note":sys.argv[5],"seq":int(time.time()*1000)},ensure_ascii=False))' \
+    "$1" "$2" "$(me_id)" "$3" "${4:-}")"
+  soa-bus post "$CHAN" "$payload" >/dev/null 2>&1
+}
+
+# fold the ledger + dispatch a read-side MODE (all overlap/TTL/dead logic here)
+fold(){ # mode [scope]
+  python3 - "$LEDGER" "$1" "$(me_id)" "$SNAP" "${2:-}" <<'PY'
+import json,sys,os,time
+ledger,mode,myid,snap = sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+scope_arg = sys.argv[5] if len(sys.argv)>5 else ''
+now=int(time.time()*1000)
+
+def canon(s):
+    s=str(s).strip()
+    if s.startswith('/'):
+        return ('path', os.path.normpath(s).rstrip('/') or '/')
+    return ('tag', s)
+
+# live-id set from the fleet snapshot: an owner that's exited or absent is dead.
+# If the snapshot is unreadable, we DON'T reap on liveness (TTL still applies).
+live_ids=None
+try:
+    d=json.load(open(snap)); tabs=d.get('tabs',d) if isinstance(d,dict) else d
+    live_ids=set(str(t.get('id')) for t in tabs if isinstance(t,dict) and not t.get('exited') and t.get('id') is not None)
+except Exception:
+    live_ids=None
+def dead(owner): return (live_ids is not None) and (str(owner) not in live_ids)
+
+latest={}
+try:
+    for line in open(ledger):
+        line=line.strip()
+        if not line: continue
+        try: outer=json.loads(line)
+        except Exception: continue
+        try: p=json.loads(outer.get('msg') or '{}')
+        except Exception: continue
+        if not isinstance(p,dict) or 'scope' not in p: continue
+        if p.get('v') not in ('claim','release','beat'): continue
+        k=canon(p['scope'])
+        seq=int(p.get('seq') or outer.get('t') or 0)
+        if k not in latest or seq>=latest[k]['seq']:
+            latest[k]={'kind':k[0],'scope':k[1],'v':p['v'],'owner':str(p.get('owner','')),
+                       'from':outer.get('from','?'),'seq':seq,'ttl':int(p.get('ttl') or 0),'note':p.get('note') or ''}
+except FileNotFoundError:
+    pass
+
+live,reap=[],[]
+for r in latest.values():
+    if r['v']=='release': continue
+    exp = r['ttl']>0 and (now-r['seq'])>r['ttl']
+    dd  = dead(r['owner'])
+    if exp or dd:
+        r=dict(r); r['why']='expired' if exp else 'dead-owner'; reap.append(r)
+    else:
+        live.append(r)
+
+def overlap(a,b):
+    if a['kind']!=b['kind']: return False
+    if a['kind']=='tag': return a['scope']==b['scope']
+    x,y=a['scope'],b['scope']
+    return x==y or x.startswith(y+'/') or y.startswith(x+'/')
+def am(r): return max(0,(now-r['seq'])//60000)      # age minutes
+def tm(r): return r['ttl']//60000 if r['ttl'] else 0 # ttl minutes
+live.sort(key=lambda r:(r['kind'],r['scope']))
+
+if mode=='check':
+    q={'kind':canon(scope_arg)[0],'scope':canon(scope_arg)[1]}
+    hits=[r for r in live if r['owner']!=str(myid) and overlap(q,r)]
+    if hits:
+        for r in hits: print(f"[CONFLICT] held by {r['from']} (age {am(r)}m, ttl {tm(r)}m) on {r['scope']}"+(f" — {r['note']}" if r['note'] else ""))
+        sys.exit(3)
+    print(f"(clear) {q['scope']}")
+elif mode=='mine':
+    mine=[r for r in live if r['owner']==str(myid)]
+    print('\n'.join(f"  {r['scope']}  (age {am(r)}m/ttl {tm(r)}m)"+(f"  — {r['note']}" if r['note'] else "") for r in mine) or "  (you hold no claims)")
+elif mode=='ls':
+    if not live: print("  (no live claims)"); sys.exit(0)
+    for r in live: print(f"  {r['from']:<18} {r['scope']}  (age {am(r)}m/ttl {tm(r)}m)"+(f"  — {r['note']}" if r['note'] else ""))
+elif mode=='conflicts':
+    seen=set(); any=False
+    for i in range(len(live)):
+        for j in range(i+1,len(live)):
+            a,b=live[i],live[j]
+            if a['owner']!=b['owner'] and overlap(a,b):
+                any=True; print(f"[CONFLICT] {a['from']} vs {b['from']} on {a['scope'] if a['kind']=='path' and len(a['scope'])<=len(b['scope']) else b['scope']}")
+    if not any: print("  (no conflicts — fleet is deconflicted)")
+elif mode=='reap':
+    print('\n'.join(f"  {r['from']:<18} {r['scope']}  ({r['why']})" for r in reap) or "  (nothing to reap)")
+elif mode=='reaplist':   # machine: one scope per line, for --post
+    for r in reap: print(r['scope'])
+PY
+}
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  claim)
+    scope="${1:-}"; shift 2>/dev/null || true
+    [ -z "$scope" ] && { echo "usage: soa-work claim <scope> [--ttl 30m] [--note …]"; exit 2; }
+    ttl="$DEFAULT_TTL"; note=""
+    while [ $# -gt 0 ]; do case "$1" in --ttl) ttl="$(parse_ttl "$2")"; shift 2;; --note) note="$2"; shift 2;; *) shift;; esac; done
+    post_record claim "$scope" "$ttl" "$note"
+    soa-bus post "$EVCHAN" "🔒 #$(me_id) claimed $scope$([ -n "$note" ] && echo " ($note)")" >/dev/null 2>&1
+    # advisory heads-up if it overlaps someone else's live claim
+    if ! out="$(fold check "$scope")"; then echo "$out"; echo "⚠ claimed anyway (advisory) — coordinate with the owner before editing"; else echo "claimed: $scope  (ttl $((ttl/60000))m)"; fi
+    ;;
+  release)
+    scope="${1:-}"; [ -z "$scope" ] && { echo "usage: soa-work release <scope>"; exit 2; }
+    post_record release "$scope" 0 ""
+    soa-bus post "$EVCHAN" "🔓 #$(me_id) released $scope" >/dev/null 2>&1
+    echo "released: $scope"
+    ;;
+  beat)
+    scope="${1:-}"; shift 2>/dev/null || true
+    [ -z "$scope" ] && { echo "usage: soa-work beat <scope> [--ttl 30m]"; exit 2; }
+    ttl="$DEFAULT_TTL"; while [ $# -gt 0 ]; do case "$1" in --ttl) ttl="$(parse_ttl "$2")"; shift 2;; *) shift;; esac; done
+    post_record beat "$scope" "$ttl" ""
+    echo "beat: $scope  (ttl $((ttl/60000))m)"
+    ;;
+  check)      scope="${1:-}"; [ -z "$scope" ] && { echo "usage: soa-work check <scope>"; exit 2; }; fold check "$scope";;
+  mine)       fold mine;;
+  ls|list)    fold ls;;
+  conflicts)  fold conflicts;;
+  reap)
+    if [ "${1:-}" = "--post" ]; then
+      n=0; while IFS= read -r sc; do [ -z "$sc" ] && continue; post_record release "$sc" 0 ""; echo "reaped (released): $sc"; n=$((n+1)); done < <(fold reaplist)
+      [ "$n" = 0 ] && echo "  (nothing to reap)"
+    else fold reap; fi
+    ;;
+  whoami)     echo "#$(me_id)  (ledger: $LEDGER)";;
+  help|--help|-h|*) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//';;
+esac

@@ -247,6 +247,11 @@ html, body {
 .ctx-pop-note { margin: 0; opacity: 0.65; line-height: 1.5; }
 .ctx-pop-note code { color: var(--soa-accent); }
 
+/* Long-press help popover — reuses the .ctx-popover chrome. */
+.help-popover { max-width: 300px; }
+.help-popover .ctx-pop-head { font-weight: bold; }
+.help-pop-body { margin: 0; line-height: 1.5; opacity: 0.9; }
+
 /* Agent status colors — all tabs (active and inactive).
    working   green   — agent is running (esc to interrupt visible)
    done      orange  — agent finished a turn, waiting for user input
@@ -472,6 +477,49 @@ html, body {
 .topbar-actions .view-switch .view-btn:hover { background: rgba(var(--soa-accent-rgb), 0.12); border-color: var(--soa-accent-dim); }
 .topbar-actions .view-switch .view-btn.active { background: var(--soa-accent); color: var(--soa-bg); }
 .view-switch .view-btn[hidden] { display: none; }
+
+/* ── Collapsible view-switch ──────────────────────────────────────────────
+   Idle, the switcher shrinks to a single ‹ chevron handle to reclaim toolbar
+   space; hovering it (or keyboard-focusing a cell) reveals every button, and
+   they re-collapse ~1s after the pointer leaves. Pure CSS — the reveal is
+   instant (transition-delay 0) and the collapse is delayed ~1s. No JS/markup
+   change; the active cell still paints normally once revealed. */
+#view-switch { min-width: 22px; }
+#view-switch::before {
+    content: "\2039";                 /* ‹ handle, shown only while collapsed */
+    order: -1; pointer-events: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 100%;
+    color: var(--soa-accent);
+    font-family: var(--font-mono); font-size: 16px; line-height: 1;
+    opacity: 1;
+    transition: opacity .12s ease, width .12s ease;
+    transition-delay: .9s;            /* fade the handle out as the cells arrive */
+}
+#view-switch .view-btn {
+    width: 0; opacity: 0; border-left-width: 0; overflow: hidden;
+    transition: width .16s ease, opacity .16s ease,
+                background .12s ease, color .12s ease;
+    transition-delay: 1s;             /* cells linger ~1s after the pointer leaves */
+}
+#view-switch:hover .view-btn,
+#view-switch:focus-within .view-btn {
+    width: 30px; opacity: 1; border-left-width: 1px;
+    transition-delay: 0s;             /* reveal instantly on hover / focus */
+}
+#view-switch:hover::before,
+#view-switch:focus-within::before { width: 0; opacity: 0; transition-delay: 0s; }
+#view-switch .view-btn:first-child,
+#view-switch:hover .view-btn:first-child,
+#view-switch:focus-within .view-btn:first-child { border-left-width: 0; }
+
+/* JS-driven open state (tap-to-toggle) — the reveal for touch, where :hover
+   never fires. Mirrors the :hover rules above so the cells expand identically. */
+#view-switch.vs-open .view-btn {
+    width: 30px; opacity: 1; border-left-width: 1px; transition-delay: 0s;
+}
+#view-switch.vs-open .view-btn:first-child { border-left-width: 0; }
+#view-switch.vs-open::before { width: 0; opacity: 0; transition-delay: 0s; }
 
 /* View-switcher customization checkboxes (Settings → Appearance). */
 .set-viewbtns { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
