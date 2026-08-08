@@ -108,6 +108,19 @@ find_by_title() {
 
 spawn_manager() {
     local result
+    # GUARD — never create a duplicate manager tab. The manager is *defined* by its
+    # title, so if ANY tab is already titled "manager" a fresh spawn just piles up a
+    # zombie. This is exactly what produced 30+ dead "manager" tabs (#21–#52): the
+    # done→respawn branch below kept calling spawn_manager while tab #1 was merely
+    # idle-at-'done' (a healthy event-loop manager reads 'done' between events), not
+    # actually exited. Only the MISSING path (find_by_title empty → no manager tab at
+    # all) may legitimately reach a real spawn.
+    local existing; existing="$(find_by_title manager)"
+    if [ -n "$existing" ]; then
+        log "spawn_manager: a tab titled 'manager' already exists (#$existing) — refusing to spawn a duplicate"
+        echo "$existing" > "$ID_FILE"
+        return 0
+    fi
     # --no-resume: a manager is spawned only when NONE is live, so start FRESH.
     # Resuming the "latest" session in this cwd grabbed a stale cross-instance
     # manager transcript (referenced a retired fleet's tab ids) — start clean and
@@ -180,8 +193,19 @@ FLAGS="$(tab_flags "$MGR_ID")"
 log "manager tab #$MGR_ID — status=${STATUS:-?} ctx=${CTX_PCT:-0}% flags='${FLAGS:-}'"
 
 case "${STATUS:-}" in
-    working|idle|attention)
-        rm -f "$STATE_DIR/.manager-done-count"   # alive — clear any done streak
+    working|idle|attention|done)
+        # 'done' is a HEALTHY, ALIVE state — it is NOT an exit. The daemon classifies
+        # 'done' by matching Claude's INPUT-BOX UI (see DONE[] in sessionManager.js:
+        # ╭─╮ / │ > │ / "bypass permissions on"): claude is running, just finished a
+        # turn, waiting at its box. A truly-EXITED claude drops to a SHELL PROMPT and
+        # classifies as 'idle' (never 'done'). The old code treated persistent 'done'
+        # as "exited → respawn", which was definitionally BACKWARDS: it piled up 30+
+        # zombie 'manager' tabs (#21–#52), and once "fixed" to resume-in-place it
+        # typed `claude --resume` straight into the LIVE manager's own terminal.
+        # A genuinely-dead manager is caught by the daemon 'exited' event → tab reaped
+        # → the MISSING path above spawns a fresh one. So on 'done' we do NOTHING but
+        # keep context in check.
+        rm -f "$STATE_DIR/.manager-done-count"   # retire the legacy done-streak counter
         if [ "${CTX_PCT:-0}" -ge 80 ] || echo "$FLAGS" | grep -q "HIGH-CTX"; then
             log "manager #$MGR_ID ctx=${CTX_PCT}% HIGH — compacting"
             soa-sessions compact "$MGR_ID" 2>/dev/null || true
@@ -192,30 +216,6 @@ case "${STATUS:-}" in
         soa-sessions resume "$MGR_ID" 2>/dev/null || true
         command -v soa-msg >/dev/null 2>&1 && \
             soa-msg "Manager (tab #$MGR_ID) resumed after usage limit." 2>/dev/null || true
-        ;;
-    done)
-        # A manager that just finished a turn briefly shows "done" but is STILL
-        # ALIVE — its /goal Stop hook revives the event loop. Respawning on a
-        # single transient "done" caused new manager tabs to pile up every turn
-        # boundary. Only respawn if "done" PERSISTS across consecutive checks
-        # (~3 runs ≈ 4.5m); a truly-exited tab is caught by the MISSING path above.
-        DONE_FILE="$STATE_DIR/.manager-done-count"
-        # `|| true`: on the FIRST "done" the count file is absent, so `cat` fails —
-        # and under `set -euo pipefail` a failing command-substitution in an
-        # assignment aborts the whole script (exit 1) BEFORE the counter is written.
-        # That silently killed the done→respawn recovery: the count never
-        # accumulated, so a manager stuck in "done" (loop stopped, tab still alive)
-        # was never respawned. Guard the read so a missing file just means count 0.
-        prev_done="$(cat "$DONE_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-        cur_done=$(( ${prev_done:-0} + 1 ))
-        if [ "$cur_done" -ge 3 ]; then
-            log "manager #$MGR_ID 'done' persisted ${cur_done}x — treating as exited, respawning"
-            rm -f "$ID_FILE" "$DONE_FILE"
-            spawn_manager
-        else
-            echo "$cur_done" > "$DONE_FILE"
-            log "manager #$MGR_ID transient 'done' (${cur_done}/3) — alive, not respawning"
-        fi
         ;;
     "")
         log "manager #$MGR_ID returned empty status — skipping"

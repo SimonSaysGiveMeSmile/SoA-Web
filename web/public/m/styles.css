@@ -1258,6 +1258,22 @@ button:active { background: var(--accent-bg-hover); }
     transition: transform 0.3s ease-out;
 }
 #overflow-overlay.open .overflow-sheet { transform: translateY(0); }
+
+/* Long-press help overlay — same bottom-sheet chrome as the actions sheet. */
+#help-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 340;
+    display: flex; align-items: flex-end; justify-content: center;
+    opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0.2s;
+}
+#help-overlay.open {
+    opacity: 1; visibility: visible; pointer-events: auto;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+#help-overlay.open .overflow-sheet { transform: translateY(0); }
+.help-body { padding: 4px 18px 10px; margin: 0; font-size: 15px; line-height: 1.5; color: var(--fg); }
 .overflow-header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 4px 16px 8px;

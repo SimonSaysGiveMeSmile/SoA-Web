@@ -477,6 +477,7 @@ class App {
         this.kbdEl       = document.getElementById('kbd');
         this.viewEls     = Array.from(document.querySelectorAll('.view'));
         this.viewBtns    = Array.from(document.querySelectorAll('.bb-btn[data-view]'));
+        this._initHelpLongPress();   // press-and-hold any control → help overlay
         this.btnNewTab   = document.getElementById('btn-newtab');
         this.btnMic      = document.getElementById('btn-mic');
         this.btnSpeak    = document.getElementById('btn-speak');
@@ -1450,6 +1451,63 @@ class App {
         this.reconnectOpenBrowser.addEventListener('click', () => {
             window.open('http://captive.apple.com/hotspot-detect.html', '_blank');
         });
+    }
+
+    // Long-press (~500ms) any button/control → a bottom-sheet explaining it,
+    // sourced from the element's help text (data-help → title → aria-label).
+    // Touch-based; swallows the tap that would otherwise follow the hold.
+    _initHelpLongPress() {
+        const HOLD = 500, MOVE = 10;
+        let timer = null, sx = 0, sy = 0, fired = false;
+        const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        const helpFor = (target) => {
+            const t = target && target.closest && target.closest('[data-help],[title],[aria-label]');
+            if (!t || t.closest('#help-overlay')) return null;
+            const txt = (t.dataset && t.dataset.help) || t.getAttribute('title') || t.getAttribute('aria-label');
+            if (!txt || !txt.trim()) return null;
+            const label = (t.getAttribute('aria-label') || t.textContent || '').replace(/\s+/g, ' ').trim();
+            return { text: txt.trim(), label: (label && label !== txt.trim()) ? label : 'What this does' };
+        };
+        document.addEventListener('touchstart', (e) => {
+            clear(); fired = false;
+            if (e.touches.length !== 1) return;
+            const hit = helpFor(e.target);
+            if (!hit) return;
+            sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+            timer = setTimeout(() => {
+                timer = null; fired = true;
+                try { navigator.vibrate && navigator.vibrate(10); } catch (_) {}
+                this._showHelp(hit.label, hit.text);
+            }, HOLD);
+        }, { passive: true });
+        document.addEventListener('touchmove', (e) => {
+            if (timer && e.touches[0] &&
+                (Math.abs(e.touches[0].clientX - sx) > MOVE || Math.abs(e.touches[0].clientY - sy) > MOVE)) clear();
+        }, { passive: true });
+        document.addEventListener('touchend', clear, { passive: true });
+        document.addEventListener('touchcancel', clear, { passive: true });
+        document.addEventListener('click', (e) => {
+            if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); }
+        }, true);
+        const ov = document.getElementById('help-overlay');
+        if (ov) {
+            ov.addEventListener('click', (e) => { if (e.target === ov) this._closeHelp(); });
+            const cb = ov.querySelector('.help-close');
+            if (cb) cb.addEventListener('click', () => this._closeHelp());
+        }
+    }
+
+    _showHelp(label, text) {
+        const ov = document.getElementById('help-overlay');
+        if (!ov) return;
+        const t = ov.querySelector('.help-title'); if (t) t.textContent = label || 'Help';
+        const b = ov.querySelector('.help-body');  if (b) b.textContent = text;
+        ov.classList.add('open');
+    }
+
+    _closeHelp() {
+        const ov = document.getElementById('help-overlay');
+        if (ov) ov.classList.remove('open');
     }
 
     _showView(target) {

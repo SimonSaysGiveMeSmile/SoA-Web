@@ -30,12 +30,12 @@
                 <span class="tabchip-count" id="tabchip-count"></span>
             </button>
             <nav id="controls" class="controls" aria-label="Functions">
-                <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERM</button>
-                <button class="bb-btn" data-view="chat-view">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
+                <button class="bb-btn" data-view="terminal-view" aria-pressed="true" title="Terminal — your agent's live terminal session">TERM</button>
+                <button class="bb-btn" data-view="chat-view" title="Chat — message the agent in plain chat bubbles">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
                 <!-- Manager-only (premium gate): hidden by default; app.js reveals it when /api/capabilities reports manager=true. -->
-                <button class="bb-btn" data-view="tiles-view" hidden>DASH</button>
-                <button class="bb-btn" data-view="web-view">WEB</button>
-                <button class="bb-btn" data-view="widgets-view">SYS</button>
+                <button class="bb-btn" data-view="tiles-view" hidden title="Dashboard — tiles of every agent (manager view)">DASH</button>
+                <button class="bb-btn" data-view="web-view" title="Web — the agent's browser & localhost preview">WEB</button>
+                <button class="bb-btn" data-view="widgets-view" title="System — device stats, ports & widgets">SYS</button>
             </nav>
             <!-- Overflow trigger — pinned OUTSIDE the scrolling #controls strip so
                  the secondary actions (mic/speak/camera/…) are always one tap away
@@ -279,6 +279,18 @@
                     <span class="overflow-cap">New tab</span>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Long-press help: press-and-hold any control to see what it does. -->
+    <div id="help-overlay">
+        <div class="overflow-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="overflow-header">
+                <div class="overflow-title help-title">Help</div>
+                <button class="settings-close help-close" aria-label="Close help">&times;</button>
+            </div>
+            <p class="help-body"></p>
         </div>
     </div>
 
