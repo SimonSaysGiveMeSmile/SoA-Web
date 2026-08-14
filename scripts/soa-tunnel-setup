@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# soa-tunnel-setup — configure a STABLE public tunnel for THIS install so the
+# mobile URL never churns across restarts. Provider-agnostic + PER-INSTALL: every
+# user brings THEIR OWN free tunnel credential, so this works for any new user,
+# not just the owner's m.s0a.app. It writes a small config in the state dir; the
+# channels healer (soa-channels) then prefers that stable door and stops minting
+# throwaway *.trycloudflare.com / random ngrok URLs.
+#
+# Two providers — pick whichever you have (both free):
+#   ngrok       A free ngrok account gives you ONE permanent subdomain + an
+#               authtoken. No domain of your own needed → best for anyone.
+#               (Free tier shows a one-time "Visit Site" interstitial.)
+#   cloudflare  A NAMED cloudflare tunnel on a (sub)domain YOU own — cleanest URL,
+#               no interstitial, no quotas. Requires delegating a domain to CF;
+#               this delegates to scripts/soa-named-tunnel-setup for the heavy part.
+#
+# Usage:
+#   soa-tunnel-setup                              detect your creds + tell you exactly what to do
+#   soa-tunnel-setup ngrok --domain <d>           stable ngrok on your reserved domain
+#   soa-tunnel-setup cloudflare --hostname <h> [--tunnel-name <n>]
+#   soa-tunnel-setup status                       show the current stable config + live door
+#   soa-tunnel-setup disable                      revert to zero-config quick tunnels
+#
+# Never restarts the SoA daemon. Idempotent — safe to re-run. The config lives at
+# $SOA_WEB_STATE_DIR/tunnel-config.json (default ~/.soa-web-local/tunnel-config.json).
+set -euo pipefail
+
+PORT="${SOA_WEB_PORT:-4010}"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
+CFG="$STATE_DIR/tunnel-config.json"
+CF_CERT="$HOME/.cloudflared/cert.pem"
+
+b(){ printf '\033[1m%s\033[0m' "$*"; }
+step(){ printf '\n\033[1m▶ %s\033[0m\n' "$*"; }
+ok(){ printf '\033[32m✓ %s\033[0m\n' "$*"; }
+warn(){ printf '\033[33m⚠ %s\033[0m\n' "$*"; }
+die(){ printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+# ── credential detection ──────────────────────────────────────────────────────
+ngrok_installed(){ command -v ngrok >/dev/null 2>&1; }
+# ngrok stores the authtoken in its own config; `ngrok config check` is the
+# portable way to know it's set (exit 0 + "Valid" when a token is present).
+ngrok_authed(){ ngrok_installed && ngrok config check >/dev/null 2>&1; }
+cf_logged_in(){ [ -f "$CF_CERT" ]; }
+
+# ── config write (no jq dependency) ───────────────────────────────────────────
+write_cfg(){ # provider  key1 val1  key2 val2 ...
+    local provider="$1"; shift
+    STATE_DIR="$STATE_DIR" CFG="$CFG" PROVIDER="$provider" PORT="$PORT" \
+    python3 - "$@" <<'PY'
+import json, os, sys, datetime
+cfg = os.environ["CFG"]
+provider = os.environ["PROVIDER"]
+port = int(os.environ["PORT"])
+kv = sys.argv[1:]
+sub = {kv[i]: kv[i+1] for i in range(0, len(kv), 2)}
+doc = {"stable": True, "provider": provider, "port": port,
+       "updatedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+if provider == "ngrok":
+    doc["ngrok"] = {"domain": sub.get("domain", "")}
+elif provider == "cloudflare":
+    doc["cloudflare"] = {"hostname": sub.get("hostname", ""),
+                         "tunnelName": sub.get("tunnelName", "soa-mobile")}
+tmp = cfg + ".tmp"
+open(tmp, "w").write(json.dumps(doc, indent=2) + "\n")
+os.replace(tmp, cfg)
+print(f"wrote {cfg}: provider={provider} " +
+      (doc.get("ngrok", {}).get("domain") or doc.get("cloudflare", {}).get("hostname") or ""))
+PY
+}
+
+kick_healer(){ # nudge the channels healer to adopt the new door now (best-effort)
+    launchctl kickstart -k "gui/$(id -u)/com.soa-web.channels" 2>/dev/null \
+        && ok "channels healer kicked — it will adopt the stable door within a pass" \
+        || warn "couldn't kick com.soa-web.channels (revive it: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.channels.plist)"
+}
+
+cmd="${1:-detect}"; [ $# -gt 0 ] && shift || true
+
+# ── status ────────────────────────────────────────────────────────────────────
+if [ "$cmd" = "status" ]; then
+    step "Stable tunnel config"
+    if [ -f "$CFG" ]; then cat "$CFG"; else echo "(none — using zero-config quick tunnels)"; fi
+    step "Live door (channels.json)"
+    [ -f "$STATE_DIR/channels.json" ] && cat "$STATE_DIR/channels.json" || echo "(none)"
+    exit 0
+fi
+
+# ── disable ───────────────────────────────────────────────────────────────────
+if [ "$cmd" = "disable" ]; then
+    rm -f "$CFG" 2>/dev/null || true
+    ok "removed $CFG — reverted to zero-config quick tunnels (URL will churn again)"
+    kick_healer
+    exit 0
+fi
+
+# ── detect / guide ────────────────────────────────────────────────────────────
+if [ "$cmd" = "detect" ]; then
+    step "Detecting what you already have"
+    if ngrok_authed; then ok "ngrok: installed + authenticated"; else
+        if ngrok_installed; then warn "ngrok: installed but NO authtoken"; else warn "ngrok: not installed"; fi
+    fi
+    if cf_logged_in; then ok "cloudflare: cloudflared logged in ($CF_CERT)"; else warn "cloudflare: cloudflared NOT logged in"; fi
+    cat <<EOF
+
+$(b "To get a STABLE mobile URL, pick one (both free, one-time):")
+
+$(b "A) ngrok  — easiest, no domain needed (recommended)")
+   1. Create a free account at https://dashboard.ngrok.com/signup
+   2. Copy your authtoken (dashboard → "Your Authtoken") and run:
+        ngrok config add-authtoken <YOUR_TOKEN>
+   3. Claim your free static domain (dashboard → "Domains" → "New Domain").
+      You'll get something like  curious-otter-1234.ngrok-free.app
+   4. Run:
+        soa-tunnel-setup ngrok --domain curious-otter-1234.ngrok-free.app
+
+$(b "B) cloudflare  — cleanest URL, if you OWN a domain")
+   1. Add your (sub)domain to a free Cloudflare account + delegate its NS.
+   2. cloudflared tunnel login   (authorize that zone)
+   3. Run:
+        soa-tunnel-setup cloudflare --hostname tunnel.yourdomain.com
+
+Then your phone bookmark never dies again. Re-run  soa-tunnel-setup status  to check.
+EOF
+    exit 0
+fi
+
+# ── ngrok ─────────────────────────────────────────────────────────────────────
+if [ "$cmd" = "ngrok" ]; then
+    DOMAIN=""
+    while [ $# -gt 0 ]; do case "$1" in --domain) DOMAIN="${2:-}"; shift 2;; *) shift;; esac; done
+    ngrok_installed || die "ngrok not installed. brew install ngrok (or https://ngrok.com/download)"
+    ngrok_authed || die "ngrok has no authtoken. Get it at https://dashboard.ngrok.com and run:
+    ngrok config add-authtoken <YOUR_TOKEN>
+  then re-run me."
+    [ -n "$DOMAIN" ] || die "need your reserved domain: soa-tunnel-setup ngrok --domain <your>.ngrok-free.app
+  (claim a free one at https://dashboard.ngrok.com → Domains → New Domain)"
+    case "$DOMAIN" in http*|*/*) die "pass the bare host, e.g. curious-otter-1234.ngrok-free.app (no https://, no path)";; esac
+
+    step "Configuring stable ngrok on $DOMAIN"
+    write_cfg ngrok domain "$DOMAIN"
+    ok "config written — the channels healer will run: ngrok http $PORT --domain=$DOMAIN"
+    kick_healer
+    cat <<EOF
+
+$(b "Your STABLE mobile URL:")  https://$DOMAIN/m/
+This survives every restart. First visit shows ngrok's one-time "Visit Site" page — tap it once.
+EOF
+    exit 0
+fi
+
+# ── cloudflare (named) ────────────────────────────────────────────────────────
+if [ "$cmd" = "cloudflare" ]; then
+    HOST=""; TNAME="soa-mobile"
+    while [ $# -gt 0 ]; do case "$1" in
+        --hostname) HOST="${2:-}"; shift 2;;
+        --tunnel-name) TNAME="${2:-}"; shift 2;;
+        *) shift;; esac; done
+    [ -n "$HOST" ] || die "need the hostname: soa-tunnel-setup cloudflare --hostname tunnel.yourdomain.com"
+    cf_logged_in || die "cloudflared not logged in. Run:  cloudflared tunnel login  (authorize the $HOST zone), then re-run me."
+
+    step "Standing up named cloudflare tunnel $HOST (via soa-named-tunnel-setup)"
+    if command -v soa-named-tunnel-setup >/dev/null 2>&1; then
+        SOA_TUNNEL_HOSTNAME="$HOST" SOA_TUNNEL_NAME="$TNAME" soa-named-tunnel-setup \
+            || die "named-tunnel setup failed — fix the prerequisites it printed, then re-run me."
+    else
+        die "scripts/soa-named-tunnel-setup not found on PATH."
+    fi
+    write_cfg cloudflare hostname "$HOST" tunnelName "$TNAME"
+    ok "config written — healer will prefer the fixed hostname $HOST"
+    kick_healer
+    printf '\n%s  https://%s/m/\n' "$(b "Your STABLE mobile URL:")" "$HOST"
+    exit 0
+fi
+
+die "unknown command '$cmd'. Try: soa-tunnel-setup   (or: ngrok | cloudflare | status | disable)"
