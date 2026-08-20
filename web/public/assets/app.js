@@ -377,6 +377,26 @@ class Shell {
         // strip selects who). Threads keyed by tab id + an away-unread counter.
         this._chatThreads = new Map();   // tabId → [{ from:'you'|'agent', full, t }]
         this._chatUnread  = 0;
+        // MEETING view state — ONE groupchat thread with many speakers. Unlike
+        // CHAT (per-tab threads typed into a PTY), a meeting is server-owned:
+        // the transcript is a ledger, the roster and the relay/message budgets
+        // are a `meetView`, and everything here is a cache of what the server
+        // said. Nothing in this block is authoritative — never render a local
+        // guess at a budget, or the room looks alive after it adjourned.
+        this._meetRoom = null;           // room name currently on screen
+        this._meetLog = [];              // [<msg>] in seq order, capped at 200
+        this._meetCursor = 0;            // max seq seen → the ?since= we refetch with
+        this._meetView = null;           // last <meetView> for _meetRoom
+        this._meetRooms = [];            // every room, open first (GET /api/meetings)
+        this._meetCandidates = [];       // picker source: [{id,title,cwd,group,status,…}]
+        this._meetPick = new Set();      // tab ids ticked in the picker
+        this._meetMode = null;           // null = let the server choose free|round
+        // What the PICKER offers, mirroring the server's MEET_MAX_MEMBERS
+        // default. It is only a courtesy stop: the real ceiling is env-tunable
+        // (SOA_MEET_MAX_MEMBERS) and enforced with a 409 ROSTER_CAP, so the
+        // refusal sentence — not this number — is the authority.
+        this._meetSoftCap = 6;
+        try { this._meetRoom = localStorage.getItem('soa_web_meet_room') || null; } catch (_) {}
         // Per-device active tab is client-local: snapshots fire on the 3s cwd
         // poll, on device connect/disconnect, and on ANY device's switch, all
         // carrying the session-global activeId. Adopting it blindly yanks this
@@ -738,6 +758,10 @@ class Shell {
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
         bridge.addEventListener('tts',       e => { this._onTTS(e.detail); this._onAgentMessage(e.detail); });
         bridge.addEventListener('manager',   e => this._onManager(e.detail));
+        // bridge.js re-emits every frame as a DOM event named after msg.t, so a
+        // new frame type needs a listener here and NOTHING else — there is no
+        // dispatch switch to extend.
+        bridge.addEventListener('meeting',   e => this._onMeeting(e.detail));
         bridge.addEventListener('tab-mem',   e => this._onTabMem(e.detail));
         bridge.addEventListener('browser-frame', e => this._onBrowserFrame(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
@@ -1024,6 +1048,17 @@ class Shell {
             this._renderChatStatus();
             this._updateChatBtn();
             if (this._chatInput) this._chatInput.focus();
+            if (switching) this.audio.play('panels');
+            return;
+        }
+        if (this.viewMode === 'meeting') {
+            // Same reason as CHAT above: the meeting overlay sits over .terms,
+            // and .term only paints with .active — so painting/focusing the tab
+            // underneath would steal the keyboard from the room composer and
+            // leave the user typing into an invisible terminal. The room is not
+            // tab-scoped at all, so there is nothing here to re-render.
+            if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
+            this._syncTabsUI();
             if (switching) this.audio.play('panels');
             return;
         }
@@ -2753,6 +2788,11 @@ class Shell {
     // A `tts` frame arrived (Claude finished a turn; the Stop hook sent its text).
     _onTTS(d) {
         if (!this._ttsEnabled) return;
+        // A meeting is N agents finishing turns at once, so every member's Stop
+        // hook fires a `tts` frame within seconds of the others. _speak cancels
+        // the previous utterance, so the room would come out as a stutter of
+        // half-sentences talking over each other. Read the transcript instead.
+        if (this.viewMode === 'meeting') return;
         const text = d && d.text;
         if (!text) return;
         // Speak only the tab you're looking at by default, so multiple Claude
@@ -3007,7 +3047,7 @@ class Shell {
         } else if (!mode || mode === 'tabs') {
             this.viewMode = 'tabs'; this.tilesGrouped = false;
         } else {
-            this.viewMode = mode;   // manager | chat | monitor
+            this.viewMode = mode;   // manager | chat | meeting | monitor
         }
         try {
             localStorage.setItem('soa_web_view_mode', this.viewMode);
@@ -3045,7 +3085,7 @@ class Shell {
         if (!sw) return;
         const pref = (s && s.viewButtons) || {};
         sw.querySelectorAll('.view-btn').forEach(btn => {
-            const v = btn.dataset.view;           // tabs|tiles|manager|chat|monitor
+            const v = btn.dataset.view;           // tabs|tiles|manager|chat|meeting|monitor
             let show = pref[v] !== false;         // default: shown unless explicitly off
             if (v === 'manager') show = show && this._managerEnabled();
             if (v === 'tabs') show = true;        // never hide the escape hatch to the terminal
@@ -3062,6 +3102,7 @@ class Shell {
         if (this.viewMode !== 'monitor') this._teardownMonitor();
         if (this.viewMode !== 'manager') this._teardownManager();
         if (this.viewMode !== 'chat') this._teardownChat();
+        if (this.viewMode !== 'meeting') this._teardownMeeting();
         if (this.viewMode === 'tiles') {
             shell.setAttribute('data-view', 'tiles');
             this._closeTileTerminal();
@@ -3085,6 +3126,15 @@ class Shell {
             this._removeTileOverlay();
             for (const [, rt] of this.tabs) rt.container.classList.remove('active');
             this._enterChat();
+        } else if (this.viewMode === 'meeting') {
+            shell.setAttribute('data-view', 'meeting');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            // Dropping .active off every terminal is not cosmetic: .term only
+            // paints when it has .active, and a live xterm left painted under an
+            // absolutely-positioned overlay bleeds through it.
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterMeeting();
         } else {
             shell.removeAttribute('data-view');
             this._removeTilesGrid();
@@ -3465,7 +3515,10 @@ class Shell {
         } else {
             this._chatUnread++;
             this._updateChatBtn();
-            this._showImBanner(tab, String(text));
+            // A meeting turns every member's turn-final message into a banner,
+            // so a 4-agent room would stack toasts over the transcript the user
+            // is trying to read. The room itself is the notification.
+            if (this.viewMode !== 'meeting') this._showImBanner(tab, String(text));
         }
     }
 
@@ -3509,7 +3562,9 @@ class Shell {
         this._chatInput.value = '';
         this._chatInput.style.height = 'auto';
         this._renderChat();
-        this.audio.play('tabSwitch');
+        // 'granted', not 'tabSwitch': there is no tabSwitch cue in audiofx.js
+        // CUES, so the old name silently played nothing on every send.
+        this.audio.play('granted');
     }
 
     _summarizeChat(text, limit = 60) {
@@ -3579,6 +3634,822 @@ class Shell {
         if (state) this._chatStatusEl.setAttribute('data-state', state);
         else this._chatStatusEl.removeAttribute('data-state');
         if (textEl) textEl.textContent = label;
+    }
+
+    // ── MEETING view — one groupchat room, several agents at once ───────────────
+    // The desktop face of `soa-meet`. Where CHAT is N private threads (your line
+    // is typed into ONE agent's PTY), a meeting is ONE thread with many speakers:
+    // your message is a single POST to the server, which appends it to a shared
+    // ledger and relays it to every member. That difference is the whole feature
+    // — a fan-out into N terminals gives each agent only YOUR text and never each
+    // other's, which is exactly the "agents talking past each other" bug meetings
+    // exist to fix. So nothing in here ever sends term-keys or _broadcastRaw, and
+    // it must not: /api/sessions (the agent-facing half `soa-meet` speaks) is
+    // loopback-only and unreachable from a tunneled browser anyway.
+    //
+    // Everything on screen is server truth: the transcript comes from the ledger
+    // (WS `meeting` frames plus a ?since= delta refetch on entry) and the roster
+    // + budgets come from `meetView` (WS `manager` frames). Pacing is structural
+    // and MUST be visible — only a human message recharges the relay budget, so
+    // once relayHops >= relayMax the agents deliberately go quiet, and a room
+    // that looks silent for no stated reason reads as a broken feature.
+    _enterMeeting() {
+        if (!this._meetEl) this._buildMeetingView();
+        this._meetEl.style.display = '';
+        // Paint from cache first so the switch is instant, then reconcile.
+        this._renderMeetHead();
+        this._renderMeetRoster();
+        this._renderMeetLog();
+        this._refreshMeeting();
+        if (this._meetTimer) clearInterval(this._meetTimer);
+        // Rooms are pushed (`meeting` for lines, `manager` for status), so this
+        // poll is only a safety net for a frame missed across a reconnect — the
+        // ?since= delta makes it nearly free.
+        this._meetTimer = setInterval(() => {
+            if (document.hidden || this.viewMode !== 'meeting') return;
+            this._refreshMeeting();
+        }, 15_000);
+        if (this._meetInput) setTimeout(() => { try { this._meetInput.focus(); } catch (_) {} }, 0);
+    }
+
+    _teardownMeeting() {
+        if (this._meetTimer) { clearInterval(this._meetTimer); this._meetTimer = null; }
+        if (this._meetEl) this._meetEl.style.display = 'none';
+        // Leaving the view disarms the two-step ADJOURN, so coming back can't
+        // fire a close the user armed minutes ago and forgot about.
+        this._meetEndArmed = false;
+    }
+
+    // Built ONCE. Only the log, the roster, the head and the picker's candidate
+    // chips re-render on frames — never the composer or the room-name input, so
+    // an inbound line from another agent can't eat the character you were typing.
+    _buildMeetingView() {
+        this._meetTitleEl = el('span', { class: 'chat-head-target' });
+        this._meetRoomSel = el('select', {
+            class: 'meet-room-sel', title: 'Which room to show',
+            onchange: () => this._setMeetRoom(this._meetRoomSel.value),
+        });
+        this._meetMetersEl = el('div', { class: 'meet-meters' });
+        this._meetStatusEl = el('div', { class: 'chat-status' }, [
+            el('span', { class: 'chat-status-dot' }),
+            el('span', { class: 'chat-status-text' }),
+        ]);
+        this._meetHeadEl = el('div', { class: 'chat-head' }, [
+            el('span', { class: 'chat-head-label', text: 'MEETING' }),
+            this._meetTitleEl,
+            this._meetRoomSel,
+            this._meetMetersEl,
+            this._meetStatusEl,
+        ]);
+
+        this._meetRosterEl = el('div', { class: 'meet-roster' });
+        this._meetLogEl = el('div', { class: 'chat-log' });
+        this._meetQuietEl = el('div', { class: 'meet-quiet', hidden: '' });
+        this._meetClosedEl = el('div', { class: 'meet-closed', hidden: '' });
+
+        // Actions.
+        this._meetConveneBtn = el('button', {
+            class: 'mgrv-chip', type: 'button', text: '＋ CONVENE',
+            title: 'Open a new room and pick which agents sit in it',
+            onclick: () => this._toggleMeetPicker('convene'),
+        });
+        this._meetAddBtn = el('button', {
+            class: 'mgrv-chip', type: 'button', text: '＋ MEMBER',
+            title: 'Add another agent to this room mid-meeting',
+            onclick: () => this._toggleMeetPicker('add'),
+        });
+        this._meetEndBtn = el('button', {
+            class: 'mgrv-chip', type: 'button', text: '■ ADJOURN',
+            title: 'Close this room — the members stop being relayed',
+            onclick: () => this._meetAdjourn(),
+        });
+        this._meetActionsEl = el('div', { class: 'meet-actions' }, [
+            this._meetConveneBtn,
+            this._meetAddBtn,
+            el('span', { class: 'meet-actions-spacer' }),
+            this._meetEndBtn,
+        ]);
+
+        // Convene / add-member picker.
+        this._meetNameInput = el('input', {
+            class: 'mgrv-input', type: 'text', maxlength: '40',
+            autocomplete: 'off', spellcheck: 'false',
+            placeholder: 'Room name — e.g. standup',
+        });
+        this._meetNameRow = el('div', { class: 'meet-picker-row' }, [
+            el('span', { class: 'mgrv-label', text: 'ROOM' }),
+            this._meetNameInput,
+            // 'free' = everyone answers every line; 'round' = roster order, which
+            // is calmer and cheaper with many agents. Neither picked = the server
+            // decides from the roster size, which is the right default.
+            el('button', { class: 'mgrv-chip', type: 'button', text: 'FREE',
+                title: 'Every member may answer every message',
+                onclick: (e) => this._setMeetMode('free', e.currentTarget) }),
+            el('button', { class: 'mgrv-chip', type: 'button', text: 'ROUND',
+                title: 'Members answer in roster order — calmer and cheaper with 5+ agents',
+                onclick: (e) => this._setMeetMode('round', e.currentTarget) }),
+        ]);
+        this._meetCandsEl = el('div', { class: 'meet-cands' });
+        this._meetPickerGoBtn = el('button', {
+            class: 'mgrv-send', type: 'button', text: 'CONVENE',
+            onclick: () => this._meetPickerGo(),
+        });
+        this._meetPickerHintEl = el('div', { class: 'meet-hint' });
+        this._meetPickerEl = el('div', { class: 'meet-picker', hidden: '' }, [
+            this._meetNameRow,
+            el('span', { class: 'mgrv-label', text: 'WHO IS IN THE ROOM' }),
+            this._meetCandsEl,
+            this._meetPickerHintEl,
+            el('div', { class: 'meet-picker-row' }, [
+                this._meetPickerGoBtn,
+                el('button', { class: 'mgrv-chip', type: 'button', text: 'CANCEL',
+                    onclick: () => this._closeMeetPicker() }),
+            ]),
+        ]);
+
+        this._meetInput = el('textarea', { class: 'chat-input', rows: '1', autocomplete: 'off', spellcheck: 'true',
+            placeholder: 'Say something to the ROOM — relayed to every member…' });
+        this._meetInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendMeet(); }
+        });
+        this._meetSendBtn = el('button', { class: 'chat-send', type: 'submit', title: 'Send to the room', text: '➤' });
+        this._meetComposerEl = el('form', { class: 'chat-composer',
+            onsubmit: (e) => { e.preventDefault(); this._sendMeet(); } }, [
+            this._meetInput,
+            this._meetSendBtn,
+        ]);
+
+        this._meetEl = el('div', { class: 'meet-view' }, [
+            this._meetHeadEl,
+            this._meetRosterEl,
+            this._meetLogEl,
+            this._meetQuietEl,
+            this._meetClosedEl,
+            this._meetActionsEl,
+            this._meetPickerEl,
+            this._meetComposerEl,
+        ]);
+        this.termsEl.appendChild(this._meetEl);
+    }
+
+    // ── Meeting transport ───────────────────────────────────────────────────
+
+    /**
+     * One meeting REST call. Deliberately NOT _managerApi: that one throws on a
+     * non-2xx, which discards the response BODY — and the body is where a 409
+     * policy refusal keeps the reason ("meeting adjourned", "#7 is already in
+     * meeting x"). A meeting must render those as sentences, so this returns
+     * `{status, data}` and never throws.
+     */
+    async _meetApi(path, body) {
+        const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+        const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+        const url = new URL(backend + path);
+        if (token) url.searchParams.set('t', token);
+        try {
+            const res = await fetch(url.toString(), body == null
+                ? { credentials: 'include', cache: 'no-store' }
+                : { method: 'POST', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body) });
+            let data = null;
+            try { data = await res.json(); } catch (_) { /* non-JSON error page */ }
+            return { status: res.status, data };
+        } catch (_) {
+            return { status: 0, data: null };
+        }
+    }
+
+    // Turn a refusal into a sentence a human can act on. The server writes a
+    // specific `error` whenever it knows the specifics (which agent, which other
+    // room), so that always wins; the map is the wording for everything else.
+    // A generic "request failed" here is what makes a working policy look like a
+    // bug, which is why 409 is handled per code rather than lumped in.
+    _meetErrText(status, data) {
+        const byCode = {
+            ROOM_CLOSED: 'This meeting has adjourned — convene a new room to keep talking.',
+            NOT_MEMBER:  'That agent is not in this meeting.',
+            BUDGET:      'This meeting spent its whole message budget, so it adjourned itself.',
+            MEMBER_BUSY: 'That agent is already sitting in another meeting.',
+            ROSTER_CAP:  'That is too many members — every extra agent is another Claude turn per round.',
+            ROOM_OPEN:   'A room with that name is already open.',
+            NO_ROOM:     'That room no longer exists.',
+        };
+        if (data && data.error) return String(data.error);
+        const code = data && data.code;
+        if (code && byCode[code]) return byCode[code];
+        if (status === 400) return 'The server rejected that — check the room name and who you picked.';
+        if (status === 403) return 'This backend has not entitled you to run meetings.';
+        if (status === 404) return 'That room no longer exists.';
+        if (status === 409) return 'The room would not allow that right now.';
+        if (status === 503) return 'No active session on the backend yet — open a terminal tab first.';
+        if (status === 0)   return 'Could not reach the server.';
+        return 'That did not work (HTTP ' + status + ').';
+    }
+
+    // In-view toast, same element/vocabulary as the manager view's.
+    _meetToast(text) {
+        if (!this._meetEl) return;
+        if (!this._meetToastEl || !this._meetToastEl.isConnected) {
+            this._meetToastEl = el('div', { class: 'mgrv-toast' });
+            this._meetEl.appendChild(this._meetToastEl);
+        }
+        this._meetToastEl.textContent = text;
+        this._meetToastEl.classList.add('show');
+        clearTimeout(this._meetToastTimer);
+        this._meetToastTimer = setTimeout(() => this._meetToastEl.classList.remove('show'), 3200);
+    }
+
+    // Full reconcile: the room list + candidates, then the transcript delta.
+    async _refreshMeeting() {
+        await this._pullMeetRooms();
+        await this._pullMeetRoom();
+    }
+
+    // GET /api/meetings — every room (open first) plus the picker's candidates in
+    // ONE request, which is why the picker never races /api/manager for a roster.
+    async _pullMeetRooms() {
+        const { status, data } = await this._meetApi('/api/meetings');
+        if (status !== 200 || !data || !data.ok) {
+            // Toast once per NEW failure, not once per poll: a standing 403 (the
+            // feature is off for this account) or a dropped tunnel would
+            // otherwise pop the same sentence every 15s forever.
+            if (this._meetEl && status !== 200 && this._meetLastErrStatus !== status) {
+                this._meetToast(this._meetErrText(status, data));
+            }
+            this._meetLastErrStatus = status;
+            return false;
+        }
+        this._meetLastErrStatus = 0;
+        this._meetRooms = Array.isArray(data.rooms) ? data.rooms : [];
+        this._meetCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+        // Stay on the room we were looking at while it still exists (even once
+        // adjourned — the transcript is still worth reading), else fall to the
+        // first OPEN one. The server already sorts open-first, most recent next.
+        const still = this._meetRooms.find(r => r.room === this._meetRoom);
+        const want = still || this._meetRooms.find(r => r.open) || null;
+        if (!want) this._resetMeetRoom(null);
+        else if (want.room !== this._meetRoom) this._resetMeetRoom(want.room);
+        this._meetView = want || null;
+        this._renderMeetHead();
+        this._renderMeetRoster();
+        if (this._meetPickerEl && !this._meetPickerEl.hidden) this._renderMeetCands();
+        return true;
+    }
+
+    // GET /api/meetings/:room?since= — the transcript DELTA. Refetching with the
+    // cursor is what makes re-entering the view cheap: the ledger hands back only
+    // what this client has not seen, so a long room never re-downloads.
+    async _pullMeetRoom() {
+        const room = this._meetRoom;
+        if (!room) return;
+        // Number(), NOT `| 0`: a seq is an epoch-ms timestamp (~1.8e12), and a
+        // bitwise coerce truncates it to 32 bits — which silently sends a much
+        // SMALLER cursor, so every poll re-downloads the whole tail and the
+        // delta this endpoint exists for stops happening.
+        const path = '/api/meetings/' + encodeURIComponent(room)
+            + '?since=' + (Number(this._meetCursor) || 0) + '&limit=100';
+        const { status, data } = await this._meetApi(path);
+        if (this._meetRoom !== room) return;   // the user switched rooms mid-await
+        if (status !== 200 || !data || !data.ok) {
+            if (status === 404) this._pullMeetRooms();
+            return;
+        }
+        if (data.room) this._meetView = data.room;
+        for (const m of (data.msgs || [])) this._pushMeet(m);
+        if (data.cursor != null) this._meetCursor = Math.max(this._meetCursor, Number(data.cursor) || 0);
+        // The backlog is in. Live pushes may now seed the log and move the cursor
+        // (see _onMeeting) — before this point they must not, or they would move
+        // the cursor past history this client never fetched.
+        this._meetPrimed = true;
+        this._renderMeetHead();
+        this._renderMeetRoster();
+        this._renderMeetLog();
+    }
+
+    // Point the view at a different room: the log and the cursor belong to ONE
+    // room, so both must reset or the new room inherits the old one's bubbles and
+    // then asks for a delta from a seq that room never reached.
+    _resetMeetRoom(room) {
+        this._meetRoom = room || null;
+        this._meetLog = [];
+        this._meetCursor = 0;
+        this._meetPrimed = false;
+        this._meetView = null;
+        this._meetEndArmed = false;
+        try {
+            if (this._meetRoom) localStorage.setItem('soa_web_meet_room', this._meetRoom);
+            else localStorage.removeItem('soa_web_meet_room');
+        } catch (_) {}
+    }
+
+    _setMeetRoom(room) {
+        if (!room || room === this._meetRoom) return;
+        this._resetMeetRoom(room);
+        this._meetView = this._meetRooms.find(r => r.room === room) || null;
+        this._renderMeetHead();
+        this._renderMeetRoster();
+        this._renderMeetLog();
+        this._pullMeetRoom();
+        this.audio.play('panels');
+    }
+
+    /**
+     * Add one ledger message to the in-memory thread. Returns whether it was new.
+     *
+     * Dedup is on `seq` and has to be: sending pushes the appended message back
+     * in the POST response AND the daemon pushes the same line out as a `meeting`
+     * frame, so every line you say arrives twice. `seq` is the ledger's monotonic
+     * cursor currency (never a line count — the ledger trims), so it is the only
+     * safe identity.
+     */
+    _pushMeet(msg) {
+        if (!msg || msg.seq == null) return false;
+        const seq = Number(msg.seq);
+        if (!Number.isFinite(seq)) return false;
+        if (this._meetLog.some(m => Number(m.seq) === seq)) return false;
+        this._meetLog.push(msg);
+        // A WS frame can land while a ?since= refetch is in flight, so order by
+        // seq rather than by arrival.
+        this._meetLog.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+        while (this._meetLog.length > 200) this._meetLog.shift();   // cap memory, like _pushChat
+        if (seq > this._meetCursor) this._meetCursor = seq;
+        return true;
+    }
+
+    // A `meeting` frame — pushed the instant a line is said, so the room reads
+    // live instead of on the 3s supervisor tick.
+    _onMeeting(d) {
+        const room = d && d.room;
+        if (!room) return;
+        // A line in a room that is not on screen: there is nothing to paint, and
+        // the room list's own counters arrive on the `manager` frame that follows
+        // this one, so drop it rather than corrupting the on-screen thread.
+        if (room !== this._meetRoom) return;
+        // Not backfilled yet. `_meetRoom` is restored from localStorage at
+        // construction, so on a reload this fires for a room whose history this
+        // client has never fetched — and seeding the log from a push would drag
+        // `_meetCursor` up to the ledger head, making the first `?since=` skip
+        // the entire backlog. Permanently: nothing ever asks for it again.
+        // Drop the push; the pending `?since=0` returns these same lines anyway.
+        if (!this._meetPrimed) return;
+        let added = 0, fromOthers = 0;
+        for (const m of (d.msgs || [])) {
+            if (!this._pushMeet(m)) continue;
+            added++;
+            if (m.who !== 'user') fromOthers++;
+        }
+        if (!added || this.viewMode !== 'meeting') return;
+        this._renderMeetLog();
+        // Your own line comes back down this same channel — the daemon pushes it
+        // before the say POST even resolves — and _sendMeet already cued that.
+        // Only cue what somebody ELSE said, or every send double-beeps.
+        if (fromOthers) this.audio.play('stdout');
+    }
+
+    // Roster + meters from the `manager` snapshot (see _onManager). Candidates are
+    // refreshed from the same frame using the SAME field names the /api/meetings
+    // candidates array uses, so the picker stays live without a second endpoint.
+    _meetSyncFromManager(d) {
+        if (!this._meetEl) return;
+        if (Array.isArray(d && d.meetings)) this._meetRooms = d.meetings;
+        if (Array.isArray(d && d.sessions)) {
+            this._meetCandidates = d.sessions.map(s => ({
+                id: s.id, title: s.title, cwd: s.cwd, group: s.group,
+                status: s.status, ctxPct: s.ctxPct, lifecycle: s.lifecycle, meeting: s.meeting,
+            }));
+        }
+        const view = this._meetRooms.find(r => r.room === this._meetRoom);
+        if (view) this._meetView = view;
+        this._renderMeetHead();
+        this._renderMeetRoster();
+        if (this._meetPickerEl && !this._meetPickerEl.hidden) this._renderMeetCands();
+    }
+
+    // ── Meeting rendering ───────────────────────────────────────────────────
+
+    _renderMeetHead() {
+        if (!this._meetEl) return;
+        const v = this._meetView;
+        // Rebuild the room <option>s only when the room list actually changes:
+        // replacing them under an OPEN select closes the popup and throws away
+        // the click the user was in the middle of.
+        const sig = this._meetRooms.map(r => r.room + ':' + (r.open ? '1' : '0') + ':' + (r.members || []).length).join('|');
+        if (sig !== this._meetRoomsSig) {
+            this._meetRoomsSig = sig;
+            this._meetRoomSel.replaceChildren(...this._meetRooms.map(r => {
+                const n = (r.members || []).length;
+                return el('option', { value: r.room,
+                    text: (r.open ? '● ' : '○ ') + r.room + ' · ' + n + (n === 1 ? ' member' : ' members') });
+            }));
+            this._meetRoomSel.hidden = this._meetRooms.length < 2;
+        }
+        if (this._meetRoom && this._meetRoomSel.value !== this._meetRoom) this._meetRoomSel.value = this._meetRoom;
+
+        const hops = v ? (v.relayHops | 0) : 0;
+        const max = v ? (v.relayMax | 0) : 0;
+        const quiet = !!v && v.open && hops >= max;
+        const meters = [];
+        if (v) {
+            meters.push(el('span', {
+                class: 'fleet-chip' + (quiet ? ' fleet-attention' : ''),
+                title: 'Agent-only relay rounds since your last message. Only YOUR message resets it.',
+                text: 'relay ' + hops + '/' + max,
+            }));
+            meters.push(el('span', {
+                class: 'fleet-chip' + ((v.msgBudget | 0) <= 5 ? ' fleet-ctx' : ''),
+                title: 'Messages this room may still spend before it adjourns itself.',
+                text: 'budget ' + (v.msgBudget | 0),
+            }));
+            meters.push(el('span', {
+                class: 'fleet-chip' + (v.live < (v.members || []).length ? ' fleet-stuck' : ''),
+                title: 'Members whose tab the server can still resolve.',
+                text: v.live + '/' + (v.members || []).length + ' live',
+            }));
+            meters.push(el('span', { class: 'fleet-chip',
+                title: v.mode === 'round' ? 'Members answer in roster order' : 'Every member may answer every message',
+                text: 'mode ' + v.mode }));
+        }
+        this._meetMetersEl.replaceChildren(...meters);
+
+        this._meetTitleEl.textContent = v ? (v.title || v.room) : 'no room open';
+
+        const textEl = this._meetStatusEl.querySelector('.chat-status-text');
+        let state = '', label = 'no room';
+        if (v && !v.open)  { state = 'completed'; label = 'adjourned' + (v.closedWhy ? ' · ' + v.closedWhy : ''); }
+        else if (quiet)    { state = 'input';     label = 'waiting for you'; }
+        else if (v)        { state = 'working';   label = 'live · ' + v.live + ' here'; }
+        if (state) this._meetStatusEl.setAttribute('data-state', state);
+        else this._meetStatusEl.removeAttribute('data-state');
+        if (textEl) textEl.textContent = label;
+
+        // The pacing bar. relayHops >= relayMax is not an error and not a stall:
+        // the agents have used their allowance of answering each other and are
+        // waiting on the human by design. Say so in words — a room that just goes
+        // silent is the single most "this feature is broken" moment there is.
+        this._meetQuietEl.hidden = !quiet;
+        if (quiet) {
+            this._meetQuietEl.textContent = max === 0
+                ? 'Waiting for you — this room relays nothing between agents, so every turn needs a message from you.'
+                : 'Waiting for you — the agents have used all ' + max + ' relay round' + (max === 1 ? '' : 's')
+                  + ' since your last message and stay quiet on purpose. Your next message lets them answer each other again.';
+        }
+        const closed = !!v && !v.open;
+        this._meetClosedEl.hidden = !closed;
+        if (closed) {
+            this._meetClosedEl.textContent = 'This meeting adjourned'
+                + (v.closedWhy ? ' (' + v.closedWhy + ')' : '')
+                + '. The transcript stays readable — convene a new room to keep going.';
+        }
+
+        // Composer + actions follow the room's actual state, so the UI can never
+        // invite a message the server is bound to refuse.
+        const canSay = !!v && v.open;
+        this._meetInput.disabled = !canSay;
+        this._meetSendBtn.disabled = !canSay;
+        this._meetInput.placeholder = canSay
+            ? 'Say something to the ROOM — relayed to every member…'
+            : 'No open room — convene one to start talking.';
+        this._meetAddBtn.hidden = !canSay;
+        this._meetEndBtn.hidden = !canSay;
+        if (!this._meetEndArmed) this._meetEndBtn.textContent = '■ ADJOURN';
+    }
+
+    // Basename of a cwd — what a member is called when its tab is gone and the
+    // server has no live title to hand us.
+    _meetShortCwd(cwd) {
+        const parts = String(cwd == null ? '' : cwd).split('/').filter(Boolean);
+        return parts.length ? parts[parts.length - 1] : '?';
+    }
+
+    // Stable speaker colour. Hashed from `who` (a tab id STRING, or 'user') so a
+    // speaker keeps its colour as members join and leave — indexing by roster
+    // position would recolour the whole backlog every time someone drops out.
+    _meetColorFor(who) {
+        const s = String(who == null ? '' : who);
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 9973;
+        return (h % 6) + 1;
+    }
+
+    _renderMeetRoster() {
+        if (!this._meetEl) return;
+        const v = this._meetView;
+        const members = (v && v.members) || [];
+        if (!members.length) {
+            this._meetRosterEl.replaceChildren(el('span', { class: 'meet-roster-empty',
+                text: v ? 'Nobody left in this room.' : 'No room on screen — use ＋ CONVENE to open one.' }));
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const m of members) {
+            let cls = 'fleet-chip';
+            let note = m.status || 'idle';
+            // An unresolvable member stays VISIBLE and says why. The server hands
+            // us `resolved` precisely so the roster can explain a missing agent
+            // instead of silently shrinking, which reads as data loss.
+            if (m.resolved === 'gone')           { cls += ' fleet-stuck';     note = 'tab gone'; }
+            else if (m.resolved === 'ambiguous') { cls += ' fleet-stuck';     note = 'two tabs share this folder'; }
+            else if (m.status === 'working')     { cls += ' fleet-working';   note = 'working'; }
+            else if (m.status === 'attention')   { cls += ' fleet-attention'; note = 'needs input'; }
+            else if (m.status === 'stuck')       { cls += ' fleet-stuck'; }
+            const label = (m.id != null ? '#' + m.id + ' ' : '') + (m.title || this._meetShortCwd(m.cwd));
+            const chip = el('span', { class: cls, title: (m.cwd || '') + ' · ' + note }, [
+                el('span', { text: label }),
+                el('span', { class: 'meet-note', text: note }),
+            ]);
+            if (v && v.open) {
+                chip.appendChild(el('button', {
+                    class: 'meet-kick', type: 'button', text: '✕',
+                    title: 'Remove ' + label + ' from this meeting',
+                    onclick: () => this._meetKick(m),
+                }));
+            }
+            frag.appendChild(chip);
+        }
+        this._meetRosterEl.replaceChildren(frag);
+    }
+
+    _renderMeetLog() {
+        if (!this._meetLogEl) return;
+        // Measure BEFORE the swap: replaceChildren resets the scroll geometry, so
+        // "was the user already following the tail?" is unanswerable afterwards.
+        // A four-agent room pushes lines constantly, and yanking the viewport down
+        // while somebody reads back is worse than letting a line arrive off-screen.
+        const gap = this._meetLogEl.scrollHeight - this._meetLogEl.scrollTop - this._meetLogEl.clientHeight;
+        const following = gap < 80;
+        if (!this._meetLog.length) {
+            this._meetLogEl.replaceChildren(el('div', { class: 'chat-empty' }, [
+                this._meetRoom ? 'Nothing said in this room yet.' : 'No meeting on screen.', el('br'),
+                'Your message goes to the ROOM, not to one terminal: the server appends it to a shared ledger and relays it to every member — which is what lets the agents answer each other instead of talking past you.',
+            ]));
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const m of this._meetLog) {
+            const mine = m.who === 'user';
+            const sys = m.who === 'system' || m.via === 'system';
+            const bubble = el('div', { class: 'chat-msg ' + (sys ? 'system' : mine ? 'you' : 'agent') });
+            if (!sys && !mine) bubble.setAttribute('data-c', String(this._meetColorFor(m.who)));
+            // textContent / createTextNode ONLY, never innerHTML. Every agent line
+            // here is untrusted text that arrived from a Claude session (which may
+            // itself have been prompt-injected by a file or a web page), and this
+            // page holds the manager's cookie. Markup would be a stored XSS with
+            // the whole fleet as the delivery mechanism.
+            bubble.appendChild(el('span', { class: 'meet-time',
+                text: m.t ? new Date(Number(m.t)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '' }));
+            // `from` is the display identity the server already formatted
+            // ('you (manager)' / '#7 api' / 'system') — the whole point of one
+            // thread with many speakers is that every bubble says who spoke.
+            bubble.appendChild(el('span', { class: 'meet-who', text: String(m.from || m.who || '?') }));
+            bubble.appendChild(document.createTextNode(String(m.text == null ? '' : m.text)));
+            frag.appendChild(bubble);
+        }
+        this._meetLogEl.replaceChildren(frag);
+        if (following) this._scrollMeetBottom();
+    }
+
+    _scrollMeetBottom() {
+        if (this._meetLogEl) this._meetLogEl.scrollTop = this._meetLogEl.scrollHeight;
+    }
+
+    // ── Meeting actions ─────────────────────────────────────────────────────
+
+    async _sendMeet() {
+        const raw = (this._meetInput && this._meetInput.value || '').trim();
+        if (!raw) return;
+        const room = this._meetRoom;
+        const v = this._meetView;
+        if (!room || !v || !v.open) { this._meetToast('No open room — use ＋ CONVENE to start one.'); return; }
+        // Clear optimistically so typing feels immediate, but keep the text: on a
+        // refusal it goes back in the box rather than being lost to a 409.
+        this._meetInput.value = '';
+        this._meetInput.style.height = 'auto';
+        const { status, data } = await this._meetApi(
+            '/api/meetings/' + encodeURIComponent(room) + '/say', { text: raw });
+        if (status === 200 && data && data.ok) {
+            if (data.roomView) this._meetView = data.roomView;
+            // The same message also arrives as a `meeting` frame; _pushMeet
+            // dedups on seq, so whichever lands first wins and neither doubles.
+            if (data.msg) this._pushMeet(data.msg);
+            this.audio.play('granted');
+            this._renderMeetHead();
+            this._renderMeetRoster();
+            this._renderMeetLog();
+            // Your own send always wins the scroll, even if you were reading back.
+            this._scrollMeetBottom();
+            return;
+        }
+        if (!this._meetInput.value) this._meetInput.value = raw;
+        this._meetToast(this._meetErrText(status, data));
+        this.audio.play('denied');
+        // A refusal usually means the room changed under us (adjourned, budget
+        // spent) — resync so the chrome stops offering what is no longer allowed.
+        this._pullMeetRooms();
+    }
+
+    // Two-step, no modal: the first click arms and relabels, the second closes the
+    // room. An accidental adjourn ends every member's relay, so it should cost two
+    // clicks — but it does not deserve a dialog either.
+    async _meetAdjourn() {
+        const room = this._meetRoom;
+        if (!room) return;
+        if (!this._meetEndArmed) {
+            this._meetEndArmed = true;
+            this._meetEndBtn.textContent = '■ ADJOURN?';
+            clearTimeout(this._meetEndArmTimer);
+            this._meetEndArmTimer = setTimeout(() => {
+                this._meetEndArmed = false;
+                if (this._meetEndBtn) this._meetEndBtn.textContent = '■ ADJOURN';
+            }, 4000);
+            this._meetToast('Click ADJOURN again to close "' + room + '".');
+            return;
+        }
+        clearTimeout(this._meetEndArmTimer);
+        this._meetEndArmed = false;
+        const { status, data } = await this._meetApi('/api/meetings', { op: 'end', room, why: 'closed' });
+        if (status === 200 && data && data.ok) {
+            this.audio.play('granted');
+            this._meetToast('Adjourned "' + room + '".');
+        } else {
+            this._meetToast(this._meetErrText(status, data));
+            this.audio.play('denied');
+        }
+        this._refreshMeeting();
+    }
+
+    // Remove a member mid-meeting. Keyed by cwd, not id: a 'gone' or 'ambiguous'
+    // member has NO live tab id, and those are exactly the rows a user wants to
+    // clear out of the roster. The server ends a room that loses its last member.
+    async _meetKick(m) {
+        const room = this._meetRoom;
+        if (!room || !m) return;
+        // Prefer the RESOLVED tab id. Keying on cwd alone makes the server pick
+        // whichever stored member matches that directory, which is the wrong
+        // agent when two sibling tabs share it (api-1 / api-2) — it would excuse
+        // a member the user never clicked. Fall back to cwd only for a member
+        // that has no live tab to name (resolved 'gone'/'ambiguous').
+        const spec = m.id != null ? { id: m.id } : { cwd: m.cwd };
+        const { status, data } = await this._meetApi('/api/meetings', { op: 'leave', room, ...spec });
+        if (status === 200 && data && data.ok) this.audio.play('granted');
+        else { this._meetToast(this._meetErrText(status, data)); this.audio.play('denied'); }
+        this._refreshMeeting();
+    }
+
+    _setMeetMode(mode, btn) {
+        this._meetMode = this._meetMode === mode ? null : mode;
+        for (const b of this._meetNameRow.querySelectorAll('.mgrv-chip')) b.classList.remove('on');
+        if (this._meetMode && btn) btn.classList.add('on');
+    }
+
+    _toggleMeetPicker(mode) {
+        if (!this._meetPickerEl.hidden && this._meetPickerMode === mode) { this._closeMeetPicker(); return; }
+        this._meetPickerMode = mode;
+        this._meetPick.clear();
+        this._meetPickerEl.hidden = false;
+        // In 'add' mode the room already exists, so its name and mode are settled
+        // — showing those inputs again would invite an edit the API cannot make.
+        this._meetNameRow.hidden = mode !== 'convene';
+        this._meetPickerGoBtn.textContent = mode === 'convene' ? 'CONVENE' : 'ADD TO ROOM';
+        if (mode === 'convene' && !this._meetNameInput.value) this._meetNameInput.value = 'standup';
+        this._renderMeetCands();
+        this.audio.play('expand');
+        // select() only holds once the field is focused, so both go in the same
+        // deferred tick — the suggested name should be typed over, not edited.
+        setTimeout(() => {
+            try {
+                if (mode !== 'convene') { this._meetPickerGoBtn.focus(); return; }
+                this._meetNameInput.focus();
+                this._meetNameInput.select();
+            } catch (_) {}
+        }, 0);
+    }
+
+    _closeMeetPicker() {
+        this._meetPickerEl.hidden = true;
+        this._meetPick.clear();
+    }
+
+    // Candidate chips. Rebuilt on refresh — and ONLY this container, never the
+    // room-name input beside it, so a `manager` frame cannot wipe a half-typed
+    // room name.
+    _renderMeetCands() {
+        if (!this._meetCandsEl) return;
+        // Keyed on the RESOLVED member id, not cwd: a sibling tab that merely
+        // shares a member's directory is a different agent, is not in the room,
+        // and the server would happily seat it — filtering by cwd would hide it
+        // from the user for no reason.
+        const inRoom = new Set(((this._meetView && this._meetView.members) || [])
+            .map(m => m.id).filter(id => id != null));
+        const cands = (this._meetCandidates || []).filter(c => {
+            // Adding an agent already in THIS room is a no-op; the manager tab
+            // must not be a member (it would prompt itself).
+            if (this._meetPickerMode === 'add' && inRoom.has(c.id)) return false;
+            return c.id !== this._managerTabId();
+        });
+        if (!cands.length) {
+            this._meetCandsEl.replaceChildren(el('span', { class: 'meet-cands-empty',
+                text: 'No other agents available — open a terminal tab for each project you want in the room.' }));
+            this._meetPickerHintEl.textContent = '';
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const c of cands) {
+            const busy = !!c.meeting;
+            const picked = this._meetPick.has(c.id);
+            const bits = [];
+            if (busy) bits.push('in "' + c.meeting + '"');
+            else if (c.status) bits.push(c.status);
+            if (c.lifecycle && c.lifecycle !== 'active') bits.push(c.lifecycle);
+            if (c.ctxPct != null) bits.push('ctx ' + c.ctxPct + '%');
+            const chip = el('button', {
+                class: 'mgrv-chip' + (picked ? ' on' : '') + (busy ? ' busy' : ''),
+                type: 'button',
+                title: (c.cwd || '') + (bits.length ? ' · ' + bits.join(' · ') : ''),
+                text: '#' + c.id + ' ' + (c.title || this._meetShortCwd(c.cwd)) + (bits.length ? '  (' + bits.join(' · ') + ')' : ''),
+                onclick: () => this._toggleMeetPick(c),
+            });
+            frag.appendChild(chip);
+        }
+        this._meetCandsEl.replaceChildren(frag);
+        this._renderMeetPickHint();
+    }
+
+    _renderMeetPickHint() {
+        const n = this._meetPick.size;
+        this._meetPickerHintEl.textContent = n
+            ? n + ' picked — every member costs one Claude turn per round, so keep a room small ('
+              + this._meetSoftCap + ' max).'
+            : 'Pick the agents that actually need to hear each other. Each one is a real Claude turn per round.';
+    }
+
+    _toggleMeetPick(c) {
+        if (!c || c.id == null) return;
+        // An agent may sit in only one open room at a time — two rooms poking one
+        // terminal would interleave two conversations into one prompt stream. The
+        // server refuses with MEMBER_BUSY; say it here so the user never queues a
+        // pick that is bound to fail.
+        if (c.meeting && !this._meetPick.has(c.id)) {
+            this._meetToast('#' + c.id + ' is already in meeting "' + c.meeting + '".');
+            this.audio.play('denied');
+            return;
+        }
+        if (this._meetPick.has(c.id)) this._meetPick.delete(c.id);
+        else if (this._meetPick.size >= this._meetSoftCap) {
+            this._meetToast('A room caps at ' + this._meetSoftCap + ' members — every extra agent is another Claude turn per round.');
+            this.audio.play('denied');
+            return;
+        } else this._meetPick.add(c.id);
+        this._renderMeetCands();
+    }
+
+    _meetPickerGo() {
+        if (this._meetPickerMode === 'add') this._meetAddMembers();
+        else this._meetConvene();
+    }
+
+    async _meetConvene() {
+        const room = (this._meetNameInput.value || '').trim().slice(0, 40);
+        if (!room) { this._meetToast('Give the room a name first.'); return; }
+        const ids = [...this._meetPick];
+        if (!ids.length) { this._meetToast('Pick at least one agent for the room.'); return; }
+        const { status, data } = await this._meetApi('/api/meetings', {
+            op: 'start', room, title: room,
+            // undefined is dropped by JSON.stringify, which is how "let the
+            // server choose free|round from the roster size" is expressed.
+            mode: this._meetMode || undefined,
+            members: ids.map(id => ({ id })),
+        });
+        if (status !== 200 || !data || !data.ok) {
+            this._meetToast(this._meetErrText(status, data));
+            this.audio.play('denied');
+            return;
+        }
+        this._closeMeetPicker();
+        this._resetMeetRoom(room);
+        this._meetView = data.room || null;
+        this.audio.play('granted');
+        this._meetToast('"' + room + '" is open — say something to get the agents talking.');
+        await this._refreshMeeting();
+        try { this._meetInput.focus(); } catch (_) {}
+    }
+
+    // Join is one call per agent: the API takes a single member per op, and doing
+    // them in sequence means a MEMBER_BUSY on one pick cannot cancel the others.
+    async _meetAddMembers() {
+        const room = this._meetRoom;
+        if (!room) return;
+        const ids = [...this._meetPick];
+        if (!ids.length) { this._meetToast('Pick who should join.'); return; }
+        const failed = [];
+        for (const id of ids) {
+            const { status, data } = await this._meetApi('/api/meetings', { op: 'join', room, id });
+            if (status !== 200 || !data || !data.ok) failed.push('#' + id + ': ' + this._meetErrText(status, data));
+        }
+        this._closeMeetPicker();
+        if (failed.length) { this._meetToast(failed[0]); this.audio.play('denied'); }
+        else { this.audio.play('granted'); this._meetToast('Added to "' + room + '".'); }
+        this._refreshMeeting();
     }
 
     _setManagerSub(sub) {
@@ -4973,6 +5844,12 @@ class Shell {
         if (this.viewMode === 'tiles') this._renderFleetBar();
         if (this.viewMode === 'manager') this._renderManagerView();
         if (this.viewMode === 'chat') { this._renderChatHead(); this._renderChatStatus(); }
+        // The manager snapshot is also the meeting room's live status channel:
+        // `meetings[]` carries each room's resolved roster and its relay/message
+        // budgets, and the daemon broadcasts one right after every meetSay. So
+        // the roster and the meters refresh from HERE — without this, a member
+        // going working→done (or dropping out) never shows until the next poll.
+        if (this.viewMode === 'meeting') this._meetSyncFromManager(d);
         if (sig !== this._groupSig) {
             this._groupSig = sig;
             if (this.viewMode === 'tiles') this._renderTiles();
@@ -5323,7 +6200,10 @@ async function bootServerMode({ backend, token }) {
         $('#boot').classList.add('hidden');
         $('#shell').classList.remove('hidden');
         shell._fitActive();
-        if (shell.viewMode === 'tiles' || shell.viewMode === 'manager') shell._applyViewMode();
+        // Views whose chrome is built lazily need an explicit _applyViewMode on
+        // boot: the constructor only restores the viewMode STRING, so a mode
+        // missing from this list comes back as an empty stage after a reload.
+        if (shell.viewMode === 'tiles' || shell.viewMode === 'manager' || shell.viewMode === 'meeting') shell._applyViewMode();
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 

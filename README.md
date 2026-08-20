@@ -59,29 +59,67 @@ The server **refuses to start** with `SOA_WEB_AUTH=open` on any non-loopback hos
 soa-web/
 ├── server/
 │   ├── src/
-│   │   ├── index.js         # HTTP + WS entry
-│   │   ├── auth.js          # shared-secret + signed cookies
-│   │   ├── sessionStore.js  # per-browser session + PTY pool
-│   │   ├── tabManager.js    # node-pty wrapper
-│   │   └── protocol.js      # wire schema (also served to browser)
-│   └── test/
-│       └── unit.test.js
-├── web/public/              # static browser bundle (xterm.js over CDN)
+│   │   ├── index.js           # HTTP + WS entry
+│   │   ├── auth.js            # shared-secret + signed cookies
+│   │   ├── sessionStore.js    # per-browser session + PTY pool
+│   │   ├── tabManager.js      # node-pty wrapper
+│   │   ├── tabPersist.js      # tabs/scrollback survive a restart
+│   │   ├── sessionManager.js  # fleet supervisor + the /api/sessions action surface
+│   │   ├── meetStore.js       # group-meeting ledger (append-only JSONL, local only)
+│   │   ├── meetings.js        # /api/meetings — the human's meeting surface
+│   │   ├── tabApi.js          # /api/tabs + /api/browse
+│   │   ├── claudeUsage.js     # token-spend engine behind the usage panel
+│   │   ├── tunnel.js          # public channel (cloudflared / ngrok) + failover
+│   │   └── protocol.js        # wire schema (also served to browser)
+│   └── test/                  # node:test suites (see Testing)
+├── web/public/                # static browser bundle (xterm.js over CDN)
 │   ├── index.html
-│   └── assets/
-│       ├── app.js           # SPA entry
-│       ├── bridge.js        # WS client
-│       └── styles.css       # TRON palette
+│   ├── assets/
+│   │   ├── app.js             # SPA entry
+│   │   ├── bridge.js          # WS client
+│   │   ├── widgets.js         # sidebar widgets (fleet, usage, QR)
+│   │   └── styles.css         # TRON palette
+│   └── m/                     # dependency-free mobile client (PWA, served at /m/)
+├── mobile/                    # mobile companion PWA packaging
+├── mobile-ios/                # native iOS shell (Capacitor) bundling /m/
+├── deploy/launchd/            # supervision plists (daemon, watchdogs, timers)
 └── scripts/
-    ├── fix-pty-perms.js     # postinstall: chmod +x prebuilt spawn helper
-    └── smoke-ws.js          # end-to-end PTY round-trip check
+    ├── fix-pty-perms.js       # postinstall: chmod +x prebuilt spawn helper
+    ├── smoke-ws.js            # end-to-end PTY round-trip check
+    ├── soa-sessions           # manager-agent CLI: see/drive every other session
+    ├── soa-meet               # agent CLI for group meetings (say/read/rooms/who)
+    ├── soa-bus                # local-only agent-to-agent message bus
+    ├── soa-work               # local-only work-claim ledger (no double edits)
+    ├── soa-msg                # message the user's phone (mobile CHAT)
+    └── soa-watchdog           # liveness probe used by the launchd timer
 ```
 
 ## Testing
 
 ```bash
-npm test           # unit tests (auth, protocol, sessions)
-node scripts/smoke-ws.js   # boot server first; verifies PTY round-trip
+npm test                          # node:test suites in server/test/*.test.js
+node scripts/smoke-ws.js          # boot server first; verifies PTY round-trip
+node scripts/manager-smoke.js     # manager loopback surface, against a THROWAWAY daemon
+node server/test/stress/stress.js # isolated mock daemons hammered for persistence/clobber bugs
+```
+
+`npm test` covers auth (cookie signing), the protocol framing, session
+create/GC, tab titling + scrollback, tab persistence, and the fleet manager —
+including group meetings (roster resolution, the poke gate, the relay budget,
+the ledger cursor). The stress harness spins up its own throwaway daemons on a
+temp state dir and never touches a running fleet.
+
+`manager-smoke.js` does **not** — read this before running it. It spawns no
+daemon of its own; it drives whatever daemon answers on `SOA_WEB_PORT` (falling
+back to `:7700`). Pointed at a live fleet it really will open and stop tabs and
+convene and adjourn a meeting inside it. Boot a throwaway daemon first and give
+it its own state dir:
+
+```bash
+SOA_WEB_PORT=7700 SOA_WEB_STATE_DIR=~/.soa-web-mgrtest SOA_WEB_HOST=127.0.0.1 \
+  SOA_WEB_AUTOPAIR=0 SOA_WEB_NO_AUTO_RESUME=1 SOA_WEB_MANAGER_ENABLED=1 \
+  node server/src/index.js &
+SOA_WEB_PORT=7700 node scripts/manager-smoke.js
 ```
 
 ## What's deliberately missing

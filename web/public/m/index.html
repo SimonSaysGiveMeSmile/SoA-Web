@@ -34,6 +34,9 @@
                 <button class="bb-btn" data-view="chat-view" title="Chat — message the agent in plain chat bubbles">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
                 <!-- Manager-only (premium gate): hidden by default; app.js reveals it when /api/capabilities reports manager=true. -->
                 <button class="bb-btn" data-view="tiles-view" hidden title="Dashboard — tiles of every agent (manager view)">DASH</button>
+                <!-- MEET keeps a SHORT label on purpose: the strip's letter-spacing
+                     was already tightened to fit five switchers, and this is the sixth. -->
+                <button class="bb-btn" data-view="meet-view" hidden title="Meet — put several agents in one groupchat and talk to all of them at once">MEET<span class="bb-badge" id="meet-badge" hidden></span></button>
                 <button class="bb-btn" data-view="web-view" title="Web — the agent's browser & localhost preview">WEB</button>
                 <button class="bb-btn" data-view="widgets-view" title="System — device stats, ports & widgets">SYS</button>
             </nav>
@@ -63,6 +66,22 @@
                               placeholder="Message the agent…" autocapitalize="sentences"
                               autocorrect="on" spellcheck="true"></textarea>
                     <button id="chat-send" class="chat-send" type="submit" aria-label="Send">➤</button>
+                </form>
+            </section>
+            <!-- MEET — the group meeting: ONE thread, several agents, you as the
+                 manager. Unlike CHAT (a single agent, unlabelled) every bubble here
+                 is SENDER-LABELLED, because a room of five talking past each other
+                 is exactly what this view exists to fix.
+                 Static markup on purpose: App snapshots `.view` / `.bb-btn[data-view]`
+                 ONCE in its constructor, so a section injected later never activates. -->
+            <section id="meet-view" class="view">
+                <div id="meet-bar" class="meet-bar" hidden></div>
+                <div id="meet-log" class="meet-log"></div>
+                <form id="meet-composer" class="meet-composer">
+                    <textarea id="meet-input" class="chat-input" rows="1"
+                              placeholder="Say something to the room…" autocapitalize="sentences"
+                              autocorrect="on" spellcheck="true"></textarea>
+                    <button id="meet-send" class="chat-send" type="submit" aria-label="Send to the room">➤</button>
                 </form>
             </section>
             <section id="widgets-view" class="view">
@@ -324,6 +343,30 @@
                 <button class="bcast-send" type="submit" id="bcast-send">SEND</button>
             </form>
             <label class="bcast-enter"><input type="checkbox" id="bcast-enter" checked /> press Enter after sending</label>
+        </div>
+    </div>
+
+    <!-- CONVENE — open a room from the phone: pick the agents, name it, go. Also
+         the room switcher, so one sheet covers "start a meeting" and "read another
+         one" instead of two entry points. -->
+    <div id="convene-overlay">
+        <div class="bcast-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="bcast-header">
+                <div class="bcast-title">&#9862; CONVENE</div>
+                <button class="settings-close" id="convene-close">&times;</button>
+            </div>
+            <div class="bcast-sub">Put a few agents in one thread. Every line is relayed to all of them, so they answer each other instead of talking past you.</div>
+            <div class="bcast-label" id="convene-rooms-label" hidden>MEETINGS</div>
+            <div class="bcast-cohorts" id="convene-rooms" hidden></div>
+            <div class="bcast-label">WHO'S IN THE ROOM <span class="bcast-n" id="convene-count">0</span></div>
+            <div class="bcast-cohorts" id="convene-members"></div>
+            <form id="convene-form" class="bcast-form">
+                <input id="convene-room" class="bcast-input" type="text" maxlength="40"
+                       placeholder="room name — e.g. standup" autocomplete="off"
+                       autocapitalize="off" autocorrect="off" spellcheck="false" />
+                <button class="bcast-send" type="submit" id="convene-start">OPEN</button>
+            </form>
         </div>
     </div>
 

@@ -529,9 +529,14 @@ function fmtList(snap, costByTab) {
             } else if (sub === 'say') {
                 // The manager speaking as itself would be indistinguishable from an
                 // agent turn and would spend the relay budget instead of recharging
-                // it. Route the manager's line through `soa-meet say` inside its own
-                // tab, or let the USER speak from the dashboard/phone.
-                console.error('soa-sessions meet: use `soa-meet say <room> <msg…>` from inside your tab');
+                // it, so there is no `meet say` here. Note the convener is NOT a
+                // member of the room it started (meet start excludes the caller),
+                // so `soa-meet say` is refused NOT_MEMBER until it also joins —
+                // say so explicitly rather than sending the caller into a 409.
+                console.error('soa-sessions meet: no `meet say` — a manager convenes a room, it is not in it.\n'
+                    + '  to take part too:  soa-meet join <room>   (then `soa-meet say <room> <msg…>`)\n'
+                    + '  to just follow it: soa-meet read <room>\n'
+                    + '  the USER speaks from the dashboard or phone (that is what recharges the relay budget).');
                 process.exit(1);
             } else {
                 console.error('usage: soa-sessions meet start|end|who|rooms …');
