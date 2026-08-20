@@ -1716,7 +1716,11 @@ function mount(app, requireAuthed, sessions) {
                     const code = r.code === 'NO_ROOM' ? 404 : (r.code ? 409 : 400);
                     return res.status(code).json(r);
                 }
-                return res.json(r);
+                // Include the room view so the CLI can tell the speaker the room
+                // has gone QUIET (relay budget spent → it is the user's turn).
+                // Without it `soa-meet say` exits 0 silently and an agent has no
+                // way to know its line will not be relayed to anyone.
+                return res.json({ ...r, roomView: man.meetView(room) });
             }
             // meet-read: non-blocking transcript read. This is the agent default —
             // there is deliberately no blocking read on this surface.

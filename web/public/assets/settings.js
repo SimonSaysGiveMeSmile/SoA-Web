@@ -34,10 +34,14 @@ export const DEFAULTS = Object.freeze({
     clockHours: 24,
     // Which cells the unified view switcher shows. Terminal (tabs) is the
     // always-available escape hatch; the rest are user-customizable.
-    viewButtons: { tabs: true, tiles: true, manager: true, chat: true, monitor: true },
+    viewButtons: { tabs: true, tiles: true, manager: true, chat: true, meeting: true, monitor: true },
 });
 
-const VIEW_KEYS = ['tabs', 'tiles', 'manager', 'chat', 'monitor'];
+// Every switchable view's key. This list is what asViewButtons iterates, so a
+// key missing HERE is silently dropped on every normalize() — the checkbox
+// flips, saves, and comes back on with no error anywhere. Add a new view to
+// DEFAULTS.viewButtons, to this array, AND to viewButtonsControl's defs.
+const VIEW_KEYS = ['tabs', 'tiles', 'manager', 'chat', 'meeting', 'monitor'];
 function asViewButtons(v) {
     const src = (v && typeof v === 'object') ? v : {};
     const out = {};
@@ -239,7 +243,7 @@ function themeSelect(id, value) {
 // back and app.js re-applies cell visibility via the 'soa:settings' event.
 function viewButtonsControl(s) {
     const wrap = el('div', { class: 'set-viewbtns' });
-    const defs = [['tiles', 'Tiles'], ['manager', 'Manager'], ['chat', 'Chat'], ['monitor', 'Monitor']];
+    const defs = [['tiles', 'Tiles'], ['manager', 'Manager'], ['chat', 'Chat'], ['meeting', 'Meeting'], ['monitor', 'Monitor']];
     const cur = (s && s.viewButtons) || {};
     // Terminal is always available — show it disabled+checked for clarity.
     const term = el('input', { type: 'checkbox', class: 'set-viewbtn', checked: 'checked', disabled: 'disabled' });

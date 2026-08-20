@@ -53,7 +53,9 @@ Frames are JSON over WebSocket:
 { "v": 1, "t": "<type>", "d": { … }, "id"?: "<correlation>" }
 ```
 
-See `server/src/protocol.js` for the authoritative list of `t` values and `input.kind` values. Server → client types: `hello`, `snapshot`, `term-data`, `term-exit`, `notice`, `pong`, `bye`. Client → server: `auth`, `input`, `ping`, `request`.
+See `server/src/protocol.js` for the authoritative list of `t` values and `input.kind` values. Server → client types: `hello`, `replay`, `snapshot`, `term-data`, `term-exit`, `notice`, `pong`, `bye`, `tts`, `browser-frame`, `manager`, `tab-mem`, `meeting`. Client → server: `auth`, `input`, `ping`, `request`.
+
+`meeting` carries a group-meeting transcript delta — `{room, msgs:[…]}` — and is pushed the instant a line is said, so a client never waits for the next 3s `manager` snapshot to render the room.
 
 The one clever bit: the *same file* is shipped to the browser. `server/src/index.js` serves `/_protocol.js` by reading `protocol.js` and rewriting the trailing `module.exports = {...}` into `export { ... }`. The two sides cannot drift.
 
@@ -62,6 +64,7 @@ The one clever bit: the *same file* is shipped to the browser. `server/src/index
 - `auth`: cookie signing, tamper rejection, mode resolution, constant-time comparison.
 - `protocol`: round-trip framing, rejection of malformed/wrong-version frames.
 - `sessions`: create/destroy, token lookup, idle GC.
+- `meetings`: roster resolution across a restart that reassigns tab ids (exact id → cwd fallback → ambiguous resolves to nobody), the poke gate's refusal reasons (`busy`, `attention`, `cooldown`, `relay-budget`, …), human-only recharge of the relay budget, and the ledger's `seq` cursor + 280-char line cap.
 
 End-to-end (`scripts/smoke-ws.js`) covers the full HTTP → WS → PTY round-trip.
 

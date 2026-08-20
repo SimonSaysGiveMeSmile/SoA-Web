@@ -123,6 +123,53 @@ function openTabs(n) {
     const read = await api({ action: 'read', id: A, lines: 10 });
     ok('read returns a tab view', read.json && read.json.id === A && typeof read.json.text === 'string');
 
+    // ── group meetings over the loopback action surface ──────────────────────
+    // The daemon is the SINGLE writer of a room's transcript, so the roster
+    // resolution, the IM cap and the refusal codes all have to hold HERE, over
+    // real HTTP — the unit tests cover the same rules against fake tabs.
+    const mtab = await api({ action: 'spawn', claude: false, title: 'smoke-meet-3' });
+    const E = mtab.json && mtab.json.id;
+    const ROOM = 'smoke-standup';
+    const ms = await api({ action: 'meet-start', room: ROOM, with: [A, B, E], self: A, title: 'smoke standup' });
+    const members = (ms.json && ms.json.room && ms.json.room.members) || [];
+    const mids = members.map((m) => m.id);
+    ok('meet-start reports the RESOLVED id list',
+        ms.status === 200 && mids.length === 2 && mids.includes(B) && mids.includes(E) && members.every((m) => m.resolved === 'id'),
+        JSON.stringify(ms.json));
+    // A convener runs the meeting, it does not sit in it — otherwise the manager
+    // agent prompts itself in a loop.
+    ok('meet-start EXCLUDES the caller\'s own tab', !mids.includes(A), `members=${JSON.stringify(mids)}`);
+
+    const nobody = await api({ action: 'meet-start', room: 'smoke-nobody', with: 'nonsense-cohort' });
+    const rooms = await api({ action: 'meet-list' });
+    ok('unknown selector convenes ZERO members (no accidental fleet-wide meeting)',
+        nobody.status === 400 && !((rooms.json && rooms.json.rooms) || []).some((r) => r.room === 'smoke-nobody'),
+        JSON.stringify(nobody.json));
+
+    // A member is not a claim: sharing the daemon's cwd with a member must not be
+    // enough to speak in the room (siblings in one directory are distinct agents).
+    const intruder = await api({ action: 'meet-say', room: ROOM, self: A, text: 'butting in' });
+    ok('a non-member cannot speak in the room (409 NOT_MEMBER)',
+        intruder.status === 409 && intruder.json && intruder.json.code === 'NOT_MEMBER', JSON.stringify(intruder.json));
+
+    // IM discipline: an agent that over-explains still gets heard, just trimmed.
+    // Rejecting the line would strand the agent with no way to answer at all.
+    const longText = 'sentence ' + 'x'.repeat(600);
+    const said = await api({ action: 'meet-say', room: ROOM, self: B, text: longText });
+    const text = (said.json && said.json.msg && said.json.msg.text) || '';
+    ok('over-cap text is TRUNCATED, not rejected',
+        said.status === 200 && said.json.ok === true && [...text].length < [...longText].length && text.endsWith('…'),
+        `status=${said.status} len=${[...text].length}`);
+
+    const ended = await api({ action: 'meet-end', room: ROOM, why: 'smoke' });
+    ok('meet-end adjourns the room', ended.status === 200 && ended.json && ended.json.room && ended.json.room.open === false);
+    // A 409 (not a 500, not a silent 200) is what lets the CLI exit 3 and the UI
+    // render "this meeting has adjourned".
+    const afterClose = await api({ action: 'meet-say', room: ROOM, self: B, text: 'anyone still here?' });
+    ok('a CLOSED room refuses new lines with 409 ROOM_CLOSED',
+        afterClose.status === 409 && afterClose.json && afterClose.json.code === 'ROOM_CLOSED', JSON.stringify(afterClose.json));
+    if (Number.isInteger(E)) await api({ action: 'stop', id: E, force: true });
+
     const bad = await api({ action: 'frobnicate' });
     ok('unknown action → 400', bad.status === 400);
 

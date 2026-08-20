@@ -473,6 +473,7 @@ html, body {
 .view-switch .view-btn[data-vicon="tiles"]    { --vb-icon: var(--soa-icon-tiles); }
 .view-switch .view-btn[data-vicon="manager"]  { --vb-icon: var(--soa-icon-manager); }
 .view-switch .view-btn[data-vicon="chat"]     { --vb-icon: var(--soa-icon-chat); }
+.view-switch .view-btn[data-vicon="meeting"]  { --vb-icon: var(--soa-icon-meeting); }
 .view-switch .view-btn[data-vicon="monitor"]  { --vb-icon: var(--soa-icon-monitor); }
 .topbar-actions .view-switch .view-btn:hover { background: rgba(var(--soa-accent-rgb), 0.12); border-color: var(--soa-accent-dim); }
 .topbar-actions .view-switch .view-btn.active { background: var(--soa-accent); color: var(--soa-bg); }
@@ -547,6 +548,10 @@ html, body {
     --soa-icon-tiles: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3.5' y='3.5' width='7' height='7' rx='1'/><rect x='13.5' y='3.5' width='7' height='7' rx='1'/><rect x='3.5' y='13.5' width='7' height='7' rx='1'/><rect x='13.5' y='13.5' width='7' height='7' rx='1'/></svg>");
     --soa-icon-manager: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='2.6'/><circle cx='12' cy='4.5' r='1.7'/><circle cx='12' cy='19.5' r='1.7'/><circle cx='4.5' cy='12' r='1.7'/><circle cx='19.5' cy='12' r='1.7'/><path d='M12 9.4V6.2M12 14.6v3.2M9.4 12H6.2M14.6 12h3.2'/></svg>");
     --soa-icon-chat: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5h16v10.5H9.5L5.5 19v-3.5H4z'/><path d='M8 9h8'/><path d='M8 12h5'/></svg>");
+    /* MEETING — three heads round a table, deliberately NOT another speech
+       bubble: the chat cell already owns that silhouette, and two bubble icons
+       side by side in a 30px cell are indistinguishable at a glance. */
+    --soa-icon-meeting: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='5.4' r='2.1'/><circle cx='5' cy='9.6' r='2.1'/><circle cx='19' cy='9.6' r='2.1'/><path d='M4 20.5c0-2.4 1.9-4 4.4-4h7.2c2.5 0 4.4 1.6 4.4 4'/><path d='M9.6 13.4h4.8'/></svg>");
 }
 
 /* ── "More" overflow submenu ───────────────────────────────────────────────
@@ -2989,6 +2994,142 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   transition: background 0.15s, border-color 0.15s;
 }
 .chat-send:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.18); }
+
+/* ── MEETING view — one groupchat thread, many speakers ─────────────────────
+   Positioning is copied from .chat-view / .manager-view verbatim and that is
+   the point, not laziness: `.terms .term` only paints when it carries .active,
+   so an absolute + inset:0 + z-index:1 panel over .terms IS the overlay
+   contract every view here honours. Drop the z-index or the inset and a live
+   terminal bleeds through the transcript.
+   Everything inside reuses the .chat-log / .chat-msg / .chat-composer /
+   .chat-status / .fleet-chip / .mgrv-chip vocabulary, so the room reads as the
+   same system as the CHAT and FLEET views rather than a second design. */
+.meet-view {
+  position: absolute; inset: 0; z-index: 1;
+  display: flex; flex-direction: column;
+  background: var(--soa-bg);
+  overflow: hidden;
+}
+/* The head is a .chat-head that wraps: room title + meters + status never fit
+   on one line at a narrow window, and a nowrap head pushed the status dot off
+   the right edge where nobody could see the "waiting for you" state. */
+.meet-view .chat-head { flex-wrap: wrap; row-gap: 6px; }
+.meet-room-sel {
+  font-family: var(--font-mono); font-size: 11px;
+  padding: 4px 6px; color: var(--soa-fg); background: var(--soa-bg);
+  border: 1px solid var(--soa-line-soft); border-radius: 3px;
+}
+.meet-meters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.meet-view .chat-status { flex: 0 0 auto; }
+/* With no open room the composer is disabled rather than hidden: the box has to
+   stay put, or the whole panel jumps every time a meeting adjourns. */
+.meet-view .chat-input:disabled,
+.meet-view .chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Roster strip — one chip per member, live status in the chip colour. Members
+   the server could not resolve ('gone' / 'ambiguous') stay VISIBLE as stuck
+   chips: silently dropping them is how a room looks half-empty for no reason. */
+.meet-roster {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 9px 14px; border-bottom: 1px solid var(--soa-line-soft);
+}
+.meet-roster .fleet-chip { display: inline-flex; align-items: center; gap: 6px; }
+.meet-roster-empty {
+  font-family: var(--font-mono); font-size: 11px;
+  color: rgba(var(--soa-accent-rgb), 0.5);
+}
+.meet-kick {
+  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+  padding: 0 2px; color: inherit; opacity: 0.55; cursor: pointer;
+  background: none; border: none; appearance: none; -webkit-appearance: none;
+}
+.meet-kick:hover { opacity: 1; color: #ff4444; }
+
+/* Bubbles. .chat-msg carries the shape; the speaker label is a block above the
+   text so a 6-way thread stays readable — colour alone can't carry identity
+   (colour-blind users, and the palette wraps at 6 members anyway). */
+.meet-who {
+  display: block; margin-bottom: 3px;
+  font-family: var(--font-display); font-size: 9px; letter-spacing: 0.16em;
+  text-transform: uppercase; opacity: 0.85;
+}
+.chat-msg[data-c="1"] .meet-who { color: #00e676; }
+.chat-msg[data-c="2"] .meet-who { color: #ff9800; }
+.chat-msg[data-c="3"] .meet-who { color: #8be9fd; }
+.chat-msg[data-c="4"] .meet-who { color: #f1c40f; }
+.chat-msg[data-c="5"] .meet-who { color: #b39ddb; }
+.chat-msg[data-c="6"] .meet-who { color: #ff79c6; }
+.chat-msg[data-c="1"] { border-left-color: #00e676; }
+.chat-msg[data-c="2"] { border-left-color: #ff9800; }
+.chat-msg[data-c="3"] { border-left-color: #8be9fd; }
+.chat-msg[data-c="4"] { border-left-color: #f1c40f; }
+.chat-msg[data-c="5"] { border-left-color: #b39ddb; }
+.chat-msg[data-c="6"] { border-left-color: #ff79c6; }
+.chat-msg.you .meet-who { color: var(--soa-bg); opacity: 0.72; }
+/* A system line (the server's own "— meeting adjourned (budget)") is neither
+   side of the conversation, so it gets the middle and no bubble chrome. */
+.chat-msg.system {
+  align-self: center; max-width: 90%; text-align: center;
+  padding: 4px 10px; background: none; border: none;
+  font-size: 11px; color: rgba(var(--soa-accent-rgb), 0.55);
+}
+.chat-msg.system .meet-who { display: none; }
+.meet-time {
+  float: right; margin-left: 10px;
+  font-size: 10px; opacity: 0.4; font-variant-numeric: tabular-nums;
+}
+.meet-note { font-size: 10px; opacity: 0.62; }
+
+/* "Waiting for you" bar. THE room pacing signal: only a human message recharges
+   the relay budget, so once relayHops >= relayMax the agents go quiet on
+   purpose. Without this the feature just looks broken. */
+.meet-quiet {
+  flex: 0 0 auto; padding: 8px 14px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+  color: var(--soa-yellow, #f1c40f);
+  background: rgba(241, 196, 15, 0.07);
+  border-top: 1px solid rgba(241, 196, 15, 0.35);
+}
+.meet-quiet[hidden] { display: none; }
+.meet-closed {
+  flex: 0 0 auto; padding: 8px 14px;
+  font-family: var(--font-mono); font-size: 11px;
+  color: rgba(var(--soa-accent-rgb), 0.6);
+  border-top: 1px solid var(--soa-line-soft);
+}
+.meet-closed[hidden] { display: none; }
+
+/* Actions + the convene / add-member picker. Panel chrome mirrors .mgrv-cast
+   so the two "pick a cohort then act" surfaces look like one control. */
+.meet-actions {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 9px 14px; border-top: 1px solid var(--soa-line-soft);
+}
+.meet-actions-spacer { flex: 1 1 auto; }
+.meet-picker {
+  flex: 0 0 auto; margin: 0 14px 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--soa-accent-dim); border-radius: 4px;
+  background: rgba(var(--soa-accent-rgb), 0.05);
+}
+/* display:flex would defeat the [hidden] attribute's UA rule. */
+.meet-picker[hidden] { display: none; }
+.meet-picker-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* An author-origin `display` beats the UA's `[hidden] { display: none }`, so the
+   room-name row would stay visible in ADD mode (where .hidden is set) without
+   this. Same trap for any flex/grid row that is toggled via the hidden attr. */
+.meet-picker-row[hidden] { display: none; }
+.meet-cands { display: flex; flex-wrap: wrap; gap: 6px; }
+.meet-cands[hidden] { display: none; }
+.meet-cands-empty {
+  font-family: var(--font-mono); font-size: 11px;
+  color: rgba(var(--soa-accent-rgb), 0.5);
+}
+.meet-hint {
+  font-family: var(--font-mono); font-size: 10px; line-height: 1.5;
+  color: rgba(var(--soa-accent-rgb), 0.5);
+}
+.mgrv-chip.busy { opacity: 0.45; }
 
 /* Toast */
 .mgrv-toast {

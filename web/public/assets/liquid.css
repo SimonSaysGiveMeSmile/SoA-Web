@@ -110,6 +110,7 @@
 [data-ui="liquid"] .welcome { background: transparent; }
 [data-ui="liquid"] .terms,
 [data-ui="liquid"] .tiles-grid,
+[data-ui="liquid"] .meet-view,
 [data-ui="liquid"] .manager-view { background: var(--lq-ground); }
 
 /* Focus: iOS systemBlue ring. */
@@ -381,6 +382,49 @@
 [data-ui="liquid"] .mgru-spark { background: rgba(255,255,255,0.04); border: 1px solid var(--soa-line-soft); border-radius: var(--lq-r-sm); }
 [data-ui="liquid"] .mgru-scope.active { color: #fff; background: var(--lq-tint); border-color: var(--lq-tint); }
 [data-ui="liquid"] .mgru-note { font-family: var(--font-display); text-transform: none; letter-spacing: 0.01em; }
+
+/* ═══ MEETING room — glass thread, iOS-blue "you" bubbles ══════════════ */
+/* The room borrows the CHAT vocabulary, so it inherits whatever the CHAT gets
+   here; only the meeting-only chrome (roster strip, meters, picker, the
+   waiting-for-you bar) needs its own skin. */
+[data-ui="liquid"] :is(.meet-roster, .meet-actions) {
+  background: rgba(255, 255, 255, 0.04);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border-color: var(--soa-line);
+}
+[data-ui="liquid"] .meet-picker {
+  background: var(--lq-fill);
+  -webkit-backdrop-filter: var(--lq-blur); backdrop-filter: var(--lq-blur);
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r);
+  box-shadow: var(--lq-rim);
+}
+[data-ui="liquid"] .meet-roster .fleet-chip {
+  background: var(--lq-glass); border-radius: var(--lq-pill);
+  box-shadow: var(--lq-rim); font-family: var(--font-display);
+}
+[data-ui="liquid"] .meet-meters .fleet-chip {
+  background: var(--lq-glass); border-radius: var(--lq-pill);
+  box-shadow: var(--lq-rim); font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+[data-ui="liquid"] .meet-who { font-family: var(--font-display); letter-spacing: 0.06em; font-weight: 620; }
+[data-ui="liquid"] .meet-room-sel {
+  -webkit-appearance: none; appearance: none;
+  font-family: var(--font-display);
+  background: var(--lq-glass); color: var(--soa-fg);
+  border: 1px solid var(--soa-line); border-radius: var(--lq-r-sm);
+}
+/* The pacing bar is the one place the room deliberately breaks the calm glass
+   palette: it must read as "the agents are waiting on YOU", not as decoration. */
+[data-ui="liquid"] .meet-quiet {
+  font-family: var(--font-display);
+  color: #ffd60a;
+  background: rgba(255, 214, 10, 0.1);
+  border-top: 1px solid rgba(255, 214, 10, 0.3);
+}
+[data-ui="liquid"] :is(.meet-closed, .meet-hint, .meet-roster-empty, .meet-cands-empty) {
+  font-family: var(--font-display); color: var(--lq-ink-2);
+}
 
 /* ═══ Menus, trays & popovers — deep frosted glass ═════════════════════ */
 [data-ui="liquid"] :is(.more-menu, .actions-tray, .ctx-popover) {
