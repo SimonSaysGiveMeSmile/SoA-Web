@@ -39,6 +39,26 @@ test('protocol: parse rejects junk and wrong version', () => {
     assert.equal(parse('{"no":"type"}'), null);
 });
 
+// The browser gets its own ESM COPY of the wire schema, and sync is manual —
+// there is no generator (an old comment in that file promised one that never
+// existed, and the two copies had silently drifted three message types apart as
+// a result). A drift here is invisible: the server keeps sending a frame type
+// the client no longer has a name for, so a whole feature just stops arriving.
+// Read the copy as TEXT rather than importing it, so this stays a plain CJS test.
+test('protocol: the browser ESM COPY declares every server MSG type', () => {
+    const src = require('node:fs').readFileSync(
+        require('node:path').join(__dirname, '../../web/public/assets/protocol.js'), 'utf8');
+    // Parse `KEY: 'value',` pairs out of the client's MSG block only.
+    const block = src.slice(src.indexOf('export const MSG'), src.indexOf('export const INPUT_KIND'));
+    const web = {};
+    for (const m of block.matchAll(/(\w+)\s*:\s*'([^']+)'/g)) web[m[1]] = m[2];
+    for (const [key, value] of Object.entries(MSG)) {
+        assert.equal(web[key], value,
+            `web/public/assets/protocol.js is missing or has drifted on MSG.${key} ('${value}') — `
+            + 'add it there in the same commit, and to the mobile client\'s own switch (msg.t)');
+    }
+});
+
 test('sessions: create + lookup + destroy', () => {
     const store = new SessionStore({ idleTtlMs: 10_000 });
     const s = store.create();

@@ -750,9 +750,23 @@ class SessionManager {
         // Remove the ONE stored member that currently resolves to that tab. A
         // cwd-wide filter would evict a sibling agent the user never excused.
         const resolved = meetRosterIds({ sessions: this._bareSessions() }, r.members);
-        let dropIndex = wantId != null ? resolved.findIndex(e => e.id === wantId) : -1;
-        if (dropIndex === -1) dropIndex = resolved.findIndex(e => e.cwd === cwd && (!m || !m.title || e.title === m.title));
-        if (dropIndex === -1) dropIndex = resolved.findIndex(e => e.cwd === cwd);
+        let dropIndex = -1;
+        if (wantId != null) {
+            // The caller named a LIVE tab, so only that tab may be excused: by id,
+            // or by (cwd, title) for a member whose stored id is stale. It must
+            // NOT fall through to a bare-cwd match — excusing a tab that already
+            // left would then evict whichever sibling still holds that directory.
+            dropIndex = resolved.findIndex(e => e.id === wantId);
+            if (dropIndex === -1 && cwd) {
+                dropIndex = resolved.findIndex(e => e.id == null && e.cwd === cwd && (!m.title || e.title === m.title));
+            }
+        } else if (cwd) {
+            // A cwd-only request is how a member whose tab is GONE gets excused
+            // (there is no id left to name it by), so prefer an unresolved seat
+            // and only then fall back to any member in that directory.
+            dropIndex = resolved.findIndex(e => e.id == null && e.cwd === cwd);
+            if (dropIndex === -1) dropIndex = resolved.findIndex(e => e.cwd === cwd);
+        }
         if (dropIndex !== -1) {
             r.members = (r.members || []).filter((_, i) => i !== dropIndex);
             if (wantId != null) this._meetSeat.delete(room + '\u0000' + wantId);

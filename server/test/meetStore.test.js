@@ -42,6 +42,19 @@ function mkLine(seq, over = {}) {
 // as a lone \udXXX escape and every reader renders '�' forever after.
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
+// ── the SHIPPED numbers every length assertion below is relative to ─────────
+test('meeting ledger: the SHIPPED defaults are the ones this file assumes', () => {
+    // Asserting a length against msgCap() alone is CIRCULAR: the default could
+    // move to 40 (every reply truncated to a stub) or to 3000 (a 4KB record, so
+    // one append is no longer one write syscall) and the whole file would stay
+    // green. Each of these is a product decision, so it is pinned HERE, once,
+    // and the rest of the file stays relative to it.
+    assert.equal(store.msgCap(), 280, 'a meeting line is an IM message, not a memo — and the cap is what keeps it an order of magnitude under MAXREC');
+    assert.equal(store.MAXREC, 4000, 'the serialized-record backstop that makes a single append atomic on a filesystem with no flock');
+    assert.equal(store.MAXLINES, 5000, 'per-file soft cap, mirroring soa-bus own SOA_BUS_MAXLINES');
+    assert.equal(store.TRIM_TO, 2000, 'a room that runs long keeps its tail, not its opening');
+});
+
 // ── append / read round-trip ────────────────────────────────────────────────
 test('append+read: a said line round-trips through the temp state dir', () => {
     const room = 'rt-roundtrip';
@@ -217,13 +230,18 @@ test('append: an overgrown ledger is trimmed to its TAIL, keeping the newest lin
 });
 
 // ── busDir(): the 4-step resolution chain ───────────────────────────────────
-test('busDir: SOA_BUS_DIR wins, then STATE_DIR/a2a, then the homedir probe', () => {
+test('busDir: SOA_BUS_DIR wins, then STATE_DIR/a2a, then the ~/.soa-web-local PROBE, then ~/.soa-web', () => {
     // This chain MUST stay identical to scripts/soa-bus and scripts/soa-work: if
     // the daemon resolves one dir while the shell-side `soa-meet` resolves
     // another, every participant writes to a ledger nobody else reads — a room
     // where all the messages vanish with no error anywhere.
     const savedBus = process.env.SOA_BUS_DIR;
     const savedState = process.env.SOA_WEB_STATE_DIR;
+    const savedHome = process.env.HOME;
+    // A home directory this test OWNS. Both bottom rungs key off os.homedir(),
+    // which re-reads $HOME on EVERY call, so pointing HOME here is what makes
+    // them deterministic instead of machine-dependent.
+    const home = path.join(TMP, 'fakehome');
     try {
         process.env.SOA_BUS_DIR = '/tmp/soa-explicit-bus';
         assert.equal(store.busDir(), '/tmp/soa-explicit-bus', 'an explicit SOA_BUS_DIR is used verbatim — no a2a suffix appended');
@@ -234,16 +252,24 @@ test('busDir: SOA_BUS_DIR wins, then STATE_DIR/a2a, then the homedir probe', () 
         assert.equal(store.busDir(), path.join('/tmp/soa-state', 'a2a'), 'STATE_DIR gets the a2a suffix, matching every other bus writer');
 
         delete process.env.SOA_WEB_STATE_DIR;
-        const local = path.join(os.homedir(), '.soa-web-local');
-        const expected = fs.existsSync(local)
-            ? path.join(local, 'a2a')
-            : path.join(os.homedir(), '.soa-web', 'a2a');
-        assert.equal(store.busDir(), expected, 'with no env at all it probes ~/.soa-web-local before ~/.soa-web — the probe every CLI performs, which stateDir.js skips');
+        process.env.HOME = home;
+        fs.mkdirSync(home, { recursive: true });
+        // Rung 4 first: no ~/.soa-web-local on disk. Recomputing the
+        // implementation's own fs.existsSync() to build an `expected` would be a
+        // TAUTOLOGY — on any machine without ~/.soa-web-local (CI, a fresh
+        // checkout, this one) the probe would never be exercised at all, and
+        // deleting it from busDir() would keep the suite green.
+        assert.equal(store.busDir(), path.join(home, '.soa-web', 'a2a'),
+            'with no ~/.soa-web-local present the chain lands on ~/.soa-web/a2a');
+        fs.mkdirSync(path.join(home, '.soa-web-local'), { recursive: true });
+        assert.equal(store.busDir(), path.join(home, '.soa-web-local', 'a2a'),
+            'once ~/.soa-web-local EXISTS the probe wins — this is the rung stateDir.js skips, and the one that keeps the daemon and the shell-side soa-meet on one ledger');
     } finally {
         // Resolved per call, so a leaked env var here would point every later
         // test at the real fleet's ledger.
         if (savedBus == null) delete process.env.SOA_BUS_DIR; else process.env.SOA_BUS_DIR = savedBus;
         process.env.SOA_WEB_STATE_DIR = savedState;
+        if (savedHome == null) delete process.env.HOME; else process.env.HOME = savedHome;
     }
     assert.equal(store.busDir(), path.join(TMP, 'a2a'), 'the temp-dir isolation is restored');
 });
@@ -260,6 +286,22 @@ test('parseRecord: tolerant of junk, and falls back to the outer timestamp for s
     assert.deepEqual({ who: m.who, text: m.text, via: m.via, from: m.from },
         { who: '?', text: '', via: 'cli', from: '?' },
         'missing fields degrade to placeholders — a partial line still renders instead of crashing the read');
+});
+
+test('parseRecord: `who` is NORMALIZED to a string, even when the raw line carries a number', () => {
+    // The wire contract is explicit — "a tab id here is a STRING, not a number".
+    // parseRecord is the ONLY door every reader comes through (the transcript
+    // read, the tick's relay, the WS push, meetSay's echo), so this is where the
+    // type is guaranteed. Both clients compare `who` against 'user'/'system' and
+    // use it as an object key for the per-speaker bubble colour, so a number
+    // silently becomes a fourth kind of speaker with no colour and no label.
+    const numeric = store.parseRecord(mkLine(5, { who: 7 }));
+    assert.equal(numeric.who, '7');
+    assert.equal(typeof numeric.who, 'string', 'a numeric who on disk (a degraded direct append, or an older writer) is coerced on the way out');
+    assert.equal(typeof store.parseRecord(mkLine(6, { who: '9' })).who, 'string');
+    assert.equal(store.parseRecord(mkLine(7, { who: 0 })).who, '0', 'tab id 0 is a real speaker — only a MISSING who degrades to the "?" placeholder');
+    assert.equal(store.parseRecord(mkLine(8, { who: null })).who, '?');
+    assert.equal(store.parseRecord(mkLine(9, { who: 'user' })).who, 'user', 'the human keeps the literal string the clients switch on');
 });
 
 test.after(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {} });

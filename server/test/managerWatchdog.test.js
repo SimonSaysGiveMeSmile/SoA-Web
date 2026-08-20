@@ -58,10 +58,31 @@ const SAMPLE = [
     row(34, 'launchd', 'idle', '7%'),
 ].join('\n');
 
-function run(calls) {
-    const script = `set -u\nSESSION_LIST=$(cat <<'EOF'\n${SAMPLE}\nEOF\n)\n${FUNCS}\n${calls}`;
+// A fleet whose ONLY tab titled "manager" is sitting at 'done' — the healthy
+// state an event-loop manager reads between events. This is the list shape that
+// produced the 30+ zombie tabs, so it needs its own fixture: SAMPLE always has a
+// live "manager" row and therefore never exercises find_by_title's fall-back.
+const DONE_MANAGER = [
+    row(7, 'manager-ui', 'working', '12%'),
+    row(8, 'manager', 'done', '41%'),
+    row(34, 'launchd', 'idle', '7%'),
+].join('\n');
+// A just-spawned manager: soa-sessions prints ctx "—" while ctxPct is still null.
+// NOTE the status/flag pair is deliberately artificial — it exists to prove the
+// em-dash column still parses when a flag follows it, nothing more. The daemon
+// cannot actually emit idle+STUCK together: sessionManager only sets `stuck` when
+// status === 'working', which means every STUCK row the daemon produces reads
+// 'working'. That is a real gap in the watchdog, not in this fixture: the script's
+// STUCK interrupt+resume branch lives under `*)`, while 'working' is matched
+// earlier by `working|idle|attention|done)`, so the documented STUCK handling is
+// unreachable for any row the daemon can generate.
+const FRESH_MANAGER = row(8, 'manager', 'idle', '—', 'STUCK');
+
+function runWith(list, calls) {
+    const script = `set -u\nSESSION_LIST=$(cat <<'EOF'\n${list}\nEOF\n)\n${FUNCS}\n${calls}`;
     return execFileSync('bash', ['-c', script], { encoding: 'utf8' });
 }
+const run = (calls) => runWith(SAMPLE, calls);
 
 test('tab_status: the status word, even when the title has spaces', () => {
     assert.strictEqual(run('tab_status 2').trim(), 'working');
@@ -85,6 +106,31 @@ test('tab_ctx: a bare integer, NOT the literal "ctx" label and NOT "39%"', () =>
     // ctx prints "—" when unknown → empty, so callers can default to 0 instead
     // of exploding on `[ "—" -ge 80 ]`.
     assert.strictEqual(run('tab_ctx 9').trim(), '');
+});
+
+test('tab_ctx: "—" is an unknown pct, NOT an unparseable row', () => {
+    // The empty above must mean "pct unknown", not "the row fell out of TAIL_RE".
+    // soa-sessions prints "—" whenever ctxPct is null (e.g. right after a spawn),
+    // so if the em-dash alternative leaves TAIL_RE the WHOLE row stops matching:
+    // STATUS comes back empty, the watchdog takes its `"") … returned empty status
+    // — skipping` branch, and every action for that tab silently stops. Assert the
+    // other trailing fields of the same row so that alternative is load-bearing.
+    assert.strictEqual(run('tab_status 9').trim(), 'idle');
+    // CAVEAT, so nobody reads more into the next two assertions than is there:
+    // FUNCS extracts TAIL_RE and the tab_*/find_by_title helpers only — never the
+    // script's `case "${STATUS:-}"` block. So these re-state the caller's SHAPE to
+    // show the parsed value survives being fed to it; they do NOT execute the real
+    // dispatch, and renaming a branch there would not fail this file. What they
+    // genuinely pin is that an em-dash row yields a usable status and flags at all
+    // (both go red the moment the em-dash leaves TAIL_RE), which is the bug this
+    // test exists for. Covering the dispatch itself needs the case block extracted
+    // the way FUNCS extracts the helpers.
+    assert.strictEqual(
+        run('S="$(tab_status 9)"; case "${S:-}" in "") echo skipping;; *) echo "act:$S";; esac').trim(),
+        'act:idle');
+    assert.strictEqual(
+        runWith(FRESH_MANAGER, 'F="$(tab_flags 8)"; echo "$F" | grep -q STUCK && echo interrupt || echo no-action').trim(),
+        'interrupt');
 });
 
 test('tab_ctx: drives the real HIGH-CTX compaction comparison', () => {
@@ -119,6 +165,23 @@ test('find_by_title: prefers the LIVE (non-done) duplicate, not the stale done o
     assert.strictEqual(run('find_by_title api').trim(), '6');
     // Single match still resolves.
     assert.strictEqual(run('find_by_title soa-web').trim(), '2');
+});
+
+test('find_by_title: still returns a DONE-only match (the anti-duplicate guard needs it)', () => {
+    // #17 "housing" is done AND unique, so this is the only case that reaches the
+    // `echo "${live:-$any}"` fall-back — the other find_by_title tests all have a
+    // live match to prefer. Preferring live must not mean DISCARDING done.
+    assert.strictEqual(run('find_by_title housing').trim(), '17');
+    // Why it matters, verbatim from spawn_manager's guard: 'done' is a healthy
+    // alive state (a manager at its input box between events). If find_by_title
+    // printed nothing for a done-only manager the guard would go blind and spawn a
+    // SECOND manager beside a perfectly healthy one — the 30+ zombie "manager"
+    // tabs (#21–#52) outage.
+    const guard = (list) =>
+        runWith(list, 'E="$(find_by_title manager)"; [ -n "$E" ] && echo "refuse #$E" || echo spawn').trim();
+    assert.strictEqual(guard(DONE_MANAGER), 'refuse #8');
+    // Control: with no "manager" row at all, MISSING is the one path that may spawn.
+    assert.strictEqual(guard(row(7, 'manager-ui', 'working', '12%')), 'spawn');
 });
 
 test('find_by_title: exact title match — "manager" must not match "manager-ui"', () => {
