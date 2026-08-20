@@ -388,36 +388,53 @@ const MEET_MAX_MEMBERS = envInt('SOA_MEET_MAX_MEMBERS', 6, 2, 12);
 const MEET_RECENT_K   = envInt('SOA_MEET_RECENT_K', 4, 1, 10);
 
 /**
- * Resolve a stored roster (cwd + join-time tab id) to live tab ids. Pure and
- * exported so the resolution rule is testable without a daemon.
+ * Resolve a stored roster to live tab ids. Pure and exported so the resolution
+ * rule is testable without a daemon.
  *
- * The rule is the one `_fireDue` uses for schedules, generalized: prefer the
- * exact tab id while it still points at the same project, else fall back to the
- * cwd — but ONLY when the cwd identifies exactly one live tab. Two tabs open in
- * one directory is genuinely ambiguous, and poking the wrong agent is much worse
- * than a member sitting the round out, so ambiguity resolves to `null`.
+ * Identity here is a genuinely awkward problem, and the shape of this function
+ * is the answer to it. A member cannot be stored by tab id alone: ids are
+ * reassigned on every daemon restart and by soa-restore-fleet, so a room would
+ * reconvene whoever happens to hold id 3 next boot. It cannot be stored by cwd
+ * alone either: TabManager explicitly supports SIBLING tabs in one directory
+ * (it auto-titles them "api-1", "api-2"), so a cwd-keyed roster would collapse
+ * two distinct agents into one member and would tag every tab in that folder as
+ * a participant — letting a non-member speak and get prompted.
  *
- * Returns one entry per member with `id` (null when unresolved) and `resolved`
- * ('id' | 'cwd' | 'ambiguous' | 'gone') so the roster UI can say *why* someone
- * is missing instead of silently dropping them.
+ * So a member is stored as (cwd, title, join-time id) and resolved in
+ * decreasing-confidence order:
+ *   1. the exact tab id, while it still points at the same cwd — the common
+ *      no-restart case, unambiguous even among siblings;
+ *   2. else the unique live tab matching BOTH cwd and title — how siblings are
+ *      told apart after a restart, since titles persist with the tabs;
+ *   3. else the unique live tab matching the cwd — covers a tab renamed since
+ *      the room opened;
+ *   4. else nobody. Poking the wrong agent is much worse than a member sitting
+ *      the round out, so every ambiguity resolves to `null`.
+ *
+ * Each entry reports `resolved` ('id' | 'title' | 'cwd' | 'ambiguous' | 'gone')
+ * so the roster UI can say *why* someone is unreachable instead of silently
+ * dropping them. Two members never resolve to the same tab: an id already
+ * claimed earlier in the roster is off the table for everyone after it.
  */
 function meetRosterIds(snapshot, members) {
-    const byId = new Map((snapshot.sessions || []).map(x => [x.id, x]));
+    const sessions = snapshot.sessions || [];
+    const byId = new Map(sessions.map(x => [x.id, x]));
+    const taken = new Set();
     const out = [];
+    const claim = (m, row, how) => { taken.add(row.id); out.push({ ...m, id: row.id, title: row.title, resolved: how }); };
     for (const m of members || []) {
         const cwd = m && m.cwd ? m.cwd : null;
+        const title = m && m.title ? m.title : null;
         const hintId = m && m.tabId != null ? Number(m.tabId) : null;
         const exact = hintId != null ? byId.get(hintId) : null;
-        if (exact && (!cwd || exact.cwd === cwd)) {
-            out.push({ ...m, id: exact.id, title: exact.title, resolved: 'id' });
-            continue;
-        }
-        const hits = cwd ? (snapshot.sessions || []).filter(x => x.cwd === cwd) : [];
-        if (hits.length === 1) {
-            out.push({ ...m, id: hits[0].id, title: hits[0].title, resolved: 'cwd' });
-            continue;
-        }
-        out.push({ ...m, id: null, resolved: hits.length > 1 ? 'ambiguous' : 'gone' });
+        if (exact && !taken.has(exact.id) && (!cwd || exact.cwd === cwd)) { claim(m, exact, 'id'); continue; }
+        const free = sessions.filter(x => !taken.has(x.id));
+        const byTitle = (cwd && title) ? free.filter(x => x.cwd === cwd && x.title === title) : [];
+        if (byTitle.length === 1) { claim(m, byTitle[0], 'title'); continue; }
+        const byCwd = cwd ? free.filter(x => x.cwd === cwd) : [];
+        if (byCwd.length === 1) { claim(m, byCwd[0], 'cwd'); continue; }
+        const contenders = byTitle.length || byCwd.length;
+        out.push({ ...m, id: null, resolved: contenders > 1 ? 'ambiguous' : 'gone' });
     }
     return out;
 }
@@ -559,37 +576,63 @@ class SessionManager {
 
     // Open room a cwd currently belongs to, or null. Closed rooms don't count —
     // an adjourned meeting must not keep an agent flagged as in-session.
-    _meetingFor(cwd) {
-        if (!cwd) return null;
+    _meetingFor(tabId, resolved) {
+        if (tabId == null) return null;
+        const map = resolved || this._resolvedRooms();
+        for (const [name, ids] of map) if (ids.has(tabId)) return name;
+        return null;
+    }
+
+    /**
+     * Every OPEN room's roster, resolved to live tab ids: `Map<room, Set<id>>`.
+     *
+     * This — not a cwd comparison — is the authoritative answer to "is this tab
+     * in a meeting?". Resolution has to run for membership, because a member is
+     * identified by (cwd, title, join-time id) and only the resolver knows which
+     * live tab a stored member actually is. Asking by cwd alone would tag every
+     * SIBLING tab in a project as a participant, letting an uninvited agent
+     * speak in the room and get prompted by it.
+     */
+    _resolvedRooms() {
+        const sessions = this._bareSessions();
+        const out = new Map();
         const rooms = this.state.meetings || {};
         for (const name of Object.keys(rooms)) {
             const r = rooms[name];
             if (!r || r.closedAt) continue;
-            if ((r.members || []).some(m => m && m.cwd === cwd)) return name;
+            const ids = new Set();
+            for (const e of meetRosterIds({ sessions }, r.members)) if (e.id != null) ids.add(e.id);
+            out.set(name, ids);
         }
-        return null;
+        return out;
     }
 
-    // Transient per-member seat (poke cooldown + how far it has been briefed).
-    // `floor` seeds the cursor so a member is never briefed on transcript from
-    // before it joined — and, after a restart, is re-briefed from the ledger
-    // rather than assumed to remember a conversation its process never saw.
-    _seat(room, cwd, floor = 0) {
-        const k = room + ' ' + cwd;
+    // Transient per-seat state (poke cooldown + how far this member has been
+    // briefed). Keyed by LIVE tab id: seats are hot state, rebuilt from scratch
+    // after a restart anyway, and ids are never reused within one daemon run —
+    // so this sidesteps the stored-identity problem entirely, and a mid-meeting
+    // rename cannot silently reset somebody's seat. `floor` seeds the cursor so
+    // a member is never briefed on transcript from before it joined, and after a
+    // restart is re-briefed from the ledger rather than assumed to remember a
+    // conversation its own process never saw.
+    _seat(room, tabId, floor = 0) {
+        const k = room + '\u0000' + tabId;
         let s = this._meetSeat.get(k);
         if (!s) { s = { lastPokeAt: 0, cursor: Number(floor) || 0, skipWhy: null }; this._meetSeat.set(k, s); }
         return s;
     }
 
-    // Normalize a member spec ({id} or {cwd}) into the stored cwd-keyed shape.
+    // Normalize a member spec ({id} or {cwd}) into the stored shape. The title
+    // is captured alongside the cwd because it is what tells SIBLING tabs in one
+    // directory apart after a restart has reassigned their ids.
     _meetMember(spec) {
         const mgr = this.session.tabMgr;
         let cwd = spec && typeof spec.cwd === 'string' && spec.cwd ? spec.cwd : null;
-        let tabId = spec && spec.id != null ? Number(spec.id) : null;
-        let title = null;
+        const tabId = spec && spec.id != null ? Number(spec.id) : null;
+        let title = spec && typeof spec.title === 'string' && spec.title ? spec.title : null;
         if (tabId != null && mgr) {
             const tab = mgr.get(tabId);
-            if (tab) { cwd = cwd || tab.cwd; title = tab.title; }
+            if (tab) { cwd = cwd || tab.cwd; title = title || tab.title; }
         }
         if (!cwd) return null;
         return { cwd, tabId, title, baseSeq: 0 };
@@ -609,14 +652,20 @@ class SessionManager {
         if (!this.state.meetings) this.state.meetings = {};
         const existing = this.state.meetings[name];
         if (existing && !existing.closedAt) return { ok: false, error: 'room already open', code: 'ROOM_OPEN' };
+        // Dedup by TAB, not by cwd: two sibling tabs in one project are two
+        // distinct agents (TabManager even auto-titles them api-1 / api-2), and
+        // collapsing them would silently drop a member the user picked.
         const seen = new Set();
+        const rooms0 = this._resolvedRooms();
         const roster = [];
         for (const spec of members || []) {
             const m = this._meetMember(spec);
-            if (!m || seen.has(m.cwd)) continue;
-            const busy = this._meetingFor(m.cwd);
+            if (!m) continue;
+            const key = m.tabId != null ? '#' + m.tabId : m.cwd + '\u0000' + (m.title || '');
+            if (seen.has(key)) continue;
+            const busy = m.tabId != null ? this._meetingFor(m.tabId, rooms0) : null;
             if (busy) return { ok: false, error: `#${m.tabId} is already in meeting "${busy}"`, code: 'MEMBER_BUSY' };
-            seen.add(m.cwd);
+            seen.add(key);
             roster.push(m);
         }
         if (roster.length < 1) return { ok: false, error: 'no resolvable members' };
@@ -677,8 +726,10 @@ class SessionManager {
         if (!r || r.closedAt) return { ok: false, error: 'no open room' };
         const m = this._meetMember(spec);
         if (!m) return { ok: false, error: 'cannot resolve member' };
-        if ((r.members || []).some(x => x.cwd === m.cwd)) return { ok: true, room: this.meetView(room) };
-        const busy = this._meetingFor(m.cwd);
+        // Already seated in THIS room (by live tab, not by directory) — idempotent.
+        const here = this._resolvedRooms().get(room) || new Set();
+        if (m.tabId != null && here.has(m.tabId)) return { ok: true, room: this.meetView(room) };
+        const busy = m.tabId != null ? this._meetingFor(m.tabId) : null;
         if (busy) return { ok: false, error: `already in meeting "${busy}"`, code: 'MEMBER_BUSY' };
         if ((r.members || []).length >= MEET_MAX_MEMBERS) return { ok: false, error: 'roster full', code: 'ROSTER_CAP' };
         m.baseSeq = meetStore.headSeq(room);
@@ -692,11 +743,20 @@ class SessionManager {
         const r = (this.state.meetings || {})[room];
         if (!r) return { ok: false, error: 'no such room' };
         const m = this._meetMember(spec);
+        const wantId = m && m.tabId != null ? m.tabId : null;
         const cwd = m ? m.cwd : (spec && spec.cwd) || null;
-        if (!cwd) return { ok: false, error: 'cannot resolve member' };
+        if (!cwd && wantId == null) return { ok: false, error: 'cannot resolve member' };
         const before = (r.members || []).length;
-        r.members = (r.members || []).filter(x => x.cwd !== cwd);
-        this._meetSeat.delete(room + ' ' + cwd);
+        // Remove the ONE stored member that currently resolves to that tab. A
+        // cwd-wide filter would evict a sibling agent the user never excused.
+        const resolved = meetRosterIds({ sessions: this._bareSessions() }, r.members);
+        let dropIndex = wantId != null ? resolved.findIndex(e => e.id === wantId) : -1;
+        if (dropIndex === -1) dropIndex = resolved.findIndex(e => e.cwd === cwd && (!m || !m.title || e.title === m.title));
+        if (dropIndex === -1) dropIndex = resolved.findIndex(e => e.cwd === cwd);
+        if (dropIndex !== -1) {
+            r.members = (r.members || []).filter((_, i) => i !== dropIndex);
+            if (wantId != null) this._meetSeat.delete(room + '\u0000' + wantId);
+        }
         this._saveState();
         this.broadcast();
         // An empty room is over — leaving the last member would otherwise leave a
@@ -720,8 +780,11 @@ class SessionManager {
         const body = String(text == null ? '' : text).trim();
         if (!body) return { ok: false, error: 'text required' };
         const isHuman = who === 'user' || who == null;
-        if (!isHuman && !(r.members || []).some(m => m.cwd === cwd)) {
-            return { ok: false, error: 'not a member of this meeting', code: 'NOT_MEMBER' };
+        // Membership is decided by RESOLVED tab id, never by cwd: a sibling tab
+        // in a member's directory is a different agent and was not invited.
+        if (!isHuman) {
+            const here = this._resolvedRooms().get(room) || new Set();
+            if (!here.has(Number(who))) return { ok: false, error: 'not a member of this meeting', code: 'NOT_MEMBER' };
         }
         if ((r.msgBudget | 0) <= 0) {
             this.meetEnd(room, 'budget');
@@ -740,7 +803,7 @@ class SessionManager {
         if (isHuman) { r.lastHumanAt = Date.now(); r.relayHops = 0; }
         // The speaker has by definition seen its own line — advance its own seat
         // so the very next tick doesn't brief it on what it just said.
-        if (!isHuman && cwd) this._seat(room, cwd, r.baseSeq).cursor = rec.seq;
+        if (!isHuman) this._seat(room, Number(who), r.baseSeq).cursor = rec.seq;
         this._saveState();
         this._emit('meeting-say', isHuman ? 0 : Number(who), { detail: `${room}: ${meetStore.capLine(body, 80)}` });
         const msg = meetStore.parseRecord(JSON.stringify(rec));
@@ -835,7 +898,7 @@ class SessionManager {
             if (!roster.length) continue;
 
             let minCursor = Infinity;
-            for (const e of roster) minCursor = Math.min(minCursor, this._seat(room, e.cwd, e.baseSeq || r.baseSeq).cursor);
+            for (const e of roster) minCursor = Math.min(minCursor, this._seat(room, e.id, e.baseSeq || r.baseSeq).cursor);
             if (!Number.isFinite(minCursor)) minCursor = r.baseSeq || 0;
             // Nothing new for even the furthest-behind member → no disk read, no
             // pokes. "Never poke when nothing is new" is the cheapest of all the
@@ -853,10 +916,12 @@ class SessionManager {
             const order = r.mode === 'round' ? roster.slice(0, 1).concat(roster.slice(1)) : roster;
             let poked = 0;
             for (const e of order) {
-                const seat = this._seat(room, e.cwd, e.baseSeq || r.baseSeq);
-                // Never brief a member on its own line — that is the tightest
+                const seat = this._seat(room, e.id, e.baseSeq || r.baseSeq);
+                // Never brief a member on its OWN line — that is the tightest
                 // possible echo loop (agent replies, gets told about its reply).
-                const pending = all.filter(m => m.seq > seat.cursor && m.cwd !== e.cwd && String(m.who) !== String(e.id));
+                // Matched on speaker id, not cwd: a sibling tab in the same
+                // directory is a different agent and must still hear it.
+                const pending = all.filter(m => m.seq > seat.cursor && String(m.who) !== String(e.id));
                 if (!pending.length) continue;
                 const row = snapSessions.find(x => x.id === e.id) || {};
                 const st = this._state(e.id);
@@ -1145,6 +1210,9 @@ class SessionManager {
         const mgr = this.session.tabMgr;
         const order = mgr ? mgr.order : [];
         const now = Date.now();
+        // Resolve every open room's roster ONCE — it is O(rooms x members x tabs)
+        // and snapshot() runs on the 3s tick for every connected client.
+        const rooms = this._resolvedRooms();
         let managerTabId = null;
         let managerStatus = null;
         const sessions = order.map(id => {
@@ -1175,7 +1243,7 @@ class SessionManager {
                 // Open meeting this agent is sitting in, or null. Also what the
                 // `meeting:<room>` cohort selector filters on, so the CLI and both
                 // UIs read one field instead of three lookups.
-                meeting: this._meetingFor(tab && tab.cwd),
+                meeting: this._meetingFor(id, rooms),
                 // Current model (raw id, e.g. "claude-opus-4-8"), read from the
                 // live transcript so it tracks in-session /model switches. The
                 // client renders it as a tier-colored badge on the tab/tile.
