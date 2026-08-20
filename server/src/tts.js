@@ -26,7 +26,8 @@ let _port = null;
 // missed the SOA_WEB_TTS_URL env injection (restored tabs, tabs that predate
 // the feature, env not inherited). This is what makes "the agent texts you"
 // reliable rather than dependent on per-PTY env.
-const BRIDGE_FILE = require('./stateDir').stateFile('bridge.json');
+const stateDir = require('./stateDir');
+const BRIDGE_FILE = stateDir.stateFile('bridge.json');
 function setPort(p) {
     _port = p;
     try {
@@ -49,6 +50,13 @@ function envFor(tabId) {
         // Per-daemon local secret — proves to /api/sessions + /api/tts that a
         // request came from a tab this daemon spawned (see localKey.js).
         SOA_WEB_LOCAL_KEY: localKey.LOCAL_KEY,
+        // The state dir WE resolved, so shell-side tools agree with us instead of
+        // re-deriving it. soa-bus/soa-work/soa-meet fall back to
+        // `~/.soa-web-local/a2a` when this is unset while stateDir.js falls back
+        // to `~/.soa-web` — a daemon started without SOA_WEB_STATE_DIR would then
+        // read and write a DIFFERENT bus than its own agents, silently splitting
+        // every shared ledger in half.
+        SOA_WEB_STATE_DIR: stateDir.STATE_DIR,
     };
 }
 
