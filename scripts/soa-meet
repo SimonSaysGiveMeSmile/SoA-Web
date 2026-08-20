@@ -1,0 +1,224 @@
+#!/bin/bash
+# soa-meet — group meetings: you, the user, and several agents in ONE room.
+#
+# A meeting is a groupchat. The user (as manager) picks who is in the room; every
+# line anyone says is relayed to the others, so separate Claude instances can
+# actually answer each other instead of talking past each other. The daemon does
+# the relaying: when there is something new for you, a one-line brief is typed
+# into your terminal with the recent transcript inlined.
+#
+# PRIVACY: the transcript is pure local files under the state dir (the same
+# append-only JSONL substrate as soa-bus) — it NEVER touches the network, is
+# never uploaded, and is never shared off this machine.
+#
+#   soa-meet say    <room> <msg...>       your turn — ONE line, <=2 sentences
+#   soa-meet read   <room> [--since MS] [N]   the transcript (non-blocking)
+#   soa-meet rooms                        every room, open first
+#   soa-meet who    <room>                the roster + who is reachable
+#   soa-meet join   <room>                add yourself to an open room
+#   soa-meet leave  <room>                excuse yourself
+#   soa-meet watch  <room> [--once]       block for new lines (NOT for agents)
+#   soa-meet whoami                       your identity + resolved ledger path
+#
+# TWO RULES, if you are an agent in a meeting:
+#   1. NEVER block in `soa-meet watch`. You are woken by a line typed into your
+#      terminal; blocking means your turn never ends and the whole room stalls
+#      behind your tool timeout. `watch` refuses to run inside a tab for exactly
+#      this reason (pass --once if you really need one drain).
+#   2. Reply with ONE `soa-meet say` of at most two sentences, then STOP. It is a
+#      groupchat, not a memo — lines are hard-capped at 280 chars anyway.
+set -u
+
+# ---- shared bus dir (identical resolution to soa-bus / soa-work) -------------
+if   [ -n "${SOA_BUS_DIR:-}" ];        then BUS="$SOA_BUS_DIR"
+elif [ -n "${SOA_WEB_STATE_DIR:-}" ];  then BUS="$SOA_WEB_STATE_DIR/a2a"
+elif [ -d "$HOME/.soa-web-local" ];    then BUS="$HOME/.soa-web-local/a2a"
+else                                        BUS="$HOME/.soa-web/a2a"
+fi
+
+PREFIX="${SOA_MEET_CHAN_PREFIX:-meet-}"   # channel prefix; must match meetStore.js
+CAP="${SOA_MEET_MSG_CAP:-280}"            # chars per line — IM discipline, not a memo
+DRY="${SOA_MEET_DRY:-0}"                  # 1 = print what would be said, send nothing
+
+norm(){ printf '%s' "$1" | tr -c 'A-Za-z0-9._@-' '_'; }
+room_file(){ echo "$BUS/${PREFIX}$(norm "$1").jsonl"; }
+
+# our tab id: SOA_MEET_ID > SOA_BUS_ID > SOA_WEB_TAB > soa-sessions whoami
+me_id(){
+  printf '%s' "${SOA_MEET_ID:-${SOA_BUS_ID:-${SOA_WEB_TAB:-$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')}}}"
+}
+
+# ---- endpoint discovery (identical to soa-sessions / soa-msg) ----------------
+base_url(){
+  if [ -n "${SOA_WEB_TTS_URL:-}" ]; then printf '%s' "${SOA_WEB_TTS_URL%/api/tts}"; return; fi
+  local p
+  p="$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' "$HOME/.soa-web/bridge.json" 2>/dev/null | head -1)"
+  [ -n "$p" ] && { printf 'http://127.0.0.1:%s' "$p"; return; }
+  printf 'http://127.0.0.1:%s' "${SOA_WEB_PORT:-7332}"
+}
+
+# POST one {action:…} to /api/sessions. The DAEMON is the single writer of a
+# room's transcript, so the cap, the membership check, the event emit and the
+# relay all happen in one place regardless of who is talking.
+api(){ # api <json-body>
+  curl -sS -m 12 -X POST "$(base_url)/api/sessions" \
+    -H 'Content-Type: application/json' \
+    ${SOA_WEB_LOCAL_KEY:+-H "x-soa-local-key: $SOA_WEB_LOCAL_KEY"} \
+    -d "$1" 2>/dev/null
+}
+
+jbody(){ # jbody key value [key value …]  -> compact JSON object
+  python3 -c '
+import json,sys
+a=sys.argv[1:]
+print(json.dumps({a[i]: a[i+1] for i in range(0,len(a),2)},ensure_ascii=False))' "$@"
+}
+
+# render the transcript as "[MM-DD HH:MM:SS] #7 api: text" (soa-bus fmt, plus the
+# speaker id the outer record already carries)
+fmt(){ python3 -c '
+import json,sys,datetime
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: r=json.loads(line)
+    except Exception: continue
+    try: p=json.loads(r.get("msg") or "{}")
+    except Exception: continue
+    if p.get("v")!="say": continue
+    ts=datetime.datetime.fromtimestamp(r.get("t",0)/1000).strftime("%m-%d %H:%M:%S")
+    print("["+ts+"] "+str(r.get("from","?"))+": "+str(p.get("text","")))
+'; }
+
+read_room(){ # read_room(file, since_ms, n)
+  local f="$1" since="${2:-0}" n="${3:-50}"
+  [ -f "$f" ] || { echo "(no messages)"; return; }
+  python3 - "$f" "$since" "$n" <<'PY' | fmt
+import json,sys
+f,since,n=sys.argv[1],int(sys.argv[2] or 0),int(sys.argv[3])
+rows=[]
+for line in open(f):
+    line=line.strip()
+    if not line: continue
+    try:
+        outer=json.loads(line); p=json.loads(outer.get("msg") or "{}")
+    except Exception: continue
+    if int(p.get("seq") or outer.get("t") or 0) <= since: continue
+    rows.append(line)
+for l in rows[-n:]: print(l)
+PY
+}
+
+watch_room(){ # watch_room(file, once, interval)
+  local f="$1" once="$2" iv="$3" base=0
+  [ -f "$f" ] && base="$(wc -l < "$f" | tr -d ' ')"
+  while :; do
+    local cur=0; [ -f "$f" ] && cur="$(wc -l < "$f" | tr -d ' ')"
+    if [ "$cur" -gt "$base" ]; then
+      sed -n "$((base+1)),${cur}p" "$f" | fmt
+      base="$cur"
+      [ "$once" = 1 ] && break
+    fi
+    sleep "$iv"
+  done
+}
+
+# print ok/error from an API reply; exit 3 on a semantic refusal (adjourned room,
+# not a member, budget spent) so a caller can tell "no" from "broken".
+report(){ # report <json> <success-line>
+  python3 - "$1" "$2" <<'PY'
+import json,sys
+raw,okline=sys.argv[1],sys.argv[2]
+try: j=json.loads(raw or "{}")
+except Exception:
+    sys.stderr.write("soa-meet: no reply from the SoA daemon (is it running?)\n"); sys.exit(1)
+if j.get("ok"):
+    print(okline)
+    r=j.get("room") or j.get("roomView") or {}
+    if isinstance(r,dict) and r.get("relayHops") is not None and r.get("relayMax") is not None:
+        if r["relayHops"] >= r["relayMax"]:
+            print("[QUIET] relay budget spent — the room waits for the user now")
+    sys.exit(0)
+err=j.get("error") or "failed"
+code=j.get("code") or ""
+if code in ("ROOM_CLOSED","NOT_MEMBER","BUDGET","MEMBER_BUSY","ROSTER_CAP","ROOM_OPEN"):
+    sys.stderr.write("[REFUSED] %s\n" % err); sys.exit(3)
+sys.stderr.write("soa-meet: %s\n" % err); sys.exit(2)
+PY
+}
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  say)
+    room="${1:-}"; shift 2>/dev/null || true; msg="$*"
+    [ -z "$room" ] || [ -z "$msg" ] && { echo "usage: soa-meet say <room> <msg…>"; exit 2; }
+    mid="$(me_id)"
+    [ -z "$mid" ] && { echo "soa-meet: can't determine my tab id (run inside a SoA tab)"; exit 2; }
+    # Trim locally too, so DRY output and the terminal echo show what will
+    # actually land. The server caps again — it is the authority.
+    msg="$(printf '%s' "$msg" | tr '\n' ' ' | cut -c1-"$CAP")"
+    if [ "$DRY" = 1 ]; then echo "[DRY] would say -> #$room: $msg"; exit 0; fi
+    report "$(api "$(jbody action meet-say room "$room" text "$msg" self "$mid")")" "said -> #$room"
+    ;;
+  read)
+    room="${1:-}"; shift 2>/dev/null || true
+    since=0; n=50
+    while [ $# -gt 0 ]; do case "$1" in --since) since="$2"; shift 2;; [0-9]*) n="$1"; shift;; *) shift;; esac; done
+    [ -z "$room" ] && { echo "usage: soa-meet read <room> [--since MS] [N]"; exit 2; }
+    read_room "$(room_file "$room")" "$since" "$n"
+    ;;
+  rooms)
+    api "$(jbody action meet-list)" | python3 -c '
+import json,sys
+try: j=json.loads(sys.stdin.read() or "{}")
+except Exception: j={}
+rooms=j.get("rooms") or []
+if not rooms: print("  (no meetings)"); raise SystemExit(0)
+for r in rooms:
+    live=r.get("live",0); n=len(r.get("members") or [])
+    state="OPEN" if r.get("open") else "closed (%s)" % (r.get("closedWhy") or "?")
+    print("  #%-16s %-16s %d/%d live · mode %s · %d msgs left · hops %s/%s"
+          % (r.get("room"), state, live, n, r.get("mode"),
+             r.get("msgBudget",0), r.get("relayHops",0), r.get("relayMax",0)))'
+    ;;
+  who)
+    room="${1:-}"; [ -z "$room" ] && { echo "usage: soa-meet who <room>"; exit 2; }
+    api "$(jbody action meet-list)" | python3 -c '
+import json,sys
+room=sys.argv[1]
+try: j=json.loads(sys.stdin.read() or "{}")
+except Exception: j={}
+for r in (j.get("rooms") or []):
+    if r.get("room")!=room: continue
+    print("  %s — %s" % (r.get("room"), r.get("title")))
+    for m in (r.get("members") or []):
+        who = ("#%s %s" % (m.get("id"), m.get("title") or "")) if m.get("id") is not None else "(unreachable)"
+        note = "" if m.get("resolved")=="id" else "  [%s]" % m.get("resolved")
+        print("    %-24s %-10s %s%s" % (who, m.get("status") or "-", m.get("cwd") or "", note))
+    raise SystemExit(0)
+sys.stderr.write("no such room: %s\n" % room); raise SystemExit(2)' "$room"
+    ;;
+  join|leave)
+    room="${1:-}"; [ -z "$room" ] && { echo "usage: soa-meet $cmd <room>"; exit 2; }
+    mid="$(me_id)"; [ -z "$mid" ] && { echo "soa-meet: can't determine my tab id"; exit 2; }
+    report "$(api "$(jbody action "meet-$cmd" room "$room" id "$mid")")" "$cmd -> #$room"
+    ;;
+  watch)
+    room="${1:-}"; shift 2>/dev/null || true
+    once=0; iv=2
+    while [ $# -gt 0 ]; do case "$1" in --once) once=1; shift;; --interval) iv="$2"; shift 2;; --force) once=2; shift;; *) shift;; esac; done
+    [ -z "$room" ] && { echo "usage: soa-meet watch <room> [--once] [--interval S]"; exit 2; }
+    # RULE 1, enforced rather than documented: an agent blocking here never ends
+    # its Claude turn, so the tool call times out and the room stalls waiting for
+    # a member that can no longer answer. The daemon pokes you; you don't wait.
+    if [ -n "${SOA_WEB_TAB:-}" ] && [ "$once" = 0 ]; then
+      echo "soa-meet: refusing to block inside a tab — you are woken by a line typed into your terminal." >&2
+      echo "          use 'soa-meet read $room' (non-blocking), or --once for a single drain." >&2
+      exit 2
+    fi
+    [ "$once" = 2 ] && once=0
+    watch_room "$(room_file "$room")" "$once" "$iv"
+    ;;
+  whoami) echo "#$(me_id)  (bus dir: $BUS · cap ${CAP} chars)";;
+  help|--help|-h|*) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//';;
+esac

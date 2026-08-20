@@ -60,6 +60,7 @@ const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
+const meetings         = require('./meetings');
 const tunnelGate       = require('./tunnelGate');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
@@ -455,6 +456,7 @@ pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
+meetings.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
@@ -754,6 +756,11 @@ function onWsConnect(ws, session, req) {
             try {
                 const m = sessionManager.ensure(session);
                 m.emitStuckSweep();   // time-derived 'stuck' → manager event
+                // Advance any open group meeting: relay new lines into the
+                // members that are ready for a turn. Rides this tick rather than
+                // its own timer so there is nothing extra to unref or tear down,
+                // and so it inherits the manager entitlement check above.
+                m.tickMeetings();
                 m.broadcast();
             } catch (_) {}
         }, 3000);
