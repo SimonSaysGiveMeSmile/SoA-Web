@@ -5,6 +5,7 @@ const express = require('express');
 const crypto = require('crypto');
 
 const { STATE_DIR } = require('./stateDir');
+const automations = require('./automations');
 const PILOT_FILE = path.join(STATE_DIR, 'autopilot.json');
 
 function ensureDir() {
@@ -101,6 +102,7 @@ class AutoPilot {
             const status = this._agentStatus ? this._agentStatus(sched.tabId) : 'idle';
             if (status === 'working' || status === 'attention') continue;
 
+            automations.announce(this._tabMgr, sched.tabId, 'autopilot · every ' + Math.max(1, Math.round(sched.intervalMs / 1000)) + 's');
             tab.write(sched.message + '\r');
             sched.lastFired = now;
             dirty = true;

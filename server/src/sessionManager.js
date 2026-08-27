@@ -23,6 +23,7 @@ const envStore = require('./envStore');
 const claudeSessions = require('./claudeSessions');
 const sessionModel = require('./sessionModel');
 const localKey = require('./localKey');
+const automations = require('./automations');
 const entitlements = require('./entitlements');
 const meetStore = require('./meetStore');
 
@@ -1049,6 +1050,7 @@ class SessionManager {
                 for (const tid of mgr.order) { const t = mgr.get(tid); if (t && t.cwd === s.cwd) { tab = t; break; } }
             }
             if (!tab) continue;
+            automations.announce(mgr, tab.id, 'manager · scheduled');
             submitToTab(tab, s.text);
         }
         this.broadcast();
@@ -1441,6 +1443,7 @@ function mount(app, requireAuthed, sessions) {
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
                 const text = String(body.text || '');
                 const submit = body.submit !== false;   // default: press Enter
+                automations.announce(mgr, id, 'manager · send');
                 if (submit) submitToTab(tab, text);      // reliable split-write
                 else writeToTab(tab, text);              // FIFO-ordered, no Enter
                 return res.json({ ok: true, id, sent: text.length, submitted: submit });
@@ -1449,6 +1452,7 @@ function mount(app, requireAuthed, sessions) {
                 const id = Number(body.id);
                 const tab = mgr.get(id);
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
+                automations.announce(mgr, id, 'manager · /compact');
                 submitToTab(tab, '/compact');
                 return res.json({ ok: true, id, compacted: true });
             }
@@ -1600,8 +1604,9 @@ function mount(app, requireAuthed, sessions) {
                     if (!tab || tab.exited) { targets.push({ id, ok: false, error: 'no live tab' }); return; }
                     const line = buildLine(tab);
                     const delay = i * 120; // stagger so N TUIs don't cold-start at once
-                    if (delay) { const tm = setTimeout(() => submitToTab(tab, line), delay); if (tm.unref) tm.unref(); }
-                    else submitToTab(tab, line);
+                    const fire = () => { automations.announce(mgr, id, 'manager · ' + verb); submitToTab(tab, line); };
+                    if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); }
+                    else fire();
                     targets.push({ id, line, ok: true });
                 });
                 return res.json({ ok: true, verb, count: targets.filter(t => t.ok).length, targets });
@@ -1618,7 +1623,7 @@ function mount(app, requireAuthed, sessions) {
                 ids.forEach((id, i) => {
                     const tab = mgr.get(id);
                     if (!tab || tab.exited) return;
-                    const fire = () => { if (submit) submitToTab(tab, text); else writeToTab(tab, text); };
+                    const fire = () => { automations.announce(mgr, id, 'manager · broadcast'); if (submit) submitToTab(tab, text); else writeToTab(tab, text); };
                     const delay = i * 120;
                     if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); } else fire();
                     hit.push(id);
@@ -1644,6 +1649,7 @@ function mount(app, requireAuthed, sessions) {
                 if (body.lifecycle && tab.cwd) man.setLifecycle(tab.cwd, body.lifecycle);
                 if (wantClaude) {
                     const tm = setTimeout(() => {
+                        automations.announce(mgr, tab.id, 'manager · spawn');
                         try { launchClaude(tab, tab.cwd, { resume, model }); } catch (_) {}
                         if (goalText) { const g = setTimeout(() => submitToTab(tab, '/goal ' + goalText), 3000); if (g.unref) g.unref(); }
                     }, 1200); // let the fresh shell print its prompt first

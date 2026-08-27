@@ -245,6 +245,22 @@ class TabManager {
         return t ? t.scrollback.snapshot() : '';
     }
 
+    // Display-only attribution divider: a dim one-liner rendered in the tab
+    // WITHOUT touching the PTY's stdin, so automations / broadcasts / API
+    // writes can be told apart from local typing. Pushed through the same
+    // scrollback + onData path as PTY output, so every connected client and
+    // the persisted scrollback see it.
+    announce(id, label) {
+        const tab = this.tabs.get(id);
+        if (!tab || tab.exited) return false;
+        const clean = String(label == null ? '' : label).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 60).trim();
+        if (!clean) return false;
+        const line = `\r\n\x1b[2m── ${clean} ──\x1b[0m\r\n`;
+        tab.scrollback.push(line);
+        this.onData(tab.id, line);
+        return true;
+    }
+
     open({ title, cwd, cols, rows, env, silent, seedScrollback } = {}) {
         const id = this.next++;
         const tab = new Tab({
