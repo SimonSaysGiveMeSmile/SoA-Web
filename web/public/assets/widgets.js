@@ -1398,6 +1398,53 @@ class AutoPilotWidget extends Widget {
     }
 }
 
+// ── MANAGER (automation control panel) ───────────────────────────────────
+// One switchboard for everything that can type into a tab on its own: the
+// rehydrate auto-resume, boot-resume, the attribution dividers, autopilot,
+// plus read-only rows for the manager CLI license and any launchd
+// supervisors installed outside the daemon. Backed by /api/automations.
+class ManagerPanelWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.manager', helpKey: 'widget.manager.help', parent, intervalMs: 6000 });
+    }
+    async tick() {
+        if (isSandbox()) { this.setRows([['STATUS', 'N/A']]); return; }
+        let d;
+        try { d = await jget('/api/automations'); } catch (_) { this.setRows([['STATUS', 'offline']]); return; }
+        if (!d.ok) { this.setRows([['STATUS', d.error || 'error']]); return; }
+        const t = d.toggles || {};
+        const toggleBtn = (name, labelKey) => $el('button', {
+            class: 'widget-btn' + (t[name] ? '' : ' widget-btn-ghost'),
+            text: (t[name] ? '⏻ ' : '○ ') + tr(labelKey) + ' · ' + (t[name] ? 'ON' : 'OFF'),
+            onclick: async () => { try { await jpost('/api/automations', { name, enabled: !t[name] }); } catch (_) {} this.tick(); },
+        });
+        const kv = (k, v) => {
+            const r = $el('div', { class: 'kv' });
+            r.appendChild($el('span', { class: 'k', text: k }));
+            r.appendChild($el('span', { class: 'v', text: v }));
+            return r;
+        };
+        const ap = d.autopilot || {};
+        const rows = [
+            $el('div', { class: 'widget-note', text: tr('widget.manager.tag') }),
+            toggleBtn('autoResume', 'widget.manager.auto_resume'),
+            toggleBtn('bootResume', 'widget.manager.boot_resume'),
+            toggleBtn('attribution', 'widget.manager.attribution'),
+            $el('button', {
+                class: 'widget-btn' + (ap.paused ? ' widget-btn-ghost' : ''),
+                text: (ap.paused ? '○ ' : '⏻ ') + 'AUTOPILOT · ' + (ap.paused ? 'PAUSED' : 'ACTIVE')
+                    + ' · ' + (ap.schedules || 0) + ' SCHED' + (ap.orchestrator ? ' · ORCH' : ''),
+                onclick: async () => { try { await jpost(ap.paused ? '/api/autopilot/resume' : '/api/autopilot/pause', {}); } catch (_) {} this.tick(); },
+            }),
+            kv('MANAGER CLI', d.manager && d.manager.entitled ? 'LICENSED' : 'OFF'),
+        ];
+        const sup = d.supervisors || [];
+        rows.push(kv('SUPERVISORS', sup.length ? String(sup.length) : 'NONE'));
+        for (const label of sup.slice(0, 4)) rows.push(kv('  ' + label.replace('com.soa-web.', ''), 'installed'));
+        this.body.replaceChildren(...rows);
+    }
+}
+
 // ── CONSOLE LOG STREAM ──────────────────────────────────────────────────
 class ConsoleLogWidget extends Widget {
     constructor({ parent }) {
@@ -1635,6 +1682,7 @@ function _widgetRegistry() {
         { id: 'memory',    titleKey: 'widget.memory',      make: p => new RamWatcherWidget({ parent: p }) },
         { id: 'ports',     titleKey: 'widget.ports',       make: p => new PortScanWidget({ parent: p }) },
         { id: 'autopilot', titleKey: 'widget.autopilot',   make: p => new AutoPilotWidget({ parent: p }) },
+        { id: 'manager',   titleKey: 'widget.manager',     make: p => new ManagerPanelWidget({ parent: p }) },
         { id: 'console',   titleKey: 'widget.console',     make: p => new ConsoleLogWidget({ parent: p }) },
         { id: 'network',   titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
         { id: 'netchart',  titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
