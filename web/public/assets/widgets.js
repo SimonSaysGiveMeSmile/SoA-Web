@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=27';
+import { t as tr } from '/assets/i18n.js?v=28';
 import { getSettings } from '/assets/settings.js?v=25';
 
 const $el = (tag, props = {}, children = []) => {
@@ -1558,6 +1558,67 @@ class InstallerWidget extends Widget {
     }
 }
 
+// ── CONTRIBUTE ───────────────────────────────────────────────────────────
+// The public repo, surfaced where the likeliest contributors already are —
+// people running the app. Star/fork/issue counts come from GitHub's
+// unauthenticated API, cached in localStorage for an hour so reload-happy
+// sessions never dent the 60-req/hr anonymous quota; the links are static and
+// always render, so the widget also works (and matters most) in the s0a.app
+// sandbox — no isSandbox() gate.
+const CONTRIB_REPO = 'SimonSaysGiveMeSmile/SoA-Web';
+const CONTRIB_URL = `https://github.com/${CONTRIB_REPO}`;
+const CONTRIB_CACHE_KEY = 'soa-web:contrib-stats';
+const CONTRIB_CACHE_MS = 60 * 60 * 1000;
+
+class ContributeWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.contribute', helpKey: 'widget.contribute.help', parent, intervalMs: 0 });
+    }
+
+    onLangChange() { this.tick(); }
+
+    tick() {
+        this._statsEl = $el('div', { class: 'contrib-stats' });
+        this.body.replaceChildren(
+            $el('div', { class: 'widget-note', text: tr('widget.contribute.tag') }),
+            $el('a', {
+                class: 'widget-btn contrib-link', href: CONTRIB_URL,
+                target: '_blank', rel: 'noopener noreferrer',
+                text: '⧉ ' + CONTRIB_REPO,
+            }),
+            $el('a', {
+                class: 'widget-btn widget-btn-ghost contrib-link', href: `${CONTRIB_URL}/issues/new`,
+                target: '_blank', rel: 'noopener noreferrer',
+                text: '◉ ' + tr('widget.contribute.issue'),
+            }),
+            this._statsEl,
+        );
+        this._fillStats();
+    }
+
+    async _fillStats() {
+        const stats = await this._stats();
+        if (this._destroyed || !stats || !this._statsEl) return;
+        this._statsEl.textContent = `★ ${stats.stars}   ⑂ ${stats.forks}   ◉ ${stats.issues}`;
+    }
+
+    // Cached repo stats, or null (offline / rate-limited) — links still work.
+    async _stats() {
+        try {
+            const hit = JSON.parse(localStorage.getItem(CONTRIB_CACHE_KEY) || 'null');
+            if (hit && Date.now() - hit.at < CONTRIB_CACHE_MS) return hit;
+        } catch (_) {}
+        try {
+            const r = await fetch(`https://api.github.com/repos/${CONTRIB_REPO}`, { headers: { Accept: 'application/vnd.github+json' } });
+            if (!r.ok) return null;
+            const d = await r.json();
+            const stats = { stars: d.stargazers_count, forks: d.forks_count, issues: d.open_issues_count, at: Date.now() };
+            try { localStorage.setItem(CONTRIB_CACHE_KEY, JSON.stringify(stats)); } catch (_) {}
+            return stats;
+        } catch (_) { return null; }
+    }
+}
+
 // ── Sidebar composition: registry + persisted layout ─────────────────────
 // Stable ids → constructors, in default order. Users hide/show and reorder
 // these via the CUSTOMIZE panel; the chosen layout persists in localStorage.
@@ -1578,6 +1639,7 @@ function _widgetRegistry() {
         { id: 'network',   titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
         { id: 'netchart',  titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
         { id: 'commits',   titleKey: 'widget.commits',     make: p => new GitCommitsWidget({ parent: p }) },
+        { id: 'contribute', titleKey: 'widget.contribute', make: p => new ContributeWidget({ parent: p }) },
     ];
 }
 
@@ -1770,6 +1832,7 @@ function _sandboxRegistry() {
         { id: 'network',  titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
         { id: 'netchart', titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
         { id: 'sandbox',  titleKey: 'widget.sandbox',     make: p => new SandboxInfoWidget({ parent: p }) },
+        { id: 'contribute', titleKey: 'widget.contribute', make: p => new ContributeWidget({ parent: p }) },
     ];
 }
 
