@@ -55,6 +55,7 @@ const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
 const automations      = require('./automations');
+const agentTasks       = require('./agentTasks');
 const preview          = require('./preview');
 const pasteImage       = require('./pasteImage');
 const tts              = require('./tts');
@@ -1297,6 +1298,43 @@ const memSample = setInterval(() => {
     } catch (_) { /* sampling is best-effort; never crash the daemon */ }
 }, MEM_SAMPLE_MS);
 if (memSample.unref) memSample.unref();
+
+// Per-tab background-subagent sampler. Every few seconds resolve each live
+// tab's cwd → newest Claude session transcript → launched-but-unfinished
+// background tasks (agentTasks.js reads the transcript incrementally; the
+// screen can't tell "parked on subagents" from "finished"). Pushed as a
+// TAB_AGENTS frame so the client can render the breathing `delegating` state.
+// Zero counts are sent too — they're what clears the state when tasks finish.
+const AGENT_SAMPLE_MS = parseInt(process.env.SOA_WEB_AGENT_SAMPLE_MS || '4000', 10);
+const agentSample = setInterval(() => {
+    try {
+        let anyClients = false;
+        for (const s of sessions.sessions.values()) {
+            if (s.sockets && s.sockets.size) { anyClients = true; break; }
+        }
+        if (!anyClients) return; // nobody watching → don't touch the disk
+        const byCwd = new Map(); // one transcript scan per cwd per sweep, however many tabs share it
+        for (const s of sessions.sessions.values()) {
+            const mgr = s.tabMgr;
+            if (!mgr || mgr.order.length === 0 || !s.sockets || !s.sockets.size) continue;
+            const agents = {};
+            for (const id of mgr.order) {
+                const t = mgr.tabs.get(id);
+                if (!t || t.exited || !t.cwd) continue;
+                if (!byCwd.has(t.cwd)) {
+                    let n = 0;
+                    try { n = agentTasks.runningFor(t.cwd).running; } catch (_) {}
+                    byCwd.set(t.cwd, n);
+                }
+                agents[id] = byCwd.get(t.cwd);
+            }
+            if (Object.keys(agents).length) {
+                try { s.send(frame(MSG.TAB_AGENTS, { agents })); } catch (_) {}
+            }
+        }
+    } catch (_) { /* sampling is best-effort; never crash the daemon */ }
+}, AGENT_SAMPLE_MS);
+if (agentSample.unref) agentSample.unref();
 
 function shutdown(code = 0) {
     console.log('\nshutting down…');

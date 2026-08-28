@@ -16,7 +16,7 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=18';
 import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=46';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
@@ -424,6 +424,7 @@ class Shell {
         this._agentEffort = new Map(); // tabId → effort level (ultracode/xhigh/…) parsed client-side from the /effort footer
         this._collapsedGroups = new Set(); // group names collapsed in the tiles view
         this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
+        this._tabAgents = new Map();   // tabId → running background subagents (server TAB_AGENTS sampler)
         // Tabs whose PTY emitted output since the last status scan. The 500ms
         // poll re-scans only dirty tabs (idle tabs cost nothing), with a full
         // sweep every ~8s as a backstop so a missed seed can't strand a tab's
@@ -763,6 +764,7 @@ class Shell {
         // dispatch switch to extend.
         bridge.addEventListener('meeting',   e => this._onMeeting(e.detail));
         bridge.addEventListener('tab-mem',   e => this._onTabMem(e.detail));
+        bridge.addEventListener('tab-agents', e => this._onTabAgents(e.detail));
         bridge.addEventListener('browser-frame', e => this._onBrowserFrame(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
@@ -1139,7 +1141,7 @@ class Shell {
             const root = el('button', {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
                 title: this._tabTooltip(t.id, t.title),
-                'data-agent': this._agentStatus.get(t.id) || '',
+                'data-agent': this._displayAgent(t.id),
                 'data-tab-id': String(t.id),
                 'data-has-preview': previewUrl ? '1' : null,
                 draggable: 'true',
@@ -2342,7 +2344,7 @@ class Shell {
         // on every working↔done flip — the dominant DOM churn with many live
         // tabs. Fall back to a full sync only if the node isn't rendered yet.
         const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
-        if (tabNode) tabNode.setAttribute('data-agent', status);
+        if (tabNode) tabNode.setAttribute('data-agent', this._displayAgent(id));
         else { this._tabsUISig = null; this._syncTabsUI(); }
         // A status flip usually means new activity/status-line text — repaint the
         // subtitle now rather than waiting for the next poll tick.
@@ -4993,7 +4995,7 @@ class Shell {
             const act = (label, fn, title) => el('button', {
                 class: 'mgrv-act', type: 'button', text: label, title: title || '',
                 onclick: (e) => { e.stopPropagation(); fn(); } });
-            return el('div', { class: 'tile mgrv-tile', 'data-agent': status, 'data-status': s.status || 'idle' }, [
+            return el('div', { class: 'tile mgrv-tile', 'data-agent': this._displayAgent(s.id, status), 'data-status': s.status || 'idle' }, [
                 pie, pctEl,
                 el('div', { class: 'tile-head', onclick: () => this._openFromManager(s.id) }, [
                     icon,
@@ -5645,9 +5647,10 @@ class Shell {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || tr('tab.default', { id });
         const status = this._agentStatus.get(id) || 'idle';
+        const disp = this._displayAgent(id);
         const pct = this._ctxPct.get(id) || 0;
         const s = this._agentBuf.get(id);
-        const activity = (s && s.activity) || this._statusLabel(status);
+        const activity = disp === 'delegating' ? this._statusLabel('delegating') : ((s && s.activity) || this._statusLabel(status));
         const statusLine = (s && s.statusLine) || '';
         const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
@@ -5663,7 +5666,7 @@ class Shell {
         const node = el('div', {
             class: 'tile',
             'data-tile-id': String(id),
-            'data-agent': status,
+            'data-agent': disp,
             draggable: 'true',
             onclick: () => {
                 if (this._tileDragDidMove) { this._tileDragDidMove = false; return; }
@@ -5731,14 +5734,15 @@ class Shell {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || tr('tab.default', { id });
         const status = this._agentStatus.get(id) || 'idle';
+        const disp = this._displayAgent(id);
         const pct = this._ctxPct.get(id) || 0;
         const s = this._agentBuf.get(id);
-        const activity = (s && s.activity) || this._statusLabel(status);
+        const activity = disp === 'delegating' ? this._statusLabel('delegating') : ((s && s.activity) || this._statusLabel(status));
         const statusLine = (s && s.statusLine) || '';
         const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
 
-        node.setAttribute('data-agent', status);
+        node.setAttribute('data-agent', disp);
         const titleEl = node.querySelector('.tile-title');
         if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
         const statusEl = node.querySelector('.tile-status-line');
@@ -5757,7 +5761,44 @@ class Shell {
         this._syncTileGroupChip(node, id);
     }
 
+    // Server sampler: tabId → running background subagents, read from the
+    // session transcript + task output files on disk. The stream classifier
+    // stays the status of record ('working'/'done'/…) — delegation is a
+    // DISPLAY overlay only, so chimes, notifications and cohort filters keep
+    // their existing, battle-tested semantics.
+    _onTabAgents(d) {
+        const agents = (d && d.agents) || {};
+        const touched = new Set(this._tabAgents.keys());
+        this._tabAgents = new Map();
+        for (const k of Object.keys(agents)) {
+            const id = Number(k);
+            this._tabAgents.set(id, agents[k] | 0);
+            touched.add(id);
+        }
+        for (const id of touched) this._refreshAgentAttr(id);
+    }
+
+    // What the tab/tile should LOOK like: 'delegating' (breathing green) while
+    // background subagents run — unless the agent needs input right now, which
+    // outranks everything and stays red.
+    _displayAgent(id, base) {
+        const st = base || this._agentStatus.get(id) || 'idle';
+        if (st === 'attention' || st === 'error') return st;
+        return (this._tabAgents.get(id) | 0) > 0 ? 'delegating' : st;
+    }
+
+    _refreshAgentAttr(id) {
+        const disp = this._displayAgent(id);
+        const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (tabNode && tabNode.getAttribute('data-agent') !== disp) tabNode.setAttribute('data-agent', disp);
+        if (this.viewMode === 'tiles' && this._tilesGridEl) {
+            const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);
+            if (node) this._updateTileNode(node, id);
+        }
+    }
+
     _statusLabel(status) {
+        if (status === 'delegating') return 'Waiting on subagents…';
         if (status === 'working') return 'Working...';
         if (status === 'done') return 'Awaiting next prompt';
         if (status === 'attention') return 'Needs input';
