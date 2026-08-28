@@ -24,6 +24,7 @@ export const MSG = Object.freeze({
     BROWSER_FRAME: 'browser-frame',
     MANAGER:   'manager',
     TAB_MEM:   'tab-mem',
+    TAB_AGENTS: 'tab-agents', // {agents:{[id]:n}} — running background subagents per tab, ~4s (see agentTasks.js)
     MEETING:   'meeting',
 
     AUTH:      'auth',
