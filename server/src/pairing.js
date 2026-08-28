@@ -27,8 +27,15 @@ function lanAddresses(port, proto = 'http') {
 }
 
 class PairingManager {
-    constructor({ port, publicProto = 'http', bindHost = '0.0.0.0' }) {
+    constructor({ port, publicProto = 'http', bindHost = '0.0.0.0', openTunnel: openTunnelImpl = openTunnel, adopt: adoptImpl = adopt, restartDelayMs = 5000 }) {
         this.port = port;
+        this._openTunnel = openTunnelImpl;
+        this._adopt = adoptImpl;
+        this._restartDelayMs = restartDelayMs;
+        this._restartTimer = null;
+        this._stopped = false;    // explicit stop(): never auto-restart
+        this._detached = false;   // shutting down: never auto-restart
+        this.onTunnelUp = null;   // (url) => void — set by mount(); fires on auto-restart too
         this.publicProto = publicProto;
         // Loopback bind → no LAN interface can actually reach the daemon, so
         // advertising interface IPs would hand the phone a connection-refused
@@ -55,13 +62,15 @@ class PairingManager {
 
     async start() {
         if (this.state === 'starting' || this.state === 'online') return this.snapshot();
+        this._stopped = false;
+        this._clearRestart();
         this.state = 'starting';
         this.error = null;
         try {
             // On a machine with no tunnel provider, openTunnel downloads
             // cloudflared first (~20 MB). Live progress lands in the snapshot
             // so the widget's 6s status poll can narrate the one-time setup.
-            this.tunnel = await openTunnel(this.port, p => { this.progress = p; });
+            this.tunnel = await this._openTunnel(this.port, p => { this.progress = p; });
             this.progress = null;
             if (!this.tunnel) {
                 this.state = 'error';
@@ -72,7 +81,7 @@ class PairingManager {
             this.state = 'online';
             this.startedAt = Date.now();
             if ('onDeath' in this.tunnel) {
-                this.tunnel.onDeath = () => this._reset('tunnel exited');
+                this.tunnel.onDeath = () => this._onTunnelDeath();
             }
             return this.snapshot();
         } catch (err) {
@@ -91,13 +100,13 @@ class PairingManager {
         this.state = 'starting';
         this.error = null;
         try {
-            const t = await adopt(this.port);
+            const t = await this._adopt(this.port);
             if (!t) { this.state = 'idle'; return this.snapshot(); }
             this.tunnel = t;
             this.publicUrl = t.url;
             this.state = 'online';
             this.startedAt = Date.now();
-            if ('onDeath' in t) t.onDeath = () => this._reset('tunnel exited');
+            if ('onDeath' in t) t.onDeath = () => this._onTunnelDeath();
             return this.snapshot();
         } catch (err) {
             this.state = 'idle';
@@ -110,16 +119,49 @@ class PairingManager {
     // graceful daemon restart and the next boot can re-adopt it. Used on
     // shutdown; contrast with stop(), which is an explicit user teardown.
     detach() {
+        this._detached = true;
+        this._clearRestart();
         this.tunnel = null;
         this._reset(null);
     }
 
     stop() {
+        this._stopped = true;
+        this._clearRestart();
         if (this.tunnel) {
             try { this.tunnel.close(); } catch (_) {}
         }
         this._reset(null);
         return this.snapshot();
+    }
+
+    // The tunnel process died underneath us (sleep, network loss, edge reset).
+    // Until 2026-08-25 this parked the manager in `error` until a human clicked
+    // START, so the phone's link stayed dead for hours. Now it re-opens the
+    // tunnel by itself after a short delay. Quick tunnels can't keep their URL,
+    // so onTunnelUp lets index.js re-announce and re-allow the new origin.
+    _onTunnelDeath() {
+        // A late exit notice for a tunnel we already stopped/detached is noise.
+        if (this._stopped || this._detached) return;
+        this._reset('tunnel exited — restarting');
+        this._clearRestart();
+        this._restartTimer = setTimeout(() => {
+            this._restartTimer = null;
+            this.start().then(snap => {
+                if (snap.state === 'online' && snap.publicUrl) {
+                    console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (re-opened after the previous tunnel exited)`);
+                    if (typeof this.onTunnelUp === 'function') { try { this.onTunnelUp(snap.publicUrl); } catch (_) {} }
+                } else if (!this._stopped && !this._detached) {
+                    // Provider still down (no network yet?) — keep trying.
+                    this._onTunnelDeath();
+                }
+            }).catch(() => { if (!this._stopped && !this._detached) this._onTunnelDeath(); });
+        }, this._restartDelayMs);
+        if (this._restartTimer.unref) this._restartTimer.unref();
+    }
+
+    _clearRestart() {
+        if (this._restartTimer) { clearTimeout(this._restartTimer); this._restartTimer = null; }
     }
 
     _reset(error) {
@@ -150,6 +192,7 @@ async function toSvg(text, { size = 220 } = {}) {
 }
 
 function mount(app, requireAuthed, pair, { onTunnelUp } = {}) {
+    if (onTunnelUp) pair.onTunnelUp = onTunnelUp;
     // Helper: tag the snapshot with the caller's session token so the desktop
     // can embed it as ?t= in the QR. The phone uses cookie auth via the WS
     // upgrade, but cookies don't cross devices — the token in the QR is what

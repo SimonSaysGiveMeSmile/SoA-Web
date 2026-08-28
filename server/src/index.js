@@ -257,6 +257,15 @@ function currentSession(req) {
 // keeps them on the same one across reloads.
 function requireAuthed(req, res, next) {
     let s = currentSession(req);
+    // Sliding expiry: re-issue a cookie older than a day so an active browser
+    // never crosses the hard Max-Age. Crossing it silently re-provisions the
+    // browser onto a fresh EMPTY session (see auth.COOKIE_RENEW_AFTER_MS).
+    if (s) {
+        const raw = auth.readCookie(req.headers.cookie || '', auth.COOKIE_NAME);
+        if (raw && auth.shouldRenew(auth.issuedAt(raw, SIGN_KEY))) {
+            res.setHeader('Set-Cookie', auth.makeCookie(auth.issue(s.token, SIGN_KEY), { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
+        }
+    }
     // Pairing-token attach: a request carrying a valid per-session token (?t= or
     // Bearer) binds to that session even with no cookie — this is how a phone
     // that scanned the QR authenticates. Mint the cookie so its later
@@ -626,8 +635,10 @@ server.on('upgrade', (req, socket, head) => {
     // divergence. Only a session that already has tabs is trusted over primary.
     const existingHasTabs = existing && existing.tabMgr && existing.tabMgr.order.length > 0;
     const isLocal = sessionManager.isLocalRequest(req);
+    const tokenSessionHasTabs = !!(tokenSession && tokenSession.tabMgr && tokenSession.tabMgr.order.length > 0);
     const decision = tunnelGate.decideWsBind({
-        tokenSession, existingHasTabs, isLocal, openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN,
+        tokenSession, tokenSessionHasTabs, existingHasTabs, isLocal, openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN,
+        primaryExists: !!_findPrimarySession(),
     });
 
     if (decision.action === 'reject') {
@@ -648,8 +659,9 @@ server.on('upgrade', (req, socket, head) => {
         const primary = _findPrimarySession();
         if (primary && primary !== existing) {
             if (existing) dbg('ws-upgrade', 'cookie session', existing.id.slice(0, 8), 'is empty — sharing primary', primary.id.slice(0, 8));
+            if (tokenSession) dbg('ws-upgrade', 'token session', tokenSession.id.slice(0, 8), 'is empty — sharing primary', primary.id.slice(0, 8));
             session = primary;
-            via = existing ? 'primary-over-empty-cookie' : 'primary-share';
+            via = tokenSession ? decision.via : (existing ? 'primary-over-empty-cookie' : 'primary-share');
         } else if (existing) {
             session = existing; via = 'cookie-empty';
         } else {
@@ -790,18 +802,14 @@ function onWsConnect(ws, session, req) {
             const shellEnv = envStore.getEnvForShell();
             const savedSb = tabPersist.loadScrollback();
             const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
-            // Multiset of live cwds: each live tab consumes one matching saved
-            // entry, so projects with several saved tabs still restore fully.
-            const liveByCwd = new Map();
-            for (const id of session.tabMgr.order) {
-                const t = session.tabMgr.tabs.get(id);
-                if (t && t.cwd) liveByCwd.set(t.cwd, (liveByCwd.get(t.cwd) || 0) + 1);
-            }
+            // Live cwd multiset across EVERY session (tabPersist.liveCwdCounts):
+            // a saved tab is re-opened only when no session at all has a live
+            // shell for it. Counting just this session re-launched the whole
+            // running fleet into an empty session on 2026-08-25.
+            const plan = tabPersist.planRestore(saved.tabs, tabPersist.liveCwdCounts(sessions.sessions.values()));
             const restoredTabs = [];
-            let skipped = 0;
-            saved.tabs.forEach((entry, i) => {
-                const have = liveByCwd.get(entry.cwd) || 0;
-                if (have > 0) { liveByCwd.set(entry.cwd, have - 1); skipped++; return; }
+            const skipped = plan.skipped;
+            plan.open.forEach(({ entry, index: i }) => {
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
                 const sb = sbList[i];
                 const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
@@ -819,7 +827,7 @@ function onWsConnect(ws, session, req) {
                 if (tab && cwd) restoredTabs.push({ tab, cwd });
             });
             console.log(`restore-on-connect: rehydrated ${restoredTabs.length}/${saved.tabs.length} saved tab(s)`
-                + (skipped ? ` (${skipped} already live)` : ''));
+                + (skipped ? ` (${skipped} already live in some session)` : ''));
             // A fresh daemon respawns dead shells, so each tab's Claude
             // conversation is gone unless we resume it. Auto-resume the tabs
             // whose cwd has a recent transcript (SOA_WEB_NO_AUTO_RESUME=1 off).
