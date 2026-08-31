@@ -13,6 +13,12 @@ const os = require('os');
 
 const COOKIE_NAME = 'soa_web_auth';
 const COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 7;  // 7 days
+// Re-issue a cookie once it is this old. Without a sliding window an active
+// browser crosses the hard Max-Age mid-session: its next request mints a NEW,
+// empty session, and the WS bind that follows can rehydrate the saved fleet on
+// top of the one still running (2026-08-25: 7-day cookie lapsed at 17:31, the
+// phone bound to the fresh empty session at 21:10, every agent got doubled).
+const COOKIE_RENEW_AFTER_MS = 60 * 60 * 24 * 1000;
 
 const SIGN_KEY_FILE = require('./stateDir').stateFile('sign-key');
 
@@ -53,6 +59,21 @@ function verify(signed, key) {
 function issue(subject, key) {
     const payload = JSON.stringify({ sub: subject, iat: Date.now() });
     return sign(Buffer.from(payload).toString('base64url'), key);
+}
+
+// iat (ms) baked into a signed cookie, or null when it doesn't verify.
+function issuedAt(signedCookie, key) {
+    const decoded = verify(signedCookie, key);
+    if (!decoded) return null;
+    try {
+        const iat = JSON.parse(Buffer.from(decoded, 'base64url').toString('utf8')).iat;
+        return Number.isFinite(iat) ? iat : null;
+    } catch (_) { return null; }
+}
+
+function shouldRenew(iatMs, nowMs = Date.now()) {
+    if (!Number.isFinite(iatMs)) return true;
+    return nowMs - iatMs >= COOKIE_RENEW_AFTER_MS;
 }
 
 function readCookie(header, name) {
@@ -103,6 +124,7 @@ function constantTimeEq(a, b) {
 }
 
 module.exports = {
+    issuedAt, shouldRenew, COOKIE_RENEW_AFTER_MS,
     COOKIE_NAME,
     resolveSignKey,
     sign, verify, issue,

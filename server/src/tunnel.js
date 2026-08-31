@@ -29,6 +29,20 @@ const { ensureCloudflared } = require('./tunnelProvision');
 // when the desktop is redeployed or refreshed.
 const STATE_FILE = require('./stateDir').stateFile('tunnel.json');
 
+// cloudflared gives up and EXITS once a connection has failed to reconnect this
+// many times (its default is 5). A laptop sleeping through more than a few
+// backoff rounds came back to a dead tunnel twice on 2026-08-25, and a quick
+// tunnel has a single connection — no HA sibling to carry it. Retry far longer.
+const CF_RETRIES = String(parseInt(process.env.SOA_WEB_CF_RETRIES || '40', 10) || 40);
+// Cloudflare publishes the *.trycloudflare.com record a few seconds AFTER
+// cloudflared prints the URL. Handing it out before then means the first client
+// lookup is an NXDOMAIN that resolvers cache for the zone's negative TTL (30 min
+// — every fresh link looked "down" on 2026-08-25). Wait, bounded, for DoH to
+// see the A record before the URL goes anywhere.
+const CF_DNS_WAIT_MS = parseInt(process.env.SOA_WEB_CF_DNS_WAIT_MS || '20000', 10);
+// cloudflared keeps logging for the life of the tunnel; keep only the tail.
+const CF_LOG_CAP = 64 * 1024;
+
 function _saveState(state) {
     try {
         fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
@@ -60,6 +74,18 @@ function _dohResolve4(host) {
         req.on('error', () => resolve(null));
         req.setTimeout(5000, () => { try { req.destroy(); } catch (_) {} resolve(null); });
     });
+}
+
+// Poll DoH until `host` has an A record, or the budget runs out (then publish
+// anyway — a late record is better than no tunnel).
+async function _waitForDns(host, budgetMs) {
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+        if (await _dohResolve4(host)) return true;
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    dbg('tunnel', 'DNS for', host, 'not visible via DoH after', budgetMs, 'ms — publishing anyway');
+    return false;
 }
 
 // One GET to url/api/ping. opts.ip pins a resolved IP via a custom lookup (the
@@ -196,20 +222,21 @@ async function _tryCloudflared(port, onProgress) {
         // _findCloudflaredPid. Without it a standalone binary self-updates
         // (~24h) and re-execs, minting a NEW trycloudflare URL out from under
         // the paired phone and defeating adopt()'s same-URL restart survival.
-        const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`, '--no-autoupdate'], {
+        const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`, '--retries', CF_RETRIES, '--no-autoupdate'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
         });
 
+        let buf = '';
         const url = await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 dbg('tunnel', 'cloudflared timed out after 30s waiting for URL; last output:', buf.slice(-400));
                 try { proc.kill(); } catch (_) {}
                 reject(new Error('cloudflared timeout'));
             }, 30000);
-            let buf = '';
             const onData = chunk => {
                 buf += chunk.toString();
+                if (buf.length > CF_LOG_CAP) buf = buf.slice(-CF_LOG_CAP);
                 // (?!api\.) — cloudflared's own log mentions its API endpoint
                 // https://api.trycloudflare.com while REQUESTING the tunnel;
                 // matching the first *.trycloudflare.com in the buffer handed
@@ -227,16 +254,22 @@ async function _tryCloudflared(port, onProgress) {
             proc.on('exit', code => { clearTimeout(timeout); dbg('tunnel', 'cloudflared exited early, code', code, '— output:', buf.slice(-400)); reject(new Error('cloudflared exit ' + code)); });
         });
 
+        let host = null;
+        try { host = new URL(url).hostname; } catch (_) {}
+        if (host) await _waitForDns(host, CF_DNS_WAIT_MS);
+
         // Remember it and let the parent exit independently of it.
         _saveState({ provider: 'cloudflared', url, pid: proc.pid, port, startedAt: Date.now() });
         try { proc.unref(); } catch (_) {}
 
         let dead = false;
         let onDeath = null;
-        proc.on('exit', () => {
+        proc.on('exit', (code, signal) => {
             if (dead) return;
             dead = true;
-            dbg('tunnel', 'cloudflared process exited (tunnel down):', url);
+            // Always logged (not just dbg): two silent deaths on 2026-08-25 left
+            // nothing to diagnose. The tail of cloudflared's own log says why.
+            console.log(`SoA-Web tunnel: cloudflared exited (code ${code}${signal ? ', signal ' + signal : ''}) — ${url} is down. Last output: ${buf.slice(-800).replace(/\s+/g, ' ')}`);
             _clearState();
             if (onDeath) onDeath();
         });

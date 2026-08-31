@@ -234,3 +234,21 @@ test('tabManager: cwd change rewrites auto title and re-runs disambiguation', ()
     mgr._refreshAutoTitles();
     assert.deepEqual(mgr.list().map(t => t.title), ['Hireal', 'other']);
 });
+
+test('auth: issuedAt reads iat from a signed cookie and rejects tampering', () => {
+    const key = 'x'.repeat(32);
+    const before = Date.now();
+    const cookie = auth.issue('tok', key);
+    const iat = auth.issuedAt(cookie, key);
+    assert.ok(iat >= before && iat <= Date.now());
+    assert.equal(auth.issuedAt(cookie + 'x', key), null);
+    assert.equal(auth.issuedAt(cookie, 'y'.repeat(32)), null);
+});
+
+test('auth: shouldRenew slides the cookie once it is a day old (or unreadable)', () => {
+    const now = 10_000_000_000;
+    assert.equal(auth.shouldRenew(now - 1000, now), false);
+    assert.equal(auth.shouldRenew(now - auth.COOKIE_RENEW_AFTER_MS + 1, now), false);
+    assert.equal(auth.shouldRenew(now - auth.COOKIE_RENEW_AFTER_MS, now), true);
+    assert.equal(auth.shouldRenew(null, now), true);
+});

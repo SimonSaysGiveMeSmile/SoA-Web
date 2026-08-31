@@ -34,8 +34,19 @@ function httpMayProvision({ isLocal, openTunnel, sessionTokenMode }) {
 // tabs; then — only for trusted callers — the primary-share / new-session
 // fallback the local desktop relies on. A remote caller with none of those is
 // an anonymous tunnel visitor → reject (no primary-share to strangers).
-function decideWsBind({ tokenSession, existingHasTabs, isLocal, openTunnel, sessionTokenMode }) {
-    if (tokenSession)   return { action: 'bind', source: 'token',  via: 'pair-token' };
+function decideWsBind({ tokenSession, tokenSessionHasTabs, existingHasTabs, isLocal, openTunnel, sessionTokenMode, primaryExists }) {
+    if (tokenSession) {
+        // The pairing token proves the caller was handed this session's QR by
+        // its owner. But when that session is EMPTY while a populated primary
+        // exists (the desktop's cookie lapsed and it was re-provisioned, then
+        // shared its new token), binding to it shows the phone no tabs and —
+        // worse — lets restore-on-connect rehydrate the saved fleet next to
+        // the one already running. Share the primary; the token stays the
+        // authorization. Callers that don't report primaryExists keep the old
+        // token-wins behaviour.
+        if (tokenSessionHasTabs || !primaryExists) return { action: 'bind', source: 'token', via: 'pair-token' };
+        return { action: 'bind', source: 'primary-or-new', via: 'primary-over-empty-token' };
+    }
     if (existingHasTabs) return { action: 'bind', source: 'cookie', via: 'cookie' };
     if (isLocal || openTunnel || sessionTokenMode) {
         return { action: 'bind', source: 'primary-or-new', via: 'primary-share' };
