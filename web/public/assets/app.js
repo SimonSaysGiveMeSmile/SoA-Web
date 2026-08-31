@@ -22,7 +22,7 @@ import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=26';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
-import { mountContextPanel } from '/assets/contextPanel.js?v=4';
+import { mountContextPanel } from '/assets/contextPanel.js?v=5';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});

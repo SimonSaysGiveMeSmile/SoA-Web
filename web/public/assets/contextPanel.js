@@ -393,6 +393,9 @@ class ContextCanvas {
         this._sub.textContent = '—';
         this._turns.textContent = '';
         this._thread.replaceChildren(el('p', { class: 'ctx-muted', text: msg }));
+        // Say something in every band, or a canvas with no session reads as a
+        // rendering bug rather than an empty state.
+        this._arts.replaceChildren(el('p', { class: 'ctx-muted', text: '—' }));
     }
 }
 
