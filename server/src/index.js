@@ -50,6 +50,7 @@ const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const procMem          = require('./procMem');
 const claudeSessions   = require('./claudeSessions');
+const contextCanvas    = require('./contextCanvas');
 const tabApi           = require('./tabApi');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
@@ -409,6 +410,7 @@ app.get('/api/user/stats', requireAuthed, async (req, res) => {
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
 consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
+contextCanvas.mount(app, requireAuthed);
 claudeUsage.mount(app, requireAuthed);
 
 // Manual daemon restart from the ⋯ MORE menu (authed — the paired user can fire

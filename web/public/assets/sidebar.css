@@ -1,8 +1,10 @@
 /* ── Sidebar layout ─────────────────────────────────────────────────────
    The stage is a two-column grid when the sidebar is visible, collapsing
    to a single-column terminal when toggled off. */
-.stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
-.stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+.stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr var(--soa-ctx-w, 340px); grid-template-areas: 'sidebar terms context' 'status status status'; }
+.stage.no-sidebar { grid-template-columns: 1fr var(--soa-ctx-w, 340px); grid-template-areas: 'terms context' 'status status'; }
+.stage.no-context { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
+.stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 .terms { grid-area: terms; }
 .sidebar { grid-area: sidebar; border-right: 1px solid var(--soa-line); border-left: none; background: var(--soa-bg-panel); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .stage.no-sidebar .sidebar { display: none; }
@@ -347,34 +349,45 @@
 .clog-wrn .clog-msg { color: var(--soa-yellow); }
 .clog-err .clog-msg { color: var(--soa-red); }
 
-/* ── Scrollbars ─────────────────────────────────────────────────────────
-   The sidebar's vertical scrollers get the same treatment .cat-strip gives
-   the horizontal filmstrip (styles.css): a thin bar on a transparent track,
-   line-soft thumb, accent-dim on hover. Colors come from tokens, so each UI
-   language restyles it for free.
+/* ── Scrollbars ──────────────────────────────────────────────
+   Every sidebar scroller gets what .cat-strip (styles.css) gives the horizontal
+   filmstrip: a thin bar on a transparent track, line-soft thumb, accent-dim on
+   hover. Colors come from tokens, so each UI language restyles it for free.
 
    Compound selector on purpose: minimal.css and liquid.css both set a wider
-   `[data-ui="..."] ::-webkit-scrollbar`, which ties this rule on specificity
-   and loads later. `.stage .sidebar` outranks it without !important. */
+   `[data-ui="..."] ::-webkit-scrollbar`, which ties these rules on specificity
+   and loads later. `.stage <el>` outranks them without !important.
+
+   Every selector below carries its pseudo-element. A bare `.stage .smgr-list` in
+   a ::-webkit-scrollbar group applies the bar's own metrics to the CONTAINER,
+   which collapses it to 8px — keep the suffix on every line. */
 .stage .sidebar,
 .stage .port-scan-list,
 .stage .smgr-list,
-.stage .clog-scroll {
+.stage .clog-scroll,
+.stage .ctx-thread,
+.stage .ctx-steps {
     scrollbar-width: thin;
     scrollbar-color: var(--soa-line-soft) transparent;
 }
 .stage .sidebar::-webkit-scrollbar,
 .stage .port-scan-list::-webkit-scrollbar,
-.stage .smgr-list,
-.stage .clog-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.stage .smgr-list::-webkit-scrollbar,
+.stage .clog-scroll::-webkit-scrollbar,
+.stage .ctx-thread::-webkit-scrollbar,
+.stage .ctx-steps::-webkit-scrollbar { width: 8px; height: 8px; }
 .stage .sidebar::-webkit-scrollbar-track,
 .stage .port-scan-list::-webkit-scrollbar-track,
-.stage .smgr-list,
-.stage .clog-scroll::-webkit-scrollbar-track { background: transparent; }
+.stage .smgr-list::-webkit-scrollbar-track,
+.stage .clog-scroll::-webkit-scrollbar-track,
+.stage .ctx-thread::-webkit-scrollbar-track,
+.stage .ctx-steps::-webkit-scrollbar-track { background: transparent; }
 .stage .sidebar::-webkit-scrollbar-thumb,
 .stage .port-scan-list::-webkit-scrollbar-thumb,
-.stage .smgr-list,
-.stage .clog-scroll::-webkit-scrollbar-thumb {
+.stage .smgr-list::-webkit-scrollbar-thumb,
+.stage .clog-scroll::-webkit-scrollbar-thumb,
+.stage .ctx-thread::-webkit-scrollbar-thumb,
+.stage .ctx-steps::-webkit-scrollbar-thumb {
     background: var(--soa-line-soft);
     border-radius: 4px;
     /* liquid.css and minimal.css inset their thumb with `border: 3px solid` +
@@ -386,14 +399,18 @@
 }
 .stage .sidebar::-webkit-scrollbar-thumb:hover,
 .stage .port-scan-list::-webkit-scrollbar-thumb:hover,
-.stage .smgr-list,
-.stage .clog-scroll::-webkit-scrollbar-thumb:hover { background: var(--soa-accent-dim); }
+.stage .smgr-list::-webkit-scrollbar-thumb:hover,
+.stage .clog-scroll::-webkit-scrollbar-thumb:hover,
+.stage .ctx-thread::-webkit-scrollbar-thumb:hover,
+.stage .ctx-steps::-webkit-scrollbar-thumb:hover { background: var(--soa-accent-dim); }
 /* The corner only shows when a scroller has both bars; left unpainted it is a
    pale square against the panel. */
 .stage .sidebar::-webkit-scrollbar-corner,
 .stage .port-scan-list::-webkit-scrollbar-corner,
-.stage .smgr-list,
-.stage .clog-scroll::-webkit-scrollbar-corner { background: transparent; }
+.stage .smgr-list::-webkit-scrollbar-corner,
+.stage .clog-scroll::-webkit-scrollbar-corner,
+.stage .ctx-thread::-webkit-scrollbar-corner,
+.stage .ctx-steps::-webkit-scrollbar-corner { background: transparent; }
 
 /* Memory bar: used sits in accent, reclaimable cache trails behind it in a
    dimmer tone. Only the RAM widget uses .bar, so splitting it is contained. */
@@ -403,4 +420,109 @@
     background: var(--soa-line-soft);
     border-left: 1px solid var(--soa-bg-panel);
     transition: width 0.5s ease;
+}
+
+/* ── Context canvas (right) ─────────────────────────────────────────────
+   One canvas per Claude session: what you asked, where you are, what is left.
+   Borrows the sidebar's tokens and mono micro-type so it reads as the same
+   product, but drops the .widget frame — this is one continuous surface, not a
+   stack of instruments. */
+.context-panel {
+    grid-area: context;
+    border-left: 1px solid var(--soa-line);
+    background: var(--soa-bg-panel);
+    display: flex; flex-direction: column;
+    min-width: 0; overflow: hidden;
+}
+.stage.no-context .context-panel { display: none; }
+
+.ctx-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    padding: 9px 12px; border-bottom: 1px solid var(--soa-line);
+    font-family: var(--font-display); flex: 0 0 auto;
+}
+.ctx-brand { font-size: 10px; letter-spacing: 0.3em; color: var(--soa-accent);
+    text-shadow: 0 0 6px rgba(var(--soa-accent-rgb), 0.3); }
+.ctx-turns { font-family: var(--font-mono); font-size: 9.5px; color: var(--soa-accent-dim);
+    font-variant-numeric: tabular-nums; }
+
+/* Bands stack; only the thread flexes, so WORKSPACE and NEXT STEPS keep their
+   height and the prompt history absorbs the rest of the column. */
+.ctx-band { display: flex; flex-direction: column; min-height: 0;
+    border-bottom: 1px solid var(--soa-line-soft); }
+.ctx-band:last-child { border-bottom: none; }
+.ctx-band-thread { flex: 1 1 auto; min-height: 120px; }
+.ctx-band-h {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    padding: 7px 12px 5px; flex: 0 0 auto;
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.22em;
+    color: var(--soa-accent-dim); background: var(--soa-bg-panel);
+    position: sticky; top: 0; z-index: 1;
+}
+.ctx-sub { letter-spacing: 0.08em; color: var(--soa-accent); opacity: 0.75; }
+.ctx-muted { margin: 0; padding: 6px 12px 10px; font-family: var(--font-mono);
+    font-size: 10px; color: var(--soa-accent-dim); opacity: 0.7; }
+
+/* The turn thread. The number is the turn index — real ordering information, so
+   it earns the rail it sits in. */
+.ctx-thread { overflow-y: auto; padding: 2px 0 8px; display: flex; flex-direction: column; }
+.ctx-turn { display: grid; grid-template-columns: 26px 1fr; gap: 8px;
+    padding: 5px 12px 5px 4px; border-left: 2px solid transparent; }
+.ctx-turn.latest { border-left-color: var(--soa-accent);
+    background: rgba(var(--soa-accent-rgb), 0.045); }
+.ctx-turn-m { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 1px; }
+.ctx-turn-n { font-family: var(--font-mono); font-size: 9px; color: var(--soa-accent-dim);
+    font-variant-numeric: tabular-nums; }
+.ctx-turn.latest .ctx-turn-n { color: var(--soa-accent); }
+.ctx-turn-t { font-family: var(--font-mono); font-size: 8.5px; color: var(--soa-accent-dim); opacity: 0.6; }
+.ctx-turn-x {
+    margin: 0; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.55;
+    color: var(--soa-fg); min-width: 0;
+    /* Prompts are prose of any length, including pasted blocks: wrap hard rather
+       than letting one long token widen the whole column. */
+    overflow-wrap: anywhere; white-space: pre-wrap;
+    max-height: 7.2em; overflow: hidden;
+}
+.ctx-turn.latest .ctx-turn-x { max-height: none; }
+
+.ctx-facts { padding: 2px 12px 9px; display: flex; flex-direction: column; gap: 2px; }
+.ctx-fact { display: grid; grid-template-columns: 52px 1fr; gap: 8px;
+    font-family: var(--font-mono); font-size: 10px; align-items: baseline; }
+.ctx-fact-k { color: var(--soa-accent-dim); letter-spacing: 0.12em; }
+.ctx-fact-v { color: var(--soa-fg); min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+
+.ctx-steps { padding: 2px 12px 4px; display: flex; flex-direction: column; gap: 1px;
+    max-height: 30vh; overflow-y: auto; }
+.ctx-step { display: grid; grid-template-columns: auto 1fr auto; gap: 7px;
+    align-items: baseline; font-family: var(--font-mono); font-size: 10.5px; }
+.ctx-step-mark, .ctx-step-del {
+    background: transparent; border: none; padding: 1px 2px; cursor: pointer;
+    font-family: var(--font-mono); color: var(--soa-accent-dim); line-height: 1.4;
+}
+.ctx-step-mark { font-size: 11px; }
+.ctx-step.in_progress .ctx-step-mark { color: var(--soa-yellow); }
+.ctx-step.completed .ctx-step-mark { color: var(--soa-accent); }
+.ctx-step-mark:hover, .ctx-step-del:hover { color: var(--soa-accent); }
+.ctx-step-x { color: var(--soa-fg); min-width: 0; overflow-wrap: anywhere; }
+.ctx-step.completed .ctx-step-x { color: var(--soa-accent-dim); text-decoration: line-through; opacity: 0.65; }
+.ctx-step-del { opacity: 0; }
+.ctx-step:hover .ctx-step-del, .ctx-step-del:focus-visible { opacity: 1; }
+.ctx-step-add {
+    margin: 4px 12px 10px; padding: 4px 7px; background: transparent;
+    border: 1px solid var(--soa-line-soft); border-radius: 2px;
+    font-family: var(--font-mono); font-size: 10px; color: var(--soa-fg);
+}
+.ctx-step-add::placeholder { color: var(--soa-accent-dim); opacity: 0.6; }
+.ctx-step-add:focus { outline: none; border-color: var(--soa-accent); }
+
+/* Below this width three columns stop being readable, so the canvas becomes an
+   overlay on the terminal — the same move the sidebar already makes. */
+@media (max-width: 1100px) {
+    .stage, .stage.no-sidebar, .stage.no-context, .stage.no-sidebar.no-context { position: relative; }
+    .context-panel { position: absolute; top: 0; right: 0; bottom: 24px;
+        width: min(var(--soa-ctx-w, 340px), 86vw); z-index: 6;
+        box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28); }
+    .stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
+    .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 }

@@ -22,6 +22,7 @@ import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
+import { mountContextPanel } from '/assets/contextPanel.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
@@ -371,6 +372,9 @@ class Shell {
         this.bridge = bridge;
         this.audio = audio || { play: () => {}, setEnabled: () => {} };
         this.tabs = new Map();
+        // id -> cwd, straight off the snapshot; the context canvas reads the active
+        // tab's cwd from here rather than duplicating a tabs poll.
+        this._tabCwd = new Map();
         this.order = [];
         this.activeId = null;
         // CHAT view state — IM-style messaging with the active agent (the top tab
@@ -645,6 +649,33 @@ class Shell {
             this.audio.play('panels');
             this._fitActive();
         });
+
+        // Context canvas. Meant to stay open, so it defaults ON and only a saved
+        // '0' closes it; phones start closed because it would cover the terminal.
+        const ctxBtn = $('#toggle-context');
+        let ctxOff = window.matchMedia('(max-width: 1100px)').matches;
+        try {
+            const saved = localStorage.getItem('soa_context_off');
+            if (saved != null) ctxOff = saved === '1';
+        } catch (_) {}
+        stageEl.classList.toggle('no-context', ctxOff);
+        const setContextOff = (off) => {
+            stageEl.classList.toggle('no-context', off);
+            try { localStorage.setItem('soa_context_off', off ? '1' : '0'); } catch (_) {}
+            this._fitActive();
+        };
+        if (ctxBtn) {
+            ctxBtn.addEventListener('click', () => {
+                setContextOff(!stageEl.classList.contains('no-context'));
+                this.audio.play('panels');
+            });
+        }
+        document.addEventListener('keydown', e => {
+            if (!(e.ctrlKey && e.shiftKey)) return;
+            if (e.key !== 'K' && e.key !== 'k') return;
+            e.preventDefault();
+            setContextOff(!stageEl.classList.contains('no-context'));
+        });
         // Tapping the scrim behind the overlay sidebar closes it.
         stageEl.addEventListener('click', e => {
             if (e.target !== stageEl) return;
@@ -863,7 +894,7 @@ class Shell {
         if (!Array.isArray(tabs)) return;
         const known = new Set(tabs.map(t => t.id));
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
-        for (const t of tabs) { this._ensureTab(t.id, t.title); if (t.mem != null) this._tabMem.set(t.id, t.mem); }
+        for (const t of tabs) { this._ensureTab(t.id, t.title); if (t.mem != null) this._tabMem.set(t.id, t.mem); if (t.cwd) this._tabCwd.set(t.id, t.cwd); }
         // Snapshot is the authoritative order: a MOVE_TAB from this client, or
         // from another device sharing the session, must reorder the local tab
         // bar. _ensureTab only appends new ids, so adopt the snapshot order.
@@ -6195,6 +6226,12 @@ async function bootServerMode({ backend, token }) {
     $('#status-session').textContent = crossOrigin ? new URL(backend).host : location.host;
 
     mountSidebar($('#sidebar'), { audio, backend, token });
+    // One canvas for the page; it rebinds as the active tab's Claude session
+    // changes instead of ever mounting a second one.
+    mountContextPanel($('#context'), {
+        backend,
+        getCwd: () => shell._tabCwd.get(shell.activeId) || null,
+    });
 
     setTimeout(() => {
         $('#boot').classList.add('hidden');

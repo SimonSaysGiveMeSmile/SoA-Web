@@ -155,7 +155,7 @@
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
   <link rel="stylesheet" href="/assets/styles.css?v=88">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=38">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=40">
   <link rel="stylesheet" href="/assets/minimal.css?v=4">
   <link rel="stylesheet" href="/assets/liquid.css?v=10">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
@@ -827,6 +827,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
     <header class="topbar">
       <div class="brand">
         <button id="toggle-sidebar" data-icon="◨" data-i18n="topbar.sidebar" data-i18n-title="topbar.sidebar_title" title="Toggle sidebar (Ctrl+Shift+B)">◨ SIDE</button>
+        <button id="toggle-context" data-icon="◧" data-i18n="topbar.context" data-i18n-title="topbar.context_title" title="Toggle context canvas (Ctrl+Shift+K)">◧ CTX</button>
         <span class="soa-brand-name">
           <a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a>
         </span>
@@ -874,6 +875,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
     <main class="stage">
       <div id="terms" class="terms"></div>
       <aside id="sidebar" class="sidebar"></aside>
+      <aside id="context" class="context-panel" aria-label="Session context"></aside>
       <div class="status-bar">
         <span id="status-session">—</span>
         <span id="status-tabs" data-i18n="status.tabs_other" data-i18n-vars='{"n":0}'>0 tabs</span>
