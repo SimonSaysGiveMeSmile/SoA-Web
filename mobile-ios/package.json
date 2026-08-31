@@ -2,7 +2,7 @@
   "name": "soa-mobile-ios",
   "version": "1.0.0",
   "private": true,
-  "description": "Son of Anton — native iOS shell (Capacitor) bundling the /m/ mobile client",
+  "description": "Son of Anton \u2014 native iOS shell (Capacitor) bundling the /m/ mobile client",
   "scripts": {
     "sync-web": "node scripts/sync-web.js",
     "build": "npm run sync-web && npx cap sync ios && node scripts/fix-spm.js",
@@ -15,5 +15,8 @@
     "@capacitor/ios": "^8.4.1",
     "@capacitor/splash-screen": "^8.0.1",
     "@capacitor/status-bar": "^8.0.2"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9"
   }
 }
