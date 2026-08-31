@@ -533,20 +533,33 @@ class CpuInfoWidget extends Widget {
 class RamWatcherWidget extends Widget {
     constructor({ parent }) {
         super({ titleKey: 'widget.memory', parent, intervalMs: 2500 });
-        this._bar = $el('div', { class: 'bar' }, [$el('span', { class: 'bar-fill' })]);
+        // Two segments: real memory in use, then reclaimable file cache behind it.
+        // One bar at 98% told the old story; this one shows why that was wrong.
+        this._bar = $el('div', { class: 'bar bar-split' }, [
+            $el('span', { class: 'bar-fill' }),
+            $el('span', { class: 'bar-cache' }),
+        ]);
         this.body.appendChild(this._bar);
     }
     async tick() {
         if (isSandbox()) { this._renderSandbox(); return; }
         try {
             const { data } = await jget('/api/ram');
+            const cachePct = data.total > 0 ? (data.cached / data.total) * 100 : 0;
             this._bar.querySelector('.bar-fill').style.width = `${data.usedPct}%`;
-            this.setRows([
+            this._bar.querySelector('.bar-cache').style.width = `${cachePct}%`;
+            // Pressure is the kernel's own verdict and the only row worth
+            // alarming on — a full-looking bar with normal pressure is healthy.
+            const pressure = data.pressure || 'unknown';
+            const rows = [
                 ['USED', fmtBytes(data.used)],
-                ['FREE', fmtBytes(data.free)],
+                ['CACHED', fmtBytes(data.cached)],
                 ['TOTAL', fmtBytes(data.total)],
-                ['LOAD', `${data.usedPct.toFixed(1)}%`, data.usedPct > 85 ? 'warn' : ''],
-            ]);
+                ['LOAD', `${data.usedPct.toFixed(1)}%`, data.usedPct > 90 ? 'warn' : ''],
+            ];
+            if (data.swapUsed > 0) rows.push(['SWAP', fmtBytes(data.swapUsed), 'warn']);
+            if (pressure !== 'unknown') rows.push(['PRESSURE', pressure.toUpperCase(), pressure === 'normal' ? '' : 'warn']);
+            this.setRows(rows);
             this.body.appendChild(this._bar);
         } catch (e) { this.setRows([['ERR', e.message]]); }
     }
