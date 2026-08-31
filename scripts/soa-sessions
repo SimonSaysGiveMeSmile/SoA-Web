@@ -13,6 +13,7 @@
  *   soa-sessions send <id> <text...>      # type text + Enter into a session
  *   soa-sessions say  <id> <text...>      # type text WITHOUT Enter
  *   soa-sessions compact <id>             # run /compact in a session
+ *   soa-sessions meet start <room> --with <cohort>   # convene a group meeting
  *
  * Endpoint discovery: SOA_WEB_TTS_URL (injected into SoA shells) → bridge.json →
  * default port. Loopback only.
@@ -209,7 +210,8 @@ function cohort(arg) {
     if (/^\d+(,\d+)+$/.test(arg)) return arg.split(',').map(Number);
     // all | working | attention | stuck | idle | done | highContext | limited
     // | active | inactive | archive  (lifecycle cohorts; resolved server-side)
-    // | group:<name>  (a user-defined static group; resolved server-side)
+    // | group:<name>    (a user-defined static group; resolved server-side)
+    // | meeting:<room>  (everyone currently in that group meeting)
     return arg;
 }
 
@@ -495,6 +497,52 @@ function fmtList(snap, costByTab) {
         if (cmd === 'interrupt') {
             const r = await post({ action: 'interrupt', id: Number(rest[0]) });
             console.log(JSON.stringify(r));
+            process.exit(r.ok ? 0 : 1);
+        }
+        // meet — group meetings: put several agents and the user in ONE room and
+        // let them answer each other. `start` takes a cohort selector, the same
+        // vocabulary as goal/broadcast (ids, a comma-list, `group:<name>`, a
+        // signal name), and always excludes YOUR tab — a manager convenes a
+        // meeting, it doesn't sit in it. Agents inside a room use `soa-meet`.
+        //   meet start <room> --with <cohort> [--title "…"] [--mode round|free]
+        //   meet end <room> | meet who <room> | meet rooms | meet say <room> <msg…>
+        if (cmd === 'meet') {
+            const sub = rest[0];
+            let r;
+            if (sub === 'start') {
+                const room = rest[1];
+                const withSel = argval('--with');
+                if (!room || !withSel) {
+                    console.error('usage: soa-sessions meet start <room> --with <cohort> [--title "…"] [--mode round|free]');
+                    process.exit(1);
+                }
+                r = await post({
+                    action: 'meet-start', room, with: cohort(withSel),
+                    title: argval('--title'), mode: argval('--mode'),
+                    includeInactive: hasFlag('--include-inactive'), self: SELF,
+                });
+            } else if (sub === 'end') {
+                r = await post({ action: 'meet-end', room: rest[1], why: argval('--why') || 'closed' });
+            } else if (sub === 'who' || sub === 'rooms' || sub === 'ls' || sub == null) {
+                r = await post({ action: 'meet-list' });
+                if (r.ok && (sub === 'who') && rest[1]) r = { ok: true, room: (r.rooms || []).find(x => x.room === rest[1]) || null };
+            } else if (sub === 'say') {
+                // The manager speaking as itself would be indistinguishable from an
+                // agent turn and would spend the relay budget instead of recharging
+                // it, so there is no `meet say` here. Note the convener is NOT a
+                // member of the room it started (meet start excludes the caller),
+                // so `soa-meet say` is refused NOT_MEMBER until it also joins —
+                // say so explicitly rather than sending the caller into a 409.
+                console.error('soa-sessions meet: no `meet say` — a manager convenes a room, it is not in it.\n'
+                    + '  to take part too:  soa-meet join <room>   (then `soa-meet say <room> <msg…>`)\n'
+                    + '  to just follow it: soa-meet read <room>\n'
+                    + '  the USER speaks from the dashboard or phone (that is what recharges the relay budget).');
+                process.exit(1);
+            } else {
+                console.error('usage: soa-sessions meet start|end|who|rooms …');
+                process.exit(1);
+            }
+            console.log(JSON.stringify(r, null, 2));
             process.exit(r.ok ? 0 : 1);
         }
         // todo — manager to-do store: add <text…> | done|toggle <id> | del <id> | list

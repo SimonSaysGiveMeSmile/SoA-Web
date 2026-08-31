@@ -229,6 +229,21 @@
     background: rgba(var(--soa-accent-rgb), 0.05);
 }
 
+/* ── CONTRIBUTE (public repo) ──────────────────────────────────────────── */
+.contrib-link {
+    text-decoration: none;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+}
+.contrib-stats {
+    margin-top: 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: rgba(var(--soa-accent-rgb), 0.72);
+    white-space: pre;
+}
+.contrib-stats:empty { display: none; }
+
 /* ── Sidebar tools + CUSTOMIZE (add/remove/reorder) ────────────────────── */
 .sidebar-tools { display: flex; }
 .sidebar-widgets { display: flex; flex-direction: column; gap: 10px; }
@@ -343,18 +358,22 @@
    and loads later. `.stage .sidebar` outranks it without !important. */
 .stage .sidebar,
 .stage .port-scan-list,
+.stage .smgr-list,
 .stage .clog-scroll {
     scrollbar-width: thin;
     scrollbar-color: var(--soa-line-soft) transparent;
 }
 .stage .sidebar::-webkit-scrollbar,
 .stage .port-scan-list::-webkit-scrollbar,
+.stage .smgr-list,
 .stage .clog-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .stage .sidebar::-webkit-scrollbar-track,
 .stage .port-scan-list::-webkit-scrollbar-track,
+.stage .smgr-list,
 .stage .clog-scroll::-webkit-scrollbar-track { background: transparent; }
 .stage .sidebar::-webkit-scrollbar-thumb,
 .stage .port-scan-list::-webkit-scrollbar-thumb,
+.stage .smgr-list,
 .stage .clog-scroll::-webkit-scrollbar-thumb {
     background: var(--soa-line-soft);
     border-radius: 4px;
@@ -367,11 +386,13 @@
 }
 .stage .sidebar::-webkit-scrollbar-thumb:hover,
 .stage .port-scan-list::-webkit-scrollbar-thumb:hover,
+.stage .smgr-list,
 .stage .clog-scroll::-webkit-scrollbar-thumb:hover { background: var(--soa-accent-dim); }
 /* The corner only shows when a scroller has both bars; left unpainted it is a
    pale square against the panel. */
 .stage .sidebar::-webkit-scrollbar-corner,
 .stage .port-scan-list::-webkit-scrollbar-corner,
+.stage .smgr-list,
 .stage .clog-scroll::-webkit-scrollbar-corner { background: transparent; }
 
 /* Memory bar: used sits in accent, reclaimable cache trails behind it in a

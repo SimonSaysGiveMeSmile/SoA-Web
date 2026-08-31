@@ -54,12 +54,14 @@ const tabApi           = require('./tabApi');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
+const automations      = require('./automations');
 const preview          = require('./preview');
 const pasteImage       = require('./pasteImage');
 const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
+const meetings         = require('./meetings');
 const tunnelGate       = require('./tunnelGate');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
@@ -450,11 +452,13 @@ tabApi.mount(app, requireAuthed, sessions);
 envStore.mount(app, requireAuthed);
 autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
+automations.mount(app, requireAuthed, { autopilot: () => autoPilot.instance.getState() });
 preview.mount(app, requireAuthed);
 pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
+meetings.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
@@ -754,6 +758,11 @@ function onWsConnect(ws, session, req) {
             try {
                 const m = sessionManager.ensure(session);
                 m.emitStuckSweep();   // time-derived 'stuck' → manager event
+                // Advance any open group meeting: relay new lines into the
+                // members that are ready for a turn. Rides this tick rather than
+                // its own timer so there is nothing extra to unref or tear down,
+                // and so it inherits the manager entitlement check above.
+                m.tickMeetings();
                 m.broadcast();
             } catch (_) {}
         }, 3000);
@@ -814,8 +823,8 @@ function onWsConnect(ws, session, req) {
             // A fresh daemon respawns dead shells, so each tab's Claude
             // conversation is gone unless we resume it. Auto-resume the tabs
             // whose cwd has a recent transcript (SOA_WEB_NO_AUTO_RESUME=1 off).
-            if (restoredTabs.length && process.env.SOA_WEB_NO_AUTO_RESUME !== '1') {
-                scheduleAutoResume(restoredTabs);
+            if (restoredTabs.length && automations.enabled('autoResume')) {
+                scheduleAutoResume(restoredTabs, session.tabMgr);
             }
         }
 
@@ -1002,7 +1011,7 @@ function streamBackgroundReplay(ws, session, tabList, activeId) {
 // once the shell has had a moment to print its prompt, staggered so N claudes
 // don't all cold-start at once. The project scan is deferred off the connect
 // path. Disable with SOA_WEB_NO_AUTO_RESUME=1.
-function scheduleAutoResume(restoredTabs) {
+function scheduleAutoResume(restoredTabs, tabMgr) {
     setTimeout(() => {
         let map;
         try { map = claudeSessions.latestSessionByCwd(72); }
@@ -1018,6 +1027,7 @@ function scheduleAutoResume(restoredTabs) {
                 // resume-vs-fresh chain the manager's `spawn` action uses, so
                 // boot-restore and agent-spawn can't drift apart. No-op if the
                 // PTY already exited.
+                automations.announce(tabMgr, tab.id, 'auto-resume');
                 try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId: hit.sessionId, coldFallback: false }); } catch (_) {}
             }, wait);
         }
@@ -1106,6 +1116,10 @@ function handleInput(session, d, ws) {
         case INPUT_KIND.TERM_KEYS: {
             const tab = mgr.get(d.id);
             if (tab) {
+                // A client that fans input out (broadcast / CAST) marks the
+                // first frame with `via`, so the divider names the source
+                // instead of the text impersonating local typing.
+                if (typeof d.via === 'string' && d.via) automations.announce(mgr, d.id, d.via.slice(0, 40));
                 const text = d.text || '';
                 tab.write(text);
                 // Enter (CR/LF) is the only keystroke that plausibly ends
@@ -1158,8 +1172,13 @@ function handleInput(session, d, ws) {
             break;
         }
         case INPUT_KIND.SHELL_COMMAND: {
+            // Only CLI tooling (soa-relaunch etc.) sends this kind — never a
+            // human keystroke — so it is always attributed.
             const tab = mgr.get(d.id);
-            if (tab && typeof d.line === 'string') tab.write(d.line + '\r');
+            if (tab && typeof d.line === 'string') {
+                automations.announce(mgr, d.id, (typeof d.via === 'string' && d.via) ? d.via.slice(0, 40) : 'api · shell-command');
+                tab.write(d.line + '\r');
+            }
             break;
         }
         case INPUT_KIND.CTX_REPORT: {
@@ -1367,7 +1386,7 @@ process.on('unhandledRejection', (err) => crashFlush('unhandledRejection', err))
 // a later browser using the same cookie binds to the same (now non-empty) session
 // and skips restore.
 function scheduleBootResume() {
-    if (process.env.SOA_WEB_NO_BOOT_RESUME === '1') return;
+    if (!automations.enabled('bootResume')) return;
     const delay = parseInt(process.env.SOA_WEB_BOOT_RESUME_DELAY_MS || '4000', 10);
     const MAX_ATTEMPTS = 3;
     // UNCONDITIONAL rehydration: the only thing that cancels an attempt is

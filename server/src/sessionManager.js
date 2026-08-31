@@ -23,7 +23,9 @@ const envStore = require('./envStore');
 const claudeSessions = require('./claudeSessions');
 const sessionModel = require('./sessionModel');
 const localKey = require('./localKey');
+const automations = require('./automations');
 const entitlements = require('./entitlements');
+const meetStore = require('./meetStore');
 
 // ── Manager config + pending resume schedules (persisted across restarts) ──
 const { STATE_DIR } = require('./stateDir');
@@ -58,9 +60,17 @@ function loadManagerState() {
             // brings. Non-active projects are skipped by cohort fan-outs + supervisors,
             // so the manager stops spending tokens (and the weekly quota) on them.
             lifecycles: (d.lifecycles && typeof d.lifecycles === 'object' && !Array.isArray(d.lifecycles)) ? d.lifecycles : {},
+            // Group meetings, keyed by room name ({ "<room>": {members,…} }).
+            // Members are keyed by cwd (with the join-time tab id as a hint) for
+            // the same reason groups and lifecycles are: tab ids are reassigned
+            // on every daemon restart, so a room stored by id would silently
+            // reconvene the wrong agents. The transcript is NOT here — it lives
+            // in the append-only bus ledger (see meetStore.js); this is only the
+            // roster + turn-taking budgets, which is what must survive a restart.
+            meetings: (d.meetings && typeof d.meetings === 'object' && !Array.isArray(d.meetings)) ? d.meetings : {},
         };
     } catch (_) {
-        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, schedules: [], todos: [], groups: {}, lifecycles: {} };
+        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, schedules: [], todos: [], groups: {}, lifecycles: {}, meetings: {} };
     }
 }
 
@@ -287,6 +297,15 @@ function resolveCohort(snapshot, sel) {
         const g = gm[1].trim();
         return g ? snapshot.sessions.filter(x => x.group === g).map(x => x.id) : [];
     }
+    // Live meeting roster: `meeting:<room>` → every agent currently in that room.
+    // Reads snapshot.meeting (set by snapshot()) rather than manager state so this
+    // stays pure and testable, exactly like the group: arm above. Empty room name
+    // resolves to [] — never a whole-fleet fan-out from a typo.
+    const mm = /^meeting:(.+)$/i.exec(str);
+    if (mm) {
+        const room = mm[1].trim();
+        return room ? snapshot.sessions.filter(x => x.meeting === room).map(x => x.id) : [];
+    }
     const flag = {
         working: x => x.status === 'working',
         attention: x => x.attention,
@@ -340,6 +359,143 @@ const EVENT_CAP   = 500;             // depth of the in-memory manager event rin
 // restart" gap a bare cursor>head check misses).
 const BOOT_EPOCH  = `${process.pid}.${Date.now()}`;
 
+// ── Group meetings: turn-taking limits ──────────────────────────────────────
+// A meeting types real prompts into real Claude sessions, so every one of these
+// is a spend control as much as a correctness control. Each has an env override
+// because the right value depends on the fleet's size and the user's quota.
+const envInt = (name, dflt, min, max) => {
+    const n = parseInt(process.env[name] || '', 10);
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : dflt;
+};
+// How many agent-only relay rounds may follow one human message. This is THE
+// anti-echo-storm control: agents answer each other for at most this many hops,
+// then the room goes quiet until the user speaks again. Only a human message
+// recharges it, so a meeting can never sustain itself.
+const MEET_RELAY_MAX  = envInt('SOA_MEET_RELAY_MAX', 2, 0, 8);
+// Minimum gap between two pokes into the SAME tab. Guards against a burst of
+// messages inside one tick turning into a burst of prompts.
+const MEET_POKE_MS    = envInt('SOA_MEET_POKE_MS', 8_000, 1_000, 120_000);
+// Hard stop on a single room's length. On exhaustion the room adjourns itself
+// rather than quietly ignoring messages.
+const MEET_MSG_BUDGET = envInt('SOA_MEET_MSG_BUDGET', 40, 4, 400);
+// A room with no human message for this long adjourns. The user walking away
+// mid-meeting must not leave agents prompting each other.
+const MEET_IDLE_MS    = envInt('SOA_MEET_IDLE_MS', 5 * 60_000, 60_000, 60 * 60_000);
+// Roster caps. Every extra member is another full Claude turn per round, so the
+// soft cap is what the UI offers and the hard cap is what the API accepts.
+const MEET_MAX_MEMBERS = envInt('SOA_MEET_MAX_MEMBERS', 6, 2, 12);
+// How many recent lines ride along inside a poke. Inlining the transcript delta
+// is what lets an agent answer WITHOUT spending a tool call to catch up.
+const MEET_RECENT_K   = envInt('SOA_MEET_RECENT_K', 4, 1, 10);
+
+/**
+ * Resolve a stored roster to live tab ids. Pure and exported so the resolution
+ * rule is testable without a daemon.
+ *
+ * Identity here is a genuinely awkward problem, and the shape of this function
+ * is the answer to it. A member cannot be stored by tab id alone: ids are
+ * reassigned on every daemon restart and by soa-restore-fleet, so a room would
+ * reconvene whoever happens to hold id 3 next boot. It cannot be stored by cwd
+ * alone either: TabManager explicitly supports SIBLING tabs in one directory
+ * (it auto-titles them "api-1", "api-2"), so a cwd-keyed roster would collapse
+ * two distinct agents into one member and would tag every tab in that folder as
+ * a participant — letting a non-member speak and get prompted.
+ *
+ * So a member is stored as (cwd, title, join-time id) and resolved in
+ * decreasing-confidence order:
+ *   1. the exact tab id, while it still points at the same cwd — the common
+ *      no-restart case, unambiguous even among siblings;
+ *   2. else the unique live tab matching BOTH cwd and title — how siblings are
+ *      told apart after a restart, since titles persist with the tabs;
+ *   3. else the unique live tab matching the cwd — covers a tab renamed since
+ *      the room opened;
+ *   4. else nobody. Poking the wrong agent is much worse than a member sitting
+ *      the round out, so every ambiguity resolves to `null`.
+ *
+ * Each entry reports `resolved` ('id' | 'title' | 'cwd' | 'ambiguous' | 'gone')
+ * so the roster UI can say *why* someone is unreachable instead of silently
+ * dropping them. Two members never resolve to the same tab: an id already
+ * claimed earlier in the roster is off the table for everyone after it.
+ */
+function meetRosterIds(snapshot, members) {
+    const sessions = snapshot.sessions || [];
+    const byId = new Map(sessions.map(x => [x.id, x]));
+    const taken = new Set();
+    const out = [];
+    const claim = (m, row, how) => { taken.add(row.id); out.push({ ...m, id: row.id, title: row.title, resolved: how }); };
+    for (const m of members || []) {
+        const cwd = m && m.cwd ? m.cwd : null;
+        const title = m && m.title ? m.title : null;
+        const hintId = m && m.tabId != null ? Number(m.tabId) : null;
+        const exact = hintId != null ? byId.get(hintId) : null;
+        if (exact && !taken.has(exact.id) && (!cwd || exact.cwd === cwd)) { claim(m, exact, 'id'); continue; }
+        const free = sessions.filter(x => !taken.has(x.id));
+        const byTitle = (cwd && title) ? free.filter(x => x.cwd === cwd && x.title === title) : [];
+        if (byTitle.length === 1) { claim(m, byTitle[0], 'title'); continue; }
+        const byCwd = cwd ? free.filter(x => x.cwd === cwd) : [];
+        if (byCwd.length === 1) { claim(m, byCwd[0], 'cwd'); continue; }
+        const contenders = byTitle.length || byCwd.length;
+        out.push({ ...m, id: null, resolved: contenders > 1 ? 'ambiguous' : 'gone' });
+    }
+    return out;
+}
+
+/**
+ * Decide whether a member may be prompted right now. Pure and exported: this is
+ * the single gate between "there is something new to say" and "type into a live
+ * Claude TUI", so every reason to hold back lives here and is unit-tested.
+ *
+ * `m` is a snapshot row plus `{looksDone, lastPokeAt}`. Returns
+ * `{ok:true}` or `{ok:false, why:'<reason>'}` — the reason rides the
+ * `meeting-skip` event so a stalled room is diagnosable from `soa-sessions
+ * watch` rather than by guesswork.
+ */
+function shouldPoke(m, opts = {}) {
+    if (!m) return { ok: false, why: 'gone' };
+    const now = opts.now != null ? opts.now : Date.now();
+    const pokeMs = opts.pokeMs != null ? opts.pokeMs : MEET_POKE_MS;
+    const relayMax = opts.relayMax != null ? opts.relayMax : MEET_RELAY_MAX;
+    if (m.id == null) return { ok: false, why: 'unresolved' };
+    // Budget first — it is the loop guard, so it must win over every "but this
+    // agent looks ready" condition below.
+    if (opts.relayHops != null && opts.relayHops >= relayMax) return { ok: false, why: 'relay-budget' };
+    // A rate-limited agent cannot answer; typing at it just queues garbage that
+    // lands whenever the limit lifts.
+    if (m.limited) return { ok: false, why: 'limited' };
+    // Sitting at a permission dialog: submitToTab presses Enter, which would
+    // ANSWER the dialog instead of starting a turn. Never poke into a prompt.
+    if (m.status === 'attention') return { ok: false, why: 'attention' };
+    // Mid-turn. Wait for the input box rather than interleaving with live work.
+    if (!m.looksDone) return { ok: false, why: 'busy' };
+    if (m.lastPokeAt && (now - m.lastPokeAt) < pokeMs) return { ok: false, why: 'cooldown' };
+    // Near the context ceiling a fresh turn is expensive and likely to trigger a
+    // compact mid-meeting. Let the throttle loop deal with it first.
+    if (m.ctxPct != null && m.ctxPct >= HIGH_CTX) return { ok: false, why: 'high-context' };
+    if (m.lifecycle && m.lifecycle !== 'active') return { ok: false, why: 'lifecycle' };
+    return { ok: true };
+}
+
+/**
+ * The line typed into a member's terminal. Everything the agent needs to answer
+ * is INLINE — the room, how many lines are new, the recent transcript with
+ * speaker labels, and the exact command to reply with — so a turn costs one
+ * prompt and no catch-up tool call.
+ *
+ * The two rules at the end are load-bearing, not decoration: an agent that
+ * blocks in `soa-meet watch` never ends its turn and stalls the whole room, and
+ * an agent that writes an essay defeats the groupchat pacing.
+ */
+function meetPokeLine(room, msgs, opts = {}) {
+    const k = opts.recentK != null ? opts.recentK : MEET_RECENT_K;
+    const recent = (msgs || []).slice(-k)
+        .map(m => `${m.who === 'user' ? 'you' : '#' + m.who}: "${m.text}"`)
+        .join(' | ');
+    const n = (msgs || []).length;
+    return `[meeting ${room}] ${n} new · you're up. RECENT: ${recent}`
+        + ` — reply with ONE line: soa-meet say ${room} "<=2 sentences>".`
+        + ' Do not block on `soa-meet watch`; answer, then stop.';
+}
+
 class SessionManager {
     constructor(session) {
         this.session = session;
@@ -356,6 +512,12 @@ class SessionManager {
         this._seq = 0;                   // monotonic sequence (head)
         this._waiters = new Set();       // parked long-poll responders
         this._stuckEmitted = new Map();  // tabId → true once per stuck episode
+        // ── Meetings: HOT state only ────────────────────────────────────────
+        // `<room>\0<cwd>` → {lastPokeAt, cursor}. Deliberately transient: a
+        // restart should re-brief every member from the durable ledger rather
+        // than assume they still remember a conversation their process never saw.
+        // Durable roster + budgets live in this.state.meetings (manager.json).
+        this._meetSeat = new Map();
         // Fire due resume schedules even when no client is connected.
         this._schedTimer = setInterval(() => this._fireDue(), 15_000);
         if (this._schedTimer.unref) this._schedTimer.unref();
@@ -402,6 +564,415 @@ class SessionManager {
         else this.state.lifecycles[cwd] = lc;
         this._saveState();
         return lc || 'active';
+    }
+
+    // ── Group meetings ──────────────────────────────────────────────────────
+    // A meeting is a groupchat between the user (as manager) and a hand-picked
+    // set of agents. The user opens a room, the daemon relays each line to the
+    // other members by typing a short brief into their terminals, and each agent
+    // answers with one `soa-meet say`. That relay is the whole mechanism: there
+    // is no shared Claude context, so the ledger + the inlined delta in each
+    // poke IS the shared context, and it is what lets separate instances
+    // actually respond to each other instead of talking past each other.
+
+    // Open room a cwd currently belongs to, or null. Closed rooms don't count —
+    // an adjourned meeting must not keep an agent flagged as in-session.
+    _meetingFor(tabId, resolved) {
+        if (tabId == null) return null;
+        const map = resolved || this._resolvedRooms();
+        for (const [name, ids] of map) if (ids.has(tabId)) return name;
+        return null;
+    }
+
+    /**
+     * Every OPEN room's roster, resolved to live tab ids: `Map<room, Set<id>>`.
+     *
+     * This — not a cwd comparison — is the authoritative answer to "is this tab
+     * in a meeting?". Resolution has to run for membership, because a member is
+     * identified by (cwd, title, join-time id) and only the resolver knows which
+     * live tab a stored member actually is. Asking by cwd alone would tag every
+     * SIBLING tab in a project as a participant, letting an uninvited agent
+     * speak in the room and get prompted by it.
+     */
+    _resolvedRooms() {
+        const sessions = this._bareSessions();
+        const out = new Map();
+        const rooms = this.state.meetings || {};
+        for (const name of Object.keys(rooms)) {
+            const r = rooms[name];
+            if (!r || r.closedAt) continue;
+            const ids = new Set();
+            for (const e of meetRosterIds({ sessions }, r.members)) if (e.id != null) ids.add(e.id);
+            out.set(name, ids);
+        }
+        return out;
+    }
+
+    // Transient per-seat state (poke cooldown + how far this member has been
+    // briefed). Keyed by LIVE tab id: seats are hot state, rebuilt from scratch
+    // after a restart anyway, and ids are never reused within one daemon run —
+    // so this sidesteps the stored-identity problem entirely, and a mid-meeting
+    // rename cannot silently reset somebody's seat. `floor` seeds the cursor so
+    // a member is never briefed on transcript from before it joined, and after a
+    // restart is re-briefed from the ledger rather than assumed to remember a
+    // conversation its own process never saw.
+    _seat(room, tabId, floor = 0) {
+        const k = room + '\u0000' + tabId;
+        let s = this._meetSeat.get(k);
+        if (!s) { s = { lastPokeAt: 0, cursor: Number(floor) || 0, skipWhy: null }; this._meetSeat.set(k, s); }
+        return s;
+    }
+
+    // Normalize a member spec ({id} or {cwd}) into the stored shape. The title
+    // is captured alongside the cwd because it is what tells SIBLING tabs in one
+    // directory apart after a restart has reassigned their ids.
+    _meetMember(spec) {
+        const mgr = this.session.tabMgr;
+        let cwd = spec && typeof spec.cwd === 'string' && spec.cwd ? spec.cwd : null;
+        const tabId = spec && spec.id != null ? Number(spec.id) : null;
+        let title = spec && typeof spec.title === 'string' && spec.title ? spec.title : null;
+        if (tabId != null && mgr) {
+            const tab = mgr.get(tabId);
+            if (tab) { cwd = cwd || tab.cwd; title = title || tab.title; }
+        }
+        if (!cwd) return null;
+        return { cwd, tabId, title, baseSeq: 0 };
+    }
+
+    /**
+     * Open a room. Returns `{ok, room}` or `{ok:false, error}`.
+     *
+     * The roster is capped because every member is a full Claude turn per round;
+     * `convener` is excluded by the caller (the manager must not prompt itself).
+     * A tab may only sit in one open room at a time — two rooms poking one
+     * terminal would interleave two conversations into one prompt stream.
+     */
+    meetStart({ room, title, members, mode, convener } = {}) {
+        const name = String(room == null ? '' : room).trim().slice(0, 40);
+        if (!name) return { ok: false, error: 'room name required' };
+        if (!this.state.meetings) this.state.meetings = {};
+        const existing = this.state.meetings[name];
+        if (existing && !existing.closedAt) return { ok: false, error: 'room already open', code: 'ROOM_OPEN' };
+        // Dedup by TAB, not by cwd: two sibling tabs in one project are two
+        // distinct agents (TabManager even auto-titles them api-1 / api-2), and
+        // collapsing them would silently drop a member the user picked.
+        const seen = new Set();
+        const rooms0 = this._resolvedRooms();
+        const roster = [];
+        for (const spec of members || []) {
+            const m = this._meetMember(spec);
+            if (!m) continue;
+            const key = m.tabId != null ? '#' + m.tabId : m.cwd + '\u0000' + (m.title || '');
+            if (seen.has(key)) continue;
+            const busy = m.tabId != null ? this._meetingFor(m.tabId, rooms0) : null;
+            if (busy) return { ok: false, error: `#${m.tabId} is already in meeting "${busy}"`, code: 'MEMBER_BUSY' };
+            seen.add(key);
+            roster.push(m);
+        }
+        if (roster.length < 1) return { ok: false, error: 'no resolvable members' };
+        if (roster.length > MEET_MAX_MEMBERS) {
+            return { ok: false, error: `too many members (${roster.length} > ${MEET_MAX_MEMBERS}) — a meeting costs one Claude turn per member per round`, code: 'ROSTER_CAP' };
+        }
+        // Baseline every member at the ledger head so reopening a room name does
+        // not replay the previous meeting's transcript into fresh terminals.
+        const base = meetStore.headSeq(name);
+        roster.forEach(m => { m.baseSeq = base; });
+        const now = Date.now();
+        const r = {
+            room: name,
+            title: String(title == null ? '' : title).trim().slice(0, 120) || name,
+            members: roster,
+            convener: convener == null ? 'user' : String(convener),
+            // 'round' asks members to answer in roster order (cheaper, calmer with
+            // many agents); 'free' lets everyone answer every message.
+            mode: mode === 'round' ? 'round' : (roster.length > 4 ? 'round' : 'free'),
+            createdAt: now,
+            lastHumanAt: now,
+            relayHops: 0,
+            msgBudget: MEET_MSG_BUDGET,
+            baseSeq: base,
+            headSeq: base,
+            closedAt: null,
+            closedWhy: null,
+        };
+        this.state.meetings[name] = r;
+        this._pruneMeetings();
+        this._saveState();
+        this._emit('meeting-open', roster[0] && roster[0].tabId ? roster[0].tabId : 0, {
+            detail: `${name} · ${roster.length} member(s) · mode ${r.mode}`,
+        });
+        this.broadcast();
+        return { ok: true, room: this.meetView(name) };
+    }
+
+    // Adjourn a room. Writes a closing line into the transcript so the reason is
+    // visible to anyone reading the ledger, not just to whoever saw the event.
+    meetEnd(room, why = 'closed') {
+        const r = (this.state.meetings || {})[room];
+        if (!r) return { ok: false, error: 'no such room' };
+        if (r.closedAt) return { ok: true, room: this.meetView(room), alreadyClosed: true };
+        r.closedAt = Date.now();
+        r.closedWhy = String(why).slice(0, 40);
+        meetStore.append(room, { v: 'say', room, who: 'system', text: `— meeting adjourned (${r.closedWhy})`, via: 'system' }, 'system');
+        this._saveState();
+        this._emit('meeting-close', 0, { detail: `${room} (${r.closedWhy})` });
+        this.broadcast();
+        return { ok: true, room: this.meetView(room) };
+    }
+
+    // Add/remove a member mid-meeting. A late joiner is baselined at the current
+    // head, so it is briefed on what happens next rather than the whole backlog.
+    meetJoin(room, spec) {
+        const r = (this.state.meetings || {})[room];
+        if (!r || r.closedAt) return { ok: false, error: 'no open room' };
+        const m = this._meetMember(spec);
+        if (!m) return { ok: false, error: 'cannot resolve member' };
+        // Already seated in THIS room (by live tab, not by directory) — idempotent.
+        const here = this._resolvedRooms().get(room) || new Set();
+        if (m.tabId != null && here.has(m.tabId)) return { ok: true, room: this.meetView(room) };
+        const busy = m.tabId != null ? this._meetingFor(m.tabId) : null;
+        if (busy) return { ok: false, error: `already in meeting "${busy}"`, code: 'MEMBER_BUSY' };
+        if ((r.members || []).length >= MEET_MAX_MEMBERS) return { ok: false, error: 'roster full', code: 'ROSTER_CAP' };
+        m.baseSeq = meetStore.headSeq(room);
+        r.members.push(m);
+        this._saveState();
+        this.broadcast();
+        return { ok: true, room: this.meetView(room) };
+    }
+
+    meetLeave(room, spec) {
+        const r = (this.state.meetings || {})[room];
+        if (!r) return { ok: false, error: 'no such room' };
+        const m = this._meetMember(spec);
+        const wantId = m && m.tabId != null ? m.tabId : null;
+        const cwd = m ? m.cwd : (spec && spec.cwd) || null;
+        if (!cwd && wantId == null) return { ok: false, error: 'cannot resolve member' };
+        const before = (r.members || []).length;
+        // Remove the ONE stored member that currently resolves to that tab. A
+        // cwd-wide filter would evict a sibling agent the user never excused.
+        const resolved = meetRosterIds({ sessions: this._bareSessions() }, r.members);
+        let dropIndex = -1;
+        if (wantId != null) {
+            // The caller named a LIVE tab, so only that tab may be excused: by id,
+            // or by (cwd, title) for a member whose stored id is stale. It must
+            // NOT fall through to a bare-cwd match — excusing a tab that already
+            // left would then evict whichever sibling still holds that directory.
+            dropIndex = resolved.findIndex(e => e.id === wantId);
+            if (dropIndex === -1 && cwd) {
+                dropIndex = resolved.findIndex(e => e.id == null && e.cwd === cwd && (!m.title || e.title === m.title));
+            }
+        } else if (cwd) {
+            // A cwd-only request is how a member whose tab is GONE gets excused
+            // (there is no id left to name it by), so prefer an unresolved seat
+            // and only then fall back to any member in that directory.
+            dropIndex = resolved.findIndex(e => e.id == null && e.cwd === cwd);
+            if (dropIndex === -1) dropIndex = resolved.findIndex(e => e.cwd === cwd);
+        }
+        if (dropIndex !== -1) {
+            r.members = (r.members || []).filter((_, i) => i !== dropIndex);
+            if (wantId != null) this._meetSeat.delete(room + '\u0000' + wantId);
+        }
+        this._saveState();
+        this.broadcast();
+        // An empty room is over — leaving the last member would otherwise leave a
+        // room "open" forever, blocking the name and burning the idle timer.
+        if (r.members.length === 0 && !r.closedAt) this.meetEnd(room, 'empty');
+        return { ok: true, removed: before !== r.members.length, room: this.meetView(room) };
+    }
+
+    /**
+     * Record one line in a room. `who` is 'user' for the manager or a tab id for
+     * an agent. Returns the appended message so the caller can echo it back.
+     *
+     * A HUMAN line resets the relay budget; an agent line does not. That single
+     * asymmetry is what makes a meeting terminate: agents can answer each other
+     * for MEET_RELAY_MAX rounds, then the room waits for the user.
+     */
+    meetSay(room, { who, cwd, text, via } = {}) {
+        const r = (this.state.meetings || {})[room];
+        if (!r) return { ok: false, error: 'no such room', code: 'NO_ROOM' };
+        if (r.closedAt) return { ok: false, error: 'meeting adjourned', code: 'ROOM_CLOSED' };
+        const body = String(text == null ? '' : text).trim();
+        if (!body) return { ok: false, error: 'text required' };
+        const isHuman = who === 'user' || who == null;
+        // Membership is decided by RESOLVED tab id, never by cwd: a sibling tab
+        // in a member's directory is a different agent and was not invited.
+        if (!isHuman) {
+            const here = this._resolvedRooms().get(room) || new Set();
+            if (!here.has(Number(who))) return { ok: false, error: 'not a member of this meeting', code: 'NOT_MEMBER' };
+        }
+        if ((r.msgBudget | 0) <= 0) {
+            this.meetEnd(room, 'budget');
+            return { ok: false, error: 'meeting message budget exhausted', code: 'BUDGET' };
+        }
+        const mgr = this.session.tabMgr;
+        const tab = (!isHuman && mgr && who != null) ? mgr.get(Number(who)) : null;
+        const from = isHuman ? 'you (manager)' : `#${who} ${(tab && tab.title) || ''}`.trim();
+        const rec = meetStore.append(room, {
+            v: 'say', room, who: isHuman ? 'user' : String(who), cwd: cwd || null,
+            text: body, via: via || (isHuman ? 'user' : 'cli'),
+        }, from);
+        if (!rec) return { ok: false, error: 'ledger write failed' };
+        r.msgBudget = (r.msgBudget | 0) - 1;
+        r.headSeq = Math.max(r.headSeq || 0, rec.seq);
+        if (isHuman) { r.lastHumanAt = Date.now(); r.relayHops = 0; }
+        // The speaker has by definition seen its own line — advance its own seat
+        // so the very next tick doesn't brief it on what it just said.
+        if (!isHuman) this._seat(room, Number(who), r.baseSeq).cursor = rec.seq;
+        this._saveState();
+        this._emit('meeting-say', isHuman ? 0 : Number(who), { detail: `${room}: ${meetStore.capLine(body, 80)}` });
+        const msg = meetStore.parseRecord(JSON.stringify(rec));
+        this.meetPush(room, msg);
+        this.broadcast();
+        return { ok: true, seq: rec.seq, msg };
+    }
+
+    meetRead(room, sinceSeq = 0, limit = 100) {
+        const r = (this.state.meetings || {})[room];
+        const out = meetStore.read(room, { sinceSeq, limit });
+        return { ok: true, room: r ? this.meetView(room) : null, ...out };
+    }
+
+    // Client-facing view of a room: roster resolved to live ids (with a reason
+    // when a member can't be resolved) plus the budgets the UI shows as meters.
+    meetView(room) {
+        const r = (this.state.meetings || {})[room];
+        if (!r) return null;
+        const snap = { sessions: this._bareSessions() };
+        const roster = meetRosterIds(snap, r.members).map(e => ({
+            cwd: e.cwd, id: e.id, title: e.title || null, resolved: e.resolved,
+            status: e.id != null ? this._state(e.id).status : null,
+        }));
+        return {
+            room: r.room, title: r.title, mode: r.mode,
+            members: roster,
+            live: roster.filter(e => e.id != null).length,
+            convener: r.convener,
+            createdAt: r.createdAt, lastHumanAt: r.lastHumanAt,
+            relayHops: r.relayHops | 0, relayMax: MEET_RELAY_MAX,
+            msgBudget: r.msgBudget | 0, headSeq: r.headSeq || 0,
+            closedAt: r.closedAt || null, closedWhy: r.closedWhy || null,
+            open: !r.closedAt,
+        };
+    }
+
+    // Minimal id/title/cwd rows for roster resolution. snapshot() itself calls
+    // meetView (for the meetings list), so meetView must NOT call snapshot() —
+    // this is the small, recursion-free substitute.
+    _bareSessions() {
+        const mgr = this.session.tabMgr;
+        if (!mgr) return [];
+        return mgr.order.map(id => {
+            const tab = mgr.get(id);
+            return { id, title: (tab && tab.title) || `tab ${id}`, cwd: (tab && tab.cwd) || null };
+        });
+    }
+
+    // Keep manager.json tidy: an unbounded closed-room history would grow
+    // forever. Ten adjourned rooms is plenty of scrollback for the UI.
+    _pruneMeetings() {
+        const rooms = this.state.meetings || {};
+        const closed = Object.keys(rooms)
+            .filter(k => rooms[k] && rooms[k].closedAt)
+            .sort((a, b) => rooms[a].closedAt - rooms[b].closedAt);
+        while (closed.length > 10) delete rooms[closed.shift()];
+    }
+
+    /**
+     * Advance every open room by one step. Called from the 3s supervisor tick —
+     * NOT its own timer, so there is nothing extra to tear down in destroy().
+     *
+     * The tick is the driver rather than the agents themselves, deliberately: an
+     * agent that blocked waiting for its turn would never end its Claude turn,
+     * and the room would deadlock behind a tool timeout. Here the daemon decides
+     * who is ready, types one brief into that terminal, and returns.
+     *
+     * It also POLLS readiness (`looksDone`) instead of waiting for a status
+     * event: `feed()` only emits on a status CHANGE, so an agent that was
+     * already at its input box can finish a turn without emitting anything at
+     * all — a room driven purely by events can wait forever for a wakeup that is
+     * never coming.
+     */
+    tickMeetings() {
+        const mgr = this.session.tabMgr;
+        if (!mgr) return;
+        const rooms = this.state.meetings || {};
+        const names = Object.keys(rooms);
+        if (!names.length) return;
+        const now = Date.now();
+        const snapSessions = this._bareSessions();
+        for (const room of names) {
+            const r = rooms[room];
+            if (!r || r.closedAt) continue;
+            // The user walked away: adjourn rather than leave agents prompting
+            // each other unattended.
+            if (r.lastHumanAt && (now - r.lastHumanAt) > MEET_IDLE_MS) { this.meetEnd(room, 'idle'); continue; }
+            if ((r.msgBudget | 0) <= 0) { this.meetEnd(room, 'budget'); continue; }
+
+            const roster = meetRosterIds({ sessions: snapSessions }, r.members).filter(e => e.id != null);
+            if (!roster.length) continue;
+
+            let minCursor = Infinity;
+            for (const e of roster) minCursor = Math.min(minCursor, this._seat(room, e.id, e.baseSeq || r.baseSeq).cursor);
+            if (!Number.isFinite(minCursor)) minCursor = r.baseSeq || 0;
+            // Nothing new for even the furthest-behind member → no disk read, no
+            // pokes. "Never poke when nothing is new" is the cheapest of all the
+            // spend controls, so it goes first.
+            if ((r.headSeq || 0) <= minCursor) continue;
+
+            const all = meetStore.read(room, { sinceSeq: minCursor, limit: 100 }).msgs;
+            if (!all.length) continue;
+            const head = all[all.length - 1].seq;
+            if (head > (r.headSeq || 0)) r.headSeq = head;   // pick up an out-of-band append
+
+            // 'round' mode: at most one member is prompted per tick, in roster
+            // order, so a big room reads as a turn-taking meeting instead of N
+            // simultaneous monologues (and costs one turn per tick, not N).
+            const order = r.mode === 'round' ? roster.slice(0, 1).concat(roster.slice(1)) : roster;
+            let poked = 0;
+            for (const e of order) {
+                const seat = this._seat(room, e.id, e.baseSeq || r.baseSeq);
+                // Never brief a member on its OWN line — that is the tightest
+                // possible echo loop (agent replies, gets told about its reply).
+                // Matched on speaker id, not cwd: a sibling tab in the same
+                // directory is a different agent and must still hear it.
+                const pending = all.filter(m => m.seq > seat.cursor && String(m.who) !== String(e.id));
+                if (!pending.length) continue;
+                const row = snapSessions.find(x => x.id === e.id) || {};
+                const st = this._state(e.id);
+                const gate = shouldPoke({
+                    ...row, id: e.id,
+                    status: st.status, ctxPct: st.ctxPct, limited: !!st.limit,
+                    lifecycle: this._lifecycleFor(row.cwd),
+                    looksDone: looksDone(st.recent),
+                    lastPokeAt: seat.lastPokeAt,
+                }, { now, relayHops: r.relayHops | 0 });
+                if (!gate.ok) {
+                    // Edge-triggered: one event per reason, not one every 3s. A
+                    // stalled room is then explainable from `soa-sessions watch`.
+                    if (seat.skipWhy !== gate.why) {
+                        seat.skipWhy = gate.why;
+                        this._emit('meeting-skip', e.id, { detail: `${room}: ${gate.why}` });
+                    }
+                    continue;
+                }
+                seat.skipWhy = null;
+                const tab = mgr.get(e.id);
+                if (!tab || tab.exited) continue;
+                submitToTab(tab, meetPokeLine(room, pending));
+                seat.lastPokeAt = now;
+                seat.cursor = head;
+                poked++;
+                this._emit('meeting-poke', e.id, { detail: `${room}: ${pending.length} new` });
+                if (r.mode === 'round') break;   // one turn per tick
+            }
+            // Count a relay round only when it was driven by agents. A human
+            // message must never spend the budget it just recharged.
+            if (poked > 0 && all[all.length - 1].who !== 'user') {
+                r.relayHops = (r.relayHops | 0) + 1;
+            }
+            if (poked > 0) this._saveState();
+        }
     }
 
     // ── One-shot "send text to tab at time" schedules ──
@@ -479,6 +1050,7 @@ class SessionManager {
                 for (const tid of mgr.order) { const t = mgr.get(tid); if (t && t.cwd === s.cwd) { tab = t; break; } }
             }
             if (!tab) continue;
+            automations.announce(mgr, tab.id, 'manager · scheduled');
             submitToTab(tab, s.text);
         }
         this.broadcast();
@@ -646,6 +1218,7 @@ class SessionManager {
         if (this._schedTimer) { clearInterval(this._schedTimer); this._schedTimer = null; }
         for (const w of this._waiters) { try { clearTimeout(w.timer); } catch (_) {} }
         this._waiters.clear();
+        this._meetSeat.clear();
     }
 
     // Build the supervisor view of every live tab.
@@ -653,6 +1226,9 @@ class SessionManager {
         const mgr = this.session.tabMgr;
         const order = mgr ? mgr.order : [];
         const now = Date.now();
+        // Resolve every open room's roster ONCE — it is O(rooms x members x tabs)
+        // and snapshot() runs on the 3s tick for every connected client.
+        const rooms = this._resolvedRooms();
         let managerTabId = null;
         let managerStatus = null;
         const sessions = order.map(id => {
@@ -680,6 +1256,10 @@ class SessionManager {
                 // Manager-only lifecycle label (active|inactive|archive), keyed by
                 // cwd. Cohort fan-outs + supervisors act on ACTIVE projects only.
                 lifecycle: this._lifecycleFor(tab && tab.cwd),
+                // Open meeting this agent is sitting in, or null. Also what the
+                // `meeting:<room>` cohort selector filters on, so the CLI and both
+                // UIs read one field instead of three lookups.
+                meeting: this._meetingFor(id, rooms),
                 // Current model (raw id, e.g. "claude-opus-4-8"), read from the
                 // live transcript so it tracks in-session /model switches. The
                 // client renders it as a tier-colored badge on the tab/tile.
@@ -705,12 +1285,21 @@ class SessionManager {
             idle: sessions.filter(x => x.idle).length,
             highContext: sessions.filter(x => x.highContext).length,
             limited: sessions.filter(x => x.limited).length,
+            inMeeting: sessions.filter(x => x.meeting).length,
         };
+        // Rooms ride the MANAGER snapshot (already pushed every 3s) so both the
+        // dashboard and the phone get the roster + budget meters with no new
+        // protocol type. Transcript deltas travel separately — see MSG.MEETING.
+        const meetings = Object.keys(this.state.meetings || {})
+            .map(name => this.meetView(name))
+            .filter(Boolean)
+            .sort((a, b) => (b.open - a.open) || (b.createdAt - a.createdAt));
         return {
             sessions, counts, ts: now,
             autoResume: this.state.autoResume,
             closeInactive: this.state.closeInactive === true,
             todos: this.state.todos,
+            meetings,
             managerTabId,
             managerActive: managerTabId != null,
             managerStatus,
@@ -719,6 +1308,14 @@ class SessionManager {
 
     broadcast() {
         try { this.session.send(frame(MSG.MANAGER, this.snapshot())); } catch (_) {}
+    }
+
+    // Push one meeting message to every connected client immediately. The 3s
+    // MANAGER snapshot carries the roster, but a groupchat needs its lines to
+    // land as they are said — a three-second lag reads as a broken chat.
+    meetPush(room, msg) {
+        if (!msg) return;
+        try { this.session.send(frame(MSG.MEETING, { room, msgs: [msg] })); } catch (_) {}
     }
 }
 
@@ -846,6 +1443,7 @@ function mount(app, requireAuthed, sessions) {
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
                 const text = String(body.text || '');
                 const submit = body.submit !== false;   // default: press Enter
+                automations.announce(mgr, id, 'manager · send');
                 if (submit) submitToTab(tab, text);      // reliable split-write
                 else writeToTab(tab, text);              // FIFO-ordered, no Enter
                 return res.json({ ok: true, id, sent: text.length, submitted: submit });
@@ -854,6 +1452,7 @@ function mount(app, requireAuthed, sessions) {
                 const id = Number(body.id);
                 const tab = mgr.get(id);
                 if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
+                automations.announce(mgr, id, 'manager · /compact');
                 submitToTab(tab, '/compact');
                 return res.json({ ok: true, id, compacted: true });
             }
@@ -1005,8 +1604,9 @@ function mount(app, requireAuthed, sessions) {
                     if (!tab || tab.exited) { targets.push({ id, ok: false, error: 'no live tab' }); return; }
                     const line = buildLine(tab);
                     const delay = i * 120; // stagger so N TUIs don't cold-start at once
-                    if (delay) { const tm = setTimeout(() => submitToTab(tab, line), delay); if (tm.unref) tm.unref(); }
-                    else submitToTab(tab, line);
+                    const fire = () => { automations.announce(mgr, id, 'manager · ' + verb); submitToTab(tab, line); };
+                    if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); }
+                    else fire();
                     targets.push({ id, line, ok: true });
                 });
                 return res.json({ ok: true, verb, count: targets.filter(t => t.ok).length, targets });
@@ -1023,7 +1623,7 @@ function mount(app, requireAuthed, sessions) {
                 ids.forEach((id, i) => {
                     const tab = mgr.get(id);
                     if (!tab || tab.exited) return;
-                    const fire = () => { if (submit) submitToTab(tab, text); else writeToTab(tab, text); };
+                    const fire = () => { automations.announce(mgr, id, 'manager · broadcast'); if (submit) submitToTab(tab, text); else writeToTab(tab, text); };
                     const delay = i * 120;
                     if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); } else fire();
                     hit.push(id);
@@ -1049,6 +1649,7 @@ function mount(app, requireAuthed, sessions) {
                 if (body.lifecycle && tab.cwd) man.setLifecycle(tab.cwd, body.lifecycle);
                 if (wantClaude) {
                     const tm = setTimeout(() => {
+                        automations.announce(mgr, tab.id, 'manager · spawn');
                         try { launchClaude(tab, tab.cwd, { resume, model }); } catch (_) {}
                         if (goalText) { const g = setTimeout(() => submitToTab(tab, '/goal ' + goalText), 3000); if (g.unref) g.unref(); }
                     }, 1200); // let the fresh shell print its prompt first
@@ -1110,6 +1711,77 @@ function mount(app, requireAuthed, sessions) {
                 man.broadcast();
                 return res.json({ ok: true, cwd, lifecycle });
             }
+
+            // ── Group meetings (the agent-facing half; `soa-meet` speaks this) ──
+            // The daemon is the SINGLE writer of a room's transcript, so the IM
+            // cap, the membership check, the event emit, and the relay all happen
+            // in exactly one place no matter who is talking.
+            //
+            // meet-say: one line into a room, from the CALLING tab. Identity is
+            // taken from the caller's own tab (body.self / body.id), never from a
+            // claimed name — otherwise any local process could speak as any agent.
+            if (action === 'meet-say') {
+                const room = String(body.room || '').trim();
+                const id = body.self != null ? Number(body.self) : (body.id != null ? Number(body.id) : null);
+                if (!room) return res.status(400).json({ ok: false, error: 'room required' });
+                if (id == null || !Number.isFinite(id)) {
+                    return res.status(400).json({ ok: false, error: 'cannot determine your tab — run inside a SoA tab' });
+                }
+                const tab = mgr.get(id);
+                if (!tab) return res.status(404).json({ ok: false, error: 'tab not found' });
+                const r = man.meetSay(room, { who: id, cwd: tab.cwd, text: body.text, via: 'cli' });
+                if (!r.ok) {
+                    // 409 for a policy refusal (adjourned / not a member / budget
+                    // spent) so the CLI can exit 3 and the agent stops trying.
+                    const code = r.code === 'NO_ROOM' ? 404 : (r.code ? 409 : 400);
+                    return res.status(code).json(r);
+                }
+                // Include the room view so the CLI can tell the speaker the room
+                // has gone QUIET (relay budget spent → it is the user's turn).
+                // Without it `soa-meet say` exits 0 silently and an agent has no
+                // way to know its line will not be relayed to anyone.
+                return res.json({ ...r, roomView: man.meetView(room) });
+            }
+            // meet-read: non-blocking transcript read. This is the agent default —
+            // there is deliberately no blocking read on this surface.
+            if (action === 'meet-read') {
+                const room = String(body.room || '').trim();
+                if (!room) return res.status(400).json({ ok: false, error: 'room required' });
+                return res.json(man.meetRead(room, Number(body.since) || 0, Number(body.limit) || 100));
+            }
+            // meet-list: every room the manager knows (open first).
+            if (action === 'meet-list') {
+                const rooms = Object.keys(man.state.meetings || {}).map(n => man.meetView(n)).filter(Boolean);
+                rooms.sort((a, b) => (b.open - a.open) || (b.createdAt - a.createdAt));
+                return res.json({ ok: true, rooms });
+            }
+            // meet-start: convene a room over a cohort selector. `self` is
+            // excluded — a manager agent runs the meeting, it doesn't sit in it.
+            if (action === 'meet-start') {
+                const room = String(body.room || '').trim();
+                const self = body.self != null ? Number(body.self) : null;
+                let ids = resolveTargets(body.with);
+                ids = activeOnlyIds(body.with, ids, man.snapshot(), body.includeInactive);
+                if (self != null) ids = ids.filter(x => x !== self);
+                const r = man.meetStart({
+                    room, title: body.title, mode: body.mode,
+                    members: ids.map(id => ({ id })),
+                    convener: self != null ? String(self) : 'user',
+                });
+                if (!r.ok) return res.status(r.code === 'ROOM_OPEN' || r.code === 'MEMBER_BUSY' || r.code === 'ROSTER_CAP' ? 409 : 400).json(r);
+                return res.json(r);
+            }
+            if (action === 'meet-end') {
+                const r = man.meetEnd(String(body.room || '').trim(), body.why || 'closed');
+                return res.status(r.ok ? 200 : 404).json(r);
+            }
+            if (action === 'meet-join' || action === 'meet-leave') {
+                const room = String(body.room || '').trim();
+                const id = body.id != null ? Number(body.id) : (body.self != null ? Number(body.self) : null);
+                if (!room || id == null || !Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'room and id required' });
+                const r = action === 'meet-join' ? man.meetJoin(room, { id }) : man.meetLeave(room, { id });
+                return res.status(r.ok ? 200 : (r.code ? 409 : 404)).json(r);
+            }
             return res.status(400).json({ ok: false, error: 'unknown action: ' + action });
         } catch (err) {
             return res.status(500).json({ ok: false, error: (err && err.message) || 'failed' });
@@ -1121,4 +1793,8 @@ module.exports = {
     SessionManager, ensure, mount,
     classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
     resolveCohort, activeOnlyIds, makeEventFilter, isLocalRequest, autoGroupFromCwd,
+    // Meeting pure helpers — exported for the same reason resolveCohort is: the
+    // rules that decide who gets prompted must be testable without a daemon.
+    meetRosterIds, shouldPoke, meetPokeLine, looksDone,
+    MEET_RELAY_MAX, MEET_POKE_MS, MEET_MSG_BUDGET, MEET_MAX_MEMBERS,
 };

@@ -1,9 +1,12 @@
 /**
  * SoA-Web wire protocol — ESM copy for the browser.
  *
- * Mirrors server/src/protocol.js. Kept in sync by `scripts/sync-protocol.js`
- * (runs on `npm run prebuild` and as a `postinstall` safety net). Edit the
- * server copy, then run `npm run sync:protocol`.
+ * Mirrors server/src/protocol.js. Sync is MANUAL — there is no generator (an
+ * earlier version of this header promised a `scripts/sync-protocol.js` that
+ * never existed, and the two copies had silently drifted apart by three message
+ * types as a result). When you add a `t` value on the server, add it here in the
+ * same commit, and to the mobile client's own `switch (msg.t)` in
+ * web/public/m/app.js — that one is hand-written and ignores anything unlisted.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -19,6 +22,9 @@ export const MSG = Object.freeze({
     BYE:       'bye',
     TTS:       'tts',
     BROWSER_FRAME: 'browser-frame',
+    MANAGER:   'manager',
+    TAB_MEM:   'tab-mem',
+    MEETING:   'meeting',
 
     AUTH:      'auth',
     INPUT:     'input',

@@ -75,12 +75,21 @@ soa-sessions broadcast <cohort> <text>  # plain-text nudge to a cohort
 soa-sessions interrupt <id>             # Ctrl-C to unwedge a stuck agent
 soa-sessions spawn [<cwd>] [--title T] [--goal "…"] [--model m]   # START a new agent
 soa-sessions stop <id>                  # STOP an agent (refuses your own tab)
+soa-sessions meet start <room> --with <cohort> [--title T] [--mode round|free]
+                                        # convene a group meeting (see soa-meet below)
+soa-sessions meet end <room>            # adjourn it
+soa-sessions meet rooms | meet who <room>   # every room · one room's roster
 ```
 
 A **cohort** is `all` or a signal name — `attention`, `stuck`, `idle`, `done`,
-`working`, `highContext`, `limited` (or a comma-list of ids). Your own tab is
-auto-excluded from every fan-out and hidden from your own event stream, so you
-never trigger or command yourself.
+`working`, `highContext`, `limited` — or `meeting:<room>` (everyone currently in
+that group meeting), or a comma-list of ids. Your own tab is auto-excluded from
+every fan-out and hidden from your own event stream, so you never trigger or
+command yourself — including from `meet start`: a manager *convenes* a meeting,
+it doesn't sit in one. So you are **not** a member of a room you started, and
+`soa-meet say` there is refused (`NOT_MEMBER`, exit 3). To take part as well as
+chair, `soa-meet join <room>` first; otherwise let the user speak from the
+dashboard or phone and just watch with `soa-meet read <room>`.
 
 **Convert a user desire into per-session goals**: decompose it in *your* context
 into concrete per-project objectives; `spawn` a tab (with `--goal`) for each
@@ -150,6 +159,56 @@ projects (post a contract/decision to a shared channel), request something from
 a peer (`dm`), or make an agent **event-driven** on a channel (`watch` blocks at
 ≈0 CPU until a peer posts — the A2A analog of `soa-sessions watch`). Keep
 messages short; channels are size-capped and trimmed to the tail.
+
+## Group meetings (soa-meet)
+
+`soa-meet` is a **local-only groupchat**: the user (as manager) puts themselves
+and a few agents in ONE room, and every line anyone says is relayed to the others
+— so separate Claude instances actually answer *each other* instead of talking
+past each other. The transcript rides the `soa-bus` substrate
+(`~/.soa-web-local/a2a/meet-<room>.jsonl`), so the same guarantee holds: pure
+append-only JSONL that **never touches the network, is never uploaded, and is
+never shared off this machine**. The daemon is the single writer.
+
+```bash
+soa-meet say   <room> <msg…>            # your turn — ONE line, ≤2 sentences
+soa-meet read  <room> [--since MS] [N]  # the transcript (non-blocking)
+soa-meet rooms                          # every room, open first (+ msgs left, hops n/max)
+soa-meet who   <room>                   # the roster + who is reachable
+soa-meet join  <room> | leave <room>    # add / excuse yourself
+soa-meet watch <room>                   # BLOCKS — never use this (see rule 1)
+soa-meet whoami                         # your identity + the ledger path
+```
+
+You are **woken, not waiting**: when a room has something new for you, the 3s
+supervisor types one brief into your terminal with the recent lines already
+inlined (`[meeting standup] 2 new · you're up. RECENT: …`), so answering costs one
+prompt and no catch-up tool call. You are never poked mid-turn, at a permission
+prompt, or while rate-limited — the room simply waits a beat. Two rules follow
+from this, and both are load-bearing:
+
+1. **NEVER block in `soa-meet watch`.** You are woken by a line typed into your
+   terminal, so there is nothing to wait for — and blocking means your Claude turn
+   never ends, the Bash tool call times out, and the whole room stalls behind you
+   waiting on a member that can no longer answer. `watch` refuses to run inside a
+   tab for exactly this reason. To catch up, `soa-meet read` (non-blocking).
+2. **Reply with ONE `soa-meet say` of at most two sentences, then STOP.** It is a
+   groupchat, not a memo: lines are hard-capped at **280 characters** (longer ones
+   are truncated mid-thought), and every line you say costs every other member a
+   Claude turn. Say your piece, end your turn, let the room move.
+
+Pacing is structural: agents may answer each other for `SOA_MEET_RELAY_MAX` (2)
+rounds and then the room goes **QUIET** until the user speaks again, because only a
+HUMAN message recharges the relay budget — so silence after your line means it is
+the user's turn, **not** that you were missed; never retry into a quiet room
+(`soa-meet rooms` shows `hops n/max`, and `say` prints `[QUIET]` when the budget is
+spent). A refusal — adjourned room, not a member, budget spent — prints `[REFUSED]`
+and exits **3**, so "no" is distinguishable from "broken". Limits are env-tunable:
+`SOA_MEET_RELAY_MAX` (2 relay rounds) · `SOA_MEET_POKE_MS` (8s per-tab poke
+cooldown) · `SOA_MEET_MSG_BUDGET` (40 lines, then the room adjourns) ·
+`SOA_MEET_IDLE_MS` (5m with no human line → adjourn) · `SOA_MEET_MAX_MEMBERS` (6) ·
+`SOA_MEET_RECENT_K` (4 lines inlined per brief) · `SOA_MEET_MSG_CAP` (280) ·
+`SOA_MEET_CHAN_PREFIX` (`meet-`) · `SOA_MEET_DRY=1` (print, send nothing).
 
 ## Not stepping on each other (soa-work)
 

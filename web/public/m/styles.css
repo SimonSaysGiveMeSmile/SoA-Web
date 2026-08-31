@@ -530,7 +530,8 @@ button:active { background: var(--accent-bg-hover); }
    with a bg-coloured cut-out ring, capped at "99+" by _updateChatBadge. The
    #controls strip clips overflow-y (for its horizontal scroll), so the badge
    nests INSIDE the button corner rather than floating outside (which would clip). */
-#controls .bb-btn[data-view="chat-view"] { position: relative; }
+#controls .bb-btn[data-view="chat-view"],
+#controls .bb-btn[data-view="meet-view"] { position: relative; }
 .bb-badge {
     position: absolute;
     top: 2px;
@@ -555,6 +556,138 @@ button:active { background: var(--accent-bg-hover); }
     pointer-events: none;
 }
 .bb-badge[hidden] { display: none; }
+
+/* ── MEET — the group meeting ───────────────────────
+   One thread, several agents, the user as manager. Where CHAT is one agent and
+   can leave identity implicit, every bubble here is SENDER-LABELLED.
+
+   `.view.active` is only `display: block`, which would leave .meet-log unable to
+   flex-scroll and drop the composer wherever the content ended — this flex rule
+   is what makes the log scroll and the composer pin, exactly as #chat-view needs
+   its own. */
+#meet-view { display: none; }
+#meet-view.active { display: flex; flex-direction: column; }
+
+/* Roster strip: the room's title, why it may be quiet, and the two meters that
+   bound it (relay hops left, message budget). */
+.meet-bar {
+    flex: 0 0 auto;
+    padding: 7px 10px 8px;
+    border-bottom: 1px solid var(--line);
+    background: var(--accent-bg);
+}
+.meet-bar[hidden] { display: none; }
+.meet-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.meet-title {
+    min-width: 0; max-width: 40%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg);
+}
+.meet-state {
+    flex: 0 0 auto; white-space: nowrap;
+    font-size: 9px; letter-spacing: 0.1em;
+    padding: 2px 7px; border-radius: 10px;
+}
+.meet-state.live   { color: #00e676; box-shadow: inset 0 0 0 1px rgba(0,230,118,0.4); }
+.meet-state.quiet  { color: var(--warn, #ffb84d); box-shadow: inset 0 0 0 1px rgba(255,184,77,0.45); }
+.meet-state.closed { color: var(--fg-dim); box-shadow: inset 0 0 0 1px var(--line); }
+.meet-meter { flex: 0 0 auto; font-size: 9.5px; letter-spacing: 0.04em; color: var(--fg-dim); white-space: nowrap; }
+.meet-spacer { flex: 1 1 auto; }
+.meet-act {
+    flex: 0 0 auto; white-space: nowrap;
+    padding: 5px 9px; font-size: 9.5px; letter-spacing: 0.1em;
+    color: var(--fg-dim); border: 1px solid var(--line); border-radius: 8px; background: none;
+}
+.meet-act:active { background: var(--accent-bg-hover); color: var(--fg); }
+.meet-act-icon { padding: 5px 8px; font-size: 12px; letter-spacing: 0; }
+
+/* One chip per member; scrolls horizontally like the tab strip rather than
+   wrapping the bar taller. Each chip carries the SEAT colour its bubbles use
+   (--meet-ink), so the strip and the transcript agree on who is who. */
+.meet-roster {
+    display: flex; gap: 6px; margin-top: 7px;
+    overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none; -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
+}
+.meet-roster::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.meet-chip {
+    flex: 0 0 auto; max-width: 46vw;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 9px; font-size: 10px; letter-spacing: 0.03em;
+    color: var(--fg); border: 1px solid var(--line); border-radius: 20px; background: none;
+}
+.meet-chip .meet-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meet-chip .meet-dot {
+    flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--meet-ink, var(--fg-dim));
+}
+.meet-chip[data-status="running"] .meet-dot { animation: chat-pulse 1.1s ease-in-out infinite; }
+.meet-chip[data-status="input"] .meet-dot { background: var(--warn, #f1c40f); }
+.meet-chip.gone { opacity: 0.45; }
+.meet-chip.gone .meet-dot { background: var(--fg-faint); }
+.meet-chip-why { flex: 0 0 auto; font-size: 8.5px; letter-spacing: 0.06em; color: var(--fg-dim); }
+
+.meet-log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 12px 12px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+/* The sender label — printed once per speaker run, tinted with that member's
+   seat colour so a five-way thread is scannable without reading names. */
+.meet-who {
+    align-self: flex-start;
+    margin: 6px 2px 1px;
+    font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    /* --meet-ink is set per speaker; your own lines have none and stay dim. */
+    color: var(--meet-ink, var(--fg-dim));
+}
+.meet-who.you { align-self: flex-end; }
+.meet-msg {
+    max-width: 84%;
+    padding: 8px 11px;
+    border-radius: 13px;
+    font-size: 13.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid var(--line);
+}
+.meet-msg.agent {
+    align-self: flex-start;
+    background: var(--accent-bg);
+    border-bottom-left-radius: 4px;
+    border-left: 2px solid var(--meet-ink, var(--accent));
+}
+.meet-msg.you {
+    align-self: flex-end;
+    background: var(--accent);
+    color: var(--bg);
+    border-color: transparent;
+    border-bottom-right-radius: 4px;
+}
+/* Server-written lines ("— meeting adjourned (budget)") — neither side's voice. */
+.meet-sys {
+    align-self: center;
+    margin: 6px 0;
+    padding: 3px 10px;
+    font-size: 10px; letter-spacing: 0.05em; text-align: center;
+    color: var(--fg-dim);
+    border: 1px dashed var(--line); border-radius: 10px;
+}
+.meet-composer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 8px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-alt, var(--bg));
+}
 
 /* Fleet supervisor summary bar (top of dashboard) */
 .manager-bar {
@@ -1717,6 +1850,30 @@ button:active { background: var(--accent-bg-hover); }
 }
 [data-theme="liquid"] .chat-more { color: var(--lqm-tint); }
 
+/* MEET (the group meeting) — the same glass as CHAT, with the member's seat
+   colour kept on the bubble's left edge so a five-way thread stays readable. */
+[data-theme="liquid"] .meet-bar,
+[data-theme="liquid"] .meet-composer {
+    background: rgba(255,255,255,0.04);
+    -webkit-backdrop-filter: var(--lqm-blur); backdrop-filter: var(--lqm-blur);
+}
+[data-theme="liquid"] .meet-bar { border-bottom: 1px solid rgba(255,255,255,0.1); }
+[data-theme="liquid"] .meet-composer { border-top: 1px solid rgba(255,255,255,0.1); }
+[data-theme="liquid"] .meet-chip,
+[data-theme="liquid"] .meet-act {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+}
+[data-theme="liquid"] .meet-msg.agent {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.1);
+    border-left-color: var(--meet-ink, var(--lqm-tint));
+}
+[data-theme="liquid"] .meet-msg.you {
+    background: var(--lqm-tint); color: #fff; border-color: transparent;
+}
+[data-theme="liquid"] .meet-sys { border-color: rgba(255,255,255,0.14); }
+
 /* FLEET / manager — glass rows, systemBlue selection (fill+rim, no per-row blur). */
 [data-theme="liquid"] .manager-bar {
     background: rgba(255,255,255,0.04);
@@ -2156,13 +2313,17 @@ button:active { background: var(--accent-bg-hover); }
 .mon-port { padding: 8px 11px; font-size: 11px; color: var(--accent); border: 1px solid rgba(38,224,200,0.4); border-radius: 7px; background: rgba(38,224,200,0.06); }
 .mon-port span { color: var(--fg-dim); font-size: 9px; }
 
-/* BROADCAST bottom sheet */
-#broadcast-overlay {
+/* BROADCAST bottom sheet — shared chassis with the MEET convene sheet, which is
+   the same kind of picker (a cohort of sessions + one action), so it reuses every
+   .bcast-* internal and only joins these three rules. */
+#broadcast-overlay,
+#convene-overlay {
     position: fixed; inset: 0; z-index: 6000; display: flex; align-items: flex-end;
     background: rgba(0,0,0,0.55); opacity: 0; visibility: hidden; transition: opacity .22s ease, visibility .22s ease;
     -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
 }
-#broadcast-overlay.visible { opacity: 1; visibility: visible; }
+#broadcast-overlay.visible,
+#convene-overlay.visible { opacity: 1; visibility: visible; }
 .bcast-sheet {
     width: 100%; max-height: 82vh; overflow-y: auto;
     background: var(--bg-alt); border-top: 1px solid rgba(38,224,200,0.35);
@@ -2170,12 +2331,17 @@ button:active { background: var(--accent-bg-hover); }
     transform: translateY(100%); transition: transform .26s cubic-bezier(.2,.9,.3,1);
     box-shadow: 0 -12px 40px rgba(0,0,0,0.6);
 }
-#broadcast-overlay.visible .bcast-sheet { transform: translateY(0); }
+#broadcast-overlay.visible .bcast-sheet,
+#convene-overlay.visible .bcast-sheet { transform: translateY(0); }
 .bcast-header { display: flex; align-items: center; justify-content: space-between; margin: 4px 0 2px; }
 .bcast-title { font-size: 13px; letter-spacing: 0.18em; color: var(--accent); }
 .bcast-sub { font-size: 10.5px; color: var(--fg-dim); letter-spacing: 0.03em; margin-bottom: 12px; }
 .bcast-label { font-size: 9.5px; letter-spacing: 0.16em; color: var(--fg-faint); margin: 12px 0 7px; }
 .bcast-cohorts, .bcast-presets { display: flex; flex-wrap: wrap; gap: 7px; }
+/* An author-origin `display` beats the UA's `[hidden] { display: none }`, so a
+   row toggled via the hidden attribute keeps its box (and its gap) without this.
+   Applies to the broadcast sheet as well as the meeting rooms switcher. */
+.bcast-cohorts[hidden], .bcast-presets[hidden] { display: none; }
 .bcast-chip {
     display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px;
     font-size: 11px; letter-spacing: 0.05em; color: var(--fg-dim);
@@ -2202,7 +2368,8 @@ button:active { background: var(--accent-bg-hover); }
 .bcast-enter input { width: 16px; height: 16px; accent-color: var(--accent); }
 
 /* hidden-attribute must win over the display rules above */
-.fleet-actions[hidden], .fleet-seg-badge[hidden], .mon-cell[hidden] { display: none !important; }
+.fleet-actions[hidden], .fleet-seg-badge[hidden], .mon-cell[hidden],
+.bcast-cohorts[hidden] { display: none !important; }
 
 /* keep the ⋯ action on the row line — let long meta truncate instead of wrapping it */
 .fleet-line1, .fleet-line2 { min-width: 0; }
@@ -2255,6 +2422,18 @@ button:active { background: var(--accent-bg-hover); }
 [data-scheme="light"] .todo-input,
 [data-scheme="light"] .todo-item { background: var(--surface); border-color: var(--line); }
 [data-scheme="light"] .todo-item { box-shadow: var(--shadow-sm); }
+
+/* MEET — the seat inks are picked for a dark ground; on porcelain the same hues
+   need darkening to stay readable as small-caps labels. Tuning the rendered text
+   rather than the palette keeps ONE ink per member across every skin. */
+[data-scheme="light"] .meet-who { filter: brightness(0.62) saturate(1.35); }
+[data-scheme="light"] .meet-bar { background: var(--surface); border-bottom-color: var(--line); }
+[data-scheme="light"] .meet-chip { background: var(--surface); border-color: var(--line); box-shadow: var(--shadow-sm); }
+/* keep the seat stripe: a bare `border-color` here would erase the ink edge */
+[data-scheme="light"] .meet-msg.agent {
+    background: var(--surface); border-color: var(--line);
+    border-left-color: var(--meet-ink, var(--accent));
+}
 
 /* MONITOR */
 [data-scheme="light"] .mon-cell { background: var(--surface); border-color: var(--line); box-shadow: var(--shadow-sm); }
@@ -2343,7 +2522,18 @@ button:active { background: var(--accent-bg-hover); }
 }
 
 /* teal "you" bubbles read better with warm white than porcelain-inherit */
-[data-theme="minimal"] .chat-msg.you { color: #fdfdfb; }
+[data-theme="minimal"] .chat-msg.you,
+[data-theme="minimal"] .meet-msg.you { color: #fdfdfb; }
+
+/* MEET's chrome joins the lowercase whisper the rest of this skin speaks in —
+   the sender labels are structure, not content. */
+[data-theme="minimal"] .meet-title,
+[data-theme="minimal"] .meet-state,
+[data-theme="minimal"] .meet-who {
+    text-transform: lowercase;
+    letter-spacing: 0.06em;
+}
+[data-theme="minimal"] .meet-sys { border-style: solid; }
 
 /* solid porcelain sheets — MINIMAL is matte, not glassy */
 [data-theme="minimal"] .settings-sheet,

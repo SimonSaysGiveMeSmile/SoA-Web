@@ -6,7 +6,11 @@
  * SW is purely about making the app installable and fast to launch.
  */
 
-const VERSION = 'soa-mobile-v81';
+// Bumped for the MEET (group meeting) view. Activation reloads the page, which
+// wipes memory-only state — harmless here: a meeting's transcript lives in the
+// server-side ledger and the view re-fetches it with `?since=<cursor>`.
+// No new files: MEET is markup + code inside the shell entries already listed.
+const VERSION = 'soa-mobile-v82';
 const SHELL = [
     '/',
     '/index.html',
