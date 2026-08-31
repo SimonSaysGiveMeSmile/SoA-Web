@@ -1,0 +1,62 @@
+# CI — every PR and every push to main.
+#
+# The daemon this repo builds runs unattended on someone's machine with a dozen
+# live agent sessions attached to it, and scripts/soa-selfupdate will pull a
+# green build onto that machine on its own. So "green" has to mean something:
+# the suite here is the same one the updater runs as its preflight, and a syntax
+# sweep catches the class of mistake that only shows up when the daemon boots.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Nothing here needs write access, and a PR from a fork should never get it.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.x', '22.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # node-pty compiles a native addon; ubuntu-latest already carries the
+      # toolchain, so a plain `npm ci` is enough.
+      - name: Install
+        run: npm ci
+
+      # A daemon that fails to parse takes the whole fleet down at boot, and no
+      # unit test covers a stray brace in a module that only loads on startup.
+      - name: Syntax sweep (server + node scripts)
+        run: |
+          set -euo pipefail
+          for f in server/src/*.js; do node --check "$f"; done
+          for f in scripts/*.js scripts/*.mjs; do [ -e "$f" ] || continue; node --check "$f"; done
+          # The extensionless CLIs are a mix of node and bash — check each with
+          # the interpreter its own shebang names.
+          for f in scripts/*; do
+            [ -f "$f" ] || continue
+            case "$(head -1 "$f")" in
+              *"env node"*) node --check "$f" ;;
+              *bash*|*sh)   bash -n "$f" ;;
+            esac
+          done
+
+      - name: Test
+        run: npm test

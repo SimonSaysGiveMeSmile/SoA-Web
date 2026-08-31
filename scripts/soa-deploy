@@ -120,11 +120,19 @@ if [ "$DRY_RUN" = 1 ]; then
     exit 0
 fi
 
-echo "mirroring server/src + scripts → $INSTALL_ROOT …"
-rsync -a "$DEV_ROOT/server/src/" "$INSTALL_ROOT/server/src/"
-rsync -a "$DEV_ROOT/scripts/"    "$INSTALL_ROOT/scripts/"
-chmod +x "$INSTALL_ROOT"/scripts/* 2>/dev/null || true
-echo "mirror done."
+# A self-hosted install runs the repo IN PLACE (DEV_ROOT == INSTALL_ROOT), e.g. an
+# install.sh checkout the daemon is launched from. There is nothing to mirror
+# there, and rsyncing a tree onto itself is a pointless risk — skip straight to
+# the restart, which is the part that actually matters.
+if [ "$(cd "$DEV_ROOT" && pwd -P)" = "$(cd "$INSTALL_ROOT" && pwd -P)" ]; then
+    echo "dev root IS the install root — nothing to mirror, restarting in place."
+else
+    echo "mirroring server/src + scripts → $INSTALL_ROOT …"
+    rsync -a "$DEV_ROOT/server/src/" "$INSTALL_ROOT/server/src/"
+    rsync -a "$DEV_ROOT/scripts/"    "$INSTALL_ROOT/scripts/"
+    chmod +x "$INSTALL_ROOT"/scripts/* 2>/dev/null || true
+    echo "mirror done."
+fi
 
 if [ "$RESTART" = 0 ]; then
     echo
