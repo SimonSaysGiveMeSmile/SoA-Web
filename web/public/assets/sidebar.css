@@ -316,8 +316,6 @@
     font-family: var(--font-mono);
     font-size: 10px;
     line-height: 1.5;
-    scrollbar-width: thin;
-    scrollbar-color: var(--soa-line-soft) transparent;
 }
 .clog-line {
     display: flex;
@@ -333,3 +331,55 @@
 .clog-msg { color: var(--soa-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .clog-wrn .clog-msg { color: var(--soa-yellow); }
 .clog-err .clog-msg { color: var(--soa-red); }
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────
+   The sidebar's vertical scrollers get the same treatment .cat-strip gives
+   the horizontal filmstrip (styles.css): a thin bar on a transparent track,
+   line-soft thumb, accent-dim on hover. Colors come from tokens, so each UI
+   language restyles it for free.
+
+   Compound selector on purpose: minimal.css and liquid.css both set a wider
+   `[data-ui="..."] ::-webkit-scrollbar`, which ties this rule on specificity
+   and loads later. `.stage .sidebar` outranks it without !important. */
+.stage .sidebar,
+.stage .port-scan-list,
+.stage .clog-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--soa-line-soft) transparent;
+}
+.stage .sidebar::-webkit-scrollbar,
+.stage .port-scan-list::-webkit-scrollbar,
+.stage .clog-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.stage .sidebar::-webkit-scrollbar-track,
+.stage .port-scan-list::-webkit-scrollbar-track,
+.stage .clog-scroll::-webkit-scrollbar-track { background: transparent; }
+.stage .sidebar::-webkit-scrollbar-thumb,
+.stage .port-scan-list::-webkit-scrollbar-thumb,
+.stage .clog-scroll::-webkit-scrollbar-thumb {
+    background: var(--soa-line-soft);
+    border-radius: 4px;
+    /* liquid.css and minimal.css inset their thumb with `border: 3px solid` +
+       background-clip. Those are separate properties, so overriding background
+       alone leaves a 3px inset on an 8px bar — about 2px of visible thumb.
+       Reset both or the bar reads as a hairline in those two languages. */
+    border: 0;
+    background-clip: border-box;
+}
+.stage .sidebar::-webkit-scrollbar-thumb:hover,
+.stage .port-scan-list::-webkit-scrollbar-thumb:hover,
+.stage .clog-scroll::-webkit-scrollbar-thumb:hover { background: var(--soa-accent-dim); }
+/* The corner only shows when a scroller has both bars; left unpainted it is a
+   pale square against the panel. */
+.stage .sidebar::-webkit-scrollbar-corner,
+.stage .port-scan-list::-webkit-scrollbar-corner,
+.stage .clog-scroll::-webkit-scrollbar-corner { background: transparent; }
+
+/* Memory bar: used sits in accent, reclaimable cache trails behind it in a
+   dimmer tone. Only the RAM widget uses .bar, so splitting it is contained. */
+.bar.bar-split { display: flex; }
+.bar-cache {
+    display: block; height: 100%;
+    background: var(--soa-line-soft);
+    border-left: 1px solid var(--soa-bg-panel);
+    transition: width 0.5s ease;
+}
