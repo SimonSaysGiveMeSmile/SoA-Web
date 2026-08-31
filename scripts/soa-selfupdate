@@ -143,11 +143,15 @@ if [ "$CHECK" = 1 ] || [ "$DRY" = 1 ]; then
 fi
 
 # ── 4. stage the new code ────────────────────────────────────────────────────
+# Did we get as far as bouncing the daemon? A preflight failure must revert the
+# code and stop — restarting a daemon that is running fine on the OLD code would
+# turn a caught problem into an outage.
+RESTARTED=0
 LOCK_CHANGED=0
 git diff --quiet "$OLD_SHA" "$TARGET_SHA" -- package-lock.json package.json || LOCK_CHANGED=1
 
 rollback() {
-    log "ROLLING BACK to $OLD_DESC"
+    log "reverting to $OLD_DESC$([ "$RESTARTED" = 1 ] && echo ' and restarting' || echo ' (daemon was never restarted)')"
     git checkout --quiet --force "$OLD_SHA" || log "rollback checkout FAILED — manual recovery needed at $ROOT"
     # An `[ x ] && cmd` here would return 1 when the test is false and, under
     # `set -e`, abort the rollback BEFORE the restart below — leaving the daemon
@@ -155,8 +159,13 @@ rollback() {
     if [ "$LOCK_CHANGED" = 1 ]; then
         npm ci --omit=dev --silent || log "rollback npm ci failed"
     fi
-    launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-    command -v soa-notify >/dev/null 2>&1 && soa-notify "SoA update rolled back to $OLD_DESC — the new build did not come up" >/dev/null 2>&1 || true
+    if [ "$RESTARTED" = 1 ]; then
+        # We bounced it onto a build that didn't come up — bounce it back.
+        launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+        command -v soa-notify >/dev/null 2>&1 && soa-notify "SoA update rolled back to $OLD_DESC — the new build did not come up" >/dev/null 2>&1 || true
+    else
+        command -v soa-notify >/dev/null 2>&1 && soa-notify "SoA update to $TARGET_REF failed preflight — daemon untouched, still on $OLD_DESC" >/dev/null 2>&1 || true
+    fi
 }
 
 log "staging $TARGET_REF …"
@@ -201,6 +210,7 @@ if [ "$NOW" != 1 ] && ! in_window; then
 fi
 
 log "restarting the daemon onto $TARGET_REF (tabs respawn and auto-resume)…"
+RESTARTED=1
 if ! soa-deploy --dev-root "$ROOT" --install-root "$ROOT" --port "$PORT" --label "$LABEL"; then
     rollback
     die "restart could not be verified — rolled back to $OLD_DESC"
