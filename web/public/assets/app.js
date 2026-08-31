@@ -20,9 +20,9 @@ import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=26';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
-import { mountContextPanel } from '/assets/contextPanel.js?v=1';
+import { mountContextPanel } from '/assets/contextPanel.js?v=3';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
@@ -368,8 +368,11 @@ class TabRuntime {
 }
 
 class Shell {
-    constructor(bridge, { audio } = {}) {
+    constructor(bridge, { audio, backend } = {}) {
         this.bridge = bridge;
+        // Kept so features loaded later (time machine, fleet restore) can reach
+        // the same daemon the WS is bound to, not just the page origin.
+        this.backend = backend || '';
         this.audio = audio || { play: () => {}, setEnabled: () => {} };
         this.tabs = new Map();
         // id -> cwd, straight off the snapshot; the context canvas reads the active
@@ -547,7 +550,7 @@ class Shell {
             tmBtn.addEventListener('click', async () => {
                 this.audio.play('panels');
                 try {
-                    const tm = await import('/assets/timemachine.js?v=2');
+                    const tm = await import('/assets/timemachine.js?v=3');
                     tm.openTimemachineModal(this);
                 } catch (err) {
                     console.warn('[timemachine] open failed', err);
@@ -659,13 +662,21 @@ class Shell {
             if (saved != null) ctxOff = saved === '1';
         } catch (_) {}
         stageEl.classList.toggle('no-context', ctxOff);
+        const ctxPull = $('#ctx-pull');
         const setContextOff = (off) => {
             stageEl.classList.toggle('no-context', off);
+            // The pull tab's chevron is CSS-driven off .no-context; only the
+            // a11y state needs syncing here.
+            if (ctxPull) ctxPull.setAttribute('aria-expanded', off ? 'false' : 'true');
             try { localStorage.setItem('soa_context_off', off ? '1' : '0'); } catch (_) {}
             this._fitActive();
         };
-        if (ctxBtn) {
-            ctxBtn.addEventListener('click', () => {
+        // Reflect the initial state without persisting it: an unvisited phone
+        // shouldn't have "closed" written into localStorage as a preference.
+        if (ctxPull) ctxPull.setAttribute('aria-expanded', ctxOff ? 'false' : 'true');
+        for (const el of [ctxBtn, ctxPull]) {
+            if (!el) continue;
+            el.addEventListener('click', () => {
                 setContextOff(!stageEl.classList.contains('no-context'));
                 this.audio.play('panels');
             });
@@ -6231,6 +6242,8 @@ async function bootServerMode({ backend, token }) {
     mountContextPanel($('#context'), {
         backend,
         getCwd: () => shell._tabCwd.get(shell.activeId) || null,
+        // A width drag changes the terminal column, so re-fit the grid as it moves.
+        onResize: () => shell._fitActive(),
     });
 
     setTimeout(() => {
@@ -6244,7 +6257,7 @@ async function bootServerMode({ backend, token }) {
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 
-    import('/assets/timemachine.js?v=2')
+    import('/assets/timemachine.js?v=3')
         .then(tm => tm.startTimemachine(shell))
         .catch(err => console.warn('[timemachine] boot failed', err));
 }

@@ -1,8 +1,8 @@
 /* ── Sidebar layout ─────────────────────────────────────────────────────
    The stage is a two-column grid when the sidebar is visible, collapsing
    to a single-column terminal when toggled off. */
-.stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr var(--soa-ctx-w, 340px); grid-template-areas: 'sidebar terms context' 'status status status'; }
-.stage.no-sidebar { grid-template-columns: 1fr var(--soa-ctx-w, 340px); grid-template-areas: 'terms context' 'status status'; }
+.stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr var(--soa-ctx-w, 256px); grid-template-areas: 'sidebar terms context' 'status status status'; }
+.stage.no-sidebar { grid-template-columns: 1fr var(--soa-ctx-w, 256px); grid-template-areas: 'terms context' 'status status'; }
 .stage.no-context { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
 .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 .terms { grid-area: terms; }
@@ -429,12 +429,46 @@
    stack of instruments. */
 .context-panel {
     grid-area: context;
+    /* Anchor for the width grip that rides the panel's left border. */
+    position: relative;
     border-left: 1px solid var(--soa-line);
     background: var(--soa-bg-panel);
     display: flex; flex-direction: column;
     min-width: 0; overflow: hidden;
 }
 .stage.no-context .context-panel { display: none; }
+
+/* ── Context pull tab ───────────────────────────────────────────────────
+   The canvas is tucked away and pulled back out from its OWN edge, so the
+   affordance lives where the motion happens instead of in the topbar. The
+   handle rides the panel's outer border and slides to the viewport edge when
+   the panel closes — it never disappears, only the chevron flips. */
+.ctx-pull {
+    position: absolute; top: 50%; right: var(--soa-ctx-w, 256px);
+    transform: translateY(-50%);
+    width: 15px; min-height: 88px; padding: 11px 0 13px;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    background: var(--soa-bg-panel);
+    border: 1px solid var(--soa-line); border-right: none;
+    border-radius: 4px 0 0 4px;
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.2em;
+    color: var(--soa-accent-dim); cursor: pointer; z-index: 7;
+    transition: right 160ms ease, color 160ms ease, border-color 160ms ease,
+                box-shadow 160ms ease;
+}
+.stage.no-context .ctx-pull { right: 0; }
+.ctx-pull:hover {
+    color: var(--soa-accent); border-color: var(--soa-accent-dim);
+    box-shadow: -5px 0 16px rgba(var(--soa-accent-rgb), 0.14);
+}
+.ctx-pull:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
+/* The glyph points the way the panel will travel, so it reads as a direction
+   rather than a state. Rendered in CSS: the class on .stage is the only source
+   of truth for open/closed, and JS never has to keep a glyph in sync. */
+.ctx-pull-chev { font-size: 10px; line-height: 1; }
+.ctx-pull-chev::before { content: '\203A'; }
+.stage.no-context .ctx-pull-chev::before { content: '\2039'; }
+.ctx-pull-label { writing-mode: vertical-rl; text-orientation: mixed; }
 
 .ctx-head {
     display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
@@ -448,10 +482,14 @@
 
 /* Bands stack; only the thread flexes, so WORKSPACE and NEXT STEPS keep their
    height and the prompt history absorbs the rest of the column. */
-.ctx-band { display: flex; flex-direction: column; min-height: 0;
+/* Only the thread may flex. Every other band is flex: 0 0 auto — without the
+   explicit no-shrink, the default (0 1 auto) let the thread's tall content
+   squeeze WORKSPACE and NEXT STEPS until the panel's overflow:hidden clipped
+   them mid-glyph, which is what the canvas looked like on a short viewport. */
+.ctx-band { display: flex; flex-direction: column; min-height: 0; flex: 0 0 auto;
     border-bottom: 1px solid var(--soa-line-soft); }
 .ctx-band:last-child { border-bottom: none; }
-.ctx-band-thread { flex: 1 1 auto; min-height: 120px; }
+.ctx-band-thread { flex: 1 1 auto; min-height: 96px; }
 .ctx-band-h {
     display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
     padding: 7px 12px 5px; flex: 0 0 auto;
@@ -485,7 +523,8 @@
 }
 .ctx-turn.latest .ctx-turn-x { max-height: none; }
 
-.ctx-facts { padding: 2px 12px 9px; display: flex; flex-direction: column; gap: 2px; }
+.ctx-facts { padding: 2px 12px 9px; display: flex; flex-direction: column; gap: 2px;
+    min-height: 0; overflow-y: auto; }
 .ctx-fact { display: grid; grid-template-columns: 52px 1fr; gap: 8px;
     font-family: var(--font-mono); font-size: 10px; align-items: baseline; }
 .ctx-fact-k { color: var(--soa-accent-dim); letter-spacing: 0.12em; }
@@ -493,7 +532,7 @@
     text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 
 .ctx-steps { padding: 2px 12px 4px; display: flex; flex-direction: column; gap: 1px;
-    max-height: 30vh; overflow-y: auto; }
+    max-height: min(30vh, 260px); overflow-y: auto; }
 .ctx-step { display: grid; grid-template-columns: auto 1fr auto; gap: 7px;
     align-items: baseline; font-family: var(--font-mono); font-size: 10.5px; }
 .ctx-step-mark, .ctx-step-del {
@@ -516,13 +555,52 @@
 .ctx-step-add::placeholder { color: var(--soa-accent-dim); opacity: 0.6; }
 .ctx-step-add:focus { outline: none; border-color: var(--soa-accent); }
 
+/* ── Resize grips ───────────────────────────────────────────────────────
+   Every edge of the canvas is draggable: the left border sets the width, the
+   divider above a band sets that band's height. The hit strip is 7px (a
+   comfortable pointer target) but the visible line is 1px and only lights up
+   on hover or during a drag, so the chrome stays quiet until you reach for it. */
+.ctx-grip { z-index: 8; }
+.ctx-grip::after {
+    content: ''; position: absolute; background: transparent;
+    transition: background 140ms ease;
+}
+.ctx-grip:hover::after, .ctx-grip.dragging::after { background: var(--soa-accent-dim); }
+.ctx-grip.dragging::after { box-shadow: 0 0 10px rgba(var(--soa-accent-rgb), 0.5); }
+.ctx-grip:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: -1px; }
+
+.ctx-grip-w {
+    position: absolute; top: 0; left: -4px; width: 7px; height: 100%;
+    cursor: col-resize;
+}
+.ctx-grip-w::after { top: 0; bottom: 0; left: 3px; width: 1px; }
+
+.ctx-grip-h {
+    position: relative; flex: 0 0 auto; height: 7px; margin-bottom: -3px;
+    cursor: row-resize;
+}
+.ctx-grip-h::after { left: 10px; right: 10px; top: 3px; height: 1px; }
+
+/* While dragging, the cursor must not flicker to a text caret over the text the
+   pointer happens to cross, and nothing should select. */
+body.ctx-resizing { user-select: none; -webkit-user-select: none; }
+body.ctx-resizing * { cursor: inherit !important; }
+
 /* Below this width three columns stop being readable, so the canvas becomes an
    overlay on the terminal — the same move the sidebar already makes. */
 @media (max-width: 1100px) {
     .stage, .stage.no-sidebar, .stage.no-context, .stage.no-sidebar.no-context { position: relative; }
     .context-panel { position: absolute; top: 0; right: 0; bottom: 24px;
-        width: min(var(--soa-ctx-w, 340px), 86vw); z-index: 6;
+        width: min(var(--soa-ctx-w, 256px), 86vw); z-index: 6;
         box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28); }
+    .ctx-pull { right: min(var(--soa-ctx-w, 256px), 86vw); }
+    .stage.no-context .ctx-pull { right: 0; }
     .stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
     .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+}
+
+/* On a phone-sized dashboard the handle would sit under the thumb that scrolls
+   the terminal, so the topbar CTX button owns the toggle there. */
+@media (max-width: 640px) {
+    .ctx-pull { display: none; }
 }

@@ -21,6 +21,9 @@
   --soa-line:      rgba(var(--soa-accent-rgb), 0.25);
   --soa-line-soft: rgba(var(--soa-accent-rgb), 0.08);
   --soa-sidebar-w: 256px;
+  /* The context canvas mirrors the sidebar: two equal rails framing the
+     terminal. Derived, not duplicated, so one knob resizes both. */
+  --soa-ctx-w:     var(--soa-sidebar-w, 256px);
   --font-mono:     ui-monospace, "Fira Mono", Menlo, Consolas, monospace;
   --font-display:  "United Sans Medium", ui-sans-serif, system-ui, sans-serif;
 }
@@ -743,7 +746,10 @@ html, body {
 .terms .term {
   position: absolute; inset: 0;
   display: none;
-  padding: 4px 6px;
+  /* No right padding: the grid is measured against this content box, so
+     every px here becomes dead gutter between the last column and the
+     context canvas. Left keeps its 6px so glyphs clear the sidebar edge. */
+  padding: 4px 0 4px 6px;
 }
 .terms .term.active { display: block; }
 .terms .xterm { height: 100%; width: 100%; }
@@ -2446,6 +2452,15 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .soa-tm-actions button:hover { border-color: var(--soa-accent); }
 .soa-tm-actions .soa-tm-close { width: 28px; padding: 0; }
 .soa-tm-sub { font-size: 11px; color: rgba(var(--soa-accent-rgb), 0.62); margin: 0 0 8px; }
+/* Restore reports what it did here — rebuilt vs replayed — instead of leaving
+   the user to guess from an unchanged screen. Empty until something happens, so
+   it costs no vertical space at rest. */
+.soa-tm-status { margin: 0 0 8px; font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--soa-accent); min-height: 0; }
+.soa-tm-status:empty { display: none; }
+.soa-tm-status[data-kind="bad"] { color: var(--soa-yellow); }
+.soa-tm-status[data-kind="good"] { color: var(--soa-accent); }
+
 .soa-tm-list { flex: 1 1 auto; overflow: auto; border: 1px solid rgba(var(--soa-accent-rgb), 0.16); padding: 6px; min-height: 120px; }
 .soa-tm-list:empty::before, .soa-tm-list[data-empty]:not([data-empty=""])::before { content: attr(data-empty); display: block; padding: 28px 12px; text-align: center; color: rgba(var(--soa-accent-rgb), 0.5); font-size: 11px; }
 .soa-tm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 8px; border-bottom: 1px dashed rgba(var(--soa-accent-rgb), 0.12); }
