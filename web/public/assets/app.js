@@ -308,7 +308,20 @@ class TabRuntime {
         try {
             const core = this.term._core;
             const dims = core && core._renderService && core._renderService.dimensions;
-            const cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            let cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            // xterm moves its dimension bookkeeping between versions, and when
+            // this lookup misses, FitAddon's own proposeDimensions misses with
+            // it — fit() silently becomes a no-op and the grid stays frozen at
+            // whatever size it was last measured correctly at. Measured live:
+            // a 1220px terminal stranded at 102 columns (734px of grid), so
+            // 486px — a third of the width — sat there as a black slab. Fall
+            // back to dividing the PAINTED grid by the column count, which is
+            // the cell width by definition and needs no xterm internals.
+            if (!(cellW > 0.5)) {
+                const rowsEl = this.term.element && this.term.element.querySelector('.xterm-rows');
+                const r = rowsEl && rowsEl.getBoundingClientRect();
+                if (r && r.width > 0 && this.term.cols > 0) cellW = r.width / this.term.cols;
+            }
             // Fill the CONTAINER's content box (the space between its padding),
             // measured independently of xterm's own element. xterm's root shrinks to
             // its content (cols×cellW), so measuring `this.term.element` makes
@@ -321,11 +334,18 @@ class TabRuntime {
             if (!el || !cellW || cellW < 1) return;
             const cs = getComputedStyle(el);
             const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-            if (!(availW > 0)) return;
+            // Wide enough to be a settled layout, not a container mid-transition.
+            if (!(availW > 40)) return;
             const cols = Math.max(2, Math.floor(availW / cellW));
-            // Grow-only: fill the void, but never transiently shrink (a mid-layout
-            // narrow measurement would otherwise reflow Claude's TUI for a frame).
-            if (cols > this.term.cols) this.term.resize(cols, this.term.rows);
+            // Growing is always right. Shrinking is right too — the canvas
+            // opening genuinely narrows the terminal — but only from a
+            // measurement worth trusting: a mid-layout narrow read would
+            // otherwise reflow Claude's TUI for a frame. availW is already
+            // guarded above, so require a real change rather than a 1-column
+            // rounding wobble.
+            if (cols > this.term.cols || cols <= this.term.cols - 2) {
+                this.term.resize(cols, this.term.rows);
+            }
         } catch (_) {}
     }
 
