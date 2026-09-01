@@ -531,6 +531,18 @@
 .ctx-fact-v { color: var(--soa-fg); min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 
+/* ARTIFACTS: one line per published thing, newest first. The row is the link —
+   a whole-row target beats a small anchor at this type size. */
+.ctx-arts { padding: 2px 6px 8px 12px; display: flex; flex-direction: column; gap: 1px;
+    min-height: 0; max-height: min(24vh, 200px); overflow-y: auto; }
+.ctx-art { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline;
+    padding: 2px 6px 2px 0; font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--soa-fg); text-decoration: none; border-left: 2px solid transparent; }
+.ctx-art:hover { color: var(--soa-accent); border-left-color: var(--soa-accent); }
+.ctx-art:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
+.ctx-art-x { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-art-t { font-size: 8.5px; color: var(--soa-accent-dim); opacity: 0.7; }
+
 .ctx-steps { padding: 2px 12px 4px; display: flex; flex-direction: column; gap: 1px;
     max-height: min(30vh, 260px); overflow-y: auto; }
 .ctx-step { display: grid; grid-template-columns: auto 1fr auto; gap: 7px;

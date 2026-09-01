@@ -8,8 +8,15 @@
  *
  * Sources, all local files Claude Code already writes:
  *   ~/.claude/history.jsonl                     user prompts, tagged {project, sessionId}
- *   ~/.claude/projects/<enc-cwd>/<sid>.jsonl    the transcript — TodoWrite carries next steps
+ *   ~/.claude/projects/<enc-cwd>/<sid>.jsonl    the transcript — TodoWrite + published artifacts
  *   <cwd>/.git/HEAD                             branch, read directly (no shell)
+ *
+ * The canvas is READ-WRITE, and the agent working in the tab is a first-class
+ * author: next steps and artifacts are merged from what the transcript shows and
+ * what the agent registered through /api/context/* (the `soa-ctx` CLI). An agent
+ * publishing an artifact does not have to remember to tell anyone — the URL is
+ * picked out of its own transcript — but it can also post one explicitly, and
+ * read the whole canvas back on its next turn.
  */
 
 const fs = require('fs');
@@ -118,6 +125,50 @@ function nextStepsFrom(file) {
     }));
 }
 
+// Published artifacts, straight out of the transcript. Claude Code prints the
+// URL when an artifact is created or updated, so the last occurrence of an id is
+// its most recent touch — dedupe by id, keep that order, newest last.
+const ARTIFACT_RE = /https:\/\/claude\.ai\/(?:code\/artifact|public\/artifacts)\/([A-Za-z0-9_-]{6,64})/g;
+const MAX_ARTIFACTS = 20;
+
+function artifactsFrom(file) {
+    if (!file) return [];
+    const text = readTail(file, TRANSCRIPT_TAIL_BYTES);
+    const byId = new Map();
+    for (const line of text.split('\n')) {
+        if (!line.includes('claude.ai/')) continue;
+        // A title is worth having but never worth failing over: prefer the
+        // Artifact tool_use input, fall back to the id.
+        let title = null, at = 0;
+        try {
+            const d = JSON.parse(line);
+            at = Date.parse(d.timestamp) || 0;
+            const content = (d.message && d.message.content) || [];
+            if (Array.isArray(content)) {
+                for (const part of content) {
+                    if (part && part.type === 'tool_use' && /artifact/i.test(part.name || '') && part.input) {
+                        title = String(part.input.title || part.input.description || '').slice(0, 80) || null;
+                    }
+                }
+            }
+        } catch (_) { /* not JSON — the URL scan below still works */ }
+        ARTIFACT_RE.lastIndex = 0;
+        let m;
+        while ((m = ARTIFACT_RE.exec(line))) {
+            const id = m[1];
+            const prev = byId.get(id);
+            byId.delete(id);   // re-insert so the most recent mention sorts last
+            byId.set(id, {
+                id, url: m[0],
+                title: title || (prev && prev.title) || null,
+                at: at || (prev && prev.at) || 0,
+                source: 'transcript',
+            });
+        }
+    }
+    return [...byId.values()].slice(-MAX_ARTIFACTS);
+}
+
 // Next steps are the one part of the canvas the user writes. TodoWrite would be
 // the natural source, but no transcript on this machine contains a single
 // TodoWrite call, so a purely derived list would always render empty. Persist an
@@ -126,25 +177,59 @@ function stepsPath(sessionId) {
     return stateFile(path.join('context', `${sessionId}.json`));
 }
 
+function readStore(sessionId) {
+    if (!sessionId) return {};
+    try { return JSON.parse(fs.readFileSync(stepsPath(sessionId), 'utf8')) || {}; }
+    catch (_) { return {}; }
+}
+
+function writeStore(sessionId, patch) {
+    const file = stepsPath(sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const next = { ...readStore(sessionId), ...patch, updatedAt: Date.now() };
+    fs.writeFileSync(file, JSON.stringify(next, null, 1));
+    _cache.clear();
+    return next;
+}
+
 function readSteps(sessionId) {
-    if (!sessionId) return null;
-    try {
-        const d = JSON.parse(fs.readFileSync(stepsPath(sessionId), 'utf8'));
-        return Array.isArray(d.steps) ? d.steps : null;
-    } catch (_) {
-        return null;
+    const d = readStore(sessionId);
+    return Array.isArray(d.steps) ? d.steps : null;
+}
+
+// Artifacts an agent registered by hand (soa-ctx artifact <url>). Merged over the
+// transcript-derived list so an explicit title wins over a guessed one.
+function readArtifacts(sessionId) {
+    const d = readStore(sessionId);
+    return Array.isArray(d.artifacts) ? d.artifacts : [];
+}
+
+function writeArtifact(sessionId, { url, title }) {
+    const clean = String(url || '').trim();
+    if (!/^https:\/\/claude\.ai\/[A-Za-z0-9/_-]+$/.test(clean)) throw new Error('claude.ai artifact url required');
+    const id = (clean.match(/([A-Za-z0-9_-]{6,64})\/?$/) || [])[1] || clean;
+    const kept = readArtifacts(sessionId).filter(a => a && a.id !== id);
+    kept.push({ id, url: clean, title: title ? String(title).slice(0, 80) : null, at: Date.now(), source: 'agent' });
+    writeStore(sessionId, { artifacts: kept.slice(-MAX_ARTIFACTS) });
+    return kept;
+}
+
+function mergeArtifacts(sessionId, derived) {
+    const byId = new Map();
+    for (const a of derived || []) byId.set(a.id, a);
+    for (const a of readArtifacts(sessionId)) {
+        const prev = byId.get(a.id);
+        byId.set(a.id, { ...prev, ...a, title: a.title || (prev && prev.title) || null });
     }
+    return [...byId.values()].sort((x, y) => (x.at || 0) - (y.at || 0)).slice(-MAX_ARTIFACTS);
 }
 
 function writeSteps(sessionId, steps) {
-    const file = stepsPath(sessionId);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
     const clean = (Array.isArray(steps) ? steps : []).slice(0, 60).map(s => ({
         text: String((s && s.text) || '').slice(0, 240),
         status: ['completed', 'in_progress', 'pending'].includes(s && s.status) ? s.status : 'pending',
     })).filter(s => s.text);
-    fs.writeFileSync(file, JSON.stringify({ steps: clean, updatedAt: Date.now() }, null, 1));
-    _cache.clear();
+    writeStore(sessionId, { steps: clean });
     return clean;
 }
 
@@ -185,6 +270,8 @@ function contextFor(cwd) {
         prompts,
         // Saved list wins: it is the user's own, and TodoWrite only ever seeds it.
         nextSteps: readSteps(sessionId) || nextStepsFrom(transcript),
+        // Whatever this session published, whether it announced it or not.
+        artifacts: mergeArtifacts(sessionId, artifactsFrom(transcript)),
         turns,
         lastActivity,
         updatedAt: Date.now(),
@@ -205,6 +292,20 @@ function mount(app, requireAuthed) {
             res.json({ ok: true, data: contextFor(path.resolve(cwd)) });
         } catch (e) {
             res.status(500).json({ ok: false, error: String((e && e.message) || e) });
+        }
+    });
+
+    // The agent's own write path: register an artifact it just published, so the
+    // canvas shows it even when the URL never appears in the transcript tail.
+    app.post('/api/context/artifacts', requireAuthed, express.json({ limit: '8kb' }), (req, res) => {
+        const sessionId = String((req.body && req.body.sessionId) || '').trim();
+        if (!/^[A-Za-z0-9_-]{6,64}$/.test(sessionId)) {
+            return res.status(400).json({ ok: false, error: 'valid sessionId required' });
+        }
+        try {
+            res.json({ ok: true, artifacts: writeArtifact(sessionId, req.body || {}) });
+        } catch (e) {
+            res.status(400).json({ ok: false, error: String((e && e.message) || e) });
         }
     });
 

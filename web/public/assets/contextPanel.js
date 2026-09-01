@@ -7,8 +7,13 @@
  * tabs never leaves a stack of stale canvases behind. Every render replaces its
  * region's children; nothing here appends.
  *
- * Three bands, in the order you need them: what you asked (prompts), where you
- * are (workspace), what is left (next steps).
+ * Four bands, in the order you need them: what you asked (prompts), where you
+ * are (workspace), what you made (artifacts), what is left (next steps).
+ *
+ * ARTIFACTS updates itself: the daemon reads published claude.ai artifact URLs
+ * out of the session's own transcript, and an agent can register one explicitly
+ * (`soa-ctx artifact <url>`). Same for NEXT STEPS — the canvas is a surface the
+ * session's agent writes to and reads back, not just a view of chat history.
  *
  * Every edge is draggable. The panel's left border sets its width; the divider
  * above WORKSPACE and above NEXT STEPS sets that band's height, with the prompt
@@ -97,6 +102,7 @@ class ContextCanvas {
         });
 
         this._facts = el('div', { class: 'ctx-facts' });
+        this._arts = el('div', { class: 'ctx-arts' });
         this._stepList = el('div', { class: 'ctx-steps' });
         this._stepInput = el('input', {
             class: 'ctx-step-add', type: 'text', placeholder: 'add a next step',
@@ -116,6 +122,11 @@ class ContextCanvas {
             el('div', { class: 'ctx-band-h' }, [el('span', { text: 'WORKSPACE' })]),
             this._facts,
         ]);
+        this._artsBand = el('div', { class: 'ctx-band ctx-band-arts' }, [
+            this._bandGrip('arts', 'ARTIFACTS'),
+            el('div', { class: 'ctx-band-h' }, [el('span', { text: 'ARTIFACTS' })]),
+            this._arts,
+        ]);
         this._stepsBand = el('div', { class: 'ctx-band ctx-band-steps' }, [
             this._bandGrip('steps', 'NEXT STEPS'),
             el('div', { class: 'ctx-band-h' }, [el('span', { text: 'NEXT STEPS' })]),
@@ -132,6 +143,7 @@ class ContextCanvas {
             head,
             this._threadBand,
             this._factsBand,
+            this._artsBand,
             this._stepsBand,
         );
     }
@@ -249,7 +261,7 @@ class ContextCanvas {
     _applySavedBands() {
         let saved = {};
         try { saved = JSON.parse(lsGet(LS_BANDS, '{}')) || {}; } catch (_) { saved = {}; }
-        const targets = { facts: this._factsBand, steps: this._stepsBand };
+        const targets = { facts: this._factsBand, arts: this._artsBand, steps: this._stepsBand };
         for (const [k, band] of Object.entries(targets)) {
             const px = parseInt(saved[k], 10);
             if (!Number.isFinite(px) || px < BAND_MIN) continue;
@@ -288,6 +300,7 @@ class ContextCanvas {
         this._turns.textContent = d.prompts.length ? `${d.prompts.length} turns · ${ago(d.lastActivity)}` : '';
         this._renderThread(d.prompts || []);
         this._renderFacts(d.workspace || {}, d);
+        this._renderArtifacts(d.artifacts || []);
         this._renderSteps();
     }
 
@@ -319,6 +332,21 @@ class ContextCanvas {
         this._facts.replaceChildren(...rows.map(([k, v]) => el('div', { class: 'ctx-fact' }, [
             el('span', { class: 'ctx-fact-k', text: k }),
             el('span', { class: 'ctx-fact-v', title: v, text: v }),
+        ])));
+    }
+
+    _renderArtifacts(list) {
+        if (!list.length) {
+            this._arts.replaceChildren(el('p', { class: 'ctx-muted', text: 'nothing published yet' }));
+            return;
+        }
+        // Newest first: the thing you just made is the thing you want to open.
+        this._arts.replaceChildren(...[...list].reverse().map(a => el('a', {
+            class: 'ctx-art', href: a.url, target: '_blank', rel: 'noopener noreferrer',
+            title: a.url,
+        }, [
+            el('span', { class: 'ctx-art-x', text: a.title || a.id.slice(0, 8) }),
+            el('span', { class: 'ctx-art-t', text: a.at ? ago(a.at) : '' }),
         ])));
     }
 
@@ -365,6 +393,9 @@ class ContextCanvas {
         this._sub.textContent = '—';
         this._turns.textContent = '';
         this._thread.replaceChildren(el('p', { class: 'ctx-muted', text: msg }));
+        // Say something in every band, or a canvas with no session reads as a
+        // rendering bug rather than an empty state.
+        this._arts.replaceChildren(el('p', { class: 'ctx-muted', text: '—' }));
     }
 }
 
