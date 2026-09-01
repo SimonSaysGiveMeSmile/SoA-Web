@@ -856,10 +856,11 @@ class Shell {
             // drag bursts but too slow here: the first prompt the server
             // paints after reload would be at its old cols. Send now so
             // the user's next command lines up with the measured grid.
+            // A reconnect gets a FRESH socket, and the server tracks desired
+            // sizes per socket — so everything we told the old one is gone.
+            this._sentSize = null;
             const rt = this.tabs.get(target);
-            if (rt && rt._opened) {
-                this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: target, cols: rt.term.cols, rows: rt.term.rows });
-            }
+            if (rt && rt._opened) this._broadcastSize(rt.term.cols, rt.term.rows);
             this._syncTabsUI(tabs);
             // Run agent status detection after HELLO so colors are correct
             // on first load — force a detection pass on all stream buffers
@@ -1046,6 +1047,7 @@ class Shell {
         );
         this.tabs.set(id, rt);
         this.order.push(id);
+        this._broadcastSizeSoon();   // a tab spawned elsewhere starts at OUR width
         return rt;
     }
 
@@ -2754,6 +2756,38 @@ class Shell {
         // in-flight output.
         rt.fitNow();
         requestAnimationFrame(() => { rt.fitNow(); requestAnimationFrame(() => rt.fitNow()); });
+        this._broadcastSizeSoon();
+    }
+
+    // Every tab shares ONE terminal area, so the active tab's measurement is
+    // the right size for all of them — but only the active tab has a painted
+    // xterm to measure, so a tab you have not visited since it was spawned (or
+    // restored) never told its PTY anything and kept the 120-column spawn
+    // default. On a wide window that agent then wraps its whole TUI at 120
+    // columns inside a ~180-column emulator and leaves the remaining third as
+    // a dead black slab down the right-hand side. Push the measured grid to
+    // every tab so background agents wrap at the width you are looking at.
+    _broadcastSize(cols, rows) {
+        if (!(cols > 1 && rows > 1)) return;
+        if (!this._sentSize) this._sentSize = new Map();
+        const key = cols + 'x' + rows;
+        for (const id of this.order) {
+            if (this._sentSize.get(id) === key) continue;
+            this._sentSize.set(id, key);
+            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows });
+        }
+    }
+
+    // Coalesced: a window drag fires a fit per frame, and each PTY resize is a
+    // SIGWINCH that repaints whatever full-screen UI the agent is drawing. Wait
+    // for the size to settle, then tell every tab once.
+    _broadcastSizeSoon() {
+        if (this._bcTimer) clearTimeout(this._bcTimer);
+        this._bcTimer = setTimeout(() => {
+            this._bcTimer = null;
+            const rt = this.tabs.get(this.activeId);
+            if (rt && rt._opened) this._broadcastSize(rt.term.cols, rt.term.rows);
+        }, 250);
     }
 
     _sendSize() {
