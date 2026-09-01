@@ -9,6 +9,13 @@
  *
  * Three bands, in the order you need them: what you asked (prompts), where you
  * are (workspace), what is left (next steps).
+ *
+ * Every edge is draggable. The panel's left border sets its width; the divider
+ * above WORKSPACE and above NEXT STEPS sets that band's height, with the prompt
+ * thread absorbing the slack. Sizes live in localStorage (per browser, like the
+ * sidebar and panel toggles), are clamped so no drag can push a band off-panel,
+ * and reset on double-click. The grips are built ONCE in _build() — renders only
+ * ever replace band BODIES, so a drag survives every tick and every rebind.
  */
 
 const el = (tag, props = {}, children = []) => {
@@ -37,6 +44,21 @@ function ago(ms) {
     return `${Math.round(s / 86400)}d`;
 }
 
+// Drag limits. WIDTH_MIN keeps the mono micro-type readable; BAND_MIN keeps a
+// band's header plus one row visible, so a band can be tucked away small but
+// never dragged out of existence.
+const WIDTH_MIN = 190, WIDTH_MAX = 720;
+const BAND_MIN = 42;
+const LS_WIDTH = 'soa_ctx_w', LS_BANDS = 'soa_ctx_bands';
+const KEY_STEP = 8;
+
+function lsGet(k, fallback) {
+    try { const v = localStorage.getItem(k); return v == null ? fallback : v; } catch (_) { return fallback; }
+}
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+function lsDel(k) { try { localStorage.removeItem(k); } catch (_) {} }
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
 const STATUS_CYCLE = { pending: 'in_progress', in_progress: 'completed', completed: 'pending' };
 const STATUS_MARK = { pending: '○', in_progress: '◐', completed: '●' };
 
@@ -48,7 +70,13 @@ class ContextCanvas {
         this.sessionId = null;
         this.steps = [];
         this._pinned = true;
+        // Called after any size change so the terminal grid can re-fit into the
+        // width the panel just gave back (or took).
+        this.onResize = ctx.onResize || (() => {});
+        this._bands = {};
+        this._applySavedWidth();
         this._build();
+        this._applySavedBands();
         this._timer = setInterval(() => this.tick(), 2500);
         this.tick();
     }
@@ -83,22 +111,151 @@ class ContextCanvas {
             },
         });
 
+        this._factsBand = el('div', { class: 'ctx-band ctx-band-facts' }, [
+            this._bandGrip('facts', 'WORKSPACE'),
+            el('div', { class: 'ctx-band-h' }, [el('span', { text: 'WORKSPACE' })]),
+            this._facts,
+        ]);
+        this._stepsBand = el('div', { class: 'ctx-band ctx-band-steps' }, [
+            this._bandGrip('steps', 'NEXT STEPS'),
+            el('div', { class: 'ctx-band-h' }, [el('span', { text: 'NEXT STEPS' })]),
+            this._stepList,
+            this._stepInput,
+        ]);
+        this._threadBand = el('div', { class: 'ctx-band ctx-band-thread' }, [
+            el('div', { class: 'ctx-band-h' }, [el('span', { text: 'PROMPTS' }), this._sub]),
+            this._thread,
+        ]);
+
         this.root.replaceChildren(
+            this._widthGrip(),
             head,
-            el('div', { class: 'ctx-band ctx-band-thread' }, [
-                el('div', { class: 'ctx-band-h' }, [el('span', { text: 'PROMPTS' }), this._sub]),
-                this._thread,
-            ]),
-            el('div', { class: 'ctx-band' }, [
-                el('div', { class: 'ctx-band-h' }, [el('span', { text: 'WORKSPACE' })]),
-                this._facts,
-            ]),
-            el('div', { class: 'ctx-band' }, [
-                el('div', { class: 'ctx-band-h' }, [el('span', { text: 'NEXT STEPS' })]),
-                this._stepList,
-                this._stepInput,
-            ]),
+            this._threadBand,
+            this._factsBand,
+            this._stepsBand,
         );
+    }
+
+    // ── Drag machinery ──────────────────────────────────────────────────────
+    // One pointer-capture drag for both axes: capture means the pointer keeps
+    // reporting to the grip even when it leaves the 7px hit strip, so a fast
+    // drag can't "slip off" the handle mid-gesture.
+    _drag(grip, onStart, onMove, onReset) {
+        grip.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            const start = onStart(e);
+            // Capture keeps a fast drag glued to the handle; it can throw when the
+            // pointer isn't active (synthetic events, exotic input), and the window
+            // listeners below are what actually make the drag work either way.
+            try { grip.setPointerCapture(e.pointerId); } catch (_) {}
+            grip.classList.add('dragging');
+            document.body.classList.add('ctx-resizing');
+            const move = (ev) => onMove(ev, start);
+            const up = () => {
+                window.removeEventListener('pointermove', move);
+                window.removeEventListener('pointerup', up);
+                window.removeEventListener('pointercancel', up);
+                window.removeEventListener('blur', up);
+                grip.classList.remove('dragging');
+                document.body.classList.remove('ctx-resizing');
+                this.onResize();
+            };
+            // On window, not the grip: a drag that outruns the 7px strip (or ends
+            // outside the viewport, or loses focus) must still land its pointerup,
+            // otherwise the panel stays stuck in resize mode.
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up);
+            window.addEventListener('pointercancel', up);
+            window.addEventListener('blur', up);
+        });
+        // A handle you can't undo is a trap: double-click restores the default.
+        grip.addEventListener('dblclick', (e) => { e.preventDefault(); onReset(); this.onResize(); });
+    }
+
+    _widthGrip() {
+        const grip = el('div', {
+            class: 'ctx-grip ctx-grip-w', role: 'separator', tabindex: '0',
+            'aria-orientation': 'vertical', 'aria-label': 'Resize context canvas width',
+            title: 'Drag to resize · double-click to reset',
+        });
+        const width = () => this.root.getBoundingClientRect().width;
+        const setW = (w) => {
+            const px = clamp(Math.round(w), WIDTH_MIN, Math.min(WIDTH_MAX, Math.round(window.innerWidth * 0.6)));
+            document.documentElement.style.setProperty('--soa-ctx-w', px + 'px');
+            lsSet(LS_WIDTH, String(px));
+        };
+        this._drag(grip,
+            (e) => ({ x: e.clientX, w: width() }),
+            // The panel is on the RIGHT, so dragging left (negative dx) grows it.
+            (ev, s) => { setW(s.w + (s.x - ev.clientX)); this.onResize(); },
+            () => { document.documentElement.style.removeProperty('--soa-ctx-w'); lsDel(LS_WIDTH); },
+        );
+        grip.addEventListener('keydown', (e) => {
+            const d = e.key === 'ArrowLeft' ? KEY_STEP : e.key === 'ArrowRight' ? -KEY_STEP : 0;
+            if (!d) return;
+            e.preventDefault();
+            setW(width() + d);
+            this.onResize();
+        });
+        return grip;
+    }
+
+    _bandGrip(key, label) {
+        const grip = el('div', {
+            class: 'ctx-grip ctx-grip-h', role: 'separator', tabindex: '0',
+            'aria-orientation': 'horizontal', 'aria-label': `Resize ${label} band`,
+            title: 'Drag to resize · double-click to reset',
+        });
+        const band = () => grip.parentElement;
+        const setH = (h) => {
+            const b = band();
+            if (!b) return;
+            // Never let a band grow past what the panel can give the thread.
+            const room = this.root.clientHeight - 120;
+            const px = clamp(Math.round(h), BAND_MIN, Math.max(BAND_MIN, room));
+            b.style.flex = `0 0 ${px}px`;
+            this._bands[key] = px;
+            lsSet(LS_BANDS, JSON.stringify(this._bands));
+        };
+        this._drag(grip,
+            (e) => ({ y: e.clientY, h: band().getBoundingClientRect().height }),
+            // The grip sits on the band's TOP edge: dragging up grows it.
+            (ev, s) => setH(s.h + (s.y - ev.clientY)),
+            () => {
+                const b = band();
+                if (b) b.style.flex = '';
+                delete this._bands[key];
+                lsSet(LS_BANDS, JSON.stringify(this._bands));
+            },
+        );
+        grip.addEventListener('keydown', (e) => {
+            const d = e.key === 'ArrowUp' ? KEY_STEP : e.key === 'ArrowDown' ? -KEY_STEP : 0;
+            if (!d) return;
+            e.preventDefault();
+            setH(band().getBoundingClientRect().height + d);
+        });
+        return grip;
+    }
+
+    _applySavedWidth() {
+        const w = parseInt(lsGet(LS_WIDTH, ''), 10);
+        if (Number.isFinite(w) && w >= WIDTH_MIN) {
+            document.documentElement.style.setProperty(
+                '--soa-ctx-w', clamp(w, WIDTH_MIN, WIDTH_MAX) + 'px');
+        }
+    }
+
+    _applySavedBands() {
+        let saved = {};
+        try { saved = JSON.parse(lsGet(LS_BANDS, '{}')) || {}; } catch (_) { saved = {}; }
+        const targets = { facts: this._factsBand, steps: this._stepsBand };
+        for (const [k, band] of Object.entries(targets)) {
+            const px = parseInt(saved[k], 10);
+            if (!Number.isFinite(px) || px < BAND_MIN) continue;
+            band.style.flex = `0 0 ${px}px`;
+            this._bands[k] = px;
+        }
     }
 
     async tick() {
