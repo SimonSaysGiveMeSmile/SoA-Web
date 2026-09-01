@@ -611,8 +611,9 @@ body.ctx-resizing * { cursor: inherit !important; }
     .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 }
 
-/* On a phone-sized dashboard the handle would sit under the thumb that scrolls
-   the terminal, so the topbar CTX button owns the toggle there. */
+/* The pull handle is the ONLY control for the canvas (the topbar CTX button was
+   removed), so it stays visible at every width. On a phone-sized dashboard it
+   shrinks so it sits clear of the thumb that scrolls the terminal. */
 @media (max-width: 640px) {
-    .ctx-pull { display: none; }
+    .ctx-pull { min-height: 64px; padding: 8px 0 9px; gap: 6px; font-size: 8px; }
 }
