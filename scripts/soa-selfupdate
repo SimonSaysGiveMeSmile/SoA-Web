@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+#
+# soa-selfupdate — keep the LIVE backend daemon on the latest published code.
+#
+# The delivery half of CI/CD. GitHub Actions tests every PR and cuts a release on
+# a `v*` tag; this is what pulls that release onto the machine actually running
+# the daemon, verifies it before it can hurt anything, restarts on the new code,
+# and rolls back if the restart doesn't come up clean.
+#
+# The five properties that make it safe to run unattended:
+#
+#   1. IT UPDATES THE CODE THE DAEMON IS ACTUALLY RUNNING. The install root is
+#      read from the live process's own command line, not guessed — updating a
+#      checkout the daemon never loads is the classic silent no-op.
+#   2. IT NEVER CLOBBERS LOCAL WORK. A dirty tree, a detached branch with local
+#      commits, or an unknown remote aborts the update (override with --force).
+#   3. IT PREFLIGHTS. Staged code must pass `node --check` on every server source
+#      AND the full test suite before a restart is even considered. Broken code
+#      never reaches a restart, so KeepAlive can't crash-loop on it.
+#   4. RESTARTS ARE WINDOWED. Fetch/verify happen any time; the disruptive part —
+#      the restart, which respawns every tab's shell — only happens inside the
+#      maintenance window, or when you ask for it with --now. Until then the
+#      update sits staged and the running daemon is untouched.
+#   5. IT ROLLS BACK. If soa-deploy can't prove a fresh, healthy daemon, the old
+#      commit is checked out and restarted, and you get told.
+#
+# Usage:
+#   soa-selfupdate                     # check + stage; restart only inside the window
+#   soa-selfupdate --check             # report what's available, change nothing
+#   soa-selfupdate --now               # apply and restart immediately
+#   soa-selfupdate --channel main      # track origin/main instead of release tags
+#   soa-selfupdate --window 03:00-05:00
+#   soa-selfupdate --dry-run           # print the plan, touch nothing
+#   soa-selfupdate --force             # proceed despite a dirty tree (last resort)
+#
+# Env: SOA_UPDATE_CHANNEL (release|main) · SOA_UPDATE_WINDOW (HH:MM-HH:MM) ·
+#      SOA_UPDATE_ENABLE=0 (kill switch) · SOA_WEB_INSTALL_ROOT · SOA_WEB_PORT
+#
+# Exit codes: 0 up to date / applied · 10 update available but not applied
+#             (staged, or --check) · 1 failed (rolled back if a restart was tried)
+
+set -euo pipefail
+
+CHANNEL="${SOA_UPDATE_CHANNEL:-release}"
+WINDOW="${SOA_UPDATE_WINDOW:-03:00-05:00}"
+PORT="${SOA_WEB_PORT:-4010}"
+LABEL="${SOA_UPDATE_LABEL:-app.s0a.web.local}"
+CHECK=0; NOW=0; DRY=0; FORCE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check)   CHECK=1; shift;;
+        --now)     NOW=1; shift;;
+        --dry-run) DRY=1; shift;;
+        --force)   FORCE=1; shift;;
+        --channel) CHANNEL="$2"; shift 2;;
+        --window)  WINDOW="$2"; shift 2;;
+        --port)    PORT="$2"; shift 2;;
+        --label)   LABEL="$2"; shift 2;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0;;
+        *) echo "soa-selfupdate: unknown arg '$1'" >&2; exit 2;;
+    esac
+done
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') soa-selfupdate: $*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
+
+[ "${SOA_UPDATE_ENABLE:-1}" = "1" ] || { log "disabled (SOA_UPDATE_ENABLE=0)"; exit 0; }
+
+# ── 1. where does the LIVE daemon run from? ───────────────────────────────────
+# Ask the process, not the filesystem: `node /path/to/server/src/index.js` names
+# the only checkout an update can possibly affect.
+resolve_install_root() {
+    if [ -n "${SOA_WEB_INSTALL_ROOT:-}" ]; then echo "$SOA_WEB_INSTALL_ROOT"; return; fi
+    local pid cmd entry
+    pid="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk -F'= ' '/^[[:space:]]*pid =/{print $2; exit}')"
+    if [ -n "${pid:-}" ]; then
+        cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+        entry="$(echo "$cmd" | tr ' ' '\n' | grep -m1 'server/src/index\.js' || true)"
+        if [ -n "$entry" ]; then (cd "$(dirname "$entry")/../.." && pwd -P); return; fi
+    fi
+    echo "$HOME/.soa-web"
+}
+
+ROOT="$(resolve_install_root)"
+[ -d "$ROOT/server/src" ] || die "no server/src under install root: $ROOT"
+[ -d "$ROOT/.git" ]       || die "install root is not a git checkout: $ROOT (nothing to update from)"
+cd "$ROOT"
+
+LOG_DIR="$ROOT/logs"; mkdir -p "$LOG_DIR" 2>/dev/null || true
+log "install root: $ROOT  ·  channel: $CHANNEL  ·  daemon: $LABEL (:$PORT)"
+
+# ── 2. refuse to touch a working tree that has anything of yours in it ────────
+DIRTY="$(git status --porcelain | head -5 || true)"
+if [ -n "$DIRTY" ] && [ "$FORCE" != 1 ]; then
+    log "working tree is dirty — refusing to update (nothing was touched):"
+    echo "$DIRTY" | sed 's/^/    /'
+    log "commit/stash it, or re-run with --force"
+    exit 1
+fi
+
+git fetch --quiet --tags --prune origin || die "git fetch failed"
+OLD_SHA="$(git rev-parse HEAD)"
+OLD_DESC="$(git describe --tags --always 2>/dev/null || echo "$OLD_SHA")"
+
+# ── 3. what should we be on? ─────────────────────────────────────────────────
+case "$CHANNEL" in
+    release)
+        # Newest semver tag on the remote. `-V` sorts v0.9.0 before v0.10.0.
+        TARGET_REF="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)"
+        [ -n "$TARGET_REF" ] || { log "no v* release tags yet — nothing to track on the release channel"; exit 0; }
+        ;;
+    main)
+        TARGET_REF="origin/main"
+        ;;
+    *) die "unknown channel '$CHANNEL' (use release or main)";;
+esac
+TARGET_SHA="$(git rev-parse "$TARGET_REF^{commit}")"
+
+if [ "$TARGET_SHA" = "$OLD_SHA" ]; then
+    log "up to date ($OLD_DESC)"
+    exit 0
+fi
+
+# Ahead of / diverged from the target means this checkout is somebody's work
+# branch, not a deployment of the tracked line. Moving it would silently abandon
+# those commits — exactly the "never clobber local work" rule, and the reason it
+# is safe to leave this job running on a machine you also develop on.
+AHEAD="$(git rev-list --count "$TARGET_SHA..$OLD_SHA" 2>/dev/null || echo 0)"
+if [ "$AHEAD" -gt 0 ] && [ "$FORCE" != 1 ]; then
+    log "checkout is $AHEAD commit(s) ahead of $TARGET_REF (a work branch: $(git rev-parse --abbrev-ref HEAD))"
+    log "refusing to move it — nothing was touched. Use --force only if you mean to discard that."
+    exit 1
+fi
+
+BEHIND="$(git rev-list --count "$OLD_SHA..$TARGET_SHA" 2>/dev/null || echo '?')"
+log "update available: $OLD_DESC → $TARGET_REF ($BEHIND commit(s) ahead)"
+git log --oneline "$OLD_SHA..$TARGET_SHA" 2>/dev/null | head -8 | sed 's/^/    /'
+
+if [ "$CHECK" = 1 ] || [ "$DRY" = 1 ]; then
+    log "would: checkout $TARGET_REF → preflight (node --check + npm test) → $([ "$NOW" = 1 ] && echo 'restart now' || echo "restart inside $WINDOW")"
+    exit 10
+fi
+
+# ── 4. stage the new code ────────────────────────────────────────────────────
+# Did we get as far as bouncing the daemon? A preflight failure must revert the
+# code and stop — restarting a daemon that is running fine on the OLD code would
+# turn a caught problem into an outage.
+RESTARTED=0
+LOCK_CHANGED=0
+git diff --quiet "$OLD_SHA" "$TARGET_SHA" -- package-lock.json package.json || LOCK_CHANGED=1
+
+rollback() {
+    log "reverting to $OLD_DESC$([ "$RESTARTED" = 1 ] && echo ' and restarting' || echo ' (daemon was never restarted)')"
+    git checkout --quiet --force "$OLD_SHA" || log "rollback checkout FAILED — manual recovery needed at $ROOT"
+    # An `[ x ] && cmd` here would return 1 when the test is false and, under
+    # `set -e`, abort the rollback BEFORE the restart below — leaving the daemon
+    # down. A rollback path must not have a way to quit early.
+    if [ "$LOCK_CHANGED" = 1 ]; then
+        npm ci --omit=dev --silent || log "rollback npm ci failed"
+    fi
+    if [ "$RESTARTED" = 1 ]; then
+        # We bounced it onto a build that didn't come up — bounce it back.
+        launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+        command -v soa-notify >/dev/null 2>&1 && soa-notify "SoA update rolled back to $OLD_DESC — the new build did not come up" >/dev/null 2>&1 || true
+    else
+        command -v soa-notify >/dev/null 2>&1 && soa-notify "SoA update to $TARGET_REF failed preflight — daemon untouched, still on $OLD_DESC" >/dev/null 2>&1 || true
+    fi
+}
+
+log "staging $TARGET_REF …"
+git -c advice.detachedHead=false checkout --quiet --force "$TARGET_SHA" || die "checkout failed (tree untouched)"
+
+if [ "$LOCK_CHANGED" = 1 ]; then
+    log "dependencies changed — npm ci"
+    npm ci --omit=dev --silent || { rollback; die "npm ci failed on the new build"; }
+fi
+
+# ── 5. preflight: broken code must never reach a restart ─────────────────────
+log "preflight: syntax"
+for f in server/src/*.js; do
+    node --check "$f" >/dev/null 2>&1 || { rollback; die "syntax check failed: $f"; }
+done
+log "preflight: test suite"
+if ! npm test >"$LOG_DIR/selfupdate-test.log" 2>&1; then
+    tail -20 "$LOG_DIR/selfupdate-test.log" | sed 's/^/    /'
+    rollback
+    die "test suite failed on $TARGET_REF (see $LOG_DIR/selfupdate-test.log)"
+fi
+log "preflight: green"
+
+# ── 6. restart — the disruptive part, so it is windowed ──────────────────────
+in_window() {
+    local start end now
+    start="${WINDOW%%-*}"; end="${WINDOW##*-}"
+    now="$(date +%H%M)"
+    start="${start/:/}"; end="${end/:/}"
+    if [ "$start" -le "$end" ]; then
+        [ "$now" -ge "$start" ] && [ "$now" -lt "$end" ]
+    else
+        # A window that wraps midnight, e.g. 23:00-02:00.
+        [ "$now" -ge "$start" ] || [ "$now" -lt "$end" ]
+    fi
+}
+
+if [ "$NOW" != 1 ] && ! in_window; then
+    log "staged $TARGET_REF — the running daemon is still on the old code."
+    log "restart deferred to the maintenance window ($WINDOW); force it with: soa-selfupdate --now"
+    exit 10
+fi
+
+log "restarting the daemon onto $TARGET_REF (tabs respawn and auto-resume)…"
+RESTARTED=1
+if ! soa-deploy --dev-root "$ROOT" --install-root "$ROOT" --port "$PORT" --label "$LABEL"; then
+    rollback
+    die "restart could not be verified — rolled back to $OLD_DESC"
+fi
+
+NEW_DESC="$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)"
+log "updated: $OLD_DESC → $NEW_DESC"
+command -v soa-notify >/dev/null 2>&1 && soa-notify "SoA backend updated to $NEW_DESC and restarted clean" >/dev/null 2>&1 || true

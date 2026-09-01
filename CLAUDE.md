@@ -314,6 +314,47 @@ soa-browser screenshot out.jpg
 
 `soa-browser open|click|type|key|scroll|back|eval|url|screenshot`.
 
+## Shipping a change (CI/CD)
+
+Tests run in GitHub Actions on every PR and every push to `main`
+(`.github/workflows/ci.yml`: `npm ci`, a syntax sweep over `server/src` and the
+node CLIs, then `npm test` on node 20 + 22). `main` is protected — changes land
+through a PR, not a direct push.
+
+A release is cut by tagging a commit that is already on `main`:
+
+```bash
+git checkout main && git pull
+git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` re-runs the suite on the tagged commit, then
+publishes a GitHub Release with generated notes and a source tarball. Nothing is
+published that did not pass.
+
+**The daemon updates itself from those releases.** `scripts/soa-selfupdate`
+(launchd job `com.soa-web.selfupdate`, every 30 min) tracks the newest `v*` tag:
+
+```bash
+soa-selfupdate --check        # what's available, change nothing
+soa-selfupdate                # fetch + preflight + stage; restart only inside the window
+soa-selfupdate --now          # apply and restart immediately
+soa-selfupdate --channel main # track origin/main instead of releases
+```
+
+Five properties make it safe to leave running: it updates the checkout the LIVE
+daemon is running (read from the process's own command line, not guessed); it
+refuses to touch a dirty working tree; staged code must pass `node --check` on
+every server source **and** the full test suite before a restart is considered;
+restarts are windowed (`SOA_UPDATE_WINDOW`, default 03:00–05:00) because a
+restart respawns every tab's shell; and a restart that can't be verified rolls
+back to the previous commit and restarts again. Kill switch:
+`SOA_UPDATE_ENABLE=0`.
+
+For a change you want live **now**, `soa-deploy` is still the direct path
+(mirror → `kickstart -k` → prove the new pid is serving the new code). Static
+client files under `web/public/**` only need a reload.
+
 ## Deploy model
 
 The production instance is the **consolidated daemon**: launchd label

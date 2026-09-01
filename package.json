@@ -1,6 +1,6 @@
 {
   "name": "soa-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Son of Anton, reimagined as a web app. Terminal sessions over WebSocket, TRON UI in the browser, zero desktop install.",
   "license": "GPL-3.0",
