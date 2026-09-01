@@ -655,7 +655,6 @@ class Shell {
 
         // Context canvas. Meant to stay open, so it defaults ON and only a saved
         // '0' closes it; phones start closed because it would cover the terminal.
-        const ctxBtn = $('#toggle-context');
         let ctxOff = window.matchMedia('(max-width: 1100px)').matches;
         try {
             const saved = localStorage.getItem('soa_context_off');
@@ -674,13 +673,12 @@ class Shell {
         // Reflect the initial state without persisting it: an unvisited phone
         // shouldn't have "closed" written into localStorage as a preference.
         if (ctxPull) ctxPull.setAttribute('aria-expanded', ctxOff ? 'false' : 'true');
-        for (const el of [ctxBtn, ctxPull]) {
-            if (!el) continue;
-            el.addEventListener('click', () => {
-                setContextOff(!stageEl.classList.contains('no-context'));
-                this.audio.play('panels');
-            });
-        }
+        // The pull handle is the only click target now (the topbar CTX button was
+        // removed); Ctrl+Shift+K below still works.
+        if (ctxPull) ctxPull.addEventListener('click', () => {
+            setContextOff(!stageEl.classList.contains('no-context'));
+            this.audio.play('panels');
+        });
         document.addEventListener('keydown', e => {
             if (!(e.ctrlKey && e.shiftKey)) return;
             if (e.key !== 'K' && e.key !== 'k') return;

@@ -442,24 +442,51 @@
    The canvas is tucked away and pulled back out from its OWN edge, so the
    affordance lives where the motion happens instead of in the topbar. The
    handle rides the panel's outer border and slides to the viewport edge when
-   the panel closes — it never disappears, only the chevron flips. */
+   the panel closes — it never disappears, only the chevron flips.
+
+   At REST the tab is only a grip mark on that border, never a filled slab:
+   the terminal deliberately runs edge-to-edge (`.terms .term` takes no right
+   padding so no column is wasted), so an opaque 15px block parked mid-height
+   reads as a black square dropped on the last two characters of every line it
+   crosses. Hover, focus or a finger promotes the same button to the full
+   labelled tab — the affordance is there when you reach for it and out of the
+   way while you are reading. */
 .ctx-pull {
     position: absolute; top: 50%; right: var(--soa-ctx-w, 256px);
     transform: translateY(-50%);
     width: 15px; min-height: 88px; padding: 11px 0 13px;
     display: flex; flex-direction: column; align-items: center; gap: 8px;
-    background: var(--soa-bg-panel);
-    border: 1px solid var(--soa-line); border-right: none;
+    background-color: transparent;
+    border: 1px solid transparent; border-right: none;
     border-radius: 4px 0 0 4px;
     font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.2em;
     color: var(--soa-accent-dim); cursor: pointer; z-index: 7;
-    transition: right 160ms ease, color 160ms ease, border-color 160ms ease,
-                box-shadow 160ms ease;
+    transition: right 160ms ease, color 160ms ease, background-color 160ms ease,
+                border-color 160ms ease, box-shadow 160ms ease;
 }
 .stage.no-context .ctx-pull { right: 0; }
-.ctx-pull:hover {
+/* The resting mark: the panel's own hairline border, thickened where you grab it. */
+.ctx-pull::before {
+    content: ''; position: absolute; right: 0; top: 12px; bottom: 12px;
+    width: 3px; border-radius: 2px 0 0 2px;
+    background: var(--soa-accent-dim); opacity: 0.5;
+    transition: opacity 160ms ease;
+}
+.ctx-pull > * { opacity: 0; transition: opacity 160ms ease; }
+.ctx-pull:hover, .ctx-pull:focus-visible {
+    background-color: var(--soa-bg-panel);
     color: var(--soa-accent); border-color: var(--soa-accent-dim);
     box-shadow: -5px 0 16px rgba(var(--soa-accent-rgb), 0.14);
+}
+.ctx-pull:hover > *, .ctx-pull:focus-visible > * { opacity: 1; }
+.ctx-pull:hover::before, .ctx-pull:focus-visible::before { opacity: 0; }
+/* Nothing hovers on a touch dashboard, so the mark carries a little more
+   weight there and the tab fills in only while the finger is down. */
+@media (hover: none) {
+    .ctx-pull::before { width: 4px; opacity: 0.75; }
+    .ctx-pull:active { background-color: var(--soa-bg-panel); border-color: var(--soa-accent-dim); }
+    .ctx-pull:active > * { opacity: 1; }
+    .ctx-pull:active::before { opacity: 0; }
 }
 .ctx-pull:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
 /* The glyph points the way the panel will travel, so it reads as a direction
@@ -611,8 +638,9 @@ body.ctx-resizing * { cursor: inherit !important; }
     .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 }
 
-/* On a phone-sized dashboard the handle would sit under the thumb that scrolls
-   the terminal, so the topbar CTX button owns the toggle there. */
+/* The pull handle is the ONLY control for the canvas (the topbar CTX button was
+   removed), so it stays visible at every width. On a phone-sized dashboard it
+   shrinks so it sits clear of the thumb that scrolls the terminal. */
 @media (max-width: 640px) {
-    .ctx-pull { display: none; }
+    .ctx-pull { min-height: 64px; padding: 8px 0 9px; gap: 6px; font-size: 8px; }
 }
