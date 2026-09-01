@@ -844,7 +844,18 @@ class Shell {
         this._updateGraveyard(graveyard);
         this._updateDeviceCount(connectedDevices);
         if (Array.isArray(tabs) && tabs.length) {
-            for (const t of tabs) this._ensureTab(t.id, t.title);
+            // HELLO carries each tab's cwd and memory (tabManager.list()), and
+            // the Time Machine NEEDS the cwd: a snapshot with no cwds can only
+            // replay into tabs that are still open, never rebuild a fleet that
+            // is gone — which is exactly what "view only" on every snapshot
+            // meant. _onSnapshot recorded both; HELLO, the one message a fresh
+            // page load is guaranteed to receive, dropped them, so a tab whose
+            // cwd never changed stayed unrecorded for the life of the page.
+            for (const t of tabs) {
+                this._ensureTab(t.id, t.title);
+                if (t.mem != null) this._tabMem.set(t.id, t.mem);
+                if (t.cwd) this._tabCwd.set(t.id, t.cwd);
+            }
             // Queue each tab's scrollback instead of writing it straight
             // into xterm. Writing before fit means writing at the default
             // 80×24 — any absolute-column ANSI in the stream lands at the
