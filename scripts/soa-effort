@@ -59,7 +59,9 @@ echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read 
 
   # skip non-active projects (inactive/archive) — the manager only spends tokens on
   # ACTIVE tabs. soa-sessions list flags non-active tabs with INACTIVE/ARCHIVED.
-  case "$(echo "$LIST" | grep -E "^ *#$id ")" in *INACTIVE*|*ARCHIVED*) continue;; esac
+  # …and Codex tabs: /effort is a Claude Code command (Codex answers "Unrecognized
+  # command" and the line lands in its prompt queue as noise).
+  case "$(echo "$LIST" | grep -E "^ *#$id ")" in *INACTIVE*|*ARCHIVED*|*CODEX*) continue;; esac
 
   # skip tabs the burn governor is holding at a lower effort (don't fight it)
   case " $THROTTLED_IDS " in *" $id "*) log "skip #$id — burn-throttled (governor owns effort)"; continue;; esac

@@ -50,7 +50,9 @@ const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const procMem          = require('./procMem');
 const claudeSessions   = require('./claudeSessions');
+const codexSessions    = require('./codexSessions');
 const tabApi           = require('./tabApi');
+const workspaceTransfer = require('./workspaceTransfer');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
@@ -63,6 +65,7 @@ const sessionManager   = require('./sessionManager');
 const tunnelGate       = require('./tunnelGate');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
+const skillsApi        = require('./skillsApi');
 const { dbg, agg }     = require('./debug');
 const { STATE_DIR, MODE } = require('./stateDir');
 const instanceLock     = require('./instanceLock');
@@ -223,6 +226,10 @@ app.use((req, res, next) => {
     // local callers — a tunneled request still fails the endpoint's loopback gate.
     // Without this, token mode (selfhost) would 401 the manager + the TTS hook.
     if ((req.path === '/api/sessions' || req.path === '/api/tts') && sessionManager.isLocalRequest(req)) return next();
+    // Workspace-transfer bundle download: the RECEIVING daemon on another
+    // device can't know this install's session token — the one-time 256-bit
+    // bundle token in the path (constant-time checked, short TTL) is the auth.
+    if (req.path.startsWith('/api/workspace/bundle/')) return next();
     const presented = extractPresentedToken(req);
     if (!constantTimeEq(presented, SESSION_TOKEN)) {
         return res.status(401).json({ ok: false, error: 'invalid session token' });
@@ -447,6 +454,7 @@ pairing.mount(app, requireAuthed, pair, {
     },
 });
 tabApi.mount(app, requireAuthed, sessions);
+workspaceTransfer.mount(app, requireAuthed, sessions, { pair });
 envStore.mount(app, requireAuthed);
 autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
@@ -456,6 +464,7 @@ tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
+skillsApi.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -708,6 +717,12 @@ function onWsConnect(ws, session, req) {
                 // for every tab regardless of which client is watching.
                 try { sessionManager.ensure(session).feed(tabId, data); } catch (_) {}
             },
+            // Every byte typed INTO a tab (keys, mobile line, manager send) — the
+            // supervisor reassembles prompts so ones rejected by a usage-limit
+            // banner can be replayed at the reset.
+            onInput: (tabId, data) => {
+                try { sessionManager.ensure(session).feedInput(tabId, data); } catch (_) {}
+            },
             onTabsChange: list => {
                 // If the active tab just went away, pick the next available
                 // one so HELLO after a reload doesn't point at a dead id.
@@ -806,8 +821,9 @@ function onWsConnect(ws, session, req) {
                     env: shellEnv,
                     silent: true,
                     seedScrollback: seed || undefined,
+                    agent: entry.agent || null,
                 });
-                if (tab && cwd) restoredTabs.push({ tab, cwd });
+                if (tab && cwd) restoredTabs.push({ tab, cwd, agent: entry.agent || null });
             });
             console.log(`restore-on-connect: rehydrated ${restoredTabs.length}/${saved.tabs.length} saved tab(s)`
                 + (skipped ? ` (${skipped} already live)` : ''));
@@ -1004,12 +1020,17 @@ function streamBackgroundReplay(ws, session, tabList, activeId) {
 // path. Disable with SOA_WEB_NO_AUTO_RESUME=1.
 function scheduleAutoResume(restoredTabs) {
     setTimeout(() => {
-        let map;
+        let map, codexMap = new Map();
         try { map = claudeSessions.latestSessionByCwd(72); }
         catch (e) { dbg('auto-resume', 'scan failed', String((e && e.message) || e)); return; }
+        try { codexMap = codexSessions.latestSessionByCwd(72); } catch (_) {}
         let n = 0;
-        for (const { tab, cwd } of restoredTabs) {
-            const hit = map.get(cwd);
+        for (const { tab, cwd, agent } of restoredTabs) {
+            // Relaunch the agent the tab was actually running (persisted in
+            // tabs.json); an unknown tab follows whichever transcript is newer.
+            const ch = map.get(cwd), cx = codexMap.get(cwd);
+            const kind = agent || (cx && (!ch || cx.mtime > ch.mtime) ? 'codex' : 'claude');
+            const hit = kind === 'codex' ? cx : ch;
             if (!hit) continue;
             const wait = n * 1500; // stagger cold-starts
             n++;
@@ -1018,7 +1039,7 @@ function scheduleAutoResume(restoredTabs) {
                 // resume-vs-fresh chain the manager's `spawn` action uses, so
                 // boot-restore and agent-spawn can't drift apart. No-op if the
                 // PTY already exited.
-                try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId: hit.sessionId, coldFallback: false }); } catch (_) {}
+                try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId: hit.sessionId, coldFallback: false, agent: kind }); } catch (_) {}
             }, wait);
         }
         if (n) dbg('auto-resume', `armed ${n}/${restoredTabs.length} restored tab(s)`);

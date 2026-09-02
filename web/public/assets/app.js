@@ -18,8 +18,8 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=17';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=44';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=27';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=45';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=28';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
@@ -523,7 +523,7 @@ class Shell {
             tmBtn.addEventListener('click', async () => {
                 this.audio.play('panels');
                 try {
-                    const tm = await import('/assets/timemachine.js?v=2');
+                    const tm = await import('/assets/timemachine.js?v=3');
                     tm.openTimemachineModal(this);
                 } catch (err) {
                     console.warn('[timemachine] open failed', err);
@@ -1624,6 +1624,9 @@ class Shell {
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
+                // Codex CLI approval modal ("No, and tell Codex what to do differently").
+                /tell Codex what to do/i,
+                /Would you like to (?:run|approve|allow)\b/i,
             ];
             if (attentionPatterns.some(p => p.test(tail))) {
                 next = 'attention';
@@ -1650,6 +1653,9 @@ class Shell {
                 /plan\s*mode\s*on/i,
                 /shift\s*\+?\s*tab\s*to\s*cycle/i,
                 /⏵⏵/,
+                // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+                /(?:^|\n)\s*›\s/m,
+                /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
             ];
             if (donePatterns.some(p => p.test(tail))) {
                 next = 'done';
@@ -1813,6 +1819,9 @@ class Shell {
                 /plan\s*mode\s*on/i,
                 /shift\s*\+?\s*tab\s*to\s*cycle/i,
                 /⏵⏵/,
+                // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+                /(?:^|\n)\s*›\s/m,
+                /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
             ],
             // See the stream detector above: attention is narrow — only genuine
             // choice/permission prompts. Idle placeholders and prose that just
@@ -1828,6 +1837,9 @@ class Shell {
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
+                // Codex CLI approval modal ("No, and tell Codex what to do differently").
+                /tell Codex what to do/i,
+                /Would you like to (?:run|approve|allow)\b/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
@@ -5327,7 +5339,7 @@ async function bootServerMode({ backend, token }) {
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 
-    import('/assets/timemachine.js?v=2')
+    import('/assets/timemachine.js?v=3')
         .then(tm => tm.startTimemachine(shell))
         .catch(err => console.warn('[timemachine] boot failed', err));
 }
@@ -5365,7 +5377,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=29');
+        await import('/assets/app-wc.js?v=30');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -5439,7 +5451,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=29').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=30').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.

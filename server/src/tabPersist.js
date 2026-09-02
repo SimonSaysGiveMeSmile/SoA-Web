@@ -202,6 +202,7 @@ function _writeMetaSync(tabMgr) {
                 title: tab.userRenamed ? tab.title : null,
                 cwd: tab.cwd,
                 userRenamed: tab.userRenamed,
+                agent: tab.agent || null,   // 'claude' | 'codex' — so a restart relaunches the RIGHT agent
             });
         }
         const data = { savedAt: new Date().toISOString(), tabs };
@@ -290,7 +291,7 @@ function reconcileTabsFromScrollback() {
     if (lgCount >= MIN_HEALTHY_TABS) {
         tabs = lastgood.tabs
             .filter(t => t && typeof t.cwd === 'string' && t.cwd)
-            .map(t => ({ title: t.userRenamed ? t.title : null, cwd: t.cwd, userRenamed: !!t.userRenamed }));
+            .map(t => ({ title: t.userRenamed ? t.title : null, cwd: t.cwd, userRenamed: !!t.userRenamed, agent: t.agent || null }));
         from = 'lastgood';
     } else if (sbCount >= MIN_HEALTHY_TABS) {
         tabs = [];
