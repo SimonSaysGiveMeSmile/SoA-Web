@@ -26,6 +26,14 @@ Can this replace the desktop app on the web? **Yes, functionally.** The scary pa
 - **Auth.** `SOA_WEB_AUTH=shared` with `SOA_WEB_PASSWORD` gates access behind a signed HttpOnly cookie. `none` delegates to an upstream proxy (Cloudflare Access, tailscale funnel, oauth2_proxy). `open` is localhost-only.
 - **Claude Code, etc.** Any CLI you want to use runs server-side inside the PTY. Install it on the host; your browser is just the glass.
 
+## If it stops responding
+
+Terminals live on the server, not in the browser tab, and every tab's directory
+and scrollback is on disk — so a dark dashboard is almost never lost work.
+**[RECOVERY.md](RECOVERY.md)** walks through it from "wait a second" to
+rebuilding the fleet by hand. The dashboard shows the same steps itself, in a
+panel that appears once the connection has been down for about eight seconds.
+
 ## Running it
 
 ```bash

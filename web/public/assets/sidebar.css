@@ -650,3 +650,110 @@ body.ctx-resizing * { cursor: inherit !important; }
 @media (max-width: 640px) {
     .ctx-pull { min-height: 64px; padding: 8px 0 9px; gap: 6px; font-size: 8px; }
 }
+
+/* ── Recovery panel ─────────────────────────────────────────────────────
+   The moment the daemon stops answering, the only feedback used to be the word
+   "disconnected" going red in the status bar — accurate, and no help at all to
+   someone who does not know what a daemon is. This panel takes that moment over.
+
+   Two decisions shape it. It is NOT a modal: the terminals behind it still hold
+   the work you were reading, and dimming the screen to make a point would take
+   that away. And it ESCALATES — for the first stretch it shows only the live
+   reconnect countdown, because launchd usually wins that race on its own and
+   four terminal commands are the wrong thing to put in front of a worried
+   person. Only once waiting has visibly failed do the rungs come up to full
+   contrast. The number on each rung is the order you should actually try them
+   in, which is the only reason it is numbered. */
+.recovery {
+    position: absolute; right: 14px; bottom: 38px; z-index: 40;
+    width: min(400px, calc(100vw - 28px)); max-height: calc(100% - 56px);
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 15px 16px 14px;
+    background: var(--soa-bg-panel);
+    border: 1px solid var(--soa-yellow); border-radius: 6px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+    color: var(--soa-fg);
+    animation: recovery-in 220ms ease both;
+}
+@keyframes recovery-in { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { .recovery { animation: none; } }
+
+.recovery-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.recovery-head h2 {
+    margin: 0; font-family: var(--font-display); font-size: 13px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--soa-yellow);
+}
+.recovery-close {
+    background: none; border: none; padding: 2px 4px; cursor: pointer; line-height: 1;
+    font-size: 12px; color: var(--soa-accent-dim);
+}
+.recovery-close:hover { color: var(--soa-accent); }
+
+/* The one line that matters most, so it is the one line that is not styled like
+   chrome: sentence case, normal weight, readable size. */
+.recovery-lead { margin: 9px 0 0; font-size: 12.5px; line-height: 1.5; }
+
+.recovery-pulse {
+    margin: 10px 0 0; padding: 7px 9px;
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.04em;
+    color: var(--soa-accent);
+    background: rgba(var(--soa-accent-rgb), 0.07);
+    border-left: 2px solid var(--soa-accent-dim); border-radius: 0 3px 3px 0;
+}
+
+.recovery-steps { list-style: none; margin: 13px 0 0; padding: 0; }
+.recovery-step {
+    display: grid; grid-template-columns: 20px 1fr; gap: 9px;
+    padding: 10px 0; border-top: 1px solid var(--soa-line-soft);
+}
+.recovery-step:first-child { border-top: none; padding-top: 4px; }
+.recovery-num {
+    font-family: var(--font-mono); font-size: 10px; line-height: 1.6;
+    color: var(--soa-accent-dim); text-align: right;
+}
+/* Grid and flex children default to min-content width, and a `white-space: pre`
+   command is very wide — without this the track grows to fit the longest curl
+   and pushes its own Copy button off the panel. */
+.recovery-body { min-width: 0; }
+.recovery-body h3 {
+    margin: 0 0 4px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.01em;
+}
+.recovery-body p { margin: 4px 0 0; font-size: 11.5px; line-height: 1.45; opacity: 0.82; }
+
+/* While waiting is still the right advice, the manual rungs stay legible but
+   quiet — present if you go looking, not shouting over step 1. */
+.recovery[data-stage="waiting"] .recovery-step[data-rung="2"],
+.recovery[data-stage="waiting"] .recovery-step[data-rung="3"],
+.recovery[data-stage="waiting"] .recovery-step[data-rung="4"] { opacity: 0.42; }
+.recovery[data-stage="stuck"] .recovery-step { opacity: 1; transition: opacity 400ms ease; }
+
+.recovery-cmd {
+    display: flex; align-items: stretch; gap: 6px; margin-top: 5px;
+}
+.recovery-cmd code {
+    flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: pre;
+    padding: 6px 8px; font-family: var(--font-mono); font-size: 10px; line-height: 1.4;
+    background: var(--soa-bg); border: 1px solid var(--soa-line); border-radius: 3px;
+    color: var(--soa-accent);
+}
+.recovery-copy {
+    flex: 0 0 auto; padding: 0 9px; cursor: pointer;
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    background: none; border: 1px solid var(--soa-line); border-radius: 3px;
+    color: var(--soa-accent-dim);
+}
+.recovery-copy:hover { color: var(--soa-accent); border-color: var(--soa-accent-dim); }
+.recovery-copy[data-copied] { color: var(--soa-accent); border-color: var(--soa-accent); }
+
+.recovery-foot {
+    margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--soa-line-soft);
+    font-size: 10.5px; line-height: 1.5; color: var(--soa-accent-dim);
+}
+.recovery-foot code { font-family: var(--font-mono); font-size: 10px; color: var(--soa-fg); }
+
+/* The status word is the handle for bringing the panel back after dismissing it. */
+#status-conn.err { cursor: pointer; text-decoration: underline dotted; }
+
+@media (max-width: 640px) {
+    .recovery { right: 8px; left: 8px; bottom: 30px; width: auto; }
+}

@@ -811,6 +811,8 @@ class Shell {
             document.fonts.ready.then(() => this._fitActive()).catch(() => {});
         }
 
+        this._initRecovery();
+
         bridge.addEventListener('hello',     e => this._onHello(e.detail));
         bridge.addEventListener('replay',    e => this._onReplay(e.detail));
         bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
@@ -829,7 +831,8 @@ class Shell {
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
 
-    _onStatus({ state }) {
+    _onStatus({ state, attempt, retryIn }) {
+        this._updateRecovery(state, attempt, retryIn);
         const s = $('#status-conn');
         s.className = state === 'open' ? 'ok' : state === 'connecting' ? 'warn' : 'err';
         const key = `status.${state}`;
@@ -840,6 +843,87 @@ class Shell {
             if (state === 'open')   this.audio.play('granted');
         }
         this._prevConnState = state;
+    }
+
+    // ── Recovery panel ──────────────────────────────────────────────────
+    // Losing the daemon is the most alarming thing this UI can do to someone
+    // who does not know what a daemon is, and until now it said so in one red
+    // word in the status bar. These two methods own the panel that takes that
+    // moment over. It is deliberately slow to appear: launchd usually restarts
+    // the daemon within seconds, and a page that panics faster than the system
+    // heals teaches people to distrust a working recovery.
+    _initRecovery() {
+        const box = $('#recovery');
+        if (!box) return;
+        // Commands must point at THIS machine even when the page was opened
+        // through the public tunnel — a tunnel URL is exactly what stops
+        // resolving when the daemon dies, so it is useless in a recovery step.
+        const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+        const port = (local && location.port) || '4010';
+        const origin = `http://127.0.0.1:${port}`;
+        const cmds = {
+            health:  `curl -s -o /dev/null -w '%{http_code}\\n' ${origin}/`,
+            kick:    'launchctl kickstart -k gui/$(id -u)/app.s0a.web.local',
+            restore: `curl -sX POST ${origin}/api/fleet/restore -H 'content-type: application/json' -d '{}'`,
+        };
+        for (const el of box.querySelectorAll('code[data-cmd]')) el.textContent = cmds[el.dataset.cmd] || '';
+        for (const btn of box.querySelectorAll('.recovery-copy')) {
+            btn.addEventListener('click', async () => {
+                const text = cmds[btn.dataset.copy];
+                if (!text) return;
+                try { await navigator.clipboard.writeText(text); } catch (_) { return; }
+                btn.dataset.copied = '1';
+                btn.textContent = 'Copied';
+                setTimeout(() => { delete btn.dataset.copied; btn.textContent = 'Copy'; }, 1600);
+            });
+        }
+        $('#recovery-close').addEventListener('click', () => {
+            this._recoveryDismissed = true;
+            box.hidden = true;
+        });
+        // Dismissing it should not be a one-way door: the red status word is
+        // the handle that brings it back.
+        const conn = $('#status-conn');
+        if (conn) conn.addEventListener('click', () => {
+            if (!conn.classList.contains('err')) return;
+            this._recoveryDismissed = box.hidden ? false : true;
+            box.hidden = !box.hidden;
+        });
+    }
+
+    _updateRecovery(state, attempt, retryIn) {
+        const box = $('#recovery');
+        if (!box) return;
+        const SHOW_AFTER_MS = 8000;    // below this, waiting is the whole answer
+        const STUCK_AFTER_MS = 45000;  // above this, waiting has visibly failed
+
+        if (state === 'open') {
+            box.hidden = true;
+            this._recoveryDown = null;
+            this._recoveryDismissed = false;
+            if (this._recoveryTick) { clearInterval(this._recoveryTick); this._recoveryTick = null; }
+            return;
+        }
+        if (state === 'closed') {
+            if (!this._recoveryDown) this._recoveryDown = Date.now();
+            this._recoveryNext = retryIn ? Date.now() + retryIn : null;
+            this._recoveryAttempt = attempt || this._recoveryAttempt || 1;
+        }
+        if (!this._recoveryDown) return;
+
+        const paint = () => {
+            const downFor = Date.now() - this._recoveryDown;
+            if (!this._recoveryDismissed && downFor >= SHOW_AFTER_MS) box.hidden = false;
+            box.dataset.stage = downFor >= STUCK_AFTER_MS ? 'stuck' : 'waiting';
+            const pulse = $('#recovery-pulse');
+            if (!pulse) return;
+            const left = this._recoveryNext ? Math.max(0, Math.round((this._recoveryNext - Date.now()) / 1000)) : 0;
+            pulse.textContent = !this._recoveryNext || left === 0
+                ? `Trying to reconnect — attempt ${this._recoveryAttempt}`
+                : `Reconnecting — attempt ${this._recoveryAttempt}, next try in ${left}s`;
+        };
+        paint();
+        if (!this._recoveryTick) this._recoveryTick = setInterval(paint, 1000);
     }
 
     _onHello({ tabs, activeId, replay, graveyard, connectedDevices }) {

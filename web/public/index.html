@@ -881,6 +881,69 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <span class="ctx-pull-chev" aria-hidden="true"></span>
         <span class="ctx-pull-label" aria-hidden="true">CTX</span>
       </button>
+      <!-- Shown only when the WebSocket has been down long enough to worry
+           about. Everything it needs is already in the page, so it still
+           renders with the daemon completely gone. -->
+      <section id="recovery" class="recovery" data-stage="waiting" hidden
+               role="status" aria-live="polite" aria-labelledby="recovery-title">
+        <header class="recovery-head">
+          <h2 id="recovery-title">Can't reach the server</h2>
+          <button id="recovery-close" class="recovery-close" aria-label="Hide this panel">✕</button>
+        </header>
+        <p class="recovery-lead">Your terminals are still running on this Mac. This page lost its
+          connection to them — nothing has been closed and nothing has been deleted.</p>
+        <p id="recovery-pulse" class="recovery-pulse">Reconnecting…</p>
+
+        <ol class="recovery-steps">
+          <li class="recovery-step" data-rung="1">
+            <span class="recovery-num">1</span>
+            <div class="recovery-body">
+              <h3>Give it a minute</h3>
+              <p>macOS restarts the server on its own. This page reconnects by itself the
+                moment it answers — you do not have to do anything.</p>
+            </div>
+          </li>
+          <li class="recovery-step" data-rung="2">
+            <span class="recovery-num">2</span>
+            <div class="recovery-body">
+              <h3>Ask if it is up</h3>
+              <div class="recovery-cmd">
+                <code data-cmd="health"></code>
+                <button class="recovery-copy" data-copy="health">Copy</button>
+              </div>
+              <p><code>200</code> means the server is fine and only this page is stuck: reload it.</p>
+            </div>
+          </li>
+          <li class="recovery-step" data-rung="3">
+            <span class="recovery-num">3</span>
+            <div class="recovery-body">
+              <h3>Start it again</h3>
+              <div class="recovery-cmd">
+                <code data-cmd="kick"></code>
+                <button class="recovery-copy" data-copy="kick">Copy</button>
+              </div>
+              <p>Paste it into the macOS Terminal app. Your tabs come back with the server.</p>
+            </div>
+          </li>
+          <li class="recovery-step" data-rung="4">
+            <span class="recovery-num">4</span>
+            <div class="recovery-body">
+              <h3>Tabs missing once it is back</h3>
+              <div class="recovery-cmd">
+                <code data-cmd="restore"></code>
+                <button class="recovery-copy" data-copy="restore">Copy</button>
+              </div>
+              <p>This only ever opens tabs. It never closes one, so it is safe to run twice.</p>
+            </div>
+          </li>
+        </ol>
+
+        <p class="recovery-foot">Your tabs and scrollback are written to disk, not held in this
+          page: <code id="recovery-statedir">~/.s0a-local/state</code> keeps <code>tabs.json</code>,
+          a protected <code>.lastgood</code> copy, rolling backups and <code>scrollback.json</code>.
+          Full guide: <code>RECOVERY.md</code> in the repo.</p>
+      </section>
+
       <div class="status-bar">
         <span id="status-session">—</span>
         <span id="status-tabs" data-i18n="status.tabs_other" data-i18n-vars='{"n":0}'>0 tabs</span>
