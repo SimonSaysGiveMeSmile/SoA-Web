@@ -185,3 +185,44 @@ test('post-recovery: a transient empty must NOT clobber or tombstone a scrollbac
 });
 
 test.after(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {} });
+
+// ── restore-on-connect planning: fleet-wide "already live" accounting ─────────
+// 2026-08-25: the live multiset was counted for the CONNECTING session only, so
+// a phone binding to a fresh empty session re-opened (and `claude --resume`d)
+// every tab of the fleet already running in the desktop's session.
+function mkSession(tabs) {
+    const map = new Map();
+    tabs.forEach((t, i) => map.set(i + 1, { cwd: t.cwd, exited: !!t.exited }));
+    return { tabMgr: { order: [...map.keys()], tabs: map } };
+}
+
+test('liveCwdCounts: counts live tabs across every session, skipping exited shells', () => {
+    const counts = tabPersist.liveCwdCounts([
+        mkSession([{ cwd: '/a' }, { cwd: '/b' }]),
+        mkSession([{ cwd: '/a' }, { cwd: '/c', exited: true }]),
+        { tabMgr: null },
+        null,
+    ]);
+    assert.deepEqual([...counts.entries()].sort(), [['/a', 2], ['/b', 1]]);
+});
+
+test('planRestore: a live tab anywhere consumes one saved entry; extras still open', () => {
+    const saved = [{ cwd: '/a' }, { cwd: '/a' }, { cwd: '/a' }, { cwd: '/b' }, { cwd: '/d' }];
+    const live = new Map([['/a', 2], ['/b', 1]]);
+    const plan = tabPersist.planRestore(saved, live);
+    assert.equal(plan.skipped, 3);
+    assert.deepEqual(plan.open.map(o => [o.index, o.entry.cwd]), [[2, '/a'], [4, '/d']]);
+    assert.equal(live.get('/a'), 2, 'input multiset is not mutated');
+});
+
+test('planRestore: nothing live → everything opens, keeping saved indexes for scrollback pairing', () => {
+    const plan = tabPersist.planRestore([{ cwd: '/x' }, { cwd: '/y' }], new Map());
+    assert.equal(plan.skipped, 0);
+    assert.deepEqual(plan.open.map(o => o.index), [0, 1]);
+});
+
+test('planRestore: fully-live fleet → opens nothing (no duplicate agents)', () => {
+    const plan = tabPersist.planRestore([{ cwd: '/x' }, { cwd: '/y' }], new Map([['/x', 1], ['/y', 3]]));
+    assert.equal(plan.open.length, 0);
+    assert.equal(plan.skipped, 2);
+});

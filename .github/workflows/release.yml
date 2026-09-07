@@ -1,0 +1,69 @@
+# Release — cut on a `v*` tag pushed to a commit that is already on main.
+#
+# This is the other half of the delivery path: the tag produces a GitHub Release,
+# and scripts/soa-selfupdate on the machine running the daemon tracks the newest
+# `v*` tag on its `release` channel. Tag → tested → released → the daemon picks it
+# up in its maintenance window. Nothing is published that did not pass the suite.
+#
+# Cutting one:
+#   git checkout main && git pull
+#   git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release notes are generated from history
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # A tag is a promise that this code is safe to auto-deploy. Test it here
+      # too — the tagged commit may not be the one CI last saw on main.
+      - name: Test
+        run: npm test
+
+      # The package version is informational (the tag is the source of truth),
+      # but a mismatch usually means someone tagged the wrong commit — say so
+      # without failing the release.
+      - name: Version check
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::warning::tag v$tag does not match package.json version $pkg"
+          fi
+
+      # Source tarball for installs that don't clone: same tree, no git, no
+      # node_modules (the daemon's own installer runs npm ci).
+      - name: Build source tarball
+        run: |
+          set -euo pipefail
+          name="soa-web-${GITHUB_REF_NAME}"
+          git archive --format=tar.gz --prefix="${name}/" -o "${name}.tar.gz" "${GITHUB_REF_NAME}"
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "soa-web-${GITHUB_REF_NAME}.tar.gz" \
+            "soa-web-${GITHUB_REF_NAME}.tar.gz.sha256"

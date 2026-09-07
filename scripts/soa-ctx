@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+/**
+ * soa-ctx — the session's context canvas, from the agent's side.
+ *
+ * The right-hand CONTEXT panel in the dashboard is not a read-only view of chat
+ * history: it is a per-session canvas, and the agent working in the tab is one of
+ * its authors. This is the CLI for that. Everything is scoped to the Claude
+ * session that owns the current directory, so there is nothing to look up.
+ *
+ *   soa-ctx                          # the whole canvas, as the panel shows it
+ *   soa-ctx json                     # same, as JSON
+ *   soa-ctx steps                    # the NEXT STEPS list
+ *   soa-ctx step add <text…>         # queue a step
+ *   soa-ctx step done <n>            # mark step n complete (1-based)
+ *   soa-ctx step rm <n> | clear
+ *   soa-ctx artifacts                # published artifacts
+ *   soa-ctx artifact <url> [title…]  # register one you just published
+ *
+ * Published artifact URLs are picked out of your transcript automatically, so
+ * ARTIFACTS fills in whether or not you run `artifact`. Register one explicitly
+ * when you want the title to read well, or when the URL never got printed.
+ *
+ * Reads and writes go to the local daemon over loopback (same discovery as
+ * soa-msg: SOA_WEB_PORT, else bridge.json). Nothing leaves the machine.
+ */
+
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function port() {
+    if (process.env.SOA_WEB_PORT) return Number(process.env.SOA_WEB_PORT);
+    for (const dir of [process.env.SOA_WEB_STATE_DIR, path.join(os.homedir(), '.soa-web-local'),
+                       path.join(os.homedir(), '.s0a-local', 'state'), path.join(os.homedir(), '.soa-web')]) {
+        if (!dir) continue;
+        try {
+            const j = JSON.parse(fs.readFileSync(path.join(dir, 'bridge.json'), 'utf8'));
+            if (j && j.port) return Number(j.port);
+        } catch (_) { /* try the next candidate */ }
+    }
+    return 4010;
+}
+
+function req(method, p, body) {
+    const data = body ? JSON.stringify(body) : null;
+    const headers = { 'x-soa-local-key': process.env.SOA_WEB_LOCAL_KEY || '' };
+    if (data) { headers['content-type'] = 'application/json'; headers['content-length'] = Buffer.byteLength(data); }
+    return new Promise((resolve, reject) => {
+        const r = http.request({ host: '127.0.0.1', port: port(), path: p, method, headers, timeout: 8000 }, res => {
+            let b = '';
+            res.on('data', c => b += c);
+            res.on('end', () => {
+                try { resolve(JSON.parse(b)); }
+                catch (_) { reject(new Error(`${res.statusCode} ${b.slice(0, 200)}`)); }
+            });
+        });
+        r.on('error', reject);
+        r.on('timeout', () => { r.destroy(); reject(new Error('daemon did not answer')); });
+        if (data) r.write(data);
+        r.end();
+    });
+}
+
+const cwd = process.env.SOA_CTX_CWD || process.cwd();
+const canvas = () => req('GET', `/api/context?cwd=${encodeURIComponent(cwd)}`).then(r => {
+    if (!r || !r.ok) throw new Error((r && r.error) || 'no canvas for this directory');
+    return r.data;
+});
+
+function ago(ms) {
+    if (!ms) return '';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86400) return `${Math.round(s / 3600)}h`;
+    return `${Math.round(s / 86400)}d`;
+}
+const MARK = { pending: '○', in_progress: '◐', completed: '●' };
+
+function show(d) {
+    const w = d.workspace || {};
+    console.log(`CONTEXT  ${w.name || cwd}  ·  session ${d.sessionId ? d.sessionId.slice(0, 8) : '—'}  ·  ${d.turns} turns`);
+    console.log(`  dir     ${w.cwd}`);
+    console.log(`  branch  ${w.branch || 'detached'}`);
+    const last = (d.prompts || []).slice(-3);
+    if (last.length) {
+        console.log('\nRECENT PROMPTS');
+        for (const p of last) console.log(`  ${ago(p.at).padStart(4)}  ${p.text.replace(/\s+/g, ' ').slice(0, 90)}`);
+    }
+    console.log('\nARTIFACTS');
+    const arts = [...(d.artifacts || [])].reverse();
+    if (!arts.length) console.log('  nothing published yet');
+    for (const a of arts) console.log(`  ${ago(a.at).padStart(4)}  ${(a.title || a.id).slice(0, 40).padEnd(40)}  ${a.url}`);
+    console.log('\nNEXT STEPS');
+    const steps = d.nextSteps || [];
+    if (!steps.length) console.log('  nothing queued');
+    steps.forEach((s, i) => console.log(`  ${String(i + 1).padStart(2)}. ${MARK[s.status] || '○'} ${s.text}`));
+}
+
+(async () => {
+    const [cmd, ...rest] = process.argv.slice(2);
+    try {
+        if (!cmd || cmd === 'show') return show(await canvas());
+        if (cmd === 'json') return console.log(JSON.stringify(await canvas(), null, 2));
+
+        if (cmd === 'artifacts') {
+            const d = await canvas();
+            for (const a of [...(d.artifacts || [])].reverse()) console.log(`${a.url}  ${a.title || ''}`.trim());
+            return;
+        }
+        if (cmd === 'artifact') {
+            const [url, ...title] = rest;
+            if (!url) throw new Error('usage: soa-ctx artifact <url> [title…]');
+            const d = await canvas();
+            if (!d.sessionId) throw new Error('no Claude session owns this directory yet');
+            const r = await req('POST', '/api/context/artifacts', { sessionId: d.sessionId, url, title: title.join(' ') || null });
+            if (!r.ok) throw new Error(r.error || 'rejected');
+            console.log(`registered · ${r.artifacts.length} artifact(s) on the canvas`);
+            return;
+        }
+        if (cmd === 'steps') {
+            const d = await canvas();
+            (d.nextSteps || []).forEach((s, i) => console.log(`${String(i + 1).padStart(2)}. ${MARK[s.status] || '○'} ${s.text}`));
+            return;
+        }
+        if (cmd === 'step') {
+            const [sub, ...args] = rest;
+            const d = await canvas();
+            if (!d.sessionId) throw new Error('no Claude session owns this directory yet');
+            let steps = (d.nextSteps || []).map(s => ({ text: s.text, status: s.status }));
+            if (sub === 'add') {
+                const text = args.join(' ').trim();
+                if (!text) throw new Error('usage: soa-ctx step add <text…>');
+                steps.push({ text, status: 'pending' });
+            } else if (sub === 'done' || sub === 'rm') {
+                const n = parseInt(args[0], 10);
+                if (!Number.isFinite(n) || n < 1 || n > steps.length) throw new Error(`step ${args[0] || ''} is not on the list`);
+                if (sub === 'done') steps[n - 1].status = 'completed';
+                else steps.splice(n - 1, 1);
+            } else if (sub === 'clear') {
+                steps = [];
+            } else {
+                throw new Error('usage: soa-ctx step add <text…> | done <n> | rm <n> | clear');
+            }
+            const r = await req('POST', '/api/context/steps', { sessionId: d.sessionId, steps });
+            if (!r.ok) throw new Error(r.error || 'rejected');
+            r.steps.forEach((s, i) => console.log(`${String(i + 1).padStart(2)}. ${MARK[s.status] || '○'} ${s.text}`));
+            return;
+        }
+        throw new Error('usage: soa-ctx [show|json|steps|step|artifacts|artifact] — see the header of this script');
+    } catch (e) {
+        console.error(`soa-ctx: ${(e && e.message) || e}`);
+        process.exit(1);
+    }
+})();

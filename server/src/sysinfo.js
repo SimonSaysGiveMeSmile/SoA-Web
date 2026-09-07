@@ -34,14 +34,83 @@ function cpuInfo() {
     };
 }
 
-function ramInfo() {
+// macOS keeps every spare page busy as file cache, so os.freemem() reports only
+// the truly-idle sliver — on a 128GB box it read 1.5GB free / 98.8% load while
+// Activity Monitor showed 62% and green pressure. Cached files are reclaimable
+// on demand, so counting them as "used" invents an emergency that isn't there.
+//
+// Mirror Activity Monitor instead:
+//   App Memory   = anonymous - purgeable
+//   Memory Used  = App Memory + wired + compressor
+//   Cached Files = file-backed + purgeable
+// and report kernel memory pressure, which is the number that actually decides
+// whether the machine is in trouble.
+const RAM_TTL_MS = 2000;
+let _ram = null, _ramAt = 0, _ramInFlight = false;
+
+function ramFallback() {
     const total = os.totalmem();
-    const free  = os.freemem();
-    const used  = total - free;
+    const free = os.freemem();
+    const used = total - free;
     return {
-        total, free, used,
+        total, free, used, cached: 0, app: 0, wired: 0, compressed: 0,
+        swapUsed: 0, pressure: 'unknown',
         usedPct: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
     };
+}
+
+function parseVmStat(out, total) {
+    const pageSize = Number((out.match(/page size of (\d+)/) || [])[1] || 4096);
+    const page = (label) => {
+        const m = out.match(new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s+(\\d+)'));
+        return m ? Number(m[1]) * pageSize : 0;
+    };
+    const purgeable = page('Pages purgeable');
+    const app = Math.max(0, page('Anonymous pages') - purgeable);
+    const wired = page('Pages wired down');
+    const compressed = page('Pages occupied by compressor');
+    const cached = page('File-backed pages') + purgeable;
+    const used = app + wired + compressed;
+    return {
+        total, used, cached, app, wired, compressed,
+        // "Available" is what a new allocation can actually take: never-used
+        // pages plus everything reclaimable from cache.
+        free: Math.max(0, total - used),
+        usedPct: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
+    };
+}
+
+// Refresh out of band and serve the last snapshot: /api/ram is polled every
+// 2.5s per client and shelling out synchronously would block the event loop
+// (and every PTY attached to it) on each poll.
+function refreshRam() {
+    if (_ramInFlight) return;
+    _ramInFlight = true;
+    const total = os.totalmem();
+    execFile('vm_stat', [], { timeout: 2000 }, (err, stdout) => {
+        if (err || !stdout) { _ramInFlight = false; _ram = ramFallback(); _ramAt = Date.now(); return; }
+        const base = parseVmStat(stdout, total);
+        execFile('sysctl', ['-n', 'vm.swapusage', 'kern.memorystatus_vm_pressure_level'],
+            { timeout: 2000 }, (err2, out2) => {
+                let swapUsed = 0, pressure = 'unknown';
+                if (!err2 && out2) {
+                    const [swapLine, levelLine] = String(out2).trim().split('\n');
+                    const m = /used\s*=\s*([\d.]+)([KMGT])/i.exec(swapLine || '');
+                    if (m) swapUsed = Number(m[1]) * ({ K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 }[m[2].toUpperCase()] || 1);
+                    // kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical.
+                    pressure = { '1': 'normal', '2': 'warn', '4': 'critical' }[String(levelLine || '').trim()] || 'unknown';
+                }
+                _ram = { ...base, swapUsed, pressure };
+                _ramAt = Date.now();
+                _ramInFlight = false;
+            });
+    });
+}
+
+function ramInfo() {
+    if (process.platform !== 'darwin') return ramFallback();
+    if (Date.now() - _ramAt > RAM_TTL_MS) refreshRam();
+    return _ram || ramFallback();
 }
 
 function netInfo() {

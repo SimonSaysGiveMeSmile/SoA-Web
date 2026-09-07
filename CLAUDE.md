@@ -25,6 +25,66 @@ Note: when you finish a turn, your final message is **automatically** sent to
 the IM (via a Claude Code Stop hook), so you don't need `soa-msg` for that —
 reach for it for *mid-task* updates and questions.
 
+## Your context canvas (soa-ctx)
+
+The dashboard's right-hand **CONTEXT** panel is a per-session canvas, not a
+read-only view of chat history — and the agent in the tab is one of its authors.
+It is scoped to the Claude session that owns the current directory, so there is
+nothing to look up:
+
+```bash
+soa-ctx                          # the whole canvas: workspace, recent prompts, artifacts, next steps
+soa-ctx json                     # the same payload, for scripting
+soa-ctx steps                    # the NEXT STEPS list
+soa-ctx step add "ship the migration"   # queue a step  (also: done <n> · rm <n> · clear)
+soa-ctx artifacts                # published artifacts
+soa-ctx artifact <url> [title…]  # register one you just published
+```
+
+Four bands: PROMPTS (your turns, from `history.jsonl`), WORKSPACE (dir, branch,
+session, path), **ARTIFACTS**, and NEXT STEPS. Artifacts fill in **by default** —
+the daemon reads published `claude.ai` artifact URLs out of your own transcript,
+so a URL you printed once is on the canvas whether or not you announced it.
+Register one explicitly when you want the title to read well, or when the URL
+never got printed. Next steps seed from `TodoWrite` and are then yours (and the
+user's) to edit; the saved list always wins.
+
+Use it as the durable surface between turns: what you produced and what is left,
+in a place the user can see from their phone and you can read back with one
+command.
+
+## Restoring a lost fleet
+
+If the tabs vanish (empty dashboard, `soa-sessions list` nearly empty), the
+context is almost always still on disk — the daemon keeps `tabs.json`, a
+protected `tabs.json.lastgood`, a rotating ring of `tabs.json.bak-*`, and
+`scrollback.json`, all in the state dir. The recovery is one call, and it is
+non-destructive (it only ever OPENS tabs):
+
+```bash
+curl -sX POST http://127.0.0.1:4010/api/fleet/restore \
+     -H 'content-type: application/json' -d '{}' | head -c 400
+```
+
+That runs `server/src/fleetRestore.js`, which is the workflow the fleet has been
+rebuilt with by hand three times: pick the richest surviving list (tabs.json →
+lastgood → newest backup → the cwds inside scrollback.json), drop entries whose
+directory is gone, skip cwds that are **already open counting duplicates as a
+multiset** (three tabs on one repo must restore three tabs), open the rest, and
+resume each one's Claude conversation with a **distinct** recent session id so
+two agents never attach to the same transcript. The dashboard's Time Machine
+Restore button calls the same endpoint, and the endpoint is not
+entitlement-gated — recovering your own terminals is not premium fleet control.
+
+Two things that have caused a real loss, worth knowing:
+
+- A `closedByUser` tombstone in `tabs.json` (written when a session legitimately
+  closes every tab) makes boot-time self-heal respect the "intent" and skip
+  recovery. If the fleet is down and `tabs.json` is a lone tab, check for that
+  flag before assuming the state is gone.
+- `soa-sessions spawn` needs the Fleet Manager entitlement, so on an unlicensed
+  install the old `soa-restore-fleet` path fails. `/api/fleet/restore` does not.
+
 ## Managing the whole fleet (manager agent)
 
 SoA runs many sessions (tabs), each often a Claude agent. A **manager agent** is
@@ -253,6 +313,47 @@ soa-browser screenshot out.jpg
 ```
 
 `soa-browser open|click|type|key|scroll|back|eval|url|screenshot`.
+
+## Shipping a change (CI/CD)
+
+Tests run in GitHub Actions on every PR and every push to `main`
+(`.github/workflows/ci.yml`: `npm ci`, a syntax sweep over `server/src` and the
+node CLIs, then `npm test` on node 20 + 22). `main` is protected — changes land
+through a PR, not a direct push.
+
+A release is cut by tagging a commit that is already on `main`:
+
+```bash
+git checkout main && git pull
+git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` re-runs the suite on the tagged commit, then
+publishes a GitHub Release with generated notes and a source tarball. Nothing is
+published that did not pass.
+
+**The daemon updates itself from those releases.** `scripts/soa-selfupdate`
+(launchd job `com.soa-web.selfupdate`, every 30 min) tracks the newest `v*` tag:
+
+```bash
+soa-selfupdate --check        # what's available, change nothing
+soa-selfupdate                # fetch + preflight + stage; restart only inside the window
+soa-selfupdate --now          # apply and restart immediately
+soa-selfupdate --channel main # track origin/main instead of releases
+```
+
+Five properties make it safe to leave running: it updates the checkout the LIVE
+daemon is running (read from the process's own command line, not guessed); it
+refuses to touch a dirty working tree; staged code must pass `node --check` on
+every server source **and** the full test suite before a restart is considered;
+restarts are windowed (`SOA_UPDATE_WINDOW`, default 03:00–05:00) because a
+restart respawns every tab's shell; and a restart that can't be verified rolls
+back to the previous commit and restarts again. Kill switch:
+`SOA_UPDATE_ENABLE=0`.
+
+For a change you want live **now**, `soa-deploy` is still the direct path
+(mirror → `kickstart -k` → prove the new pid is serving the new code). Static
+client files under `web/public/**` only need a reload.
 
 ## Deploy model
 

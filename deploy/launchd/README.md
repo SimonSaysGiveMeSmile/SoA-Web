@@ -75,3 +75,21 @@ launchctl bootout gui/$(id -u)/com.soa-web.server
 ```
 
 Logs: `~/.soa-web/logs/watchdog.log` (only written when it takes action).
+
+## `com.soa-web.selfupdate.plist` — automated backend updates
+
+The delivery end of CI/CD. Every 30 minutes `scripts/soa-selfupdate` checks the
+repo for a newer release (`v*` tag; `SOA_UPDATE_CHANNEL=main` tracks main
+instead), stages it, and preflights it — `node --check` on every server source
+plus the full test suite — before anything restarts.
+
+The restart is the disruptive part (every tab's shell respawns and auto-resumes),
+so it is **windowed**: `SOA_UPDATE_WINDOW`, default 03:00–05:00 local. Outside
+that window an update sits staged and the running daemon is untouched; force it
+with `soa-selfupdate --now`. If the restart can't be verified by `soa-deploy`
+(fresh pid, `/api/ping` green, start time after the newest source mtime), the
+previous commit is checked out and restarted, and you get a push notification.
+
+It refuses to touch a working tree that is dirty or ahead of the target, so a
+machine you also develop on is never clobbered. `SOA_UPDATE_ENABLE=0` disables
+it without unloading the job.

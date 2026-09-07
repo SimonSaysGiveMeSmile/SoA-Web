@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SELF-UPDATE — runs scripts/soa-selfupdate every 30 min (1800s).
+
+  Delivery half of CI/CD: GitHub Actions tests every PR and publishes a release
+  on a `v*` tag; this pulls that release onto the machine running the daemon.
+
+  Safe to leave on. Fetch, preflight (node --check + the full test suite) and
+  staging happen on every tick, but the DISRUPTIVE part — the restart, which
+  respawns every tab's shell — only happens inside SOA_UPDATE_WINDOW. A failed
+  restart rolls back to the previous commit. A dirty working tree aborts the
+  update untouched, so a machine you develop on is never clobbered.
+
+  Knobs (edit below):
+    SOA_UPDATE_CHANNEL  release (newest v* tag, default) | main
+    SOA_UPDATE_WINDOW   local-time window in which restarts may happen
+    SOA_UPDATE_ENABLE   0 to disable without unloading the job
+    SOA_WEB_PORT        daemon port to health-check after the restart
+
+  Paths below assume the install at ~/.s0a-local/app — change them if the daemon
+  runs from a different checkout (soa-selfupdate itself reads the live process to
+  find the real one).
+
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.selfupdate.plist
+  Run once by hand:  soa-selfupdate --check      (report only)
+                     soa-selfupdate --now        (apply + restart immediately)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.selfupdate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/realsimon/.s0a-local/app/scripts/soa-selfupdate</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/realsimon/.s0a-local/app</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/realsimon/.s0a-local/logs/selfupdate.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/realsimon/.s0a-local/logs/selfupdate.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/realsimon/.s0a-local/app/scripts</string>
+        <key>SOA_UPDATE_CHANNEL</key>
+        <string>release</string>
+        <key>SOA_UPDATE_WINDOW</key>
+        <string>03:00-05:00</string>
+        <key>SOA_UPDATE_ENABLE</key>
+        <string>1</string>
+        <key>SOA_WEB_PORT</key>
+        <string>4010</string>
+    </dict>
+</dict>
+</plist>

@@ -18,10 +18,11 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=18';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=46';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=26';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
+import { mountContextPanel } from '/assets/contextPanel.js?v=5';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
@@ -307,7 +308,20 @@ class TabRuntime {
         try {
             const core = this.term._core;
             const dims = core && core._renderService && core._renderService.dimensions;
-            const cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            let cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            // xterm moves its dimension bookkeeping between versions, and when
+            // this lookup misses, FitAddon's own proposeDimensions misses with
+            // it — fit() silently becomes a no-op and the grid stays frozen at
+            // whatever size it was last measured correctly at. Measured live:
+            // a 1220px terminal stranded at 102 columns (734px of grid), so
+            // 486px — a third of the width — sat there as a black slab. Fall
+            // back to dividing the PAINTED grid by the column count, which is
+            // the cell width by definition and needs no xterm internals.
+            if (!(cellW > 0.5)) {
+                const rowsEl = this.term.element && this.term.element.querySelector('.xterm-rows');
+                const r = rowsEl && rowsEl.getBoundingClientRect();
+                if (r && r.width > 0 && this.term.cols > 0) cellW = r.width / this.term.cols;
+            }
             // Fill the CONTAINER's content box (the space between its padding),
             // measured independently of xterm's own element. xterm's root shrinks to
             // its content (cols×cellW), so measuring `this.term.element` makes
@@ -320,11 +334,18 @@ class TabRuntime {
             if (!el || !cellW || cellW < 1) return;
             const cs = getComputedStyle(el);
             const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-            if (!(availW > 0)) return;
+            // Wide enough to be a settled layout, not a container mid-transition.
+            if (!(availW > 40)) return;
             const cols = Math.max(2, Math.floor(availW / cellW));
-            // Grow-only: fill the void, but never transiently shrink (a mid-layout
-            // narrow measurement would otherwise reflow Claude's TUI for a frame).
-            if (cols > this.term.cols) this.term.resize(cols, this.term.rows);
+            // Growing is always right. Shrinking is right too — the canvas
+            // opening genuinely narrows the terminal — but only from a
+            // measurement worth trusting: a mid-layout narrow read would
+            // otherwise reflow Claude's TUI for a frame. availW is already
+            // guarded above, so require a real change rather than a 1-column
+            // rounding wobble.
+            if (cols > this.term.cols || cols <= this.term.cols - 2) {
+                this.term.resize(cols, this.term.rows);
+            }
         } catch (_) {}
     }
 
@@ -367,10 +388,16 @@ class TabRuntime {
 }
 
 class Shell {
-    constructor(bridge, { audio } = {}) {
+    constructor(bridge, { audio, backend } = {}) {
         this.bridge = bridge;
+        // Kept so features loaded later (time machine, fleet restore) can reach
+        // the same daemon the WS is bound to, not just the page origin.
+        this.backend = backend || '';
         this.audio = audio || { play: () => {}, setEnabled: () => {} };
         this.tabs = new Map();
+        // id -> cwd, straight off the snapshot; the context canvas reads the active
+        // tab's cwd from here rather than duplicating a tabs poll.
+        this._tabCwd = new Map();
         this.order = [];
         this.activeId = null;
         // CHAT view state — IM-style messaging with the active agent (the top tab
@@ -544,7 +571,7 @@ class Shell {
             tmBtn.addEventListener('click', async () => {
                 this.audio.play('panels');
                 try {
-                    const tm = await import('/assets/timemachine.js?v=2');
+                    const tm = await import('/assets/timemachine.js?v=3');
                     tm.openTimemachineModal(this);
                 } catch (err) {
                     console.warn('[timemachine] open failed', err);
@@ -645,6 +672,39 @@ class Shell {
             setSidebarHidden(stageEl.classList.contains('no-sidebar'));
             this.audio.play('panels');
             this._fitActive();
+        });
+
+        // Context canvas. Meant to stay open, so it defaults ON and only a saved
+        // '0' closes it; phones start closed because it would cover the terminal.
+        let ctxOff = window.matchMedia('(max-width: 1100px)').matches;
+        try {
+            const saved = localStorage.getItem('soa_context_off');
+            if (saved != null) ctxOff = saved === '1';
+        } catch (_) {}
+        stageEl.classList.toggle('no-context', ctxOff);
+        const ctxPull = $('#ctx-pull');
+        const setContextOff = (off) => {
+            stageEl.classList.toggle('no-context', off);
+            // The pull tab's chevron is CSS-driven off .no-context; only the
+            // a11y state needs syncing here.
+            if (ctxPull) ctxPull.setAttribute('aria-expanded', off ? 'false' : 'true');
+            try { localStorage.setItem('soa_context_off', off ? '1' : '0'); } catch (_) {}
+            this._fitActive();
+        };
+        // Reflect the initial state without persisting it: an unvisited phone
+        // shouldn't have "closed" written into localStorage as a preference.
+        if (ctxPull) ctxPull.setAttribute('aria-expanded', ctxOff ? 'false' : 'true');
+        // The pull handle is the only click target now (the topbar CTX button was
+        // removed); Ctrl+Shift+K below still works.
+        if (ctxPull) ctxPull.addEventListener('click', () => {
+            setContextOff(!stageEl.classList.contains('no-context'));
+            this.audio.play('panels');
+        });
+        document.addEventListener('keydown', e => {
+            if (!(e.ctrlKey && e.shiftKey)) return;
+            if (e.key !== 'K' && e.key !== 'k') return;
+            e.preventDefault();
+            setContextOff(!stageEl.classList.contains('no-context'));
         });
         // Tapping the scrim behind the overlay sidebar closes it.
         stageEl.addEventListener('click', e => {
@@ -786,7 +846,18 @@ class Shell {
         this._updateGraveyard(graveyard);
         this._updateDeviceCount(connectedDevices);
         if (Array.isArray(tabs) && tabs.length) {
-            for (const t of tabs) this._ensureTab(t.id, t.title);
+            // HELLO carries each tab's cwd and memory (tabManager.list()), and
+            // the Time Machine NEEDS the cwd: a snapshot with no cwds can only
+            // replay into tabs that are still open, never rebuild a fleet that
+            // is gone — which is exactly what "view only" on every snapshot
+            // meant. _onSnapshot recorded both; HELLO, the one message a fresh
+            // page load is guaranteed to receive, dropped them, so a tab whose
+            // cwd never changed stayed unrecorded for the life of the page.
+            for (const t of tabs) {
+                this._ensureTab(t.id, t.title);
+                if (t.mem != null) this._tabMem.set(t.id, t.mem);
+                if (t.cwd) this._tabCwd.set(t.id, t.cwd);
+            }
             // Queue each tab's scrollback instead of writing it straight
             // into xterm. Writing before fit means writing at the default
             // 80×24 — any absolute-column ANSI in the stream lands at the
@@ -818,10 +889,11 @@ class Shell {
             // drag bursts but too slow here: the first prompt the server
             // paints after reload would be at its old cols. Send now so
             // the user's next command lines up with the measured grid.
+            // A reconnect gets a FRESH socket, and the server tracks desired
+            // sizes per socket — so everything we told the old one is gone.
+            this._sentSize = null;
             const rt = this.tabs.get(target);
-            if (rt && rt._opened) {
-                this.bridge.input(INPUT_KIND.TERM_RESIZE, { id: target, cols: rt.term.cols, rows: rt.term.rows });
-            }
+            if (rt && rt._opened) this._broadcastSize(rt.term.cols, rt.term.rows);
             this._syncTabsUI(tabs);
             // Run agent status detection after HELLO so colors are correct
             // on first load — force a detection pass on all stream buffers
@@ -865,7 +937,7 @@ class Shell {
         if (!Array.isArray(tabs)) return;
         const known = new Set(tabs.map(t => t.id));
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
-        for (const t of tabs) { this._ensureTab(t.id, t.title); if (t.mem != null) this._tabMem.set(t.id, t.mem); }
+        for (const t of tabs) { this._ensureTab(t.id, t.title); if (t.mem != null) this._tabMem.set(t.id, t.mem); if (t.cwd) this._tabCwd.set(t.id, t.cwd); }
         // Snapshot is the authoritative order: a MOVE_TAB from this client, or
         // from another device sharing the session, must reorder the local tab
         // bar. _ensureTab only appends new ids, so adopt the snapshot order.
@@ -1008,6 +1080,7 @@ class Shell {
         );
         this.tabs.set(id, rt);
         this.order.push(id);
+        this._broadcastSizeSoon();   // a tab spawned elsewhere starts at OUR width
         return rt;
     }
 
@@ -2716,6 +2789,38 @@ class Shell {
         // in-flight output.
         rt.fitNow();
         requestAnimationFrame(() => { rt.fitNow(); requestAnimationFrame(() => rt.fitNow()); });
+        this._broadcastSizeSoon();
+    }
+
+    // Every tab shares ONE terminal area, so the active tab's measurement is
+    // the right size for all of them — but only the active tab has a painted
+    // xterm to measure, so a tab you have not visited since it was spawned (or
+    // restored) never told its PTY anything and kept the 120-column spawn
+    // default. On a wide window that agent then wraps its whole TUI at 120
+    // columns inside a ~180-column emulator and leaves the remaining third as
+    // a dead black slab down the right-hand side. Push the measured grid to
+    // every tab so background agents wrap at the width you are looking at.
+    _broadcastSize(cols, rows) {
+        if (!(cols > 1 && rows > 1)) return;
+        if (!this._sentSize) this._sentSize = new Map();
+        const key = cols + 'x' + rows;
+        for (const id of this.order) {
+            if (this._sentSize.get(id) === key) continue;
+            this._sentSize.set(id, key);
+            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows });
+        }
+    }
+
+    // Coalesced: a window drag fires a fit per frame, and each PTY resize is a
+    // SIGWINCH that repaints whatever full-screen UI the agent is drawing. Wait
+    // for the size to settle, then tell every tab once.
+    _broadcastSizeSoon() {
+        if (this._bcTimer) clearTimeout(this._bcTimer);
+        this._bcTimer = setTimeout(() => {
+            this._bcTimer = null;
+            const rt = this.tabs.get(this.activeId);
+            if (rt && rt._opened) this._broadcastSize(rt.term.cols, rt.term.rows);
+        }, 250);
     }
 
     _sendSize() {
@@ -6236,6 +6341,14 @@ async function bootServerMode({ backend, token }) {
     $('#status-session').textContent = crossOrigin ? new URL(backend).host : location.host;
 
     mountSidebar($('#sidebar'), { audio, backend, token });
+    // One canvas for the page; it rebinds as the active tab's Claude session
+    // changes instead of ever mounting a second one.
+    mountContextPanel($('#context'), {
+        backend,
+        getCwd: () => shell._tabCwd.get(shell.activeId) || null,
+        // A width drag changes the terminal column, so re-fit the grid as it moves.
+        onResize: () => shell._fitActive(),
+    });
 
     setTimeout(() => {
         $('#boot').classList.add('hidden');
@@ -6248,7 +6361,7 @@ async function bootServerMode({ backend, token }) {
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 
-    import('/assets/timemachine.js?v=2')
+    import('/assets/timemachine.js?v=3')
         .then(tm => tm.startTimemachine(shell))
         .catch(err => console.warn('[timemachine] boot failed', err));
 }

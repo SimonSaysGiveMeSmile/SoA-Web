@@ -384,7 +384,41 @@ function _writeScrollbackSync(tabMgr) {
     } catch (_) { /* best-effort */ }
 }
 
+// Multiset of live (non-exited) tab cwds across the given sessions — the
+// "already running" side of restore-on-connect. Counted fleet-wide, not per
+// session: the saved list describes the whole fleet, and the fleet may be alive
+// in ANOTHER session (a lapsed cookie, a phone bound to a fresh token session).
+// Re-opening those here `claude --resume`s agents that are already running —
+// the 2026-08-25 duplication (16 agents, 8 of them doubled or tripled).
+function liveCwdCounts(sessionsIterable) {
+    const counts = new Map();
+    for (const s of sessionsIterable || []) {
+        if (!s || !s.tabMgr) continue;
+        for (const id of s.tabMgr.order) {
+            const t = s.tabMgr.tabs.get(id);
+            if (t && t.cwd && !t.exited) counts.set(t.cwd, (counts.get(t.cwd) || 0) + 1);
+        }
+    }
+    return counts;
+}
+
+// Which saved entries to (re)open given the live multiset. Each live tab consumes
+// one matching saved entry, so a project with several saved tabs still restores
+// fully when only some are alive. Pure; does not mutate `liveByCwd`.
+function planRestore(savedTabs, liveByCwd) {
+    const remaining = new Map(liveByCwd || []);
+    const open = [];
+    let skipped = 0;
+    (savedTabs || []).forEach((entry, index) => {
+        const have = (entry && remaining.get(entry.cwd)) || 0;
+        if (have > 0) { remaining.set(entry.cwd, have - 1); skipped++; return; }
+        open.push({ entry, index });
+    });
+    return { open, skipped };
+}
+
 module.exports = {
+    liveCwdCounts, planRestore,
     load, loadScrollback, loadLastGood, loadSession, saveSession,
     save, saveImmediate, saveAll, reconcileTabsFromScrollback,
     noteUserClose,

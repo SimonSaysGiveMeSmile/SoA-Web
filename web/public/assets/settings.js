@@ -27,7 +27,9 @@ export const DEFAULTS = Object.freeze({
     cursorBlink: true,
     nocursor: false,
     nointro: false,
-    audio: true,
+    // Sound FX default to MUTED: a terminal that chirps on every panel toggle is
+    // a surprise on first run, and someone who wants it turns it on once.
+    audio: false,
     audioVolume: 1.0,
     disableFeedbackAudio: false,
     agentDoneSound: true,
