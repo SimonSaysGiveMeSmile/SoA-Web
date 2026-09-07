@@ -25,6 +25,7 @@ const MSG = Object.freeze({
     BROWSER_FRAME: 'browser-frame',
     MANAGER:    'manager',
     TAB_MEM:    'tab-mem',   // {mem:{[id]:bytes}} — per-tab process-tree RSS, pushed every ~10s
+    TAB_AGENTS: 'tab-agents', // {agents:{[id]:n}} — running background subagents per tab, ~4s (see agentTasks.js)
     MEETING:    'meeting',   // {room, msgs:[…]} — group-meeting transcript delta, pushed as it is said
 
     AUTH:       'auth',
