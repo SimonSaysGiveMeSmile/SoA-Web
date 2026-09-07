@@ -535,7 +535,13 @@
     padding: 5px 12px 5px 4px; border-left: 2px solid transparent; }
 .ctx-turn.latest { border-left-color: var(--soa-accent);
     background: rgba(var(--soa-accent-rgb), 0.045); }
-.ctx-turn-m { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 1px; }
+/* The turn number and its age are chrome, not content. Selecting a run of
+   prompts to paste elsewhere used to swallow them, so the clipboard came out as
+   `…(down` / `22` / `3d` / `change bracket to (down xx %)` — the gutter
+   interleaved line by line with the text, unreadable at the other end. Excluding
+   the meta column from selection leaves the prompts themselves, one per line. */
+.ctx-turn-m { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 1px;
+    user-select: none; -webkit-user-select: none; }
 .ctx-turn-n { font-family: var(--font-mono); font-size: 9px; color: var(--soa-accent-dim);
     font-variant-numeric: tabular-nums; }
 .ctx-turn.latest .ctx-turn-n { color: var(--soa-accent); }
