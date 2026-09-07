@@ -42,7 +42,16 @@ function encodeCwd(cwd) {
 // task-notification's id tag. Both verified against live transcripts
 // (2026-08-27); ids are the basename so the same regex covers agents
 // (agent-…jsonl symlinks), background shells, and future task kinds.
-const LAUNCH_RE = /([^\s"'\\]*\/tasks\/([A-Za-z0-9_-]{4,})\.output)/g;
+//
+// The launch marker anchors on the literal `/tasks/<id>.output` and recovers
+// the path prefix by walking backwards (see _pathStart). It must NOT lead
+// with `[^\s"'\\]*`: that prefix backtracks quadratically at every start
+// offset of an unbroken token, and transcripts routinely carry ~600 KB runs
+// with no whitespace or quote in them (a pasted base64 image is one). On a
+// 4 MB backfill that is hours of synchronous regex inside the 4s sampler —
+// it wedges the event loop and the daemon stops answering /api/ping.
+const LAUNCH_RE = /\/tasks\/([A-Za-z0-9_-]{4,})\.output/g;
+const PATH_BREAK = /[\s"'\\]/;
 const DONE_RE = /<task-id>\s*([A-Za-z0-9_-]{4,})\s*<\/task-id>/g;
 
 const _dirCache = new Map();   // cwd → { at, file }
@@ -77,10 +86,21 @@ function _stateFor(file) {
     return st;
 }
 
+// Start of the path token containing `/tasks/` — the span the old leading
+// `[^\s"'\\]*` used to consume, found by a linear scan instead.
+function _pathStart(chunk, at) {
+    let i = at;
+    while (i > 0 && !PATH_BREAK.test(chunk[i - 1])) i--;
+    return i;
+}
+
 function _parseChunk(st, chunk) {
     let m;
     LAUNCH_RE.lastIndex = 0;
-    while ((m = LAUNCH_RE.exec(chunk))) st.launched.set(m[2], m[1]);
+    while ((m = LAUNCH_RE.exec(chunk))) {
+        const start = _pathStart(chunk, m.index);
+        st.launched.set(m[1], chunk.slice(start, m.index + m[0].length));
+    }
     DONE_RE.lastIndex = 0;
     while ((m = DONE_RE.exec(chunk))) st.notified.add(m[1]);
 }

@@ -93,3 +93,21 @@ test('a truncated/rotated transcript resets cleanly instead of mixing state', ()
     fs.writeFileSync(J(), noticeLine('other0')); // smaller file, unrelated content
     assert.equal(agentTasks.runningFor(CWD).running, 0);
 });
+
+// A single transcript line can carry a very long token with no whitespace,
+// quote or backslash in it — a pasted base64 image is the everyday case, and
+// ~600 KB runs show up in real transcripts. The launch marker must not scan
+// such a run by backtracking: the earlier `[^\s"'\\]*\/tasks\/…` form was
+// quadratic in the run length, which on a 4 MB backfill is hours of blocking
+// regex inside the 4s sampler — it wedged the event loop and the daemon
+// stopped answering /api/ping.
+test('a long unbroken token does not blow up the launch scan (no quadratic backtracking)', () => {
+    reset();
+    const noise = 'A'.repeat(200000); // one run: no \s, " , ' or \ to break it
+    const st = agentTasks._stateFor('backtracking-probe');
+    const started = process.hrtime.bigint();
+    agentTasks._parseChunk(st, `${noise} ${outPath('base64')} trailing text`);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `launch scan took ${ms.toFixed(0)}ms over a 200k-char token — the regex is backtracking`);
+    assert.equal(st.launched.get('base64'), outPath('base64'), 'the marker after the run is still parsed');
+});
