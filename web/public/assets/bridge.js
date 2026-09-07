@@ -45,6 +45,7 @@ export class Bridge extends EventTarget {
 
         ws.addEventListener('open', () => {
             this.backoff = 500;
+            this.attempts = 0;
             this._emit('status', { state: 'open' });
             this._ping = setInterval(() => this.send(MSG.PING, { ts: Date.now() }), 20_000);
         });
@@ -58,7 +59,16 @@ export class Bridge extends EventTarget {
         ws.addEventListener('close', ev => {
             this._clearPing();
             this.ws = null;
-            this._emit('status', { state: 'closed', code: ev.code });
+            // Report the retry we are about to make, not just the failure. A UI
+            // that can say "attempt 3, next try in 4s" turns a silent outage
+            // into something visibly still working on your behalf.
+            const willRetry = !this.closed && ev.code !== 1008 && ev.code !== 4401;
+            this.attempts = (this.attempts || 0) + 1;
+            this._emit('status', {
+                state: 'closed', code: ev.code,
+                attempt: this.attempts,
+                retryIn: willRetry ? this.backoff : null,
+            });
             if (this.closed) return;
             if (ev.code === 1008 || ev.code === 4401) {
                 // 1008 = policy violation / 4401 = our custom "relogin please"
