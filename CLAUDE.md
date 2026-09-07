@@ -41,9 +41,174 @@ soa-sessions compact <id>         # run /compact on a session that's high on con
 
 A server-side supervisor watches every tab always-on (status + context + stuck
 detection) and feeds the dashboard's FLEET bar; `soa-sessions list` reads the
-same view. As a manager agent: poll `list`, `read` any session that needs
-attention, then `send` an answer, `compact` a high-context one, or `soa-msg` the
-user when a decision is needed. Keep your own running notes as your context.
+same view.
+
+### React, don't poll — the event loop
+
+A manager agent is **event-driven**, not a busy-poller. The supervisor emits a
+trigger whenever a session changes state, and the manager *blocks* on a
+long-poll until one arrives (≈0 CPU between events):
+
+```bash
+soa-sessions whoami               # confirm YOUR tab id (never command/stop your own id)
+soa-sessions events               # one-shot drain to reconcile current state
+soa-sessions watch [--kinds attention,stuck,done,limited] [--once]
+                                  # BLOCKS until the next event(s), then prints them
+```
+
+Event kinds: `attention` (needs input), `stuck` (working but silent >4m),
+`done`, `idle`, `working`, `highContext` (ctx ≥80%), `limited` (hit usage limit),
+`spawned`, `exited`. Each is a one-line wake-up like
+`[ev 142] #3 "api" attention (was working) ctx 41%`. **`list` is ground truth;
+events are advisory wake-ups** — if `watch` reports `dropped > 0` you slept
+through history, so reconcile with `list`.
+
+The loop: `whoami` → `events`+`list` (reconcile) → forever block on `watch` →
+for each event, `read` the offending session, decide, and act:
+
+```bash
+soa-sessions goal <id|cohort> <text>    # fan a /goal out to one tab or a cohort
+soa-sessions btw  <id|cohort> <note>    # /btw aside
+soa-sessions clear <id|cohort>          # /clear
+soa-sessions resume <id|all|limited>    # claude --resume … || claude --continue
+soa-sessions broadcast <cohort> <text>  # plain-text nudge to a cohort
+soa-sessions interrupt <id>             # Ctrl-C to unwedge a stuck agent
+soa-sessions spawn [<cwd>] [--title T] [--goal "…"] [--model m]   # START a new agent
+soa-sessions stop <id>                  # STOP an agent (refuses your own tab)
+```
+
+A **cohort** is `all` or a signal name — `attention`, `stuck`, `idle`, `done`,
+`working`, `highContext`, `limited` (or a comma-list of ids). Your own tab is
+auto-excluded from every fan-out and hidden from your own event stream, so you
+never trigger or command yourself.
+
+**Convert a user desire into per-session goals**: decompose it in *your* context
+into concrete per-project objectives; `spawn` a tab (with `--goal`) for each
+project that isn't open yet, `goal <cohort> …` the rest, and keep the mapping in
+your notes. On `attention` answer routine prompts with `send`/`goal`, else
+`soa-msg` the user **one** question. On `stuck` → `read`, then `btw`/`compact`,
+or `interrupt`+`resume` if wedged. On `done` → assign the next goal. On
+`highContext` → `compact`. On `limited` → it auto-resumes (or `resume-all`).
+Prefer `goal`/`btw` over raw `send` so the slash-prefix is correct; never bare
+`claude` after a restart (use `resume`). Keep your own running notes as context.
+
+### Usage limits: automatic resume + prompt replay (Claude AND Codex)
+
+The supervisor parses BOTH agents' limit banners — Claude Code's
+`You've hit your session limit · resets 9pm (…)` (also `resets Sep 4, 6pm` /
+`resets in 2h 15m`) and Codex CLI's `You've hit your usage limit … or try again
+at Sep 30th, 2026 3:09 AM.` (wraps mid-sentence; parsed across the wrap) — and,
+with `autoResume` on (default in `manager.json`), arms a one-shot **timer at
+reset + 2 min**. Everything typed into the tab while it is limited (the TUI
+rejects those prompts) is captured through the PTY input hook and **replayed in
+order** when the timer fires, so the user's queued asks are not lost; with
+nothing queued it types `continue`. The queue is persisted on the schedule
+(survives a restart) and shows as `QUEUED:n` in `list`. Guard against the trap
+that bit on 2026-09-01: the banner stays on screen after the reset, and
+re-parsing `resets 9pm` at 9:02pm reads as *tomorrow* — such a stale banner is
+ignored (no re-arm, no second `limited` event); a genuinely new limit (different
+reset time) re-arms normally. Control commands (`/usage-credits`, `/effort`,
+bare `continue`, …) are never replayed.
+
+**Claude vs Codex is a first-class distinction**: each tab carries
+`agent: claude|codex` (detected from what the TUI paints: `❯`/footer vs `›`/
+`gpt-… medium · cwd`; persisted in `tabs.json` so a restart relaunches the RIGHT
+agent via `codex resume <id>` instead of `claude --resume`). `list` flags Codex
+tabs `CODEX`; `continue`/`resume` build `codex resume --last` / `codex resume
+<id>` for them, `btw` becomes a plain aside and `clear` → `/new`; `soa-effort`
+skips them (`/effort` is Claude-only — it used to land as "Unrecognized command"
+noise). `spawn --agent codex` starts a Codex tab. The Codex idle composer is a
+`done` signal, so a parked Codex tab no longer reads as working/STUCK.
+
+### Token-usage control — throttle, never stop
+
+The manager also keeps the fleet under Claude's usage limit so agents don't burn
+the 5h/weekly quota and get `limited` (which *stops* their work). Live spend is a
+first-class input: `soa-sessions usage` reads the same v2 engine the dashboard
+shows and folds it per **project** (and `--by session`), tab-correlated, with a
+`$/min` burn rate and budget verdicts:
+
+```bash
+soa-sessions usage                 # per-project 5h$ / day$ / $/min + OVER/FAST flags + a ⚠ THROTTLE header
+soa-sessions usage --by session    # per-session detail
+soa-sessions usage --over          # just the over-budget tab ids (comma-list, for fan-out)
+soa-sessions usage --ids hot       # over-budget OR burning fast (the throttle set)
+soa-sessions list --cost           # the normal fleet view + a spend column
+soa-sessions budget set <project> <blockCost> [todayCost]   # per-project caps ($ est.; default 20/5h · 60/day · 1.5/min)
+```
+
+When a project is **OVER** budget or **FAST**, or the 5h block is projected to
+blow the limit, **THROTTLE — never `stop`** (stopping loses the work; the goal is
+to slow burn, not halt it):
+
+```bash
+soa-sessions throttle <id|list|over|hot|all>            # /compact each → clears context → cheaper turns, work continues
+soa-sessions throttle <id|hot> --pause [Nm]             # interrupt + auto-resume in Nm (default 15): pauses burn, resumes itself
+```
+
+Policy: prefer **`/compact`** (safe — the agent keeps working, just at a lower
+per-turn cost; best on high-context tabs). Use **`--pause`** only for the
+*fastest* burners when the block is close to the cap — it interrupts the current
+turn and schedules a `continue`, so nothing is ever abandoned. **Never `stop`**
+an agent to save tokens. Re-check `usage` after throttling; on `limited` the tab
+still auto-resumes at the reset. Thresholds live in
+`~/.soa-web-local/usage-budgets.json` (defaults mirror the `soa-usage-alert`
+push watchdog and the dashboard's ⚠ hot-row highlight, so all three agree).
+
+## Agent-to-agent comms (soa-bus)
+
+`soa-bus` is a **local-only** message bus so agents can coordinate directly
+instead of only through the manager. It is pure append-only JSONL under the
+state dir (`~/.soa-web-local/a2a/`) — it **never touches the network, is never
+uploaded, and is never shared off this machine**. No database, no daemon.
+
+```bash
+soa-bus post   <channel> <msg>          # publish to a shared channel
+soa-bus read   <channel> [--since MS] [N]   # last N (default 50)
+soa-bus dm     <id|title> <msg>         # direct message to one agent
+soa-bus inbox  [--since MS] [--watch]   # your direct messages
+soa-bus watch  <channel> [--once]       # BLOCK until new traffic, then print it
+soa-bus channels                        # list active channels
+soa-bus whoami                          # your bus identity (#id title)
+```
+
+Identity is auto-derived from `soa-sessions whoami` (`#<id> <title>`), so
+messages are attributed to the sending tab. Use it to hand off work between
+projects (post a contract/decision to a shared channel), request something from
+a peer (`dm`), or make an agent **event-driven** on a channel (`watch` blocks at
+≈0 CPU until a peer posts — the A2A analog of `soa-sessions watch`). Keep
+messages short; channels are size-capped and trimmed to the tail.
+
+## Not stepping on each other (soa-work)
+
+`soa-work` is a **local-only work-claim ledger** built on the `soa-bus` substrate
+(same privacy: pure append-only JSONL under the state dir, never networked) so two
+agents never blindly edit the same directory tree or shared asset. **Before any
+multi-file edit, refactor, or commit that touches shared or ambient state**, run
+the claim → check → release loop:
+
+```bash
+soa-work check   <scope>                          # conflict? exit 3 + who holds it · clear? exit 0
+soa-work claim   <scope> [--ttl 30m] [--note "…"] # register it for the duration
+soa-work beat    <scope>                          # keep a long job's claim fresh
+soa-work release <scope>                          # the instant you finish — and before going idle
+soa-work ls                                       # every live claim (who owns what)
+soa-work conflicts                                # all live overlaps (manager view)
+```
+
+`<scope>` is the **narrowest** thing you'll modify: an absolute path (your repo
+root or a subtree — overlap is by **ancestor/descendant**, so a claim on
+`…/Summer-2026` collides with `…/Summer-2026/iPlan` in *both* directions) or a tag
+like `asset:@macncheese/desktop-ui` / `project:anthropic-proxy` (exact match). If
+`check` reports `[CONFLICT]`, do **not** proceed — narrow to a non-overlapping
+subdir, `soa-bus dm #<id> "coordinating on <scope>?"` the owner, or ask the
+manager; never double-edit a claimed scope. Claims are **advisory** (the non-zero
+exit is the signal; nothing is force-locked) and **self-expire** (default 30m TTL,
+and a crashed/exited agent's claims are reaped immediately via the fleet snapshot),
+so a forgotten release only blocks briefly — but release promptly so peers aren't
+stalled. Make yourself event-driven on peers' claims with
+`soa-bus watch work-events --once` (never bare `watch`). The manager runs
+`soa-work conflicts` in its loop and heads off overlaps before assigning goals.
 
 ## Driving an isolated browser
 
@@ -60,11 +225,141 @@ soa-browser screenshot out.jpg
 
 ## Deploy model
 
+The production instance is the **consolidated daemon**: launchd label
+`app.s0a.web.local`, port `:4010`, code `~/.soa-web/server/src`, static
+`~/.soa-web/web/public`, state dir `~/.soa-web-local` (`SOA_WEB_STATE_DIR`).
+
 Edit this repo (`/Users/test/Desktop/Hireal/soa-web`), then mirror changed files
-to the install dir (`~/.soa-web`). Static client files (`web/public/**`) take
-effect on reload (bump the SW `VERSION` in `web/public/m/sw.js`). Server changes
-(`server/src/**`) need a graceful restart: `kill -TERM <daemon-pid>` (flushes
-scrollback/tabs, leaves the tunnel running) then
-`launchctl kickstart -k gui/$(id -u)/com.soa-web.server`. The tunnel URL is
-persisted to `~/.soa-web/tunnel.json` and re-adopted across restarts, so it
-stays stable.
+to the install dir (`~/.soa-web`) — that is the code the live daemon runs (it
+reads code only at startup). Static client files (`web/public/**`) take effect
+on reload (bump the SW `VERSION` in `web/public/m/sw.js`). Server changes
+(`server/src/**`) need a graceful restart: `kill -TERM <pid>` — read the pid
+from `~/.soa-web-local/daemon.lock` — (flushes scrollback/tabs) then
+`launchctl kickstart -k gui/$(id -u)/app.s0a.web.local`; tabs and tunnel
+re-adopt. The tunnel URL is persisted to `~/.soa-web-local/tunnel.json` (the
+**state dir**, not `~/.soa-web`) and re-adopted across restarts, so it stays
+stable.
+
+## Self-healing (no more manual restores)
+
+The supervision plists are tracked in `deploy/launchd/` in the **canonical
+repo** (`/Users/test/Desktop/Hireal/soa-web/deploy/launchd/`; the install dir
+`~/.soa-web` has no copy, and the daemon's own `app.s0a.web.local.plist` lives
+only in `~/Library/LaunchAgents`). Layers of supervision (all `gui/501`
+launchd jobs):
+
+1. `app.s0a.web.local` itself has unconditional **`KeepAlive = true`** — any
+   exit → restart in ≤10s. On restart the daemon re-adopts the tunnel +
+   persisted tabs.
+2. `com.soa-web.watchdog-4010` — every 60s runs `scripts/soa-watchdog`: pings
+   `:4010` and `kickstart -k`s `app.s0a.web.local` if it's **hung or down**
+   (the case KeepAlive can't see). It is load-tolerant — it re-probes over
+   ~30s before acting, so a load-starved (not dead) daemon isn't restarted —
+   and runs with `SOA_WEB_MANAGE_TUNNEL=0` so it never touches the tunnel.
+3. `com.soa-web.manager-watchdog-4010` — every 90s ensures a manager tab
+   exists (resumes a wedged one, respawns it if missing).
+4. `com.soa-web.channels` — every 60s owns/heals the public tunnel
+   (provider-agnostic: it has switched between cloudflare and ngrok) and
+   persists the active channel (`tunnel.json`/`channels.json` in the state
+   dir). **Stable URL (no churn):** by default it mints *ephemeral* quick
+   tunnels, so the public URL rotates on every restart (a phone bookmark dies).
+   To pin a FIXED URL, run **`soa-tunnel-setup`** once — a per-install,
+   provider-agnostic config (`tunnel-config.json` in the state dir) that works
+   for **any** user with **their own** free tunnel: `soa-tunnel-setup ngrok
+   --domain <your>.ngrok-free.app` (a free ngrok account's one reserved
+   subdomain — no domain of your own needed) **or** `soa-tunnel-setup cloudflare
+   --hostname <host>` (a named tunnel on a domain you delegate; wraps
+   `soa-named-tunnel-setup`). The healer then PREFERS that fixed door
+   (`ch_ngrok` runs `ngrok http … --domain=…`; `ch_named` for cloudflare),
+   upgrades a rotating door to it, and never churns under it. `soa-tunnel-setup
+   status|disable` to inspect/revert. Note: the real healer log is
+   `~/.soa-web-local/logs/channels.log` (state dir) — **not**
+   `~/.soa-web/logs/channels.log`, a stale pre-`SOA_WEB_STATE_DIR` leftover.
+5. `com.soa-web.heartbeat` — every 600s produces the fleet blocker digest.
+6. `com.soa-web.nudge-stale-4010` — every **900s (15 min)** runs
+   `scripts/soa-nudge-stale` (FLEET-CONTINUE): keeps the whole fleet moving.
+   Finds PARKED tabs (idle/done/attention/stuck) that still carry an UNFINISHED
+   Claude Code todo list — todo state read from the on-disk task store, **not**
+   the terminal: per tab cwd → newest `~/.claude/projects/<enc(cwd)>/<sid>.jsonl`
+   → `~/.claude/tasks/<sid>/*.json` (one file per task, `status`
+   pending|in_progress|completed), reliable even after the widget scrolls off.
+   Then: a tab that just stopped → types `continue`; a tab **waiting on a
+   decision** (attention/stuck, or a question in its tail) → a fast headless
+   `claude -p` (haiku) reads its context + todos and **AUTONOMOUSLY makes the
+   best call**, typing the answer in (a digit for numbered menus). It does NOT
+   escalate to the user (per standing directive — see memory
+   `fleet-autonomy-decide`). Guardrails: prefer safe/reversible actions; never
+   auto-authorize spending money, deleting data, or destructive deploys, and for
+   human-only secrets (API keys/logins) tell the agent to proceed with all
+   non-blocked todos and defer that item. Skips manager tabs + caller; ~14m
+   per-tab cooldown; a tab making NO progress backs off to hourly (never
+   abandoned). Log: `~/.soa-web/logs/nudge-stale.log`.
+7. `com.soa-web.effort-4010` — every 900s runs `scripts/soa-effort`: keeps every
+   agent at `/effort ultracode` (xhigh effort + standing dynamic-workflow
+   orchestration). ultracode is **session-only** — it resets to the settings.json
+   default (`xhigh`) on restart/resume — so this re-asserts it. Requires
+   `enableWorkflows: true` in `~/.claude/settings.json` (else `/effort ultracode`
+   errors "needs dynamic workflows enabled"); the script warns if it's off. Only
+   touches PARKED tabs (never interrupts a working agent); detects current effort
+   from the footer (the word `ultracode`) and skips tabs already set; ~20m per-tab
+   cooldown. Log: `~/.soa-web/logs/effort.log`.
+8. `com.soa-web.usage-alert` — every 120s runs `scripts/soa-usage-alert`: polls
+   `/api/claude-usage` (loopback, no auth) and pushes the user when a SINGLE
+   session is "using too much token" — leaning hard on the model in the active
+   5h usage-limit block (≥ $20 est.), heavy today (≥ $60), or suddenly burning
+   fast (cost-**velocity** ≥ $1.5/min, derived by diffing successive polls; the
+   piece the stateless snapshot engine lacks). Edge-triggered with a 30-min
+   per-session cooldown (never spams), re-fires on a 2× escalation, resets on a
+   new block. Correlates each Claude session → tab (`#N title`) via `/api/tabs`.
+   Delivers via `soa-notify` (ntfy OS push) + in-app CHAT. Read-only over
+   loopback — never touches the daemon/tabs/agents; **no restart needed**.
+   Thresholds env-tunable (`SOA_USAGE_BLOCK_COST`/`_TODAY_COST`/`_BURN_COST`/
+   `_COOLDOWN`). The dashboard TOP SESSIONS widget flags the same sessions with a
+   ⚠ red row. Log: `~/.soa-web/logs/usage-alert.log`.
+9. `com.soa-web.fleet-loop` — a PERSISTENT daemon (KeepAlive, not a timer) running
+   `scripts/soa-fleet-loop`: blocks on `soa-sessions watch` (≈0 CPU between events)
+   and reacts the INSTANT a session changes state — the always-on complement to the
+   manager AGENT's event loop (works even with no manager alive) and to the timer
+   watchdogs. SAFE BY DEFAULT: journals every event (the only persistent fleet-event
+   log) + notifies you on `limited` (an agent hit its cap and stopped) and an
+   unexpected `exited` (a working agent's process died), each with a 30m per-tab
+   cooldown; skips the manager tab; NEVER interrupts a working agent or stops
+   anything. Immediate high-context `/compact` of PARKED tabs is OPT-IN
+   (`SOA_FLEETLOOP_COMPACT=1` in the plist; usage-throttle otherwise owns compaction).
+   Kill switch `SOA_FLEETLOOP_ENABLE=0`; dry-run `SOA_FLEETLOOP_DRY=1`. On a watch-
+   stream end launchd restarts it (5s sleep guards against hot-looping). Log:
+   `~/.soa-web/logs/fleet-loop.log`.
+10. `com.soa-web.fleet-restore-4010` — every 60s runs
+    `scripts/soa-fleet-restore-watch`: self-recovery for a fleet **collapse**. The
+    daemon's boot-resume rehydrates on restart, but a boot race (a fresh client
+    binding before rehydrate) or a reconcile that fails to stick can leave the
+    daemon **healthy yet holding only the lone default tab** while the real fleet
+    is gone — "all tabs gone" (2026-08-06, and again 2026-08-14: `boot-resume[1]:
+    no saved tabs on disk` logged while `tabs.json.lastgood` + `scrollback.json`
+    still held 16 tabs). The other supervisors watch liveness/context/usage; none
+    watched "healthy daemon, fleet vanished" — so a collapse sat until the user
+    noticed. This closes that gap: it compares the LIVE fleet (`/api/tabs`,
+    loopback) against `tabs.json.lastgood`, and when the daemon is up + answering
+    but the live fleet has collapsed to ≤1 tab while lastgood holds a real fleet
+    (≥2, **not** `closedByUser`), it runs `soa-restore-fleet` (respawns each
+    project tab + `claude --resume`) and pushes the user. SAFE: never touches the
+    daemon (liveness stays watchdog-4010's job); only respawns already-known
+    project cwds via the idempotent restore (skips open cwds). **Debounced** (the
+    collapse must persist ~45s across two checks), **boot-window-gated** (ignored
+    until the daemon is >90s old, so a mid-rehydrate blip is left alone), and
+    **cooldowned** (10m between restores). Kill switch `SOA_FLEET_RESTORE_ENABLE=0`;
+    dry-run `SOA_FLEET_RESTORE_DRY=1`. Its log also captures the exact live/lastgood
+    state at each collapse — the forensic trail to pin the daemon-side root cause.
+    Log: `~/.soa-web/logs/fleet-restore.log`. (Time Machine gained the browser-side
+    complement the same day: snapshots now record per-tab cwd, and Restore reopens
+    closed terminals at their project folder + `claude --continue` via the
+    cookie-authed tab API — works from mobile.)
+
+The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
+`com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end
+then; the `-4010` replacements were installed minutes later) and are
+launchctl-**disabled**; their plists remain in `~/Library/LaunchAgents` but
+must **not** be re-enabled. To stop the daemon by hand, bootout
+`com.soa-web.watchdog-4010` **first** (else it revives the daemon). Action
+logs: `~/.soa-web-local/logs/watchdog.log` (watchdog) and
+`~/.soa-web/logs/heartbeat.log` (heartbeat).

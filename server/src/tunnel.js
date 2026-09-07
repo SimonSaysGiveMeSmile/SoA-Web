@@ -14,19 +14,20 @@ try {
     localtunnel = null;
 }
 
-const { execFile, spawn } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { dbg } = require('./debug');
+const { ensureCloudflared } = require('./tunnelProvision');
 
 // Where we remember a live tunnel so it can be re-adopted after a daemon
 // restart instead of minting a fresh (different) URL. Keeping the same public
 // URL across restarts is what stops the mobile client from losing the bridge
 // when the desktop is redeployed or refreshed.
-const STATE_FILE = path.join(os.homedir(), '.soa-web', 'tunnel.json');
+const STATE_FILE = require('./stateDir').stateFile('tunnel.json');
 
 function _saveState(state) {
     try {
@@ -46,42 +47,89 @@ function _alive(pid) {
     try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-// Probe a tunnel URL end-to-end (through Cloudflare, back to our own origin).
-// 200 from /api/ping means the tunnel is alive AND routing to a live daemon.
-function _probe(url) {
+// DoH (DNS-over-HTTPS, port 443) resolve — unaffected by a flaky local UDP/53
+// resolver. Lets _probe reach a tunnel that's genuinely alive even when
+// getaddrinfo NXDOMAINs its fresh *.trycloudflare.com host. First A, or null.
+function _dohResolve4(host) {
     return new Promise(resolve => {
-        let done = false;
-        const finish = v => { if (!done) { done = true; resolve(v); } };
-        try {
-            const u = new URL(url.replace(/\/$/, '') + '/api/ping');
-            const lib = u.protocol === 'https:' ? https : http;
-            const req = lib.get(u, res => {
-                res.resume();
-                finish(res.statusCode === 200);
+        const req = https.get(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`,
+            { headers: { accept: 'application/dns-json' } }, res => {
+                let s = ''; res.on('data', d => s += d);
+                res.on('end', () => { try { const a = (JSON.parse(s).Answer || []).find(x => x.type === 1); resolve(a ? a.data : null); } catch (_) { resolve(null); } });
             });
-            req.on('error', () => finish(false));
-            req.setTimeout(6000, () => { try { req.destroy(); } catch (_) {} finish(false); });
-        } catch (_) { finish(false); }
+        req.on('error', () => resolve(null));
+        req.setTimeout(5000, () => { try { req.destroy(); } catch (_) {} resolve(null); });
     });
 }
 
-// Re-adopt a tunnel that outlived a previous daemon process. Returns a handle
-// shaped like _tryCloudflared's so callers can't tell the difference, or null
-// if there's nothing healthy to adopt. A process that's alive but no longer
-// routing to us is killed so we don't leak orphans or run two tunnels.
+// One GET to url/api/ping. opts.ip pins a resolved IP via a custom lookup (the
+// real hostname is still used for SNI/Host). Resolves { ok, dnsErr }.
+function _probeOnce(url, ip) {
+    return new Promise(resolve => {
+        let done = false;
+        const finish = (ok, dnsErr) => { if (!done) { done = true; resolve({ ok, dnsErr: !!dnsErr }); } };
+        try {
+            const u = new URL(url.replace(/\/$/, '') + '/api/ping');
+            const lib = u.protocol === 'https:' ? https : http;
+            const opts = ip ? { lookup: (h, o, cb) => { if (typeof o === 'function') cb = o; cb(null, ip, 4); } } : {};
+            const req = lib.get(u, opts, res => { res.resume(); finish(res.statusCode === 200, false); });
+            req.on('error', e => finish(false, e && /ENOTFOUND|EAI_AGAIN|ENODATA/.test(e.code || '')));
+            req.setTimeout(6000, () => { try { req.destroy(); } catch (_) {} finish(false, false); });
+        } catch (_) { finish(false, false); }
+    });
+}
+
+// Probe a tunnel URL end-to-end (through Cloudflare, back to our own origin).
+// 200 from /api/ping means the tunnel is alive AND routing to a live daemon.
+// CRITICAL for restart survival: if the local resolver can't resolve the host
+// (NXDOMAIN on a flaky network), retry via a DoH-pinned IP rather than declaring
+// the tunnel dead — otherwise adopt() kills a healthy surviving tunnel on every
+// daemon restart and mints a NEW url, breaking remote clients' saved link.
+async function _probe(url) {
+    const first = await _probeOnce(url, null);
+    if (first.ok) return true;
+    if (!first.dnsErr) return false;
+    let host; try { host = new URL(url).hostname; } catch (_) { return false; }
+    const ip = await _dohResolve4(host);
+    if (!ip) return false;
+    dbg('tunnel', 'probe: local resolver failed for', host, '— retrying via DoH-pinned', ip);
+    return (await _probeOnce(url, ip)).ok;
+}
+
+// Find the surviving cloudflared quick-tunnel for this port by its command line.
+// Needed because the channel self-healer (soa-channels) rewrites tunnel.json
+// WITHOUT the pid (provider:"cloudflare"), so the saved pid is often absent —
+// but the detached cloudflared is still running and adoptable.
+function _findCloudflaredPid(port) {
+    try {
+        const out = execFileSync('pgrep', ['-f', `cloudflared tunnel --url http://localhost:${port}`], { encoding: 'utf8', timeout: 3000 });
+        const pid = parseInt((out || '').split('\n').filter(Boolean)[0], 10);
+        return Number.isInteger(pid) ? pid : null;
+    } catch (_) { return null; }
+}
+
+// Re-adopt a tunnel that outlived a previous daemon process (same URL), so a
+// restart/redeploy never breaks remote/mobile clients. Accepts both the
+// tunnel.js-written state (provider:"cloudflared" + pid) AND the self-healer's
+// (provider:"cloudflare", no pid) — in the latter case it finds the surviving
+// process by port. Returns a handle shaped like _tryCloudflared's, or null.
 async function adopt(port) {
     const st = _loadState();
-    if (!st || st.provider !== 'cloudflared' || st.port !== port || !st.pid || !st.url) return null;
-    if (!_alive(st.pid)) { dbg('tunnel', 'adopt: saved pid', st.pid, 'is gone'); _clearState(); return null; }
-    const ok = await _probe(st.url);
+    if (!st || !st.url || st.port !== port || !/^cloudflared?$/.test(st.provider || '')) return null;
+    let pid = (st.pid && _alive(st.pid)) ? st.pid : null;
+    const fromSaved = pid !== null;
+    if (!pid) pid = _findCloudflaredPid(port);   // healer-rewritten tunnel.json: no pid → find the survivor
+    if (!pid || !_alive(pid)) { dbg('tunnel', 'adopt: no live cloudflared survivor for', st.url); return null; }
+    const ok = await _probe(st.url);             // DoH-aware: a flaky local resolver won't false-kill a live tunnel
     if (!ok) {
-        dbg('tunnel', 'adopt: pid', st.pid, 'alive but', st.url, 'not routing — killing stale tunnel');
-        try { process.kill(st.pid); } catch (_) {}
-        _clearState();
+        dbg('tunnel', 'adopt: pid', pid, st.url, 'not routing');
+        // Only reap a process WE recorded — never a pgrep-discovered one (could be
+        // a healthy tunnel the local probe simply couldn't resolve).
+        if (fromSaved) { try { process.kill(pid); } catch (_) {} _clearState(); }
         return null;
     }
-    dbg('tunnel', 'adopt: re-using surviving cloudflared pid', st.pid, st.url);
-    return _wrapAdopted(st);
+    dbg('tunnel', 'adopt: re-using surviving cloudflared pid', pid, st.url);
+    return _wrapAdopted({ ...st, pid, provider: 'cloudflared' });
 }
 
 function _wrapAdopted(st) {
@@ -110,9 +158,11 @@ function _wrapAdopted(st) {
     };
 }
 
-async function openTunnel(port) {
+// onProgress (optional) receives {pct, receivedMB, totalMB} while cloudflared
+// is being auto-downloaded on a machine that has none (see tunnelProvision).
+async function openTunnel(port, onProgress) {
     dbg('tunnel', 'openTunnel: probing providers for port', port);
-    const cf = await _tryCloudflared(port);
+    const cf = await _tryCloudflared(port, onProgress);
     if (cf) { dbg('tunnel', 'cloudflared up:', cf.url); return cf; }
     dbg('tunnel', 'cloudflared unavailable, trying ngrok');
     const ng = await _tryNgrok(port);
@@ -126,9 +176,15 @@ async function openTunnel(port) {
 
 // ── Cloudflare Tunnel (quick tunnel, no account needed) ───────────
 
-async function _tryCloudflared(port) {
-    const cfPath = await _findBinary('cloudflared');
-    if (!cfPath) { dbg('tunnel', 'cloudflared binary not found on PATH or well-known dirs'); return null; }
+async function _tryCloudflared(port, onProgress) {
+    // Finds a system cloudflared, or downloads the official release into the
+    // state dir when the machine has none — a fresh install pairs a phone
+    // with one click, no brew/account/terminal (see tunnelProvision.js).
+    const cfPath = await ensureCloudflared(onProgress);
+    // Download done (or skipped) — clear the progress note so the UI shows a
+    // plain STARTING while the tunnel itself spawns, not a stuck "99%".
+    if (onProgress) { try { onProgress(null); } catch (_) {} }
+    if (!cfPath) { dbg('tunnel', 'cloudflared unavailable (not found and auto-download failed/disabled)'); return null; }
     dbg('tunnel', 'cloudflared binary:', cfPath);
     try {
         // detached: run cloudflared in its own process group so it survives a
@@ -136,7 +192,11 @@ async function _tryCloudflared(port) {
         // the URL is known and persist {pid,url} so the next boot can adopt it
         // and keep the SAME public URL — the mobile bridge never has to chase
         // a new address.
-        const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`], {
+        // --no-autoupdate LAST so the argv prefix stays pgrep-matchable by
+        // _findCloudflaredPid. Without it a standalone binary self-updates
+        // (~24h) and re-execs, minting a NEW trycloudflare URL out from under
+        // the paired phone and defeating adopt()'s same-URL restart survival.
+        const proc = spawn(cfPath, ['tunnel', '--url', `http://localhost:${port}`, '--no-autoupdate'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
         });
@@ -150,7 +210,12 @@ async function _tryCloudflared(port) {
             let buf = '';
             const onData = chunk => {
                 buf += chunk.toString();
-                const match = buf.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+                // (?!api\.) — cloudflared's own log mentions its API endpoint
+                // https://api.trycloudflare.com while REQUESTING the tunnel;
+                // matching the first *.trycloudflare.com in the buffer handed
+                // that out as the public URL (broken QR). Keep buffering until
+                // the actually-assigned subdomain appears.
+                const match = buf.match(/https:\/\/(?!api\.)[a-zA-Z0-9-]+\.trycloudflare\.com/);
                 if (match) {
                     clearTimeout(timeout);
                     resolve(match[0]);

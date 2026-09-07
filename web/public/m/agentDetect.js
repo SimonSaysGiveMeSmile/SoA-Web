@@ -30,14 +30,28 @@ const ATTENTION = [
     /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
     /\bPermission\s+(?:required|needed)\b/i,
     /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
+    // Codex CLI approval modal ("No, and tell Codex what to do differently").
+    /tell Codex what to do/i,
+    /Would you like to (?:run|approve|allow)\b/i,
 ];
 
+// done = finished, waiting for the user (orange). Legacy boxed prompt + modern
+// Claude Code footer, matched whitespace-flexibly (\s*) so the cursor-positioned,
+// space-collapsed status line ("bypasspermissionson") still registers — else a
+// waiting agent falls through to the idle shell-prompt and shows blue.
 const DONE = [
     /╭─+╮/,
     /│\s*>\s*│/,
     /╰─+╯/,
     /│\s*>\s*$/m,
-    /BYPASS PERMISSIONS\s+ON/i,
+    /bypass\s*permissions\s*on/i,
+    /accept\s*edits\s*on/i,
+    /plan\s*mode\s*on/i,
+    /shift\s*\+?\s*tab\s*to\s*cycle/i,
+    /⏵⏵/,
+    // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+    /(?:^|\n)\s*›\s/m,
+    /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
 ];
 
 const SHELL_PROMPT = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[$#%]\s*$)/m;

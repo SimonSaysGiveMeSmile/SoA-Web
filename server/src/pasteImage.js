@@ -29,7 +29,7 @@ const EXT = {
     'image/svg+xml': 'svg',
 };
 
-const PASTE_DIR = path.join(os.homedir(), '.soa-web', 'pasted');
+const PASTE_DIR = require('./stateDir').stateFile('pasted');
 // Keep the folder from growing without bound — prune anything older than a day
 // on each upload. Cheap, best-effort.
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;

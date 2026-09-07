@@ -17,7 +17,13 @@
  *   SOA_WEB_SHELL      shell binary; defaults to $SHELL or /bin/bash
  *   SOA_WEB_SESSION_TTL_MS  idle timeout for sessions (default 6h)
  *   SOA_WEB_DEV=1      dev mode — sends cache-control: no-store on static assets
- *   SOA_WEB_AUTOPAIR   '0' disables auto-starting the Cloudflare tunnel on boot
+ *   SOA_WEB_AUTOPAIR   '0' disables auto-starting the Cloudflare tunnel on boot.
+ *                      Default auto-starts so a fresh install is ready to pair
+ *                      with no manual step — safe because the tunnel is now
+ *                      QR-holder-only (see tunnelGate / SOA_WEB_OPEN_TUNNEL).
+ *   SOA_WEB_OPEN_TUNNEL '1' restores the pre-hardening OPEN tunnel (any visitor
+ *                      to the URL gets a shell). Never auto-starts on boot in
+ *                      this mode — exposing an open shell must be deliberate.
  *   SOA_WEB_SESSION_TOKEN  when set, every /api/* and /ws request must carry
  *                          ?t=<this-token> (or Authorization: Bearer <token>
  *                          on /api/*). Used by scripts/selfhost.js to gate a
@@ -39,29 +45,63 @@ const { SessionStore } = require('./sessionStore');
 const { TabManager }   = require('./tabManager');
 const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
+const claudeUsage      = require('./claudeUsage');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
+const procMem          = require('./procMem');
+const claudeSessions   = require('./claudeSessions');
+const codexSessions    = require('./codexSessions');
 const tabApi           = require('./tabApi');
+const workspaceTransfer = require('./workspaceTransfer');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
 const autoPilot        = require('./autoPilot');
+const agentTasks       = require('./agentTasks');
 const preview          = require('./preview');
 const pasteImage       = require('./pasteImage');
 const tts              = require('./tts');
 const agentBrowser     = require('./agentBrowser');
 const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
+const tunnelGate       = require('./tunnelGate');
+const entitlements     = require('./entitlements');
+const userProfile      = require('./userProfile');
+const skillsApi        = require('./skillsApi');
 const { dbg, agg }     = require('./debug');
+const { STATE_DIR, MODE } = require('./stateDir');
+const instanceLock     = require('./instanceLock');
 
 const HOST = process.env.SOA_WEB_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.SOA_WEB_PORT || '7332', 10);
 let activePort = PORT;
+
+// One daemon per state dir — a second instance pointed at the same dir would
+// clobber tabs.json/scrollback.json (the 2026-06 corruption incidents). Must
+// run before any state is read or written; exits with a clear message if the
+// dir is owned by a live daemon.
+instanceLock.acquireOrExit(PORT);
 const DEV  = process.env.SOA_WEB_DEV === '1';
 const SESSION_TTL_MS = parseInt(process.env.SOA_WEB_SESSION_TTL_MS || String(1000 * 60 * 60 * 6), 10);
+
+// Saved scrollback replayed on restore can carry terminal-STATE sequences the
+// prior TUI left armed — mouse tracking (1000/1002/1003/1006/1015), the alt
+// screen (1049), bracketed paste (2004). Replaying those verbatim re-arms the
+// mode in xterm, and then stray mouse moves stream coordinate reports into the
+// fresh shell AS INPUT — the 2026-07-13 "random typing" flood. Bracketing every
+// replay with this reset makes the terminal end in a sane mode. (Cursor shown,
+// keypad normal too, belt-and-suspenders.)
+const SANE_TERM_RESET =
+    '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b>';
 
 const SIGN_KEY   = auth.resolveSignKey();
 const SECURE_COOKIE = process.env.SOA_WEB_SECURE_COOKIE === '1';
 const SESSION_TOKEN = process.env.SOA_WEB_SESSION_TOKEN || '';
+// QR-holder-only tunnel: a request arriving over the tunnel (not local) must
+// present a valid per-session pairing token — otherwise the tunnel would be an
+// open, unauthenticated shell for anyone who found the URL. Local requests are
+// unaffected. SOA_WEB_OPEN_TUNNEL=1 restores the old open behavior; it is a
+// no-op under SESSION_TOKEN mode (that already gates every request upstream).
+const OPEN_TUNNEL = process.env.SOA_WEB_OPEN_TUNNEL === '1';
 
 function constantTimeEq(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -90,6 +130,13 @@ const DEFAULT_ALLOWED_ORIGINS = [
     'https://s0a.app',
     'http://localhost:' + PORT,
     'http://127.0.0.1:' + PORT,
+    // Native app shells (Capacitor). The iOS/Android "Son of Anton" app serves
+    // its bundled web client from a local scheme, so its WS/CORS Origin is a
+    // fixed capacitor:// (iOS) / http://localhost (Android) — not the backend's
+    // own origin. Trust them so the native app's /ws upgrade isn't 403'd.
+    'capacitor://localhost',
+    'ionic://localhost',
+    'http://localhost',
     ...pairing.lanAddresses(PORT, 'http'),
 ];
 const ALLOWED_ORIGINS = Array.from(new Set([
@@ -101,12 +148,30 @@ const CROSS_SITE = ALLOWED_ORIGINS.some(o => !/^https?:\/\/(localhost|127\.0\.0\
 
 const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
 
+// Self-heal a clobbered fleet BEFORE anything reads tabs.json: if the tab list
+// was lost (empty/missing, and not an intentional close-all) but scrollback.json
+// still holds the per-tab cwds, rebuild tabs.json from it. restore-on-connect +
+// auto-resume below then rehydrate the fleet automatically — no manual
+// soa-relaunch. No-op when tabs are intact or the user cleared them.
+try {
+    const _rec = tabPersist.reconcileTabsFromScrollback();
+    if (_rec.action === 'recovered') {
+        console.log(`tabPersist: RECOVERED ${_rec.count} tab(s) from ${_rec.from || 'backup'} — tabs.json had collapsed to ${_rec.over || 0} (self-heal)`);
+    } else if (_rec.action === 'error') {
+        console.log('tabPersist: fleet reconcile failed:', _rec.reason);
+    }
+} catch (_) { /* best-effort — never block boot on recovery */ }
+
 // Boot-time restore: re-seat the previously persisted session under its
 // original token so any browser cookie still in the wild keeps working
 // after a server restart. Tab cwds and scrollback are restored lazily on
 // the first WS connect (see onWsConnect) so we don't spawn PTYs for a
 // session no one is actually visiting.
 const _persistedSession = tabPersist.loadSession();
+// Truth flag for "the saved fleet was actually rehydrated somewhere this
+// process". Boot-resume keys off THIS — not off "some session has tabs",
+// which a client's own fresh tab used to satisfy, cancelling rehydration.
+let _diskRestoreRan = false;
 if (_persistedSession) {
     try { sessions.create({ id: _persistedSession.id, token: _persistedSession.token }); }
     catch (_) { /* corrupted state — fall through, fresh session minted on first hit */ }
@@ -132,11 +197,15 @@ app.use((req, res, next) => {
         res.setHeader('Vary', 'Origin');
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'content-type');
+        // Echo the preflight's requested headers (credentialed CORS can't use '*')
+        // so custom headers the SPA adds — e.g. `ngrok-skip-browser-warning` on the
+        // backend probe — pass preflight instead of being rejected (which dropped the
+        // deployed s0a.app into sandbox mode). Falls back to the known set off-preflight.
+        res.setHeader('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'content-type, ngrok-skip-browser-warning');
         res.setHeader('Access-Control-Max-Age', '600');
-        if (req.headers['access-control-request-private-network'] === 'true') {
-            res.setHeader('Access-Control-Allow-Private-Network', 'true');
-        }
+        // Send on every allowed response (not just preflight) — Chrome requires
+        // the PNA header on the actual response too, not only on OPTIONS.
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
     }
     if (req.method === 'OPTIONS' && origin) {
         return res.status(allowed ? 204 : 403).end();
@@ -152,6 +221,16 @@ app.use((req, res, next) => {
     if (!SESSION_TOKEN) return next();
     if (!req.path.startsWith('/api/')) return next();
     if (req.path === '/api/ping') return next();
+    // Loopback-trusted endpoints (/api/sessions, /api/tts) carry their OWN
+    // tunnel-aware local-only gate and are driven by local CLIs (soa-sessions /
+    // soa-msg) that don't know the session token. Exempt them ONLY for genuinely
+    // local callers — a tunneled request still fails the endpoint's loopback gate.
+    // Without this, token mode (selfhost) would 401 the manager + the TTS hook.
+    if ((req.path === '/api/sessions' || req.path === '/api/tts') && sessionManager.isLocalRequest(req)) return next();
+    // Workspace-transfer bundle download: the RECEIVING daemon on another
+    // device can't know this install's session token — the one-time 256-bit
+    // bundle token in the path (constant-time checked, short TTL) is the auth.
+    if (req.path.startsWith('/api/workspace/bundle/')) return next();
     const presented = extractPresentedToken(req);
     if (!constantTimeEq(presented, SESSION_TOKEN)) {
         return res.status(401).json({ ok: false, error: 'invalid session token' });
@@ -184,7 +263,26 @@ function currentSession(req) {
 // keeps them on the same one across reloads.
 function requireAuthed(req, res, next) {
     let s = currentSession(req);
+    // Pairing-token attach: a request carrying a valid per-session token (?t= or
+    // Bearer) binds to that session even with no cookie — this is how a phone
+    // that scanned the QR authenticates. Mint the cookie so its later
+    // same-origin calls are authed too (the mobile client also re-sends ?t=).
     if (!s) {
+        const presented = extractPresentedToken(req);
+        const byTok = presented && sessions.getByToken(presented);
+        if (byTok) {
+            s = byTok;
+            const token = auth.issue(s.token, SIGN_KEY);
+            res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
+        }
+    }
+    if (!s) {
+        // No session and no valid token. A remote (tunnel) caller must pair with
+        // a token first — never hand an anonymous internet visitor a fresh shell.
+        // Local callers still get one for free (no login on your own machine).
+        if (!tunnelGate.httpMayProvision({ isLocal: sessionManager.isLocalRequest(req), openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN })) {
+            return res.status(401).json({ ok: false, error: 'pairing required — scan the QR' });
+        }
         s = sessions.create();
         const token = auth.issue(s.token, SIGN_KEY);
         res.setHeader('Set-Cookie', auth.makeCookie(token, { secure: SECURE_COOKIE, crossSite: CROSS_SITE }));
@@ -197,11 +295,25 @@ function requireAuthed(req, res, next) {
 
 // ── API ─────────────────────────────────────────────────────────────────
 app.get('/api/ping', (req, res) => {
-    res.json({ ok: true, name: 'soa-web', protocol: 1, tokenRequired: !!SESSION_TOKEN });
+    // Remote callers now need the per-session pairing token too, so advertise
+    // tokenRequired to a tunnel visitor with no token — the mobile client shows
+    // "re-scan the QR" instead of looping on a doomed tokenless /ws upgrade.
+    const remoteNeedsPair = !tunnelGate.httpMayProvision({ isLocal: sessionManager.isLocalRequest(req), openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN });
+    res.json({ ok: true, name: 'soa-web', protocol: 1, tokenRequired: !!SESSION_TOKEN || remoteNeedsPair });
 });
 
 app.get('/api/me', requireAuthed, (req, res) => {
-    res.json({ ok: true, authed: true });
+    // `capabilities` tells the client which premium features to surface. Bundled
+    // into /api/me so the client learns its entitlements in the same round-trip
+    // it already makes on load (no extra request needed to hide/show the DASH).
+    res.json({ ok: true, authed: true, capabilities: entitlements.capabilities({ req, user: entitlements.getUserContext(req) }) });
+});
+
+// Standalone capabilities probe (same data as /api/me.capabilities) — a stable
+// endpoint the client/CLI can hit to decide whether to show the manager UI.
+// Per-context, so it becomes per-user automatically once accounts exist.
+app.get('/api/capabilities', requireAuthed, (req, res) => {
+    res.json({ ok: true, capabilities: entitlements.capabilities({ req, user: entitlements.getUserContext(req) }) });
 });
 
 app.get('/api/devices', requireAuthed, (req, res) => {
@@ -217,16 +329,133 @@ app.get('/api/devices', requireAuthed, (req, res) => {
     res.json({ ok: true, count: devices.length, devices });
 });
 
+// Approximate location of every connected client, for the WorldView globe's
+// multiuser pins. One entry per DISTINCT public IP (city-level, from ipinfo) —
+// LAN/localhost clients collapse into a single "local" cluster at the server's
+// own egress location. Raw IPs are never returned: only lat/lon/city/country +
+// a device count, so a peer can be pinned without being identified.
+app.get('/api/geo/peers', requireAuthed, async (req, res) => {
+    const byIp = new Map();   // public IP -> live-socket count
+    let localCount = 0;       // LAN/localhost sockets (server's own location)
+    for (const s of sessions.sessions.values()) {
+        for (const ws of s.sockets) {
+            if (!ws || ws.readyState !== 1) continue;
+            const ip = ws._remoteIp || '';
+            if (!ip || sysinfo.isPrivateIp(ip)) { localCount++; continue; }
+            byIp.set(ip, (byIp.get(ip) || 0) + 1);
+        }
+    }
+    const peers = [];
+    if (localCount > 0) {
+        try {
+            const g = await sysinfo.geoInfo();
+            if (g && g.lat != null) {
+                peers.push({ lat: g.lat, lon: g.lon, city: g.city, region: g.region, country: g.country, count: localCount, self: true });
+            }
+        } catch (_) { /* server geo unavailable — skip the local cluster */ }
+    }
+    // Cap the distinct-IP fan-out so a flood of connections can't spray the
+    // upstream; per-IP results are cached 6h so this is cheap in steady state.
+    const ips = [...byIp.keys()].slice(0, 64);
+    const geos = await Promise.all(ips.map(ip => sysinfo.geoForIp(ip).catch(() => null)));
+    geos.forEach((g, i) => {
+        if (g && g.lat != null) {
+            peers.push({ lat: g.lat, lon: g.lon, city: g.city, region: g.region, country: g.country, count: byIp.get(ips[i]) });
+        }
+    });
+    const total = peers.reduce((n, p) => n + (p.count || 1), 0);
+    res.json({ ok: true, data: { peers, total, locatable: peers.length } });
+});
+
+// Aggregate per-user stats for the profile panel. /api/devices only ever sees
+// the CALLER's own session sockets (and a browser's WS may bind to the primary
+// session, not its cookie session — so that endpoint reads 0 for an API caller).
+// This one reports the GLOBAL live client count, a fleet token estimate (sum of
+// each tab's context% × the context window), and the egress country for a flag.
+// Cheap enough to be polled by the open profile pane for a live readout.
+app.get('/api/user/stats', requireAuthed, async (req, res) => {
+    let connectedClients = 0;
+    for (const s of sessions.sessions.values()) {
+        for (const ws of s.sockets) {
+            if (ws && ws.readyState === 1) connectedClients++;
+        }
+    }
+    const CONTEXT_WINDOW = parseInt(process.env.SOA_WEB_CONTEXT_WINDOW || '200000', 10);
+    let estTokens = 0, activeTabs = 0, ctxSum = 0, ctxTabs = 0;
+    try {
+        const primary = _findPrimarySession() || req.session;
+        if (primary) {
+            const snap = sessionManager.ensure(primary).snapshot();
+            activeTabs = snap.sessions.length;
+            for (const t of snap.sessions) {
+                if (typeof t.ctxPct === 'number') {
+                    estTokens += Math.round((t.ctxPct / 100) * CONTEXT_WINDOW);
+                    ctxSum += t.ctxPct; ctxTabs++;
+                }
+            }
+        }
+    } catch (_) { /* supervisor not ready — return zeros */ }
+    let country = null, city = null;
+    try {
+        const g = await sysinfo.geoInfo();
+        if (g) { country = g.country || null; city = g.city || null; }
+    } catch (_) { /* geo unavailable — flag falls back client-side */ }
+    res.json({
+        ok: true,
+        connectedClients,
+        estTokens,
+        activeTabs,
+        avgCtxPct: ctxTabs ? Math.round(ctxSum / ctxTabs) : 0,
+        contextWindow: CONTEXT_WINDOW,
+        country,
+        city,
+    });
+});
+
 // ── Sidebar + mobile-pairing routes ─────────────────────────────────────
 consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
-const pair = new pairing.PairingManager({ port: PORT });
+claudeUsage.mount(app, requireAuthed);
+
+// Manual daemon restart from the ⋯ MORE menu (authed — the paired user can fire
+// it from their phone over the tunnel). Graceful: launchd `kickstart -k` sends
+// SIGTERM → our shutdown() flushes tabs + scrollback and DETACHES the tunnel
+// (re-adopted on boot), then KeepAlive brings us right back and boot-resume
+// rehydrates the fleet (respawns PTYs + auto-resumes Claude). We spawn kickstart
+// DETACHED so it outlives our own termination; a 4s fallback self-exits (so a
+// KeepAlive supervisor restarts us) if kickstart is unavailable (non-launchd dev
+// run). Idempotent-safe: double shutdown() is guarded.
+app.post('/api/daemon/restart', requireAuthed, (req, res) => {
+    console.log('daemon: manual restart requested via /api/daemon/restart');
+    res.json({ ok: true, restarting: true });
+    const uid = (process.getuid && process.getuid()) || 501;
+    const label = process.env.SOA_WEB_LAUNCHD_LABEL || 'app.s0a.web.local';
+    setTimeout(() => {
+        try {
+            const { spawn } = require('child_process');
+            const p = spawn('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`],
+                            { detached: true, stdio: 'ignore' });
+            p.unref();
+        } catch (e) {
+            console.log('daemon restart: kickstart spawn failed:', e && e.message);
+        }
+        // Fallback in case kickstart didn't SIGTERM us (e.g. not under launchd):
+        // flush + exit and let the supervisor restart us. Harmless if kickstart
+        // already fired — shutdown() is a no-op the second time.
+        setTimeout(() => { try { shutdown(0); } catch (_) { process.exit(0); } }, 4000).unref();
+    }, 200);
+});
+// bindHost matters: a loopback-bound daemon (the curl|sh install default)
+// must not advertise LAN interface IPs in the pairing widget — they
+// connection-refuse from a phone, a dead link dressed up as an option.
+const pair = new pairing.PairingManager({ port: PORT, bindHost: HOST });
 pairing.mount(app, requireAuthed, pair, {
     onTunnelUp: (url) => {
         if (!ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
     },
 });
 tabApi.mount(app, requireAuthed, sessions);
+workspaceTransfer.mount(app, requireAuthed, sessions, { pair });
 envStore.mount(app, requireAuthed);
 autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
@@ -235,6 +464,8 @@ pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
+userProfile.mount(app, requireAuthed);
+skillsApi.mount(app, requireAuthed);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -267,7 +498,7 @@ app.use((req, res, next) => {
 // SOA_WEB_INSTALL_LOG (default ~/.soa-web/install-log.jsonl). Best-effort:
 // any I/O error is swallowed so a broken disk can't take the page down.
 const INSTALL_LOG_PATH = process.env.SOA_WEB_INSTALL_LOG
-    || path.join(require('os').homedir(), '.soa-web', 'install-log.jsonl');
+    || require('./stateDir').stateFile('install-log.jsonl');
 function logInstallHit(req) {
     try {
         const dir = path.dirname(INSTALL_LOG_PATH);
@@ -297,15 +528,26 @@ app.get('/m/*', (req, res) => {
     res.sendFile(path.join(MOBILE_DIR, 'index.html'));
 });
 
+// Read-only share links (feature-flagged). Registered before the SPA fallback so
+// /share/:id serves the viewer instead of the app shell. Additive route subtree.
+if (process.env.SOA_WEB_SHARE === '1') {
+    try { require('./shareLinks').mount(app, { requireAuthed, publicDir: PUBLIC_DIR, closeViewersForShare }); }
+    catch (e) { console.error('share mount failed:', e && e.message); }
+}
+
 // SPA fallback — any unknown GET serves index.html so client-side routes work.
 app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/') || req.path.startsWith('/_') || req.path.startsWith('/m')) return next();
+    if (req.path.startsWith('/api/') || req.path.startsWith('/_') || req.path.startsWith('/m') || req.path.startsWith('/share')) return next();
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
 // ── HTTP + WS server ────────────────────────────────────────────────────
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
+
+// ── Read-only per-tab share links (feature-flagged; default OFF) ──────────────
+const shareRegistry = require('./shareRegistry');
+const SHARE_ENABLED = process.env.SOA_WEB_SHARE === '1';
 
 server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
@@ -315,6 +557,28 @@ server.on('upgrade', (req, socket, head) => {
     // Dev-server HMR websockets for the local-web preview proxy.
     if (url.pathname.startsWith('/preview/') && preview.proxyUpgrade(req, socket, head)) return;
     if (url.pathname !== '/ws') { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
+
+    // ── Share-link viewer: a scoped, read-only socket bound to ONE tab. The
+    // share token is its own authorization, so this branch runs BEFORE the
+    // session-token / origin / cookie gates and hands off to a restricted
+    // connect handler that never joins session.sockets.
+    if (SHARE_ENABLED && (url.searchParams.get('share') || url.searchParams.get('st'))) {
+        const rec = shareRegistry.resolve(url.searchParams.get('share'), url.searchParams.get('st'));
+        if (!rec) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+        // A share token is a bearer capability, but still refuse a cross-origin WS
+        // from an arbitrary third-party page (embedding/clickjacking). In cross-
+        // site (tunnel) mode only the served origin + tunnel origin may open it.
+        const _shareOrigin = req.headers.origin;
+        if (CROSS_SITE && _shareOrigin && !ALLOWED_ORIGINS.includes(_shareOrigin)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return;
+        }
+        const shareSession = sessions.get(rec.sessionId);
+        if (!shareSession || !shareSession.tabMgr || !shareSession.tabMgr.get(rec.tabId)) {
+            socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return;
+        }
+        wss.handleUpgrade(req, socket, head, ws => onShareConnect(ws, shareSession, rec, req));
+        return;
+    }
 
     if (SESSION_TOKEN) {
         const presented = url.searchParams.get('t') || '';
@@ -354,32 +618,55 @@ server.on('upgrade', (req, socket, head) => {
         } catch (_) { return null; }
     })(req);
 
-    // Share the primary desktop session (the one with live tabs) whenever this
-    // connection doesn't already own a non-empty session. Mobile reliably picks
-    // up its OWN empty cookie-session from authed /api/* polls (sysinfo, etc.);
-    // if we honored that cookie it would bind to an empty session and show a
-    // dead/stale terminal while the desktop streams to the primary — the exact
-    // "different state on each device" divergence. Only an existing session that
-    // already has tabs of its own is trusted over the primary.
+    // A phone that scanned the QR presents the desktop session's per-session
+    // token as ?t=. Possessing it authorizes sharing THAT session — this is the
+    // pairing capability, and it's what a remote caller needs to get in.
+    const presentedTok = url.searchParams.get('t') || '';
+    const tokenSession = presentedTok ? sessions.getByToken(presentedTok) : null;
+
+    // Share the primary desktop session (the one with live tabs) whenever a
+    // *trusted* connection doesn't already own a non-empty session. Mobile picks
+    // up its OWN empty cookie-session from authed /api/* polls; honoring that
+    // cookie would bind it to an empty session and show a dead terminal while
+    // the desktop streams to the primary — the "different state per device"
+    // divergence. Only a session that already has tabs is trusted over primary.
     const existingHasTabs = existing && existing.tabMgr && existing.tabMgr.order.length > 0;
-    let session = existing;
-    let via = 'cookie';
-    if (!existingHasTabs) {
+    const isLocal = sessionManager.isLocalRequest(req);
+    const decision = tunnelGate.decideWsBind({
+        tokenSession, existingHasTabs, isLocal, openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN,
+    });
+
+    if (decision.action === 'reject') {
+        // Anonymous tunnel visitor: no pairing token, no populated session of
+        // its own. Never hand it the primary desktop shell.
+        dbg('ws-upgrade', 'REJECT 401: remote /ws without a valid pairing token');
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+
+    let session, via = decision.via;
+    if (decision.source === 'token') {
+        session = tokenSession;
+    } else if (decision.source === 'cookie') {
+        session = existing;
+    } else { // primary-or-new (trusted callers only)
         const primary = _findPrimarySession();
         if (primary && primary !== existing) {
             if (existing) dbg('ws-upgrade', 'cookie session', existing.id.slice(0, 8), 'is empty — sharing primary', primary.id.slice(0, 8));
             session = primary;
             via = existing ? 'primary-over-empty-cookie' : 'primary-share';
+        } else if (existing) {
+            session = existing; via = 'cookie-empty';
+        } else {
+            session = sessions.create();
+            tabPersist.saveSession({ id: session.id, token: session.token });
+            via = 'new';
+            dbg('ws-upgrade', 'bound to NEW empty session', session.id.slice(0, 8), '(no cookie match, no primary found — mobile will see no tabs)');
         }
     }
-    if (!session) {
-        session = sessions.create();
-        tabPersist.saveSession({ id: session.id, token: session.token });
-        dbg('ws-upgrade', 'bound to NEW empty session', session.id.slice(0, 8), '(no cookie match, no primary found — mobile will see no tabs)');
-    } else {
-        const tabCount = session.tabMgr ? session.tabMgr.order.length : 0;
-        dbg('ws-upgrade', 'bound to session', session.id.slice(0, 8), 'via', via, '— tabs=' + tabCount, 'existingSockets=' + session.sockets.size);
-    }
+    const tabCount = session.tabMgr ? session.tabMgr.order.length : 0;
+    dbg('ws-upgrade', 'bound to session', session.id.slice(0, 8), 'via', via, '— tabs=' + tabCount, 'existingSockets=' + session.sockets.size, 'local=' + isLocal);
     wss.handleUpgrade(req, socket, head, ws => onWsConnect(ws, session, req));
 });
 
@@ -408,6 +695,12 @@ function _broadcastDeviceCount(session, excludeWs) {
 function onWsConnect(ws, session, req) {
     ws._connectedAt = Date.now();
     ws._userAgent = (req && req.headers && req.headers['user-agent']) || '';
+    // Real client IP for the WorldView peer map. Behind cloudflared the visitor
+    // IP arrives as CF-Connecting-IP; LAN/localhost clients keep their private
+    // address (geolocated to the server's egress in /api/geo/peers).
+    const _h = (req && req.headers) || {};
+    ws._remoteIp = (_h['cf-connecting-ip'] || (_h['x-forwarded-for'] || '').split(',')[0]
+        || (req && req.socket && req.socket.remoteAddress) || '').toString().trim();
     session.attachSocket(ws);
     session.touch();
     ws.isAlive = true;
@@ -418,10 +711,18 @@ function onWsConnect(ws, session, req) {
         session.tabMgr = new TabManager({
             onData: (tabId, data) => {
                 agg('term-out', 'session=' + session.id.slice(0, 8) + ' tab=' + tabId, data.length, '→ ' + session.sockets.size + ' socket(s)');
-                session.send(frame(MSG.TERM_DATA, { id: tabId, data }));
+                const _tf = frame(MSG.TERM_DATA, { id: tabId, data });
+                session.send(_tf);
+                if (SHARE_ENABLED && session.shareViewers.size) session.sendToShareViewers(tabId, _tf);
                 // Feed the always-on supervisor so it tracks status + context
                 // for every tab regardless of which client is watching.
                 try { sessionManager.ensure(session).feed(tabId, data); } catch (_) {}
+            },
+            // Every byte typed INTO a tab (keys, mobile line, manager send) — the
+            // supervisor reassembles prompts so ones rejected by a usage-limit
+            // banner can be replayed at the reset.
+            onInput: (tabId, data) => {
+                try { sessionManager.ensure(session).feedInput(tabId, data); } catch (_) {}
             },
             onTabsChange: list => {
                 // If the active tab just went away, pick the next available
@@ -437,7 +738,16 @@ function onWsConnect(ws, session, req) {
                 }));
                 tabPersist.save(session.tabMgr);
             },
-            onExit: (tabId, code) => session.send(frame(MSG.TERM_EXIT, { id: tabId, code })),
+            onExit: (tabId, code) => {
+                try { agentBrowser.teardown(tabId); } catch (_) {}
+                // Emit a clean 'exited' manager event + forget stale tab state
+                // (status, stuck latch). forget() was never called before — a
+                // latent leak the event/stuck machinery would otherwise inherit.
+                try { sessionManager.ensure(session).noteExit(tabId); } catch (_) {}
+                const _ef = frame(MSG.TERM_EXIT, { id: tabId, code });
+                session.send(_ef);
+                if (SHARE_ENABLED && session.shareViewers.size) session.sendToShareViewers(tabId, _ef);
+            },
         });
 
         // Periodic cwd poll: catches directory changes from running programs
@@ -450,40 +760,80 @@ function onWsConnect(ws, session, req) {
         if (session._cwdInterval.unref) session._cwdInterval.unref();
 
         // Supervisor tick: refresh stuck/idle derivations and push a MANAGER
-        // snapshot to the dashboard. Always-on (independent of connected clients).
+        // snapshot to the dashboard. Always-on (independent of connected clients)
+        // — but ONLY when the manager feature is entitled. On a free install this
+        // premium supervision loop never runs, so there's zero overhead and no
+        // manager frames leak to the client. (Install-wide today; filter per
+        // connection here once entitlement is per-user.)
         session._managerInterval = setInterval(() => {
-            try { sessionManager.ensure(session).broadcast(); } catch (_) {}
+            if (!entitlements.isEnabled('manager')) return;
+            try {
+                const m = sessionManager.ensure(session);
+                m.emitStuckSweep();   // time-derived 'stuck' → manager event
+                m.broadcast();
+            } catch (_) {}
         }, 3000);
         if (session._managerInterval.unref) session._managerInterval.unref();
 
-        // Restore tabs from disk if this is a fresh session with no tabs.
-        // Seed each new shell's scrollback with the bytes saved by the prior
-        // run so the user sees the conversation/work that was on screen
-        // before the restart. The PTY itself is fresh — divider makes that
-        // explicit so nobody mistakes the seeded text for a live process.
-        // Match scrollback to tab by index; cwd doubles as a sanity check so
-        // a desync between the two files doesn't cross-paste history.
+        // Restore tabs from disk into a fresh session. Seed each new shell's
+        // scrollback with the bytes saved by the prior run so the user sees
+        // the conversation/work that was on screen before the restart. The
+        // PTY itself is fresh — divider makes that explicit so nobody
+        // mistakes the seeded text for a live process. Match scrollback to
+        // tab by index; cwd doubles as a sanity check so a desync between the
+        // two files doesn't cross-paste history.
+        //
+        // Runs even when the session already holds tab(s): the old
+        // "order.length === 0" gate meant any client that got a tab in first
+        // (a mobile view binding right at boot) cancelled rehydration
+        // entirely and its tiny list then persisted over the saved fleet —
+        // the 2026-07-08 fleet loss. Saved entries already represented live
+        // (same cwd, multiset) are skipped, and the per-session latch stops
+        // a second pass, so nothing double-opens.
         const saved = tabPersist.load();
-        if (saved && saved.tabs.length > 0 && session.tabMgr.order.length === 0) {
+        if (saved && Array.isArray(saved.tabs) && saved.tabs.length > 0 && !session._diskRestored) {
+            session._diskRestored = true;
+            _diskRestoreRan = true;
             const shellEnv = envStore.getEnvForShell();
             const savedSb = tabPersist.loadScrollback();
             const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
+            // Multiset of live cwds: each live tab consumes one matching saved
+            // entry, so projects with several saved tabs still restore fully.
+            const liveByCwd = new Map();
+            for (const id of session.tabMgr.order) {
+                const t = session.tabMgr.tabs.get(id);
+                if (t && t.cwd) liveByCwd.set(t.cwd, (liveByCwd.get(t.cwd) || 0) + 1);
+            }
+            const restoredTabs = [];
+            let skipped = 0;
             saved.tabs.forEach((entry, i) => {
+                const have = liveByCwd.get(entry.cwd) || 0;
+                if (have > 0) { liveByCwd.set(entry.cwd, have - 1); skipped++; return; }
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
                 const sb = sbList[i];
                 const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
                 const label = entry.userRenamed && entry.title ? entry.title : (cwd || 'tab');
                 const seed = prior
-                    ? prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n`
+                    ? SANE_TERM_RESET + prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n` + SANE_TERM_RESET
                     : '';
-                session.tabMgr.open({
+                const tab = session.tabMgr.open({
                     title: entry.userRenamed ? entry.title : undefined,
                     cwd,
                     env: shellEnv,
                     silent: true,
                     seedScrollback: seed || undefined,
+                    agent: entry.agent || null,
                 });
+                if (tab && cwd) restoredTabs.push({ tab, cwd, agent: entry.agent || null });
             });
+            console.log(`restore-on-connect: rehydrated ${restoredTabs.length}/${saved.tabs.length} saved tab(s)`
+                + (skipped ? ` (${skipped} already live)` : ''));
+            // A fresh daemon respawns dead shells, so each tab's Claude
+            // conversation is gone unless we resume it. Auto-resume the tabs
+            // whose cwd has a recent transcript (SOA_WEB_NO_AUTO_RESUME=1 off).
+            if (restoredTabs.length && process.env.SOA_WEB_NO_AUTO_RESUME !== '1') {
+                scheduleAutoResume(restoredTabs);
+            }
         }
 
         autoPilot.instance.attach(session.tabMgr, (tabId) => session._agentStatus && session._agentStatus.get(tabId) || 'idle');
@@ -491,32 +841,52 @@ function onWsConnect(ws, session, req) {
 
     try {
         const tabList = session.tabMgr.list();
-        // Replay scrollback right after the tab list so a reloading browser
-        // catches up on everything it missed — tabs, which one was active,
-        // and the accumulated output for each — before any new term-data
-        // frames arrive. This is what makes a page refresh non-destructive.
-        const replay = tabList
-            .map(t => ({ id: t.id, data: session.tabMgr.scrollback(t.id) }))
-            .filter(r => r.data && r.data.length);
         const activeId = (session.activeTab && tabList.some(t => t.id === session.activeTab))
             ? session.activeTab
             : (tabList[0] && tabList[0].id) || 0;
+        // Replay scrollback so a reloading browser catches up on everything it
+        // missed — tabs, which one was active, and accumulated output — before
+        // any new term-data frames arrive. This is what makes a refresh
+        // non-destructive.
+        //
+        // Send ONLY the active tab's scrollback inline with HELLO; stream every
+        // other tab's scrollback as separate REPLAY frames afterwards. With
+        // ~17 tabs × up to 256 KiB each, a single all-tabs HELLO is multiple MB.
+        // A WebSocket frame is atomic on the wire: while that one frame crawls
+        // over a slow mobile/tunnel link, NO ping/pong control frame can
+        // interleave, so both the client's 9 s app-heartbeat and the server's
+        // 5 s ws.ping() watchdog fire and tear the socket down — which
+        // reconnects and resends the same giant frame: an endless reconnect
+        // loop that also makes the terminal take "a minute" to appear. Split
+        // into per-tab frames so heartbeats interleave → stable socket, and the
+        // tab the user actually lands on paints immediately.
+        const helloReplay = [];
+        const activeData = session.tabMgr.scrollback(activeId);
+        if (activeData && activeData.length) helloReplay.push({ id: activeId, data: activeData });
         ws.send(frame(MSG.HELLO, {
             serverVersion: 1,
             serverTime: Date.now(),
             tabs: tabList,
             activeId,
-            replay,
+            replay: helloReplay,
             graveyard: session.tabMgr.graveyardList(),
             connectedDevices: session.sockets.size,
         }));
-        dbg('ws-hello', 'sent to', ws._userAgent.slice(0, 40), '— tabs=' + tabList.length, 'activeId=' + activeId, 'replayBytes=' + replay.reduce((n, r) => n + r.data.length, 0), 'devices=' + session.sockets.size);
+        dbg('ws-hello', 'sent to', ws._userAgent.slice(0, 40), '— tabs=' + tabList.length, 'activeId=' + activeId, 'activeReplayBytes=' + (activeData ? activeData.length : 0), 'devices=' + session.sockets.size);
+        // Stream the remaining tabs' scrollback (active tab excluded — it went
+        // out in HELLO). Best-effort, off the connect path.
+        streamBackgroundReplay(ws, session, tabList, activeId);
         // Notify other clients that a new device joined
         _broadcastDeviceCount(session, ws);
     } catch (_) { /* ignore */ }
 
     ws.on('message', raw => {
         session.touch();
+        // Any inbound frame proves the peer is alive — credit it the same way a
+        // WS pong does. The mobile client app-pings every 4s, so a live socket
+        // stays marked alive even when the browser's automatic control-frame
+        // pong is momentarily queued behind a burst of terminal output.
+        ws.isAlive = true;
         const msg = parse(raw.toString());
         if (!msg) return;
         switch (msg.t) {
@@ -533,23 +903,154 @@ function onWsConnect(ws, session, req) {
                 }
                 break;
             case MSG.INPUT:
-                handleInput(session, msg.d || {});
+                handleInput(session, msg.d || {}, ws);
                 break;
             default: /* forward-compat: ignore unknown types */ break;
         }
     });
 
     ws.on('close', () => {
+        try { agentBrowser.unsubscribeAll(ws); } catch (_) {}
         session.detachSocket(ws);
         _broadcastDeviceCount(session);
     });
     ws.on('error', () => { /* close handler will fire too */ });
 }
 
-function handleInput(session, d) {
+// A read-only share socket: bound to ONE tab, receives only that tab's output,
+// accepts NO input. Deliberately NOT added to session.sockets, so it never sees
+// the full broadcast (other tabs, manager frames, snapshots, device counts).
+function onShareConnect(ws, session, rec, req) {
+    const tabId = Number(rec.tabId);
+    ws._shareMode = true;
+    ws._shareTabId = tabId;
+    ws._shareId = rec.shareId;   // so revoke/expiry can find + close THIS socket
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+    session.addShareViewer(tabId, ws);
+    try {
+        const meta = (session.tabMgr.list() || []).find(t => t.id === tabId);
+        const scroll = session.tabMgr.scrollback(tabId);
+        ws.send(frame(MSG.HELLO, {
+            serverVersion: 1,
+            serverTime: Date.now(),
+            tabs: meta ? [meta] : [],
+            activeId: tabId,
+            replay: (scroll && scroll.length) ? [{ id: tabId, data: scroll }] : [],
+            graveyard: [],
+            connectedDevices: 1,
+            shareMode: 'read',
+        }));
+    } catch (_) {}
+    ws.on('message', raw => {
+        // Read-only: honor keepalive ping only; drop everything else (no input).
+        const msg = parse(raw.toString());
+        if (msg && msg.t === MSG.PING) { try { ws.send(frame(MSG.PONG, { ts: Date.now() })); } catch (_) {} }
+    });
+    ws.on('close', () => { try { session.removeShareViewer(tabId, ws); } catch (_) {} });
+    ws.on('error', () => {});
+}
+
+// Revocation/expiry must cut the LIVE socket, not just flip a registry flag —
+// else a connected viewer keeps streaming the terminal forever. Close every
+// viewer socket carrying this shareId across all sessions.
+function closeViewersForShare(shareId) {
+    let closed = 0;
+    for (const s of sessions.sessions.values()) {
+        if (!s.shareViewers) continue;
+        for (const set of s.shareViewers.values()) {
+            for (const ws of set) {
+                if (ws._shareId === shareId) { try { ws.close(1008, 'share revoked'); closed++; } catch (_) {} }
+            }
+        }
+    }
+    return closed;
+}
+
+// Belt-and-braces: periodically close any viewer whose share is no longer live
+// (revoked or past its TTL), so expiry is enforced on the wire too.
+if (SHARE_ENABLED) {
+    const _shareSweep = setInterval(() => {
+        for (const s of sessions.sessions.values()) {
+            if (!s.shareViewers) continue;
+            for (const set of s.shareViewers.values()) {
+                for (const ws of set) {
+                    if (ws._shareId && !shareRegistry.isLive(ws._shareId)) {
+                        try { ws.close(1008, 'share expired'); } catch (_) {}
+                    }
+                }
+            }
+        }
+    }, 5000);
+    if (_shareSweep.unref) _shareSweep.unref();
+}
+
+// Stream each background tab's scrollback as its own REPLAY frame, one at a
+// time, yielding to the event loop between sends so WebSocket control frames
+// (ping/pong) and the client's keepalive interleave instead of being stuck
+// behind one multi-MB HELLO. Honours backpressure: if the socket's send buffer
+// is already deep, wait for it to drain before queuing more. Best-effort —
+// bails the moment the socket is no longer OPEN (closed, or reconnected with a
+// fresh ws that will get its own stream).
+const REPLAY_HIGH_WATER = 512 * 1024; // bytes buffered before we pause to drain
+function streamBackgroundReplay(ws, session, tabList, activeId) {
+    const ids = tabList.map(t => t.id).filter(id => id !== activeId);
+    if (!ids.length) return;
+    let i = 0;
+    const sendNext = () => {
+        if (!ws || ws.readyState !== 1) return; // socket gone / reconnected
+        if (i >= ids.length) return;
+        if (ws.bufferedAmount > REPLAY_HIGH_WATER) { setTimeout(sendNext, 50); return; }
+        const id = ids[i++];
+        let data = '';
+        try { data = session.tabMgr.scrollback(id); } catch (_) {}
+        if (data && data.length) {
+            try { ws.send(frame(MSG.REPLAY, { id, data })); } catch (_) { return; }
+        }
+        setImmediate(sendNext);
+    };
+    setImmediate(sendNext);
+}
+
+// Auto-resume Claude in tabs restored after a daemon restart. The respawned
+// shells are fresh (dead), so each tab's conversation is lost unless we resume
+// it. For every restored tab whose cwd has a recent Claude transcript, type
+//   claude --resume <latest-session> || claude --continue
+// once the shell has had a moment to print its prompt, staggered so N claudes
+// don't all cold-start at once. The project scan is deferred off the connect
+// path. Disable with SOA_WEB_NO_AUTO_RESUME=1.
+function scheduleAutoResume(restoredTabs) {
+    setTimeout(() => {
+        let map, codexMap = new Map();
+        try { map = claudeSessions.latestSessionByCwd(72); }
+        catch (e) { dbg('auto-resume', 'scan failed', String((e && e.message) || e)); return; }
+        try { codexMap = codexSessions.latestSessionByCwd(72); } catch (_) {}
+        let n = 0;
+        for (const { tab, cwd, agent } of restoredTabs) {
+            // Relaunch the agent the tab was actually running (persisted in
+            // tabs.json); an unknown tab follows whichever transcript is newer.
+            const ch = map.get(cwd), cx = codexMap.get(cwd);
+            const kind = agent || (cx && (!ch || cx.mtime > ch.mtime) ? 'codex' : 'claude');
+            const hit = kind === 'codex' ? cx : ch;
+            if (!hit) continue;
+            const wait = n * 1500; // stagger cold-starts
+            n++;
+            setTimeout(() => {
+                // Shared launch helper: reliable split-write submit + the same
+                // resume-vs-fresh chain the manager's `spawn` action uses, so
+                // boot-restore and agent-spawn can't drift apart. No-op if the
+                // PTY already exited.
+                try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId: hit.sessionId, coldFallback: false, agent: kind }); } catch (_) {}
+            }, wait);
+        }
+        if (n) dbg('auto-resume', `armed ${n}/${restoredTabs.length} restored tab(s)`);
+    }, 1200);
+}
+
+function handleInput(session, d, ws) {
     const mgr = session.tabMgr;
     if (d.kind === INPUT_KIND.TERM_RESIZE) {
-        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(resizes SHARED pty; desktop will reflow)');
+        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(shared pty resizes to MAX across live clients)');
     } else if (d.kind === INPUT_KIND.TERM_KEYS) {
         dbg('input', 'TERM_KEYS tab=' + d.id, JSON.stringify((d.text || '').slice(0, 16)));
     } else if (d.kind) {
@@ -582,6 +1083,9 @@ function handleInput(session, d) {
             break;
         }
         case INPUT_KIND.CLOSE_TAB:
+            // Explicit user intent — lets the persist shrink-guard tell a real
+            // "close my tabs" apart from a boot-race clobber.
+            tabPersist.noteUserClose();
             mgr.close(d.id);
             break;
         case INPUT_KIND.MOVE_TAB:
@@ -636,7 +1140,28 @@ function handleInput(session, d) {
         }
         case INPUT_KIND.TERM_RESIZE: {
             const tab = mgr.get(d.id);
-            if (tab) tab.resize(Math.max(2, d.cols | 0), Math.max(2, d.rows | 0));
+            if (!tab) break;
+            const cols = Math.max(2, d.cols | 0);
+            const rows = Math.max(2, d.rows | 0);
+            // Remember THIS client's desired size for this tab.
+            if (ws) {
+                if (!ws._tabSizes) ws._tabSizes = new Map();
+                ws._tabSizes.set(d.id, { cols, rows });
+            }
+            // Resize the SHARED pty to the LARGEST size any live client wants
+            // for this tab — a narrow phone can then never clip the wide
+            // desktop (the "black void on the right when a mobile is attached,
+            // and it stays while the desktop is idle" bug). Smaller clients
+            // just scroll/scale; the widest surface stays whole.
+            let maxCols = cols, maxRows = rows;
+            for (const sock of session.sockets) {
+                if (!sock || sock.readyState !== 1 || !sock._tabSizes) continue;
+                const sz = sock._tabSizes.get(d.id);
+                if (!sz) continue;
+                if (sz.cols > maxCols) maxCols = sz.cols;
+                if (sz.rows > maxRows) maxRows = sz.rows;
+            }
+            tab.resize(maxCols, maxRows);
             break;
         }
         case INPUT_KIND.HOTKEY: {
@@ -668,13 +1193,17 @@ function handleInput(session, d) {
             break;
         }
         case INPUT_KIND.BROWSER_SUBSCRIBE:
-            agentBrowser.subscribe().catch(() => {});
+            // d.id '*' = the monitor grid (watch every instance); otherwise watch
+            // one tab's browser, defaulting to this device's active tab.
+            if (d.id === '*') agentBrowser.subscribeAll(ws).catch(() => {});
+            else agentBrowser.subscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
             break;
         case INPUT_KIND.BROWSER_UNSUBSCRIBE:
-            agentBrowser.unsubscribe().catch(() => {});
+            if (d.id === '*') agentBrowser.unsubscribeAll(ws);
+            else agentBrowser.unsubscribe(d.id != null ? d.id : session.activeTab, ws).catch(() => {});
             break;
         case INPUT_KIND.BROWSER_CLICK:
-            agentBrowser.command('click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
+            agentBrowser.command(d.id != null ? d.id : session.activeTab, 'click', { x: Number(d.x), y: Number(d.y) }).catch(() => {});
             break;
         case INPUT_KIND.WINDOW_CONTROL:
             windowControl.applyPreset(String(d.preset || ''))
@@ -685,75 +1214,324 @@ function handleInput(session, d) {
     }
 }
 
+// Liveness watchdog. A socket is reaped only after it stays SILENT across
+// several cycles — not after a single missed pong. On a high-latency mobile/
+// tunnel link a pong can lag many seconds behind a burst of terminal output
+// without the socket being dead; terminating on the first miss false-killed
+// those laggy-but-live mobile sockets, which then reconnected and re-replayed
+// every tab's scrollback — the "streaming is unstable, try again" symptom.
+// `isAlive` is reset to true by EITHER a WS pong (ws.on('pong')) or any inbound
+// message (ws.on('message')), so a genuinely live peer never accrues misses.
+const HEARTBEAT_MS = 5000;
+const MAX_MISSED_BEATS = 3; // ~15s of unbroken silence before we give up
 const heartbeat = setInterval(() => {
     wss.clients.forEach(ws => {
-        if (ws.isAlive === false) { try { ws.terminate(); } catch (_) {} return; }
+        if (ws.isAlive === false) {
+            ws._missedBeats = (ws._missedBeats || 0) + 1;
+            if (ws._missedBeats >= MAX_MISSED_BEATS) { try { ws.terminate(); } catch (_) {} return; }
+        } else {
+            ws._missedBeats = 0;
+        }
         ws.isAlive = false;
         try { ws.ping(); } catch (_) {}
     });
-}, 5000);
+}, HEARTBEAT_MS);
 if (heartbeat.unref) heartbeat.unref();
 
-// Persist scrollback to disk every 5 minutes so a server restart doesn't
-// lose the on-screen context. Metadata (titles, cwds) is already saved on
-// every change; this captures the live PTY output for each tab.
-const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(5 * 60 * 1000), 10);
-const scrollbackFlush = setInterval(() => {
+// Persist scrollback to disk every 30s so even a *hard* crash (SIGKILL from
+// the watchdog's `kickstart -k`, OOM, panic — none of which run the graceful
+// shutdown flush below) loses at most ~30s of on-screen context. Metadata
+// (titles, cwds) is already saved on every change; this captures the live PTY
+// output — the actual session "memory" — for each tab. The write is a capped
+// (128 KiB/tab) atomic tmp+rename, ~a few MB total (measured ~50ms p99 on a
+// 30-tab fleet), so the tighter cadence is negligible I/O. Bump it up on slow
+// network storage (e.g. SOA_WEB_SCROLLBACK_FLUSH_MS=120000) to reduce churn.
+const SCROLLBACK_FLUSH_MS = parseInt(process.env.SOA_WEB_SCROLLBACK_FLUSH_MS || String(30 * 1000), 10);
+// Flush only the session that actually owns tabs. Flushing every session
+// last-writer-wins into the same two files, so an empty tabMgr (e.g. a WS
+// client that bound while no session had tabs) iterated last would erase the
+// real state on disk — this is what clobbered tabs.json on 2026-06-11.
+// Intentional close-all still persists via the debounced onTabsChange save.
+function persistableSession() {
+    let best = null;
     for (const s of sessions.sessions.values()) {
-        if (s.tabMgr) tabPersist.saveAll(s.tabMgr);
+        if (!s.tabMgr || s.tabMgr.order.length === 0) continue;
+        if (!best || s.tabMgr.order.length > best.tabMgr.order.length) best = s;
     }
+    return best;
+}
+const scrollbackFlush = setInterval(() => {
+    const s = persistableSession();
+    if (s) tabPersist.saveAll(s.tabMgr);
 }, SCROLLBACK_FLUSH_MS);
 if (scrollbackFlush.unref) scrollbackFlush.unref();
+
+// Per-tab memory sampler. Every ~10s take ONE `ps` snapshot of all processes
+// and sum each tab's process-tree RSS from its PTY pid (the shell + the agent
+// running under it), then push a compact {id:bytes} frame to that session's
+// clients for the tab hover tooltip. Resource-frugal by design: skip the ps
+// call entirely when NO client is connected (nobody to show it to), and one
+// snapshot serves every tab/session. memBytes is also stamped on each tab so a
+// fresh HELLO/SNAPSHOT carries the last value immediately (tabManager.list).
+const MEM_SAMPLE_MS = parseInt(process.env.SOA_WEB_MEM_SAMPLE_MS || String(10 * 1000), 10);
+const memSample = setInterval(() => {
+    try {
+        let anyClients = false;
+        for (const s of sessions.sessions.values()) {
+            if (s.sockets && s.sockets.size) { anyClients = true; break; }
+        }
+        if (!anyClients) return; // nobody watching → don't spend a ps
+        const snap = procMem.snapshot();
+        for (const s of sessions.sessions.values()) {
+            const mgr = s.tabMgr;
+            if (!mgr || mgr.order.length === 0) continue;
+            const mem = {};
+            for (const id of mgr.order) {
+                const t = mgr.tabs.get(id);
+                if (!t || t.exited || !t.pty || !t.pty.pid) continue;
+                const bytes = procMem.subtreeBytes(t.pty.pid, snap);
+                t.memBytes = bytes;
+                mem[id] = bytes;
+            }
+            if (s.sockets && s.sockets.size && Object.keys(mem).length) {
+                try { s.send(frame(MSG.TAB_MEM, { mem })); } catch (_) {}
+            }
+        }
+    } catch (_) { /* sampling is best-effort; never crash the daemon */ }
+}, MEM_SAMPLE_MS);
+if (memSample.unref) memSample.unref();
+
+// Per-tab background-subagent sampler. Every few seconds resolve each live
+// tab's cwd → newest Claude session transcript → launched-but-unfinished
+// background tasks (agentTasks.js reads the transcript incrementally; the
+// screen can't tell "parked on subagents" from "finished"). Pushed as a
+// TAB_AGENTS frame so the client can render the breathing `delegating` state.
+// Zero counts are sent too — they're what clears the state when tasks finish.
+const AGENT_SAMPLE_MS = parseInt(process.env.SOA_WEB_AGENT_SAMPLE_MS || '4000', 10);
+const agentSample = setInterval(() => {
+    try {
+        let anyClients = false;
+        for (const s of sessions.sessions.values()) {
+            if (s.sockets && s.sockets.size) { anyClients = true; break; }
+        }
+        if (!anyClients) return; // nobody watching → don't touch the disk
+        const byCwd = new Map(); // one transcript scan per cwd per sweep, however many tabs share it
+        for (const s of sessions.sessions.values()) {
+            const mgr = s.tabMgr;
+            if (!mgr || mgr.order.length === 0 || !s.sockets || !s.sockets.size) continue;
+            const agents = {};
+            for (const id of mgr.order) {
+                const t = mgr.tabs.get(id);
+                if (!t || t.exited || !t.cwd) continue;
+                if (!byCwd.has(t.cwd)) {
+                    let n = 0;
+                    try { n = agentTasks.runningFor(t.cwd).running; } catch (_) {}
+                    byCwd.set(t.cwd, n);
+                }
+                agents[id] = byCwd.get(t.cwd);
+            }
+            if (Object.keys(agents).length) {
+                try { s.send(frame(MSG.TAB_AGENTS, { agents })); } catch (_) {}
+            }
+        }
+    } catch (_) { /* sampling is best-effort; never crash the daemon */ }
+}, AGENT_SAMPLE_MS);
+if (agentSample.unref) agentSample.unref();
 
 function shutdown(code = 0) {
     console.log('\nshutting down…');
     clearInterval(heartbeat);
     clearInterval(scrollbackFlush);
+    clearInterval(memSample);
     // Persist tabs + scrollback before killing PTYs so the next boot can
     // seed each tab with what was on screen.
-    for (const s of sessions.sessions.values()) {
-        if (s.tabMgr) tabPersist.saveAll(s.tabMgr);
-    }
+    const flushS = persistableSession();
+    if (flushS) tabPersist.saveAll(flushS.tabMgr);
     // Detach (don't kill) the tunnel so it survives the restart and the next
     // boot re-adopts the same public URL — the mobile bridge stays reachable.
     try { pair.detach(); } catch (_) {}
     try { wss.close(); } catch (_) {}
     try { sessions.shutdown(); } catch (_) {}
+    instanceLock.release();
     server.close(() => process.exit(code));
     setTimeout(() => process.exit(code), 5000).unref();
 }
 process.on('SIGINT',  () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
+// SIGHUP — re-read the persisted tunnel state and trust its CURRENT public URL
+// for WS origin checks, WITHOUT a restart (which would kill every PTY). The
+// soa-watchdog respawns cloudflared out-of-band when the tunnel zombies, minting
+// a new random *.trycloudflare.com host each time; it then signals us so browsers
+// on the new host stop getting 403'd on the /ws upgrade (the recurring "I only
+// see a dead terminal after the URL changed"). Cheap + idempotent — safe to send
+// on every watchdog cycle.
+process.on('SIGHUP', () => {
+    try {
+        const f = require('./stateDir').stateFile('tunnel.json');
+        const url = JSON.parse(fs.readFileSync(f, 'utf8')).url;
+        if (url && !ALLOWED_ORIGINS.includes(url)) {
+            ALLOWED_ORIGINS.push(url);
+            console.log('SIGHUP: registered current tunnel origin for WS', url);
+        } else {
+            console.log('SIGHUP: tunnel origin already trusted', url || '(none)');
+        }
+    } catch (e) {
+        console.log('SIGHUP: could not read tunnel.json:', e && e.message);
+    }
+});
+
+// Self-heal on an in-process crash. An uncaughtException / unhandledRejection
+// would otherwise tear the daemon down *without* running the flush above —
+// losing up to SCROLLBACK_FLUSH_MS of on-screen session memory — and leave no
+// trace of why it died. We can't safely keep serving from a corrupted state,
+// so on a detected crash we: (1) best-effort synchronous flush so the next
+// boot re-seeds every tab from what was on screen, (2) detach (not kill) the
+// tunnel so the same public URL survives the restart, (3) append the reason to
+// crash.log so the bounce is diagnosable, then (4) exit non-zero. launchd's
+// unconditional KeepAlive (with the soa-watchdog as backstop) restarts the
+// daemon in seconds, and tab/tunnel state is re-adopted on the way up.
+let _crashing = false;
+function crashFlush(kind, err) {
+    if (_crashing) { try { process.exit(1); } catch (_) {} return; } // never loop
+    _crashing = true;
+    try { clearInterval(scrollbackFlush); } catch (_) {}
+    try { clearInterval(heartbeat); } catch (_) {}
+    try { clearInterval(memSample); } catch (_) {}
+    try {
+        const s = persistableSession();
+        if (s) tabPersist.saveAll(s.tabMgr);            // sync atomic tmp+rename
+    } catch (_) { /* already crashing — best effort */ }
+    try { pair.detach(); } catch (_) {}
+    try {
+        const line = `${new Date().toISOString()} ${kind}: ${(err && err.stack) || err}\n`;
+        fs.appendFileSync(path.join(STATE_DIR, 'logs', 'crash.log'), line);
+    } catch (_) {}
+    try { console.error(`SoA-Web ${kind} — flushed scrollback, exiting for supervised restart:`, err); } catch (_) {}
+    process.exit(1);
+}
+process.on('uncaughtException',  (err) => crashFlush('uncaughtException', err));
+process.on('unhandledRejection', (err) => crashFlush('unhandledRejection', err));
+
+// Boot-time self-heal: a daemon restart only rehydrates the fleet (respawn PTYs
+// + claude --resume) when a client connects to the primary session — so a restart
+// with NO browser leaves the saved tabs dead on disk until someone connects (the
+// "self-heal recovered tabs.json but the fleet is still down" gap). Here the
+// daemon connects an internal loopback WS to ITSELF a few seconds after boot,
+// carrying the persisted session's own cookie so it binds to THAT exact session,
+// which drives the SAME battle-tested restore-on-connect path (open tabs, arm
+// auto-resume). It then closes — tabs/PTYs live on the session, not the socket,
+// so they persist. No-op if a real client already rehydrated, tabs.json is empty,
+// or SOA_WEB_NO_BOOT_RESUME=1. Cookie targeting is what prevents a double-restore:
+// a later browser using the same cookie binds to the same (now non-empty) session
+// and skips restore.
+function scheduleBootResume() {
+    if (process.env.SOA_WEB_NO_BOOT_RESUME === '1') return;
+    const delay = parseInt(process.env.SOA_WEB_BOOT_RESUME_DELAY_MS || '4000', 10);
+    const MAX_ATTEMPTS = 3;
+    // UNCONDITIONAL rehydration: the only thing that cancels an attempt is
+    // proof the restore actually ran (_diskRestoreRan — set inside
+    // restore-on-connect itself). The old heuristic — "the persisted session
+    // has >0 tabs, so a client must have rehydrated" — was satisfied by a
+    // client's own fresh tab and silently skipped the whole fleet
+    // (2026-07-08). Every skip now says why, and failed attempts retry with
+    // backoff instead of giving up for the life of the process.
+    const attempt = (n) => {
+        try {
+            if (_diskRestoreRan) { console.log(`boot-resume[${n}]: restore-on-connect already ran — nothing to do`); return; }
+            // Self-heal a collapsed tabs.json HERE, at rehydrate time — not only at
+            // module-eval (line ~153). A restart landing inside a collapse window,
+            // or a runtime collapse that happened AFTER the early reconcile ran,
+            // would otherwise leave tabs.json at 0/1 the instant boot-resume reads
+            // it, and the fleet would stay dead on disk even though tabs.json.lastgood
+            // (immune to the same collapse that clobbered tabs.json) still holds the
+            // full list. reconcile prefers lastgood, then scrollback, respects an
+            // intentional close-all (closedByUser), and no-ops on an already-healthy
+            // list — so it is safe to call on every attempt.
+            const rec = tabPersist.reconcileTabsFromScrollback();
+            if (rec && rec.action === 'recovered') {
+                console.log(`boot-resume[${n}]: self-healed ${rec.count} tab(s) from ${rec.from} (tabs.json had collapsed to ${rec.over || 0}) before rehydrate`);
+            }
+            const saved = tabPersist.load();
+            if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) {
+                console.log(`boot-resume[${n}]: no saved tabs on disk — nothing to rehydrate`);
+                return;
+            }
+            console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
+            const headers = {};
+            if (_persistedSession && _persistedSession.token) {
+                // Bind to the persisted primary session so the restored tabs
+                // land where the user's existing cookie points.
+                headers.Cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+            } else {
+                console.log(`boot-resume[${n}]: no persisted session — rehydrating into a fresh primary session`);
+            }
+            const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
+            const probe = new WebSocket(url, { headers });
+            probe.on('open', () => {
+                // restore-on-connect runs synchronously inside onWsConnect; hold the
+                // socket open briefly so the first auto-resume tick can fire, then close.
+                setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
+            });
+            probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
+        } catch (e) { console.log(`boot-resume[${n}] failed:`, e && e.message); }
+        if (n < MAX_ATTEMPTS) {
+            const r = setTimeout(() => { if (!_diskRestoreRan) attempt(n + 1); }, delay * 2 * n);
+            if (r.unref) r.unref();
+        }
+    };
+    const t = setTimeout(() => attempt(1), delay);
+    if (t.unref) t.unref();
+}
+
 function onListening() {
     activePort = server.address().port;
     sysinfo.setSoaPort(activePort);
     tts.setPort(activePort);
-    console.log(`SoA-Web ready: http://${HOST}:${activePort}`);
+    // Refresh the lock with the port we actually bound (may have hopped).
+    instanceLock.acquireOrExit(activePort);
+    console.log(`SoA-Web ready: http://${HOST}:${activePort}  [${MODE} · state: ${STATE_DIR}]`);
 
-    if (process.env.SOA_WEB_AUTOPAIR !== '0') {
-        const registerTunnel = (url) => {
-            if (url && !ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
-        };
-        // Try to re-adopt a tunnel that outlived the previous process first; only
-        // mint a fresh one if there's nothing healthy to take over. Adoption keeps
-        // the same public URL across restarts so the mobile client never loses it.
-        pair.resume().then(snap => {
-            if (snap.state === 'online' && snap.publicUrl) {
-                registerTunnel(snap.publicUrl);
-                console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (re-adopted — survived restart)`);
-                return;
+    // Headless self-heal: rehydrate the fleet even if no browser reconnects.
+    scheduleBootResume();
+
+    const registerTunnel = (url) => {
+        if (url && !ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
+    };
+    // Try to re-adopt a tunnel that outlived the previous process first; only
+    // mint a fresh one if there's nothing healthy to take over. Adoption keeps
+    // the same public URL across restarts so the mobile client never loses it.
+    //
+    // Adoption runs UNCONDITIONALLY — AUTOPAIR only gates minting a FRESH
+    // tunnel. On AUTOPAIR=0 installs (curl|sh default) the user's clicked
+    // START spawned a detached cloudflared that survives our restart; if we
+    // skipped resume() here its origin would never be re-registered and the
+    // paired phone would 403 on /ws until the user clicked START again.
+    pair.resume().then(snap => {
+        if (snap.state === 'online' && snap.publicUrl) {
+            registerTunnel(snap.publicUrl);
+            console.log(`SoA-Web tunnel:  ${snap.publicUrl}  (re-adopted — survived restart)`);
+            return;
+        }
+        // Auto-start so a fresh install is ready to pair with no manual step —
+        // but only a HARDENED tunnel. Open mode (SOA_WEB_OPEN_TUNNEL=1, no
+        // SESSION_TOKEN) is an unauthenticated shell, so it must never come up
+        // by itself; the user clicks START to expose it deliberately.
+        if (!tunnelGate.shouldAutoStartTunnel({ autopairEnv: process.env.SOA_WEB_AUTOPAIR, openTunnel: OPEN_TUNNEL, sessionTokenMode: !!SESSION_TOKEN })) {
+            if (OPEN_TUNNEL && !SESSION_TOKEN) {
+                console.log('SoA-Web tunnel:  auto-start skipped — SOA_WEB_OPEN_TUNNEL makes the tunnel an open shell; click START to expose it deliberately.');
             }
-            return pair.start().then(snap2 => {
-                if (snap2.state === 'online' && snap2.publicUrl) {
-                    registerTunnel(snap2.publicUrl);
-                    console.log(`SoA-Web tunnel:  ${snap2.publicUrl}  (QR in the sidebar)`);
-                } else if (snap2.state === 'error') {
-                    console.log(`SoA-Web tunnel:  unavailable — ${snap2.error}`);
-                }
-            });
-        }).catch(() => {});
-    }
+            return;
+        }
+        return pair.start().then(snap2 => {
+            if (snap2.state === 'online' && snap2.publicUrl) {
+                registerTunnel(snap2.publicUrl);
+                console.log(`SoA-Web tunnel:  ${snap2.publicUrl}  (QR in the sidebar)`);
+            } else if (snap2.state === 'error') {
+                console.log(`SoA-Web tunnel:  unavailable — ${snap2.error}`);
+            }
+        });
+    }).catch(() => {});
 }
 
 function tryListen(port) {

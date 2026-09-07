@@ -43,7 +43,15 @@ function post(body) {
 }
 
 (async () => {
-    const [cmd, ...rest] = process.argv.slice(2);
+    const argv = process.argv.slice(2);
+    // Each agent's shell carries its tab id in $SOA_WEB_TAB, so its soa-browser
+    // calls land in that tab's OWN isolated browser instead of a shared one.
+    // `--tab N` overrides (e.g. the manager driving another agent's browser).
+    let tab = process.env.SOA_WEB_TAB || null;
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === '--tab' && argv[i + 1] != null) { tab = argv[i + 1]; argv.splice(i, 2); break; }
+    }
+    const [cmd, ...rest] = argv;
     let action, args = {};
     switch (cmd) {
         case 'open': case 'navigate': case 'go': action = 'navigate'; args.url = rest.join(' '); break;
@@ -60,7 +68,7 @@ function post(body) {
             process.exit(1);
     }
     try {
-        const r = await post({ action, ...args });
+        const r = await post({ action, tab, ...args });
         if (action === 'screenshot' && r && r.data) {
             const fs = require('fs');
             const out = rest[0] || 'soa-browser-shot.jpg';

@@ -14,6 +14,7 @@ const PROTOCOL_VERSION = 1;
 
 const MSG = Object.freeze({
     HELLO:      'hello',
+    REPLAY:     'replay',
     SNAPSHOT:   'snapshot',
     TERM_DATA:  'term-data',
     TERM_EXIT:  'term-exit',
@@ -23,6 +24,8 @@ const MSG = Object.freeze({
     TTS:        'tts',
     BROWSER_FRAME: 'browser-frame',
     MANAGER:    'manager',
+    TAB_MEM:    'tab-mem',   // {mem:{[id]:bytes}} — per-tab process-tree RSS, pushed every ~10s
+    TAB_AGENTS: 'tab-agents', // {agents:{[id]:n}} — running background subagents per tab, ~4s (see agentTasks.js)
 
     AUTH:       'auth',
     INPUT:      'input',

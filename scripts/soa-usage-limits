@@ -1,0 +1,54 @@
+#!/bin/bash
+# soa-usage-limits — fetch Claude's REAL usage-limit utilization (the exact
+# numbers `/usage` shows) from the OAuth usage endpoint and cache them for the
+# dashboard widget + burn throttle to consume.
+#
+# WHY: the local-transcript engine (claudeUsage.js) only knows a ROLLING 7-day
+# COST sum, which structurally diverges from Anthropic's FIXED weekly limit
+# block — the rolling sum sheds old days while the real block accumulates to its
+# reset. On 2026-08-10 that gap was live: the rolling proxy read 56% while the
+# real seven-day utilization was 94%. This endpoint is the ground truth.
+#
+#   GET https://api.anthropic.com/api/oauth/usage   (OAuth bearer; no inference)
+#   -> { five_hour:{utilization,resets_at}, seven_day:{utilization,resets_at}, … }
+#
+# The OAuth token is read fresh from the login keychain each run (Claude Code
+# refreshes it there), so a rotated token is picked up automatically. Writes
+# $STATE_DIR/usage-limits.json atomically; on any failure it leaves the previous
+# cache untouched and exits non-zero (callers fall back to the rolling estimate).
+set -u
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
+OUT="$STATE_DIR/usage-limits.json"
+EP="${SOA_USAGE_LIMITS_EP:-https://api.anthropic.com/api/oauth/usage}"
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+TOK="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null \
+        | python3 -c 'import sys,json;print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null)"
+[ -z "$TOK" ] && { echo "soa-usage-limits: no OAuth token in keychain" >&2; exit 1; }
+
+resp="$(curl -fsS --max-time 12 \
+          -H "Authorization: Bearer $TOK" \
+          -H "anthropic-beta: oauth-2025-04-20" \
+          "$EP" 2>/dev/null)"
+[ -z "$resp" ] && { echo "soa-usage-limits: fetch failed" >&2; exit 2; }
+
+printf '%s' "$resp" | OUT="$OUT" python3 -c "
+import sys,os,json,time,datetime
+d=json.load(sys.stdin)
+def iso_ms(s):
+    if not s: return None
+    try: return int(datetime.datetime.fromisoformat(s.replace('Z','+00:00')).timestamp()*1000)
+    except Exception: return None
+def blk(x):
+    x=x or {}
+    r=x.get('resets_at')
+    return {'utilization':x.get('utilization'),'resetsAt':r,'resetsAtMs':iso_ms(r)}
+out={'fetchedAt':int(time.time()*1000),
+     'fiveHour':blk(d.get('five_hour')),
+     'sevenDay':blk(d.get('seven_day')),
+     'sevenDayOpus':(blk(d.get('seven_day_opus')) if d.get('seven_day_opus') else None)}
+p=os.environ['OUT']; tmp=p+'.tmp'
+open(tmp,'w').write(json.dumps(out)); os.replace(tmp,p)
+fh,sd=out['fiveHour'],out['sevenDay']
+print('5h %s%% · 7d %s%% (resets %s)'%(fh['utilization'],sd['utilization'],sd['resetsAt']))
+" || { echo "soa-usage-limits: parse failed" >&2; exit 3; }

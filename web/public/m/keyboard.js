@@ -37,10 +37,14 @@ export class VirtualKeyboard {
         this.input = document.createElement('input');
         this.input.type = 'text';
         this.input.className = 'kbd-hidden-input';
-        this.input.autocomplete = 'on';
-        this.input.autocapitalize = 'sentences';
-        this.input.autocorrect = 'on';
-        this.input.spellcheck = true;
+        // Terminal input: OS text-assist MUST be off. autocapitalize turned
+        // `git`→`Git`, autocorrect rewrote commands/paths, and spellcheck adds
+        // noise squiggles — a shell needs the exact bytes you typed. Set via
+        // attributes too (autocorrect is a non-standard Safari attr).
+        this.input.autocomplete = 'off';
+        this.input.setAttribute('autocapitalize', 'none');
+        this.input.setAttribute('autocorrect', 'off');
+        this.input.spellcheck = false;
         this.input.placeholder = 'Type here…';
         this.input.setAttribute('enterkeyhint', 'send');
         this.root.appendChild(this.input);

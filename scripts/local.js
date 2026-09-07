@@ -20,10 +20,17 @@
  * about this machine; use selfhost.js when you want other devices
  * (phone, iPad, etc.) to reach the same shell.
  *
+ * State isolation: by default this runs against ~/.soa-web-dev, NOT the
+ * production ~/.soa-web — a dev daemon sharing the launchd daemon's state
+ * dir clobbers tabs/scrollback (the 2026-06 corruption incidents). Pass
+ * --prod-state only if you intentionally want the production state dir
+ * (the server's instance lock will refuse if the prod daemon is running).
+ *
  * Usage:
- *   node scripts/local.js              # default port 4010
+ *   node scripts/local.js              # default port 4010, state ~/.soa-web-dev
  *   node scripts/local.js --port 7000  # custom port
  *   node scripts/local.js --no-open    # skip launching the browser
+ *   node scripts/local.js --prod-state # use ~/.soa-web (danger: prod state)
  */
 
 const { spawn, execFile } = require('child_process');
@@ -31,11 +38,12 @@ const path = require('path');
 const http = require('http');
 
 function parseArgs(argv) {
-    const out = { port: '4010', openBrowser: true };
+    const out = { port: '4010', openBrowser: true, prodState: false };
     for (let i = 2; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--port') out.port = argv[++i];
         else if (a === '--no-open') out.openBrowser = false;
+        else if (a === '--prod-state') out.prodState = true;
         else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
     }
     return out;
@@ -46,9 +54,12 @@ function printHelp() {
         'local.js — run a SoA-Web backend on this machine and open a browser.',
         '',
         'Options:',
-        '  --port <n>   Local port to bind (default 4010).',
-        '  --no-open    Don\'t launch the browser; just print the URL.',
-        '  --help       Show this help.',
+        '  --port <n>     Local port to bind (default 4010).',
+        '  --no-open      Don\'t launch the browser; just print the URL.',
+        '  --prod-state   Use the production state dir ~/.soa-web instead of',
+        '                 the isolated ~/.soa-web-dev. Refused while the prod',
+        '                 daemon is running (instance lock).',
+        '  --help         Show this help.',
     ].join('\n'));
 }
 
@@ -93,11 +104,20 @@ async function main() {
     const args = parseArgs(process.argv);
     const port = String(args.port);
 
+    // Isolated state dir by default so a dev daemon can never corrupt the
+    // production daemon's tabs/scrollback/session files.
+    const stateDir = args.prodState
+        ? ''
+        : (process.env.SOA_WEB_STATE_DIR || path.join(require('os').homedir(), '.soa-web-dev'));
     const env = {
         ...process.env,
         SOA_WEB_PORT: port,
         SOA_WEB_HOST: '127.0.0.1',
         SOA_WEB_AUTOPAIR: process.env.SOA_WEB_AUTOPAIR || '0',
+        ...(stateDir ? { SOA_WEB_STATE_DIR: stateDir, SOA_WEB_MODE: 'dev' } : {}),
+        // Daemons inherited from a user shell often miss /usr/sbin (lsof) —
+        // normalize so sysinfo features behave the same as under launchd.
+        PATH: `${process.env.PATH || ''}:/usr/sbin:/sbin`,
     };
 
     const serverPath = path.resolve(__dirname, '../server/src/index.js');
@@ -131,6 +151,7 @@ async function main() {
     console.log(dim('│ '));
     console.log(dim('│ ') + bold('URL:   ') + green(url));
     console.log(dim('│ ') + bold('Mode:  ') + 'local (no tunnel, no token)');
+    console.log(dim('│ ') + bold('State: ') + (stateDir || '~/.soa-web (PRODUCTION)'));
     console.log(dim('│ '));
     console.log(dim('│ ') + 'Ctrl+C stops the server.');
     console.log(dim('└' + bar + '┘') + '\n');

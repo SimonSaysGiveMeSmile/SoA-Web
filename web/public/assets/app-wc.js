@@ -14,14 +14,17 @@
  *   - The filesystem is ephemeral. Good for scratch work, not for secrets.
  */
 
-import { AudioFX } from '/assets/audiofx.js?v=12';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=12';
-import { mountSandboxSidebar } from '/assets/widgets.js?v=12';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=12';
-// The WebContainer API ships as ESM on esm.sh. We only depend on the named
-// WebContainer class; auth is optional (loaded below only if present + a
-// clientId is configured) so the rest of the app still works during dev.
-import * as WC from 'https://esm.sh/@webcontainer/api@1.5.1';
+import { AudioFX } from '/assets/audiofx.js?v=18';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=28';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=45';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=25';
+// The WebContainer API is vendored into /assets/vendor (was esm.sh, but a
+// cross-origin static import makes the whole module graph — and therefore
+// the dynamic import of this file — fail whenever the CDN is slow, blocked,
+// or geo-502s, and Chrome misreports it as "Failed to fetch app-wc.js".
+// Vendoring keeps sandbox boot same-origin. The runtime still talks to
+// stackblitz.com/headless for the actual container; that part is inherent.
+import * as WC from '/assets/vendor/webcontainer-api-1.5.1/index.js';
 
 const CFG = window.__SOA_WEB__ || {};
 
@@ -135,10 +138,12 @@ class WCShell {
             audioBtn.textContent = on ? tr('topbar.audio_off') : tr('topbar.audio_on');
         });
 
-        const settingsBtn = $('#open-settings');
+        // Settings merged into the user-chip (the standalone ⚙ button was removed);
+        // fall back to #open-settings for any legacy markup. Ctrl+Shift+S still works.
+        const settingsBtn = $('#user-chip') || $('#open-settings');
         if (settingsBtn) settingsBtn.addEventListener('click', () => {
             this.audio.play('panels');
-            openSettingsModal();
+            openSettingsModal({ tab: 'profile' });
         });
         onSettings(s => this._applySettings(s));
 

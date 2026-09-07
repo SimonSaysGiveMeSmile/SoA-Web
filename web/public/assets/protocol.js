@@ -10,6 +10,7 @@ export const PROTOCOL_VERSION = 1;
 
 export const MSG = Object.freeze({
     HELLO:     'hello',
+    REPLAY:    'replay',
     SNAPSHOT:  'snapshot',
     TERM_DATA: 'term-data',
     TERM_EXIT: 'term-exit',
@@ -18,6 +19,7 @@ export const MSG = Object.freeze({
     BYE:       'bye',
     TTS:       'tts',
     BROWSER_FRAME: 'browser-frame',
+    TAB_AGENTS: 'tab-agents', // {agents:{[id]:n}} — running background subagents per tab, ~4s (see agentTasks.js)
 
     AUTH:      'auth',
     INPUT:     'input',

@@ -1,0 +1,309 @@
+#!/bin/bash
+# SoA CREDENTIAL FAILOVER — runs every 60s (launchd com.soa-web.failover-4010)
+# and is safe to invoke by hand. Delivers "uninterrupted in any sense": when the
+# active Claude credential fails for ANY reason, it rotates the whole fleet to the
+# next HEALTHY provider and relaunches the stuck tabs onto it — no human tap.
+#
+# It unifies the three interruption classes that all surface as "Please run /login":
+#   1. OAuth token revoked        (401 · access token has been revoked)
+#   2. usage limit hit            (You've hit your {session,weekly} limit)
+#   3. third-party proxy quota    (403 · 用户额度不足 / insufficient balance)
+#   ...plus connection failures   (Unable to connect / ConnectionRefused).
+#
+# Providers come from env.json (the same store Settings edits): the Max-plan OAuth
+# (no baseUrl → keychain) plus every configured provider. Failover policy (user
+# chose FULL failover incl. proxies, cheapest/most-headroom first):
+#     OAuth (sunk-cost, prefer while not limited)
+#       → proxies    (prepaid, cheap — only if the health probe shows balance)
+#       → API keys   (metered $ — last resort)
+# A provider is a candidate ONLY if a live 1-token health probe with its creds
+# succeeds; a dead/broke/limited provider is skipped, never rotated onto.
+#
+# How a switch reaches LIVE tabs: env.json's active provider is injected into a
+# shell at PTY-creation (getEnvForShell), so a running claude keeps its old creds.
+# We therefore (a) set env.json `active`, then (b) for each cred-stuck tab, respawn
+# it in its own cwd (daemon injects the NEW provider env) and --resume its session.
+# This matches soa-relaunch and never types a token into a tab's scrollback.
+#
+# Safety / anti-thrash:
+#   • Acts on a tab ONLY when its LATEST output (not stale scrollback) shows a cred
+#     failure AND it isn't actively working. Distinguishes live-vs-stale by position.
+#   • Skips manager tab(s) and our own id; per-tab relaunch cooldown.
+#   • Won't flip `active` more than once per SWITCH_COOLDOWN (anti-flap).
+#   • Probes cost money on metered keys, so it only probes when a failover is
+#     actually needed, and caches provider health for HEALTH_TTL.
+#   • SOA_FAILOVER_DRY=1 → log/print the plan, change nothing (no active switch, no
+#     relaunch, no notify). Recommended for the first run.
+set -u
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$DIR}"
+# CRITICAL: the daemon reads env.json from ITS state dir (stateDir.js →
+# $SOA_WEB_STATE_DIR/env.json), NOT the install dir. On :4010 that is
+# ~/.soa-web-local/env.json. Writing `active` anywhere else is a silent no-op the
+# daemon never sees. Default to the state-dir path so a switch actually lands.
+ENV_JSON="${SOA_ENV_JSON:-$STATE_DIR/env.json}"
+LOG="$STATE_DIR/logs/failover.log"
+STATE="$STATE_DIR/logs/.failover.json"             # {activeSince, lastSwitch, health:{id:{ok,ts}}}
+COOLDOWN_DIR="$STATE_DIR/logs/.failover-tabs"       # per-tab relaunch cooldown stamps
+mkdir -p "$(dirname "$LOG")" "$COOLDOWN_DIR" 2>/dev/null
+TS="$(date '+%Y-%m-%dT%H:%M:%S')"; NOW="$(date +%s)"
+DRY="${SOA_FAILOVER_DRY:-0}"
+PROBE_MODEL="${SOA_FAILOVER_PROBE_MODEL:-claude-haiku-4-5-20251001}"
+PROBE_TIMEOUT="${SOA_FAILOVER_PROBE_TIMEOUT:-30}"
+SWITCH_COOLDOWN="${SOA_FAILOVER_SWITCH_COOLDOWN:-180}"   # secs between active-provider flips
+TAB_COOLDOWN="${SOA_FAILOVER_TAB_COOLDOWN:-600}"         # secs between relaunches of one tab
+READ_LINES="${SOA_FAILOVER_READ_LINES:-25}"
+
+log(){ echo "$TS $*" >> "$LOG" 2>/dev/null; }
+run_to(){ local t="$1"; shift; perl -e 'my $t=shift; alarm $t; exec @ARGV or exit 127' "$t" "$@"; }
+
+[ -f "$ENV_JSON" ] || { log "no env.json at $ENV_JSON — nothing to do"; exit 0; }
+
+# ── Any-credential-failure banner (all three classes + connection) ─────────────
+FAIL_RE='Please run /login|access token has been revoked|hit your (session|usage|weekly) limit|用户额度不足|剩余额度|API Error: 4(0[13]|29)|Unable to connect to API|ConnectionRefused'
+
+# HARD failures only — the ones that DON'T self-heal on a timer, so failing the
+# fleet over to another provider is warranted: OAuth revoked, third-party proxy
+# out of balance, weekly limit (resets days away), or the endpoint unreachable.
+# DELIBERATELY EXCLUDES the soft/transient cases — a plain session limit (resets in
+# hours) or a momentary 429 under load — because those are already handled by the
+# auto-resume-at-reset layer, and failing over on them would needlessly route your
+# prompts + code through a third-party proxy and churn tabs. A transient blip is
+# not a credential outage.
+HARD_RE='access token has been revoked|hit your weekly limit|用户额度不足|剩余额度|API Error: 40[13]|Unable to connect to API|ConnectionRefused'
+
+# ── Provider table from env.json → TSV: id<TAB>baseUrl<TAB>tokenVar<TAB>token<TAB>kind
+# kind: oauth|proxy|apikey. Order encodes default failover priority.
+providers_tsv() {
+python3 - "$ENV_JSON" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+rows=[]
+# 1) OAuth (keychain) — always first candidate; no baseUrl/token.
+rows.append(("oauth","","","","oauth"))
+# 2) legacy top-level key, if set
+c=d.get("claude",{}) or {}
+if c.get("apiKey"):
+    rows.append(("claude-legacy",c.get("baseUrl","") or "","ANTHROPIC_API_KEY",c["apiKey"],
+                 "apikey" if not (c.get("baseUrl")) else "proxy"))
+# 3) providers: proxies (have baseUrl) before bare api keys; sk-ant-api = apikey
+proxies=[]; keys=[]
+for p in d.get("providers",[]):
+    tv=p.get("tokenVar") or "ANTHROPIC_AUTH_TOKEN"
+    bu=p.get("baseUrl","") or ""
+    tok=p.get("token","") or ""
+    if not tok: continue
+    kind = "proxy" if bu else ("apikey" if tok.startswith("sk-ant-api") else "proxy")
+    (proxies if kind=="proxy" else keys).append((p["id"],bu,tv,tok,kind))
+rows += proxies + keys
+# Join with US (\x1f), NOT tab: tab is IFS-whitespace, so `read` COLLAPSES runs of
+# empty tab-delimited fields — the OAuth row (empty baseUrl/token) then misparsed,
+# sliding id="oauth" into baseUrl and yielding ANTHROPIC_BASE_URL=oauth (a bogus
+# URL → phantom "OAuth unhealthy"). \x1f is non-whitespace, so empty fields survive.
+for r in rows:
+    print("\x1f".join(r))
+PY
+}
+
+# ── current active id ──────────────────────────────────────────────────────────
+active_id(){ python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('active','') or 'oauth')" "$ENV_JSON" 2>/dev/null; }
+
+# ── set active id in env.json (atomic; preserves everything else) ──────────────
+set_active(){
+    local id="$1"; [ "$id" = "oauth" ] && id=""
+    python3 - "$ENV_JSON" "$id" <<'PY'
+import json,sys,os,tempfile
+p,a=sys.argv[1],sys.argv[2]
+d=json.load(open(p))
+d["active"]=a
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p));
+with os.fdopen(fd,"w") as f: json.dump(d,f,indent=2)
+os.replace(tmp,p)
+PY
+}
+
+# ── health probe: does a 1-token call with THIS provider's creds succeed? ───────
+# 0 = healthy, 1 = failed. Runs claude with a clean env + only this provider's vars.
+# RETRIED PROBE_RETRIES times: a provider is declared unhealthy only if EVERY
+# attempt fails — so a transient OAuth blip / momentary 429 can't dump the whole
+# fleet onto a third-party proxy. (This is the difference between resilient and
+# hair-trigger: a single flaky call is not a credential outage.)
+PROBE_RETRIES="${SOA_FAILOVER_PROBE_RETRIES:-3}"
+PROBE_GAP="${SOA_FAILOVER_PROBE_GAP:-4}"
+probe_once(){
+    local baseUrl="$1" tokenVar="$2" token="$3" out rc
+    local -a envargs=(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_MODEL)
+    [ -n "$baseUrl" ] && envargs+=("ANTHROPIC_BASE_URL=$baseUrl")
+    [ -n "$token" ]   && envargs+=("$tokenVar=$token")
+    out="$(printf 'reply with exactly: ok' | run_to "$PROBE_TIMEOUT" "${envargs[@]}" claude -p --model "$PROBE_MODEL" 2>&1)"; rc=$?
+    if [ $rc -eq 0 ] && printf '%s' "$out" | grep -qiE '\bok\b' \
+        && ! printf '%s' "$out" | grep -qiE "$FAIL_RE"; then
+        return 0
+    fi
+    local why="rc=$rc"
+    printf '%s' "$out" | grep -qiE "hit your (session|usage|weekly) limit" && why="usage-limit"
+    printf '%s' "$out" | grep -qiE "用户额度不足|剩余额度|API Error: 403" && why="proxy-quota"
+    printf '%s' "$out" | grep -qiE "revoked|API Error: 401" && why="revoked"
+    printf '%s' "$out" | grep -qiE "Unable to connect|ConnectionRefused|API Error: 429" && why="unreachable"
+    PROBE_WHY="$why"
+    [ "${SOA_FAILOVER_DEBUG:-0}" = "1" ] && log "    [dbg] probe rc=$rc out=[$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)]"
+    return 1
+}
+probe(){
+    local i=1
+    while [ "$i" -le "$PROBE_RETRIES" ]; do
+        if probe_once "$@"; then [ "$i" -gt 1 ] && log "    (probe recovered on attempt $i)"; return 0; fi
+        [ "$i" -lt "$PROBE_RETRIES" ] && run_to $((PROBE_GAP+2)) sleep "$PROBE_GAP" 2>/dev/null
+        i=$((i+1))
+    done
+    return 1   # failed every attempt → genuinely unhealthy (PROBE_WHY set by last attempt)
+}
+
+# ── pick the best HEALTHY provider, in priority order. Echoes its id, or "". ────
+pick_healthy(){
+    local skip="${1:-}"   # optionally skip this id (the one that just failed)
+    while IFS=$'\x1f' read -r id baseUrl tokenVar token kind; do
+        [ "$id" = "$skip" ] && continue
+        PROBE_WHY=""
+        if probe "$baseUrl" "$tokenVar" "$token"; then
+            log "  probe $id ($kind) → HEALTHY"
+            echo "$id"; return 0
+        else
+            log "  probe $id ($kind) → unhealthy ($PROBE_WHY)"
+        fi
+    done < <(providers_tsv)
+    echo ""; return 1
+}
+
+# ── daemon view ────────────────────────────────────────────────────────────────
+LIST="$(soa-sessions list 2>/dev/null)"
+[ -z "$LIST" ] && { log "no list (daemon down?) — nothing to do"; exit 0; }
+SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +manager ' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+excluded(){ local id="$1"; [ -n "$SELF" ] && [ "$id" = "$SELF" ] && return 0; case " $MGR " in *" $id "*) return 0;; esac; return 1; }
+
+# Latest output of a tab, ANSI-stripped, tail only (so we judge the CURRENT state,
+# not week-old scrollback). Echoes "hard" if the last few lines show a HARD failure,
+# "soft" for a self-healing one, "" if not stuck. We only FAIL OVER on hard.
+tab_cred_state(){
+    local id="$1" tail
+    tail="$(soa-sessions read "$id" "$READ_LINES" 2>/dev/null | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tail -6)"
+    if printf '%s' "$tail" | grep -qiE "$HARD_RE"; then echo hard
+    elif printf '%s' "$tail" | grep -qiE "$FAIL_RE"; then echo soft
+    else echo ""; fi
+}
+title_of(){ echo "$LIST" | sed -nE "s/^ *#$1 +(.+[^ ]) +(idle|done|working|attention|stuck) +ctx.*/\1/p" | head -1 | sed -E 's/ +$//'; }
+cwd_of(){ soa-sessions read "$1" 1 >/dev/null 2>&1; curl -fsS --max-time 4 "http://127.0.0.1:${SOA_WEB_PORT:-4010}/api/tabs" 2>/dev/null | python3 -c "
+import json,sys
+try:
+ d=json.load(sys.stdin)
+ for t in d.get('tabs',[]):
+  if str(t.get('id'))=='$1': print(t.get('cwd') or ''); break
+except: pass" 2>/dev/null; }
+
+# ── 1. Find cred-stuck tabs (live state), split hard vs soft ───────────────────
+STUCK="" HARD=""
+for id in $(echo "$LIST" | sed -nE 's/^ *#([0-9]+) .*/\1/p'); do
+    excluded "$id" && continue
+    st="$(tab_cred_state "$id")"
+    [ -n "$st" ] && STUCK="$STUCK $id"
+    [ "$st" = "hard" ] && HARD="$HARD $id"
+done
+STUCK="$(echo $STUCK | tr -s ' ' | sed -E 's/^ +| +$//g')"
+HARD="$(echo $HARD | tr -s ' ' | sed -E 's/^ +| +$//g')"
+
+if [ -z "$HARD" ]; then
+    # Nothing hard-stuck. Soft-stuck tabs (transient/session limits) are left to the
+    # auto-resume-at-reset layer — failing them over would needlessly hit a proxy.
+    [ -n "$STUCK" ] && log "soft-stuck only ($STUCK) — self-healing class; no failover" \
+                    || log "no cred-stuck tabs — fleet healthy on active='$(active_id)'"
+    exit 0
+fi
+log "HARD cred-stuck tabs (live): $HARD (all stuck: ${STUCK}) — evaluating failover (active='$(active_id)')"
+# Only the hard-stuck tabs get relaunched onto the new provider.
+STUCK="$HARD"
+
+# ── 2. Anti-flap: only re-pick active if we haven't switched very recently ─────
+last_switch="$(python3 -c "import json,sys;print(json.load(open('$STATE')).get('lastSwitch',0))" 2>/dev/null || echo 0)"
+cur_active="$(active_id)"
+target="$cur_active"
+if [ $(( NOW - ${last_switch:-0} )) -ge "$SWITCH_COOLDOWN" ]; then
+    log "probing providers to pick a healthy active (was '$cur_active')…"
+    healthy="$(pick_healthy "")"
+    if [ -n "$healthy" ]; then
+        target="$healthy"
+    else
+        log "NO provider passed the health probe — every credential is down/limited. Notifying user; will retry next cycle."
+        [ "$DRY" != "1" ] && command -v soa-notify >/dev/null 2>&1 && \
+            soa-notify -t "SoA fleet — action needed" -p high -T lock --also-msg \
+            "⚠️ All Claude credentials are failing (OAuth + all providers). Fleet is paused until one recovers or you add a working key/login." >/dev/null 2>&1
+        exit 0
+    fi
+else
+    log "within switch-cooldown (${SWITCH_COOLDOWN}s) — keeping active='$cur_active'"
+fi
+
+# ── 3. Switch active if the healthy target differs from current ────────────────
+if [ "$target" != "$cur_active" ]; then
+    if [ "$DRY" = "1" ]; then
+        log "[dry] would switch active provider: '$cur_active' → '$target'"
+    else
+        set_active "$target"
+        python3 -c "
+import json,os
+p='$STATE'
+d={}
+try: d=json.load(open(p))
+except: pass
+d['lastSwitch']=$NOW; d['activeSince']=$NOW
+json.dump(d,open(p,'w'))
+" 2>/dev/null
+        log "switched active provider: '$cur_active' → '$target'"
+        command -v soa-notify >/dev/null 2>&1 && \
+            soa-notify -t "SoA fleet" -T arrows_counterclockwise --also-msg \
+            "Credential '$cur_active' failed — auto-failed the fleet over to '$target'. Relaunching stuck tabs." >/dev/null 2>&1
+    fi
+else
+    # Active credential is healthy AND already the best choice → NO real outage.
+    # The hard banners on these tabs are therefore STALE scrollback (an old limit
+    # that has since reset), not a live block — relaunching would just churn tabs
+    # that are actually fine. Leave them to the normal auto-resume / nudge layer.
+    log "active ('$target') is healthy and already best — hard banners are stale; NOT relaunching (avoids churn). Stuck: $STUCK"
+    exit 0
+fi
+
+# ── 4. Relaunch each cred-stuck tab onto the NEW provider (real failover only) ──
+# Reached ONLY when we switched providers (a genuine outage), so these tabs are
+# truly blocked on the dead credential and must move to the healthy one.
+relaunched=0
+for id in $STUCK; do
+    excluded "$id" && continue
+    stamp="$COOLDOWN_DIR/$id"
+    if [ -f "$stamp" ]; then
+        last="$(cat "$stamp" 2>/dev/null || echo 0)"
+        if [ $(( NOW - ${last:-0} )) -lt "$TAB_COOLDOWN" ]; then
+            log "  #$id within relaunch cooldown — skipping"; continue
+        fi
+    fi
+    title="$(title_of "$id")"; cwd="$(cwd_of "$id")"
+    [ -z "$cwd" ] && { log "  #$id: no cwd resolvable — skipping (can't respawn safely)"; continue; }
+    if [ "$DRY" = "1" ]; then
+        log "  [dry] would relaunch #$id \"$title\" in $cwd onto '$target' (stop --force + spawn --resume)"
+        continue
+    fi
+    # Clean respawn in-cwd: daemon injects the new active provider's env at PTY
+    # creation, and default spawn --resume restores the session's context.
+    soa-sessions stop "$id" --force >/dev/null 2>&1
+    res="$(soa-sessions spawn "$cwd" --title "${title:-tab}" 2>&1)"
+    if printf '%s' "$res" | grep -q '"ok":true'; then
+        echo "$NOW" > "$stamp"; relaunched=$((relaunched+1))
+        newid="$(printf '%s' "$res" | sed -nE 's/.*"id":([0-9]+).*/\1/p')"
+        log "  relaunched #$id \"$title\" → new #${newid:-?} on '$target'"
+    else
+        log "  #$id relaunch FAILED: $res"
+    fi
+done
+
+log "failover pass done — target='$target', relaunched=$relaunched tab(s)"
+exit 0

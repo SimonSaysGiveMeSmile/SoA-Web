@@ -15,12 +15,14 @@
  * broadcast a `soa:settings` window event so widgets/tabs can re-render.
  */
 
-import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=5';
+import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=17';
 
 const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
+    theme: 'dark',   // default to dark regardless of system preference
+    uiLang: 'tron',  // UI language: 'tron' (terminal classic) | 'minimal' (porcelain modern) | 'liquid' (liquid glass / iOS)
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,
@@ -28,8 +30,37 @@ export const DEFAULTS = Object.freeze({
     audio: true,
     audioVolume: 1.0,
     disableFeedbackAudio: false,
+    agentDoneSound: true,
     clockHours: 24,
+    // Which cells the unified view switcher shows. Terminal (tabs) is the
+    // always-available escape hatch; the rest are user-customizable.
+    viewButtons: { tabs: true, tiles: true, manager: true, chat: true, monitor: true },
 });
+
+const VIEW_KEYS = ['tabs', 'tiles', 'manager', 'chat', 'monitor'];
+function asViewButtons(v) {
+    const src = (v && typeof v === 'object') ? v : {};
+    const out = {};
+    for (const k of VIEW_KEYS) out[k] = src[k] !== false;   // default: shown
+    out.tabs = true;                                        // terminal always on
+    return out;
+}
+
+const THEMES = ['auto', 'dark', 'light', 'dim'];
+function asTheme(v) { return THEMES.includes(v) ? v : DEFAULTS.theme; }
+
+const UILANGS = ['tron', 'minimal', 'liquid'];
+function asUiLang(v) { return UILANGS.includes(v) ? v : DEFAULTS.uiLang; }
+
+// Reflect the UI language onto <html data-ui> so minimal.css activates.
+// index.html sets it pre-paint from localStorage; this keeps it in sync on
+// every change (app.js _applyTheme then re-themes open xterm instances).
+function applyUiAttr() {
+    const want = current ? current.uiLang : DEFAULTS.uiLang;
+    if (document.documentElement.dataset.ui !== want) {
+        document.documentElement.dataset.ui = want;
+    }
+}
 
 function clampFont(n)   { n = Number(n); return Number.isFinite(n) ? Math.max(8, Math.min(28, Math.round(n))) : DEFAULTS.termFontSize; }
 function clampVol(n)    { n = Number(n); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : DEFAULTS.audioVolume; }
@@ -39,6 +70,8 @@ function asHours(n)     { n = Number(n); return n === 12 ? 12 : 24; }
 function normalize(raw) {
     const s = raw && typeof raw === 'object' ? raw : {};
     return {
+        theme: asTheme(s.theme ?? DEFAULTS.theme),
+        uiLang: asUiLang(s.uiLang ?? DEFAULTS.uiLang),
         termFontSize: clampFont(s.termFontSize ?? DEFAULTS.termFontSize),
         cursorBlink: asBool(s.cursorBlink, DEFAULTS.cursorBlink),
         nocursor: asBool(s.nocursor, DEFAULTS.nocursor),
@@ -46,7 +79,9 @@ function normalize(raw) {
         audio: asBool(s.audio, DEFAULTS.audio),
         audioVolume: clampVol(s.audioVolume ?? DEFAULTS.audioVolume),
         disableFeedbackAudio: asBool(s.disableFeedbackAudio, DEFAULTS.disableFeedbackAudio),
+        agentDoneSound: asBool(s.agentDoneSound, DEFAULTS.agentDoneSound),
         clockHours: asHours(s.clockHours ?? DEFAULTS.clockHours),
+        viewButtons: asViewButtons(s.viewButtons),
     };
 }
 
@@ -65,6 +100,7 @@ export function saveSettings(patch) {
     current = normalize({ ...current, ...(patch || {}) });
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(current)); } catch (_) {}
     applyCursorClass();
+    applyUiAttr();
     window.dispatchEvent(new CustomEvent('soa:settings', { detail: { ...current } }));
     return { ...current };
 }
@@ -73,6 +109,7 @@ export function resetSettings() {
     current = normalize(null);
     try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
     applyCursorClass();
+    applyUiAttr();
     window.dispatchEvent(new CustomEvent('soa:settings', { detail: { ...current } }));
     return { ...current };
 }
@@ -171,6 +208,63 @@ function langSelect(id) {
     return s;
 }
 
+function uiLangSelect(id, value) {
+    const sel = el('select', { id });
+    for (const [v, label] of [['tron', 'TRON · terminal classic'], ['minimal', 'MINIMAL · porcelain modern'], ['liquid', 'LIQUID · glass (iOS)']]) {
+        const o = el('option', { value: v, text: label });
+        if (v === value) o.selected = true;
+        sel.appendChild(o);
+    }
+    // Instant apply, same pipeline as theme: saveSettings sets <html data-ui>
+    // (applyUiAttr) and 'soa:settings' → app.js _applyTheme re-themes xterm.
+    sel.addEventListener('change', () => saveSettings({ uiLang: asUiLang(sel.value) }));
+    return sel;
+}
+
+function themeSelect(id, value) {
+    const sel = el('select', { id });
+    for (const [v, label] of [['auto', 'Auto (system)'], ['dark', 'Dark'], ['light', 'Light'], ['dim', 'Dim']]) {
+        const o = el('option', { value: v, text: label });
+        if (v === value) o.selected = true;
+        sel.appendChild(o);
+    }
+    // Instant apply: changing the dropdown re-themes the whole UI immediately
+    // (saveSettings → 'soa:settings' → app.js _applySettings → _applyTheme).
+    sel.addEventListener('change', () => saveSettings({ theme: asTheme(sel.value) }));
+    return sel;
+}
+
+// View-switcher customization — a checkbox per toggleable view. Instant-apply
+// (same pipeline as the theme/uiLang selects): each change writes viewButtons
+// back and app.js re-applies cell visibility via the 'soa:settings' event.
+function viewButtonsControl(s) {
+    const wrap = el('div', { class: 'set-viewbtns' });
+    const defs = [['tiles', 'Tiles'], ['manager', 'Manager'], ['chat', 'Chat'], ['monitor', 'Monitor']];
+    const cur = (s && s.viewButtons) || {};
+    // Terminal is always available — show it disabled+checked for clarity.
+    const term = el('input', { type: 'checkbox', class: 'set-viewbtn', checked: 'checked', disabled: 'disabled' });
+    wrap.appendChild(el('label', { class: 'set-viewbtn-lbl set-viewbtn-lbl--fixed', title: 'Always shown' }, [term, ' Terminal']));
+    for (const [key, label] of defs) {
+        const cb = el('input', { type: 'checkbox', class: 'set-viewbtn', id: 'set-viewbtn-' + key });
+        cb.checked = cur[key] !== false;
+        cb.addEventListener('change', () => {
+            const next = { ...getSettings().viewButtons, [key]: cb.checked };
+            saveSettings({ viewButtons: next });
+        });
+        wrap.appendChild(el('label', { class: 'set-viewbtn-lbl', for: 'set-viewbtn-' + key }, [cb, ' ' + label]));
+    }
+    return wrap;
+}
+
+// A read-only settings row (label / description / static value).
+function staticRow(label, desc, valueText) {
+    return el('tr', {}, [
+        el('td', { class: 'k' }, [el('code', { text: label })]),
+        el('td', { class: 'd', text: desc }),
+        el('td', { class: 'v' }, [el('span', { text: valueText })]),
+    ]);
+}
+
 function buildAppearancePane(s) {
     return el('table', { class: 'settings-table' }, [
         el('thead', {}, [el('tr', {}, [
@@ -179,10 +273,26 @@ function buildAppearancePane(s) {
             el('th', { text: tr('settings.col.value') }),
         ])]),
         el('tbody', {}, [
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'uiLang' })]),
+                el('td', { class: 'd', text: 'UI language — TRON is the classic terminal look; MINIMAL is a warm porcelain skin; LIQUID is a black & white iOS-style liquid-glass skin (frosted panels, rounded corners). MINIMAL and LIQUID bring their own palettes, so the theme below only affects TRON. Applies instantly.' }),
+                el('td', { class: 'v' }, [uiLangSelect('set-uiLang', s.uiLang)]),
+            ]),
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'theme' })]),
+                el('td', { class: 'd', text: 'Color theme — Auto follows your system; Light/Dim are bright variants. Applies instantly.' }),
+                el('td', { class: 'v' }, [themeSelect('set-theme', s.theme)]),
+            ]),
             kvRow('termFontSize', 'settings.desc.termFontSize', numInput('set-termFontSize', s.termFontSize, 8, 28, 1)),
             kvRow('cursorBlink',  'settings.desc.cursorBlink',  boolSelect('set-cursorBlink', s.cursorBlink)),
             kvRow('nocursor',     'settings.desc.nocursor',     boolSelect('set-nocursor', s.nocursor)),
             kvRow('nointro',      'settings.desc.nointro',      boolSelect('set-nointro', s.nointro)),
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'viewButtons' })]),
+                el('td', { class: 'd', text: 'View switcher — choose which view buttons appear in the toolbar switcher (Terminal is always shown; Manager also needs the fleet entitlement). Applies instantly.' }),
+                el('td', { class: 'v' }, [viewButtonsControl(s)]),
+            ]),
+            staticRow('version', 'SoA-Web build', 'v' + ((window.__SOA_WEB__ || {}).version || 'dev')),
         ]),
     ]);
 }
@@ -198,6 +308,11 @@ function buildAudioPane(s) {
             kvRow('audio',               'settings.desc.audio',               boolSelect('set-audio', s.audio)),
             kvRow('audioVolume',         'settings.desc.audioVolume',         numInput('set-audioVolume', s.audioVolume, 0, 1, 0.05)),
             kvRow('disableFeedbackAudio','settings.desc.disableFeedbackAudio',boolSelect('set-disableFeedbackAudio', s.disableFeedbackAudio)),
+            el('tr', {}, [
+                el('td', { class: 'k' }, [el('code', { text: 'agentDoneSound' })]),
+                el('td', { class: 'd', text: 'Play a chime when a fleet agent finishes a turn (working → done).' }),
+                el('td', { class: 'v' }, [boolSelect('set-agentDoneSound', s.agentDoneSound)]),
+            ]),
         ]),
     ]);
 }
@@ -340,6 +455,291 @@ function buildEnvPane() {
     return pane;
 }
 
+// ── Workspace transfer ──────────────────────────────────────────────────────
+// Move this whole workspace (tabs + scrollback + Claude conversations) to
+// another device running SoA, over the tunnel link. Source side mints a
+// short-lived one-time link; target side pastes it and imports.
+function buildTransferPane() {
+    const pane = el('div', { class: 'settings-pane-body' });
+
+    const makeBtn   = el('button', { class: 'soa-modal-copy', text: 'Create transfer link' });
+    const linkInput = el('input', { type: 'text', readonly: '', placeholder: 'link appears here…', style: 'width:100%' });
+    const copyBtn   = el('button', { class: 'soa-modal-copy', text: 'Copy' });
+    const revokeBtn = el('button', { class: 'soa-modal-copy', text: 'Revoke' });
+    const qrBox     = el('div', { class: 'transfer-qr' });
+    const sendStatus = el('p', { class: 'settings-status' });
+
+    makeBtn.addEventListener('click', async () => {
+        sendStatus.textContent = 'Bundling workspace…';
+        qrBox.innerHTML = '';
+        try {
+            const res = await _apiFetch('/api/workspace/export', { method: 'POST' });
+            const data = await res.json();
+            if (!data.ok) { sendStatus.textContent = 'Error: ' + (data.error || 'unknown'); return; }
+            linkInput.value = data.url;
+            const mb = (data.bytes / (1024 * 1024)).toFixed(1);
+            const skipped = (data.skippedTranscripts || []).length;
+            sendStatus.textContent = `${data.tabs} tab(s), ${data.transcripts} Claude conversation(s), ${mb} MB — link valid 15 min, max 3 downloads`
+                + (skipped ? ` · ${skipped} transcript(s) too large, skipped` : '');
+            try {
+                const qr = await _apiFetch('/api/pair/qr?text=' + encodeURIComponent(data.url));
+                if (qr.ok) qrBox.innerHTML = await qr.text();
+            } catch (_) { /* QR is a nicety; the link is the feature */ }
+        } catch (e) { sendStatus.textContent = 'Error: ' + e.message; }
+    });
+
+    copyBtn.addEventListener('click', async () => {
+        if (!linkInput.value) return;
+        try { await navigator.clipboard.writeText(linkInput.value); sendStatus.textContent = 'Link copied.'; }
+        catch (_) { linkInput.select(); document.execCommand('copy'); sendStatus.textContent = 'Link copied.'; }
+    });
+
+    revokeBtn.addEventListener('click', async () => {
+        try { await _apiFetch('/api/workspace/export/revoke', { method: 'POST' }); } catch (_) {}
+        linkInput.value = '';
+        qrBox.innerHTML = '';
+        sendStatus.textContent = 'Transfer link revoked.';
+    });
+
+    const importInput = el('input', { type: 'text', placeholder: 'https://…/api/workspace/bundle/…', style: 'width:100%' });
+    const importBtn   = el('button', { class: 'soa-modal-copy', text: 'Import workspace' });
+    const importStatus = el('p', { class: 'settings-status' });
+
+    importBtn.addEventListener('click', async () => {
+        const url = importInput.value.trim();
+        if (!url) { importStatus.textContent = 'Paste a transfer link first.'; return; }
+        importStatus.textContent = 'Fetching bundle from the other device…';
+        importBtn.disabled = true;
+        try {
+            const res = await _apiFetch('/api/workspace/import', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            const data = await res.json();
+            if (!data.ok) { importStatus.textContent = 'Error: ' + (data.error || 'unknown'); return; }
+            let msg = `Imported ${data.imported} tab(s) from ${data.from || 'the other device'} — ${data.transcripts} conversation(s) installed, ${data.resumed} Claude agent(s) resuming.`;
+            if (data.missingCwd && data.missingCwd.length) {
+                msg += ` ${data.missingCwd.length} project folder(s) not on this device (tabs opened in $HOME): ${data.missingCwd.join(', ')}`;
+            }
+            if (data.skipped && data.skipped.length) msg += ` Skipped: ${data.skipped.join('; ')}`;
+            importStatus.textContent = msg;
+        } catch (e) { importStatus.textContent = 'Error: ' + e.message; }
+        finally { importBtn.disabled = false; }
+    });
+
+    pane.append(
+        el('h4', { class: 'settings-section-title', text: 'Send this workspace' }),
+        el('p', { class: 'settings-hint', text: 'Bundles every tab, its scrollback, and each tab’s latest Claude conversation into a one-time link served over your tunnel. On the other device, open Settings → Transfer and paste the link (or scan the QR with it).' }),
+        el('div', { class: 'settings-row-actions' }, [makeBtn]),
+        el('div', { class: 'env-field' }, [linkInput]),
+        el('div', { class: 'settings-row-actions' }, [copyBtn, revokeBtn]),
+        qrBox,
+        sendStatus,
+        el('h4', { class: 'settings-section-title', text: 'Receive a workspace' }),
+        el('p', { class: 'settings-hint', text: 'Paste a transfer link from another device. Tabs open here with their history; Claude resumes automatically in every project folder that exists on this machine. Project files themselves are not copied — sync those with git.' }),
+        el('div', { class: 'env-field' }, [importInput]),
+        el('div', { class: 'settings-row-actions' }, [importBtn]),
+        importStatus,
+    );
+    return pane;
+}
+
+const AVATAR_COLORS = [
+    { color: '#4a6566', name: 'Slate' },
+    { color: '#aacfd1', name: 'Teal' },
+    { color: '#ffb86c', name: 'Orange' },
+    { color: '#50fa7b', name: 'Green' },
+    { color: '#ff5555', name: 'Red' },
+    { color: '#6272a4', name: 'Blue' },
+    { color: '#bd93f9', name: 'Purple' },
+];
+
+function buildProfilePane() {
+    const pane = el('div', { class: 'settings-pane-body' });
+
+    const nameInput = el('input', { class: 'profile-input', type: 'text', maxlength: '50', placeholder: 'Your display name' });
+    let selectedColor = '#4a6566';
+
+    const swatches = el('div', { class: 'profile-avatar-swatches' });
+    for (const { color, name: cname } of AVATAR_COLORS) {
+        const s = el('button', { class: 'profile-avatar-swatch', title: cname, style: `background:${color}` });
+        s.addEventListener('click', () => {
+            swatches.querySelectorAll('.profile-avatar-swatch').forEach(x => x.classList.remove('selected'));
+            s.classList.add('selected');
+            selectedColor = color;
+        });
+        swatches.appendChild(s);
+    }
+
+    const locToggle = el('input', { class: 'profile-loc-toggle', type: 'checkbox', id: 'set-loc-toggle' });
+    const locLabel  = el('label', { class: 'profile-loc-label', for: 'set-loc-toggle', text: 'Show my location on the globe' });
+    const locStatus = el('div', { class: 'profile-loc-status' });
+
+    locToggle.addEventListener('change', () => {
+        if (!locToggle.checked) { locStatus.textContent = ''; return; }
+        if (!navigator.geolocation) {
+            locToggle.checked = false;
+            locStatus.textContent = 'GPS not available in this browser.';
+            return;
+        }
+        locStatus.textContent = 'Requesting location permission…';
+        navigator.geolocation.getCurrentPosition(
+            pos => {
+                locStatus.textContent = `Permission granted ✓  (${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)})`;
+                window.dispatchEvent(new CustomEvent('soa:user-location', {
+                    detail: { lat: pos.coords.latitude, lon: pos.coords.longitude, name: nameInput.value.trim() || 'You' },
+                }));
+            },
+            err => {
+                locToggle.checked = false;
+                locStatus.textContent = err.code === 1 ? 'Location permission denied.' : 'Could not get location.';
+            },
+            { timeout: 10_000, maximumAge: 10 * 60_000 },
+        );
+    });
+
+    const saveBtn   = el('button', { class: 'soa-modal-copy', text: 'Save profile' });
+    const saveStatus = el('p', { class: 'settings-status' });
+
+    saveBtn.addEventListener('click', async () => {
+        try {
+            const body = {
+                displayName: nameInput.value.trim() || 'User',
+                avatarColor: selectedColor,
+                locationPermission: locToggle.checked,
+            };
+            const res = await _apiFetch('/api/user/profile', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                saveStatus.textContent = 'Saved at ' + new Date().toTimeString().slice(0, 8);
+                window.dispatchEvent(new CustomEvent('soa:profile-updated', { detail: data.profile }));
+            } else {
+                saveStatus.textContent = 'Error: ' + (data.error || 'unknown');
+            }
+        } catch (e) { saveStatus.textContent = 'Error: ' + e.message; }
+    });
+
+    // Press Enter in the name field to save (name is freely editable/modifiable).
+    nameInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); saveBtn.click(); }
+    });
+
+    // ── Live account stats (polled only while this pane is on screen) ───────────
+    const statClients = el('span', { class: 'profile-stat-val', text: '—' });
+    const statTokens  = el('span', { class: 'profile-stat-val', text: '—' });
+    const statFlag    = el('span', { class: 'profile-stat-flag', text: '🌍' });
+    const statPlace   = el('span', { class: 'profile-stat-val', text: '—' });
+
+    async function refreshStats() {
+        try {
+            const res = await _apiFetch('/api/user/stats');
+            const d = await res.json();
+            if (!d || !d.ok) return;
+            statClients.textContent = String(d.connectedClients ?? 0)
+                + (d.connectedClients === 1 ? ' client' : ' clients');
+            statTokens.textContent = formatTokens(d.estTokens) + ' ctx'
+                + (d.activeTabs ? `  ·  ${d.activeTabs} tab${d.activeTabs === 1 ? '' : 's'}` : '');
+            const flag = iso2ToFlagEmoji(d.country);
+            statFlag.textContent = flag;
+            statPlace.textContent = [d.city, d.country].filter(Boolean).join(', ') || 'Unknown';
+            // Mirror the flag onto the always-visible topbar chip.
+            window.dispatchEvent(new CustomEvent('soa:user-geo', { detail: { country: d.country, flag } }));
+        } catch (_) { /* transient — keep last values */ }
+    }
+    refreshStats();
+    const statsTimer = setInterval(() => {
+        if (!pane.isConnected) { clearInterval(statsTimer); return; }
+        refreshStats();
+    }, 3000);
+
+    // Load existing profile
+    (async () => {
+        try {
+            const res = await _apiFetch('/api/user/profile');
+            const { ok, profile } = await res.json();
+            if (!ok) return;
+            nameInput.value = profile.displayName || '';
+            selectedColor = profile.avatarColor || '#4a6566';
+            swatches.querySelectorAll('.profile-avatar-swatch').forEach(s => {
+                if (s.style.backgroundColor === selectedColor ||
+                    s.style.background === selectedColor ||
+                    s.title === AVATAR_COLORS.find(c => c.color === selectedColor)?.name) {
+                    s.classList.add('selected');
+                }
+            });
+            // Match by background style
+            swatches.querySelectorAll('.profile-avatar-swatch').forEach(s => {
+                const hex = rgbToHex(s.style.background || s.style.backgroundColor);
+                if (hex && hex.toLowerCase() === selectedColor.toLowerCase()) s.classList.add('selected');
+            });
+            locToggle.checked = !!profile.locationPermission;
+        } catch (_) {}
+    })();
+
+    pane.append(
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Live Account' }),
+            el('div', { class: 'profile-stats' }, [
+                el('div', { class: 'profile-stat-row' }, [
+                    el('span', { class: 'profile-stat-key', text: 'Connected' }), statClients,
+                ]),
+                el('div', { class: 'profile-stat-row' }, [
+                    el('span', { class: 'profile-stat-key', text: 'Tokens (fleet)' }), statTokens,
+                ]),
+                el('div', { class: 'profile-stat-row' }, [
+                    el('span', { class: 'profile-stat-key', text: 'Location (IP)' }),
+                    el('span', { class: 'profile-stat-loc' }, [statFlag, statPlace]),
+                ]),
+            ]),
+        ]),
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Display Name' }),
+            nameInput,
+        ]),
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Avatar Color' }),
+            swatches,
+        ]),
+        el('div', { class: 'profile-field' }, [
+            el('div', { class: 'profile-label', text: 'Location' }),
+            el('div', { class: 'profile-loc-row' }, [locToggle, locLabel]),
+            locStatus,
+        ]),
+        el('div', { class: 'settings-row-actions' }, [saveBtn]),
+        saveStatus,
+        el('p', { class: 'settings-hint', text: 'Browser GPS is shared only with this device\'s globe widget — never sent to any server. The IP location/flag above is the server\'s egress.' }),
+    );
+    return pane;
+}
+
+// Convert CSS rgb(...) string to hex for comparison
+function rgbToHex(rgb) {
+    const m = String(rgb).match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (!m) return rgb; // already hex or empty
+    return '#' + [m[1], m[2], m[3]].map(n => parseInt(n, 10).toString(16).padStart(2, '0')).join('');
+}
+
+// ISO-3166-1 alpha-2 (e.g. 'US') → flag emoji via regional-indicator symbols.
+// Returns a globe for missing/invalid codes so the UI never shows a broken glyph.
+export function iso2ToFlagEmoji(iso2) {
+    if (!iso2 || typeof iso2 !== 'string' || iso2.length !== 2 || !/^[a-z]{2}$/i.test(iso2)) return '🌍';
+    const cps = iso2.toUpperCase().split('').map(c => 127397 + c.charCodeAt(0));
+    return String.fromCodePoint(...cps);
+}
+
+// Compact token formatting: 850 → "850", 12300 → "12k", 1_250_000 → "1.3M".
+function formatTokens(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k';
+    return (n / 1_000_000).toFixed(1) + 'M';
+}
+
 function buildAutomationPane() {
     const pane = el('div', { class: 'settings-pane-body settings-auto-pane' });
     const enableCompact = el('select', { id: 'set-auto-compact-enabled' });
@@ -471,7 +871,11 @@ function buildAutomationPane() {
 
 function collectFromDOM(prev) {
     const get = id => document.getElementById(id);
+    const themeEl = get('set-theme');
+    const uiLangEl = get('set-uiLang');
     return {
+        theme:                themeEl ? asTheme(themeEl.value) : (prev && prev.theme) || DEFAULTS.theme,
+        uiLang:               uiLangEl ? asUiLang(uiLangEl.value) : (prev && prev.uiLang) || DEFAULTS.uiLang,
         termFontSize:         Number(get('set-termFontSize').value),
         cursorBlink:          get('set-cursorBlink').value === 'true',
         nocursor:             get('set-nocursor').value === 'true',
@@ -479,15 +883,19 @@ function collectFromDOM(prev) {
         audio:                get('set-audio').value === 'true',
         audioVolume:          Number(get('set-audioVolume').value),
         disableFeedbackAudio: get('set-disableFeedbackAudio').value === 'true',
+        agentDoneSound:       get('set-agentDoneSound') ? get('set-agentDoneSound').value === 'true' : (prev && prev.agentDoneSound),
         clockHours:           Number(get('set-clockHours').value),
         _lang:                get('set-lang').value,
     };
 }
 
-export function openSettingsModal() {
+export function openSettingsModal({ tab: openTab } = {}) {
     if (document.getElementById('settings-modal')) return;
 
-    const backdrop = el('div', { class: 'soa-modal-backdrop', id: 'settings-modal' });
+    // Anchored dropdown (not a full-screen dimmed modal) so opening settings is
+    // low-interruption — see .soa-settings-drop in styles.css. The backdrop is a
+    // transparent click-catcher that still closes on an outside click / Escape.
+    const backdrop = el('div', { class: 'soa-modal-backdrop soa-settings-drop', id: 'settings-modal' });
     const card = el('div', { class: 'soa-modal soa-settings' });
     const close = () => { backdrop.remove(); document.removeEventListener('keydown', escHandler); };
     const escHandler = e => { if (e.key === 'Escape') close(); };
@@ -495,27 +903,33 @@ export function openSettingsModal() {
     backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
 
     const s = getSettings();
+    const defaultTab = openTab || 'appearance';
     const panes = {
+        profile:    buildProfilePane(),
         appearance: buildAppearancePane(s),
         audio:      buildAudioPane(s),
         misc:       buildMiscPane(s),
         connection: buildConnPane(),
         env:        buildEnvPane(),
         automation: buildAutomationPane(),
+        transfer:   buildTransferPane(),
     };
     Object.values(panes).forEach(p => p.classList.add('settings-pane'));
-    panes.appearance.classList.add('settings-pane--active');
+    (panes[defaultTab] || panes.appearance).classList.add('settings-pane--active');
 
     const tabDefs = [
+        ['profile',    'Profile'],
         ['appearance', tr('settings.tab.appearance')],
         ['audio',      tr('settings.tab.audio')],
         ['misc',       tr('settings.tab.misc')],
         ['connection', tr('settings.tab.connection')],
         ['env',        tr('settings.tab.env')],
         ['automation', tr('settings.tab.automation')],
+        ['transfer',   'Transfer'],
     ];
     const tabs = tabDefs.map(([k, label]) => {
-        const t = el('div', { class: 'settings-tab' + (k === 'appearance' ? ' settings-tab--active' : ''), text: label });
+        const isActive = k === defaultTab;
+        const t = el('div', { class: 'settings-tab' + (isActive ? ' settings-tab--active' : ''), text: label });
         t.addEventListener('click', () => {
             card.querySelectorAll('.settings-tab').forEach(x => x.classList.remove('settings-tab--active'));
             card.querySelectorAll('.settings-pane').forEach(x => x.classList.remove('settings-pane--active'));

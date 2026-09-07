@@ -16,12 +16,13 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=15';
-import { AudioFX } from '/assets/audiofx.js?v=15';
-import { mountSidebar } from '/assets/widgets.js?v=16';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=15';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=13';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=18';
+import { AudioFX } from '/assets/audiofx.js?v=18';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=45';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=28';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=25';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
+import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -54,8 +55,6 @@ function saveBackend(backend, token) {
     } catch (_) {}
 }
 
-function clearSaved() { try { localStorage.removeItem(LS_KEY); } catch (_) {} }
-
 function pickBackendFromURL() {
     const q = new URLSearchParams(location.search);
     const backend = q.get('backend');
@@ -73,13 +72,22 @@ async function probePing(backend, token, timeoutMs = 2500) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
         const u = new URL(backend + '/api/ping');
-        if (token) u.searchParams.set('t', token);
+        // The token is deliberately NOT sent on the probe: /api/ping is
+        // unauthenticated, so it buys nothing — and a saved pairing now
+        // persists across backend outages, so probing forever with ?t=
+        // would hand the token to whoever later acquires a recycled
+        // hostname. (The token still flows to the chosen backend in
+        // bootServerMode.)
         // Probe without credentials. /api/ping is unauthenticated and omitting
         // cookies sidesteps browsers that suppress third-party cookies on
         // cross-site fetches — we only want to know whether the backend is
         // reachable. Credentials get added back once we switch to the chosen
         // backend in bootServerMode.
-        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'omit', cache: 'no-store' });
+        // ngrok-skip-browser-warning: bypass the ngrok-free abuse interstitial so a
+        // cross-origin probe (e.g. s0a.app → an ngrok backend) gets JSON instead of
+        // the warning HTML — without it the probe fails and s0a.app drops to sandbox.
+        // Harmless on non-ngrok backends (just an ignored header).
+        const res = await fetch(u.toString(), { signal: ctl.signal, credentials: 'omit', cache: 'no-store', headers: { 'ngrok-skip-browser-warning': 'true' } });
         if (!res.ok) return null;
         const body = await res.json().catch(() => null);
         if (!body || !body.ok) return null;
@@ -103,7 +111,7 @@ function wsUrl(backend, token) {
     return u.toString();
 }
 
-const FETCH_INIT = { credentials: 'include' };
+const FETCH_INIT = { credentials: 'include', headers: { 'ngrok-skip-browser-warning': 'true' } };
 
 function wireLangSelector() {
     const sel = document.querySelector('#lang');
@@ -173,9 +181,13 @@ class TabRuntime {
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
             fontSize,
-            theme: TRON_THEME,
+            theme: xtermTheme(resolveTheme(s.theme)),
             cursorBlink: s.cursorBlink,
-            scrollback: 5000,
+            // Minimal per-tab browser memory: each xterm buffer is the dominant
+            // client-side cost, and with ~20 tabs a 5000-line buffer per tab was
+            // bloating the page until it crashed. 1000 lines keeps useful
+            // scrollback while cutting per-tab memory ~5×. Tunable knob.
+            scrollback: 1000,
             convertEol: false,
         });
         this.fit = new FitAddon.FitAddon();
@@ -245,6 +257,16 @@ class TabRuntime {
     queueReplay(data) {
         if (!data) return;
         this._pendingReplay += data;
+        // With virtualization this buffers a hidden tab's LIVE output (not just
+        // bounded scrollback), so cap it. Keep the tail and align to a newline so
+        // the replay never starts mid-escape-sequence; a full-screen TUI repaints
+        // itself shortly after, so a dropped prefix self-corrects on switch.
+        const CAP = 1 << 17; // 128 KB — minimal buffered streaming history per hidden tab
+        if (this._pendingReplay.length > CAP) {
+            const tail = this._pendingReplay.slice(-CAP);
+            const nl = tail.indexOf('\n');
+            this._pendingReplay = nl >= 0 ? tail.slice(nl + 1) : tail;
+        }
     }
 
     flushPendingReplay() {
@@ -267,9 +289,43 @@ class TabRuntime {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
             this.fit.fit();
+            // FitAddon subtracts a phantom ~15px scrollbar (xterm's Viewport
+            // falls back to 15 when our CSS hides the scrollbar), which strands
+            // a dead vertical strip on the right. Grow the grid into the real
+            // width — our viewport is overflow:hidden so no scrollbar takes space.
+            this._fillWidth();
             this._everFit = true;
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
+    }
+
+    // Recompute cols from the actual render width with NO scrollbar subtraction.
+    // Conservative floor() never overflows into a horizontal scroll; only grows
+    // past FitAddon's undercount, never shrinks. No-op if xterm internals or the
+    // measurement aren't available (falls back to FitAddon's result).
+    _fillWidth() {
+        try {
+            const core = this.term._core;
+            const dims = core && core._renderService && core._renderService.dimensions;
+            const cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            // Fill the CONTAINER's content box (the space between its padding),
+            // measured independently of xterm's own element. xterm's root shrinks to
+            // its content (cols×cellW), so measuring `this.term.element` makes
+            // floor(width/cellW) === cols and the grid NEVER grows — stranding a wide
+            // "black void" on the right (tens of columns on a wide screen, not just a
+            // scrollbar gutter). clientWidth includes padding, so subtract it; the
+            // floor guarantees cols×cellW ≤ availW so we never overflow into a
+            // horizontal scrollbar.
+            const el = this.container;
+            if (!el || !cellW || cellW < 1) return;
+            const cs = getComputedStyle(el);
+            const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+            if (!(availW > 0)) return;
+            const cols = Math.max(2, Math.floor(availW / cellW));
+            // Grow-only: fill the void, but never transiently shrink (a mid-layout
+            // narrow measurement would otherwise reflow Claude's TUI for a frame).
+            if (cols > this.term.cols) this.term.resize(cols, this.term.rows);
+        } catch (_) {}
     }
 
     // Pin the viewport to the bottom of the buffer. Used when activating a
@@ -301,7 +357,7 @@ class TabRuntime {
     applySettings(s) {
         try { this.term.options.fontSize = s.termFontSize; } catch (_) {}
         try { this.term.options.cursorBlink = s.cursorBlink; } catch (_) {}
-        if (this._ensureOpen()) { try { this.fit.fit(); } catch (_) {} }
+        if (this._ensureOpen()) { try { this.fitNow(); } catch (_) {} }
     }
 
     dispose() {
@@ -317,6 +373,24 @@ class Shell {
         this.tabs = new Map();
         this.order = [];
         this.activeId = null;
+        // CHAT view state — IM-style messaging with the active agent (the top tab
+        // strip selects who). Threads keyed by tab id + an away-unread counter.
+        this._chatThreads = new Map();   // tabId → [{ from:'you'|'agent', full, t }]
+        this._chatUnread  = 0;
+        // Per-device active tab is client-local: snapshots fire on the 3s cwd
+        // poll, on device connect/disconnect, and on ANY device's switch, all
+        // carrying the session-global activeId. Adopting it blindly yanks this
+        // device's view and pings SWITCH_TAB back, gluing devices together.
+        // A normal SWITCH is already optimistic-local (see _activate), so it
+        // needs no server round-trip. The only thing we must follow from the
+        // server is a tab THIS device just CREATED/RESTORED, whose id the server
+        // assigns. When we send NEW_TAB/RESTORE_TAB we snapshot the set of tab
+        // ids that exist right then; _onSnapshot adopts the activeId of the
+        // first snapshot that names a tab NOT in that set (i.e. the genuinely
+        // new tab), then clears the pending set. Matching the NEW id — not just
+        // "any valid activeId" — means a racing cwd-poll/device-count snapshot
+        // carrying the old (still-valid) activeId can't burn the intent.
+        this._adoptNewTabIds = null;
         this.tabsEl = $('#tabs');
         this.termsEl = $('#terms');
         this.sidebarEl = $('#sidebar');
@@ -325,6 +399,19 @@ class Shell {
         this._agentStatus = new Map(); // tabId → 'working'|'done'|'attention'|'idle'
         this._agentBuf = new Map();    // tabId → detector state (see _pollAgentStatus)
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
+        this._agentGroup = new Map();  // tabId → group name (from the manager snapshot)
+        this._agentModel = new Map();  // tabId → raw model id (from the manager snapshot)
+        this._agentEffort = new Map(); // tabId → effort level (ultracode/xhigh/…) parsed client-side from the /effort footer
+        this._collapsedGroups = new Set(); // group names collapsed in the tiles view
+        this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
+        this._tabAgents = new Map();   // tabId → running background subagents (server TAB_AGENTS sampler)
+        // Tabs whose PTY emitted output since the last status scan. The 500ms
+        // poll re-scans only dirty tabs (idle tabs cost nothing), with a full
+        // sweep every ~8s as a backstop so a missed seed can't strand a tab's
+        // status/context. Seeded in _onTermData and on HELLO replay below.
+        this._pollDirty = new Set();
+        this._pollTickN = 0;
+        this._pollWasHidden = false;
         // Agent-detection debug overlay (bottom-right box) — off by default.
         // Opt in with ?debugAgent=1 in the URL or localStorage 'soaDebugAgent'='1'.
         window.__SOA_DEBUG_AGENT =
@@ -335,6 +422,17 @@ class Shell {
         // scanning the PTY stream because Ink re-renders in-place via cursor-up.
         this._ctxPollTimer = setInterval(() => this._pollCtxLines(), 500);
         this._tileElapsedTimer = setInterval(() => this._refreshTileElapsed(), 1000);
+        // Seed every tab's agent status + ctx% from the server supervisor —
+        // which classifies ALL tabs server-side from their PTY streams, not just
+        // the one on screen — so the fleet shows correct colours/context on load
+        // without opening each tab. Re-pulled on a slow cadence so unopened tabs
+        // stay live too; paused while the page is hidden. (Requirement: status
+        // loaded on startup, not tab-by-tab.)
+        this._serverStatusTimer = setInterval(() => { if (!document.hidden) this._pullServerStatus(); }, 4000);
+        this._statusSeeded = false;
+        // Request OS notification permission on the user's first interaction
+        // (some browsers require a gesture). Until granted, in-app toasts only.
+        this._armNotifications();
         // Server-side graveyard, mirrored on HELLO / SNAPSHOT. Newest entry
         // is at the end; an empty list means there's nothing to restore.
         this.graveyard = [];
@@ -342,30 +440,91 @@ class Shell {
         // Reset on reload — we want the guard back each time the app boots.
         this._skipCloseConfirm = false;
 
-        // View mode: 'tabs' (classic) or 'tiles' (dashboard grid).
+        // View mode: 'tabs' (classic) or 'tiles' (dashboard grid). The tiles view
+        // has a grouped sub-mode: one horizontal-scrolling row per category.
         this.viewMode = 'tabs';
-        try { this.viewMode = localStorage.getItem('soa_web_view_mode') || 'tabs'; } catch (_) {}
+        this.tilesGrouped = false;
+        try {
+            this.viewMode = localStorage.getItem('soa_web_view_mode') || 'tabs';
+            this.tilesGrouped = localStorage.getItem('soa_web_tiles_grouped') === '1';
+        } catch (_) {}
+        // Virtualize background tabs: only the on-screen terminal parses live;
+        // hidden tabs buffer raw output and catch up on switch. Cuts ~N live
+        // ANSI parsers down to ~1 with many sessions. Escape hatch:
+        // localStorage.soa_no_virtualize='1' keeps every tab live-parsed.
+        this._noVirtualize = false;
+        try { this._noVirtualize = localStorage.getItem('soa_no_virtualize') === '1'; } catch (_) {}
         this._tileOverlayId = null; // id of the tab currently open in tile overlay
         this._tilesGridEl = null;
         this._tileOverlayEl = null;
 
-        const viewBtn = $('#toggle-view');
-        if (viewBtn) {
-            viewBtn.addEventListener('click', () => this._toggleViewMode());
-            this._updateViewBtn();
+        // ── Localhost preview ───────────────────────────────────────────────
+        // Detects dev-server URLs from PTY output and surfaces a per-tab
+        // preview toggle button in the tab strip. Clicking shows/hides a
+        // split pane with an iframe pointing at /preview/<port>/.
+        this._previewUrls = new Map();       // tabId → detected URL string
+        this._previewVisible = new Map();    // tabId → boolean (pane open?)
+        this._ownPort = parseInt(location.port, 10) || 7332;
+
+        // Unified view switcher — one segmented control; each cell selects its
+        // view via _setView (the standalone TILES/FLEET/CHAT/MON buttons folded
+        // in). Which cells appear is customizable in Settings → Appearance.
+        const viewSwitch = $('#view-switch');
+        if (viewSwitch) {
+            // Tap-to-toggle collapse. Idle, the switcher is a single ‹ handle; the
+            // CSS reveal is :hover/:focus-within only — which never fires on touch
+            // and STICKS OPEN after a cell is tapped (it keeps :focus-within). So
+            // drive the reveal explicitly with a `.vs-open` class and blur the cell
+            // after selecting, so it actually re-collapses. Cells are 0-width when
+            // collapsed, so a tap there lands on the container → expand (touch).
+            // The hover CSS still works as a desktop fallback.
+            const collapse = () => {
+                viewSwitch.classList.remove('vs-open');
+                document.removeEventListener('pointerdown', onOutside, true);
+            };
+            const onOutside = (e) => { if (!viewSwitch.contains(e.target)) collapse(); };
+            const expand = () => {
+                if (viewSwitch.classList.contains('vs-open')) return;
+                viewSwitch.classList.add('vs-open');
+                document.addEventListener('pointerdown', onOutside, true);
+            };
+            viewSwitch.querySelectorAll('.view-btn').forEach(btn => {
+                // A cell is only hittable once revealed (hover or vs-open), so a
+                // real cell click always means "select this view".
+                btn.addEventListener('click', () => {
+                    this._setView(btn.dataset.view);
+                    btn.blur();
+                    collapse();
+                });
+            });
+            // Collapsed, cells are 0-width so this fires on the ‹ handle → reveal.
+            viewSwitch.addEventListener('click', (e) => {
+                if (!e.target.closest('.view-btn')) expand();
+            });
         }
+        this._applyViewButtonsVisibility(getSettings());
+        this._syncViewSwitch();
+        // Premium-feature gate: the fleet-manager view is manager-only. Default to
+        // DISABLED so a slow/failed capabilities fetch fails safe to hidden, then
+        // reveal it only once the server confirms the entitlement.
+        this._caps = { manager: false };
+        this._applyManagerEntitlement();
+        this._loadCapabilities();
 
         $('#new-tab').addEventListener('click', () => {
             this.audio.play('panels');
             this._openNewTabChooser();
         });
 
+        const bcastBtn = $('#broadcast');
+        if (bcastBtn) bcastBtn.addEventListener('click', () => { this.audio.play('panels'); this._openBroadcast(); });
+
         const tmBtn = $('#timemachine');
         if (tmBtn) {
             tmBtn.addEventListener('click', async () => {
                 this.audio.play('panels');
                 try {
-                    const tm = await import('/assets/timemachine.js?v=1');
+                    const tm = await import('/assets/timemachine.js?v=3');
                     tm.openTimemachineModal(this);
                 } catch (err) {
                     console.warn('[timemachine] open failed', err);
@@ -373,6 +532,41 @@ class Shell {
             });
         }
 
+
+        // Restart the SoA server (⋯ MORE menu). Interrupts every tab's in-flight
+        // turn for a few seconds, but tabs + tunnel + Claude sessions re-adopt on
+        // boot (boot-resume respawns PTYs and auto-resumes Claude), so it's safe.
+        // Confirm first, then POST; the WS drops during the restart and the client
+        // auto-reconnects on its own.
+        const restartBtn = $('#restart-daemon');
+        if (restartBtn) {
+            restartBtn.addEventListener('click', async () => {
+                this.audio.play('panels');
+                const ok = window.confirm(
+                    'Restart the SoA server now?\n\n' +
+                    'Every tab flushes and re-adopts (Claude sessions auto-resume) and ' +
+                    'the tunnel stays up — but in-flight turns are interrupted for a few ' +
+                    'seconds while the server comes back.');
+                if (!ok) return;
+                const prev = restartBtn.textContent;
+                restartBtn.disabled = true;
+                restartBtn.textContent = '↻ RESTARTING…';
+                try {
+                    const r = await fetch('/api/daemon/restart', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    });
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    // Server is going down; the socket will drop and the client
+                    // reconnects automatically once it's back. Leave the label as
+                    // RESTARTING… — the page effectively reloads state on reconnect.
+                } catch (err) {
+                    console.warn('[restart] request failed', err);
+                    restartBtn.disabled = false;
+                    restartBtn.textContent = prev;
+                    window.alert('Restart request failed: ' + (err && err.message || err));
+                }
+            });
+        }
 
         const audioBtn = $('#toggle-audio');
         const initialAudio = getSettings().audio;
@@ -406,11 +600,11 @@ class Shell {
             });
         }
 
-        const settingsBtn = $('#open-settings');
-        if (settingsBtn) settingsBtn.addEventListener('click', () => {
-            this.audio.play('panels');
-            openSettingsModal();
-        });
+        // Settings are reached via the user-chip (merged to save topbar space) and
+        // the Ctrl+Shift+S shortcut — the standalone ⚙ button was removed.
+
+        // User profile chip — loads display name / avatar, starts geo watcher if permitted
+        this._initUserProfile();
 
         onSettings(s => this._applySettings(s));
 
@@ -422,8 +616,13 @@ class Shell {
         if (window.matchMedia('(max-width: 768px)').matches) {
             stageEl.classList.add('no-sidebar');
         }
+        // Pause the sidebar widgets whenever it's collapsed (its normal state on
+        // phones, and the common full-screen-terminal state on desktop) so they
+        // stop polling /api/* against an invisible pane.
+        setSidebarHidden(stageEl.classList.contains('no-sidebar'));
         sideBtn.addEventListener('click', () => {
             stageEl.classList.toggle('no-sidebar');
+            setSidebarHidden(stageEl.classList.contains('no-sidebar'));
             this.audio.play('panels');
             this._fitActive();
         });
@@ -433,12 +632,85 @@ class Shell {
             if (!window.matchMedia('(max-width: 768px)').matches) return;
             if (stageEl.classList.contains('no-sidebar')) return;
             stageEl.classList.add('no-sidebar');
+            setSidebarHidden(true);
             this._fitActive();
         });
+
+        // Collapsible action tray — slide the toolbar icons in/out to reclaim
+        // topbar width. Markup defaults to collapsed; restore the saved
+        // preference (no animation on first paint), then wire the toggle.
+        const actionsBar = $('#topbar-actions');
+        const actionsToggle = $('#toggle-actions');
+        if (actionsBar && actionsToggle) {
+            let actionsCollapsed = true;
+            try { if (localStorage.getItem('soa_actions_collapsed') === '0') actionsCollapsed = false; } catch (_) {}
+            const applyActions = (animate) => {
+                if (!animate) actionsBar.classList.add('no-anim');
+                actionsBar.classList.toggle('actions-collapsed', actionsCollapsed);
+                actionsToggle.setAttribute('aria-expanded', actionsCollapsed ? 'false' : 'true');
+                if (!animate) requestAnimationFrame(() => actionsBar.classList.remove('no-anim'));
+            };
+            applyActions(false);
+            this._toggleActions = () => {
+                actionsCollapsed = !actionsCollapsed;
+                try { localStorage.setItem('soa_actions_collapsed', actionsCollapsed ? '1' : '0'); } catch (_) {}
+                applyActions(true);
+                this.audio.play('panels');
+            };
+            actionsToggle.addEventListener('click', () => this._toggleActions());
+        }
+
+        // "More" overflow submenu — holds the secondary actions (download,
+        // mute, speak, monitor, time machine) so the bar stays uncluttered.
+        // The items keep their own ids/handlers (wired above); this only opens
+        // and closes the popover and dismisses it on outside-click / Escape.
+        const moreBtn = $('#toggle-more');
+        const moreMenu = $('#more-menu');
+        if (moreBtn && moreMenu) {
+            const onDocClick = (e) => {
+                if (moreMenu.contains(e.target) || moreBtn.contains(e.target)) return;
+                closeMore();
+            };
+            const onKey = (e) => { if (e.key === 'Escape') { closeMore(); moreBtn.focus(); } };
+            const closeMore = () => {
+                moreMenu.hidden = true;
+                moreBtn.setAttribute('aria-expanded', 'false');
+                document.removeEventListener('click', onDocClick, true);
+                document.removeEventListener('keydown', onKey, true);
+            };
+            const openMore = () => {
+                moreMenu.hidden = false;
+                moreBtn.setAttribute('aria-expanded', 'true');
+                document.addEventListener('click', onDocClick, true);
+                document.addEventListener('keydown', onKey, true);
+            };
+            moreBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (moreMenu.hidden) { this.audio.play('panels'); openMore(); }
+                else closeMore();
+            });
+            // Picking an action runs its own handler, then the menu dismisses.
+            moreMenu.addEventListener('click', (e) => {
+                if (e.target.closest('.more-item')) setTimeout(closeMore, 0);
+            });
+        }
+
+        // Theme toggle (toolbar): flip between dark and light. The full set
+        // (Auto/Dark/Light/Dim) lives in Settings; this is the quick switch.
+        const themeBtn = $('#toggle-theme');
+        if (themeBtn) {
+            themeBtn.addEventListener('click', () => this._toggleTheme());
+        }
+        // Apply the saved theme now (the inline <head> script already set the
+        // attribute pre-paint; this syncs terminals + the toggle icon) and keep
+        // 'auto' in step with the OS.
+        this._applyTheme();
+        onSystemThemeChange(() => { if (getSettings().theme === 'auto') this._applyTheme(); });
 
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
+        this._initHelpLongPress();   // press-and-hold any control → a help popover
         // Image paste: Claude Code grabs clipboard images on Ctrl+V (it ignores
         // Cmd+V for images). Browsers map Cmd/Ctrl+V to a TEXT paste, so an
         // image yields no text and nothing happens. Capture the paste before
@@ -460,11 +732,16 @@ class Shell {
         }
 
         bridge.addEventListener('hello',     e => this._onHello(e.detail));
+        bridge.addEventListener('replay',    e => this._onReplay(e.detail));
         bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
         bridge.addEventListener('term-data', e => this._onTermData(e.detail));
         bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
-        bridge.addEventListener('tts',       e => this._onTTS(e.detail));
+        bridge.addEventListener('tts',       e => { this._onTTS(e.detail); this._onAgentMessage(e.detail); });
+        bridge.addEventListener('manager',   e => this._onManager(e.detail));
+        bridge.addEventListener('tab-mem',   e => this._onTabMem(e.detail));
+        bridge.addEventListener('tab-agents', e => this._onTabAgents(e.detail));
+        bridge.addEventListener('browser-frame', e => this._onBrowserFrame(e.detail));
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
 
@@ -498,10 +775,19 @@ class Shell {
                     if (rt && r.data) {
                         rt.queueReplay(r.data);
                         this._detectAgentFromStream(r.id, r.data);
+                        this._pollDirty.add(r.id);
                     }
                 }
             }
-            const target = (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
+            // HELLO fires on a genuine page load AND on every transparent WS
+            // auto-reconnect (sleep/flaky wifi). On reconnect this.activeId is
+            // already set, so KEEP the tab the user is viewing instead of
+            // jumping to the session-global activeId (which another device may
+            // have moved). Only a fresh load (activeId still null) adopts the
+            // server's last-viewed tab.
+            const keepLocal = this.activeId != null && tabs.some(t => t.id === this.activeId);
+            const target = keepLocal ? this.activeId
+                : (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
             this._activate(target);
             // Tell the PTY what width we actually ended up at. _activate's
             // fitNow goes through the debounced _onResize (60ms) — good for
@@ -523,10 +809,31 @@ class Shell {
                     }
                 }
                 this._pollAgentStatus();
+                // Authoritative seed for every tab (incl. ones never opened).
+                this._pullServerStatus();
             }, 300);
         } else {
+            // First connect with no existing tabs: this device is creating the
+            // session's only tab. No intent needed — the ensuing snapshot has
+            // activeId still null locally, so the initial-load branch focuses
+            // the sole new tab.
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
+    }
+
+    // A background tab's scrollback, streamed one frame per tab right after
+    // HELLO (the active tab's scrollback rides inline with HELLO). Same handling
+    // as a HELLO replay entry — queue-until-fit rather than the live term-data
+    // path, so absolute-column escapes in the scrollback don't land at 80×24
+    // before the tab is sized. Flush immediately if it's the tab on screen.
+    _onReplay({ id, data }) {
+        if (id == null || !data) return;
+        const rt = this.tabs.get(id);
+        if (!rt) return;
+        rt.queueReplay(data);
+        this._detectAgentFromStream(id, data);
+        this._pollDirty.add(id);
+        if (id === this.activeId) rt.flushPendingReplay();
     }
 
     _onSnapshot({ tabs, activeId, graveyard, connectedDevices }) {
@@ -534,24 +841,52 @@ class Shell {
         if (!Array.isArray(tabs)) return;
         const known = new Set(tabs.map(t => t.id));
         for (const id of Array.from(this.tabs.keys())) if (!known.has(id)) this._removeTab(id);
-        for (const t of tabs) this._ensureTab(t.id, t.title);
+        for (const t of tabs) { this._ensureTab(t.id, t.title); if (t.mem != null) this._tabMem.set(t.id, t.mem); }
         // Snapshot is the authoritative order: a MOVE_TAB from this client, or
         // from another device sharing the session, must reorder the local tab
         // bar. _ensureTab only appends new ids, so adopt the snapshot order.
         this.order = tabs.map(t => t.id);
         this._syncTabsUI(tabs);
-        const nextActive = (activeId && this.tabs.has(activeId)) ? activeId
-            : (this.activeId == null && tabs[0]) ? tabs[0].id : null;
-        if (nextActive && nextActive !== this.activeId) this._activate(nextActive);
+        // Per-device active tab: do NOT follow the session-global activeId on
+        // routine snapshots. Adopt it only when (a) this is effectively initial
+        // load — local activeId is still null, so there is nothing to disturb —
+        // or (b) this device just sent NEW_TAB/RESTORE_TAB and this snapshot
+        // names the genuinely new tab (an id absent from the set we captured
+        // when we acted). Matching the NEW id rather than "any valid activeId"
+        // means a racing cwd-poll/device-count/foreign-switch snapshot carrying
+        // the old-but-still-valid activeId cannot burn the intent.
+        const serverActiveValid = !!(activeId && this.tabs.has(activeId));
+        if (this.activeId == null) {
+            // Fresh page / reload: restore the last-viewed tab.
+            this._adoptNewTabIds = null;
+            const initial = serverActiveValid ? activeId : (tabs[0] ? tabs[0].id : null);
+            if (initial && initial !== this.activeId) this._activate(initial);
+        } else if (this._adoptNewTabIds && serverActiveValid && !this._adoptNewTabIds.has(activeId)) {
+            // This device created/restored a tab and this is its new id — focus it.
+            this._adoptNewTabIds = null;
+            if (activeId !== this.activeId) this._activate(activeId);
+        } else if (!this.tabs.has(this.activeId)) {
+            // The tab we were viewing disappeared from the snapshot (closed,
+            // possibly by another device): fall back locally to the first tab.
+            const fallback = tabs[0] ? tabs[0].id : null;
+            if (fallback) this._activate(fallback); else this.activeId = null;
+        }
+        // Otherwise keep the user's current local active tab untouched.
         const tabsEl = $('#status-tabs');
         const tabsKey = tabs.length === 1 ? 'status.tabs_one' : 'status.tabs_other';
         tabsEl.textContent = tr(tabsKey, { n: tabs.length });
         tabsEl.setAttribute('data-i18n', tabsKey);
         tabsEl.setAttribute('data-i18n-vars', JSON.stringify({ n: tabs.length }));
         this._updateDeviceCount(connectedDevices);
-        // Run agent status detection immediately after snapshot so colors
-        // are correct on first load (don't wait for the poll interval).
-        setTimeout(() => this._pollAgentStatus(), 150);
+        // Run the full agent-status scan once, on the first snapshot, so
+        // colors are right on initial load. Later snapshots fire on every
+        // cwd/title change and carry NO terminal bytes, so a full N-tab regex
+        // sweep here finds nothing the 500ms dirty-gated _pollCtxLines loop
+        // won't already catch — and it defeats that dirty gate.
+        if (!this._didInitialStatusScan) {
+            this._didInitialStatusScan = true;
+            setTimeout(() => this._pollAgentStatus(), 150);
+        }
     }
 
     _updateDeviceCount(count) {
@@ -568,13 +903,34 @@ class Shell {
         el.setAttribute('data-i18n-vars', JSON.stringify({ n: count }));
     }
 
+    // A tab is "live" (parses straight into xterm) only when its terminal is
+    // actually on screen — its container carries .active (the active tab in
+    // tabs view, or the expanded tile). Everything else buffers and replays on
+    // switch. The .active class is the single source of truth across all views.
+    _isLiveTab(id) {
+        if (this._noVirtualize) return true;
+        const rt = this.tabs.get(id);
+        return !!(rt && rt.container && rt.container.classList.contains('active'));
+    }
+
     _onTermData({ id, data }) {
         const t = this.tabs.get(id);
-        if (t) t.write(data);
+        if (t) {
+            // Virtualization: only the on-screen terminal parses live into xterm;
+            // hidden tabs buffer the raw bytes and catch up via flushPendingReplay
+            // on switch — so many sessions run ~1 live ANSI parser, not N. Status
+            // and ctx% still update from the raw stream (below), so background tab
+            // colours/preview stay live without parsing the full grid.
+            if (this._isLiveTab(id)) t.write(data);
+            else t.queueReplay(data);
+        }
         // Extract OSC 0/2 title sequences from the raw stream. xterm.js's
         // onTitleChange can miss titles when data arrives in chunks that split
         // the escape sequence, so always parse here as the primary source.
-        if (t) {
+        // Only pay the OSC-title scan when an OSC sequence is actually present
+        // (or we're mid-sequence from a prior chunk) — skips a regex + string
+        // concat on the vast majority of output chunks across all tabs.
+        if (t && (data.indexOf('\x1b]') !== -1 || (this._oscBuf && this._oscBuf.get(id)))) {
             if (!this._oscBuf) this._oscBuf = new Map();
             let buf = (this._oscBuf.get(id) || '') + data;
             const m = buf.match(/\x1b\](?:0|2);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
@@ -587,6 +943,8 @@ class Shell {
             this._oscBuf.set(id, partial ? partial[0] : '');
         }
         this._detectAgentFromStream(id, data);
+        this._detectDevServer(id, data);
+        this._pollDirty.add(id);   // new output → re-scan status/context next tick
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
         // still overlap into the Web Audio mixer like crossfire. The tab id
@@ -641,8 +999,11 @@ class Shell {
         if (det && det.pending) clearTimeout(det.pending);
         this._agentBuf.delete(id);
         this._agentStatus.delete(id);
+        this._agentModel.delete(id);
         this._lastStdoutCue.delete(id);
         this._ctxPct.delete(id);
+        this._previewUrls.delete(id);
+        this._previewVisible.delete(id);
         if (this.activeId === id) {
             const next = this.order[0];
             if (next) this._activate(next); else this.activeId = null;
@@ -651,8 +1012,23 @@ class Shell {
 
     _activate(id) {
         const switching = this.activeId !== id && this.activeId != null;
+        const prevId = this.activeId;
         const sameTab = this.activeId === id;
         this.activeId = id;
+        if (this.viewMode === 'chat') {
+            // In CHAT mode the top tab strip selects which agent you're messaging;
+            // skip painting/focusing the terminal hidden under the chat overlay.
+            if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
+            this._syncTabsUI();
+            this._chatUnread = 0;
+            this._renderChatHead();
+            this._renderChat();
+            this._renderChatStatus();
+            this._updateChatBtn();
+            if (this._chatInput) this._chatInput.focus();
+            if (switching) this.audio.play('panels');
+            return;
+        }
         if (this.viewMode === 'tiles') {
             this._openTileTerminal(id);
         } else {
@@ -665,16 +1041,28 @@ class Shell {
                 rt.flushPendingReplay();
                 rt.scrollToBottom();
                 rt.focus();
+                // flushPendingReplay paints the grid without going through
+                // _onTermData, so seed the dirty flag to re-scan ctx%/status on
+                // the next tick instead of waiting for the ~8s full sweep.
+                this._pollDirty.add(id);
             }
         }
         if (!sameTab) this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
         this._syncTabsUI();
         if (switching && this.viewMode !== 'tiles') this.audio.play('panels');
+        // Sync preview pane: hide the previous tab's pane, show new tab's if open.
+        if (switching && prevId != null) this._syncPreviewPaneVisibility(prevId, false);
+        if (!sameTab) this._syncPreviewPaneVisibility(id, !!this._previewVisible.get(id));
     }
 
     _syncTabsUI(list) {
         const tabs = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}`).join('|') + '#' + (this.activeId || 0) + '#' + tabs.map(t => this._agentStatus.get(t.id) || '').join('|');
+        // agentStatus is intentionally NOT folded into this signature: status
+        // changes are applied as a targeted data-agent attribute swap in
+        // _setStatus, so including it here would rebuild all N tab buttons on
+        // every working↔done flip. Only structural changes (set/title/active)
+        // bust the row cache.
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentModel.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
         this._tabsUISig = signature;
         // replaceChildren destroys the old tab buttons, which resets the
@@ -684,24 +1072,48 @@ class Shell {
         const savedScrollLeft = this.tabsEl.scrollLeft;
         this.tabsEl.replaceChildren(...tabs.map(t => {
             const label = el('span', {
+                // No own title: hovering the label falls through to the tab
+                // button's richer tooltip (memory + context + rename hint).
                 class: 'tab-label',
-                title: tr('tab.rename_hint') || 'Double-click to rename',
                 text: t.title || tr('tab.default', { id: t.id }),
-                ondblclick: (e) => { e.stopPropagation(); this._promptRename(t.id, t.title); },
             });
-            const dot = this._makePie(this._ctxPct.get(t.id) || 0, t.id);
+            // Dim second line: a live peek at this tab's last output line so
+            // tabs with default / near-identical titles are still tellable
+            // apart. Updated in place by _updateTabPreview (no row rebuild).
+            const sub = el('span', { class: 'tab-sub', text: this._tabPreview(t.id) });
+            // Preview toggle button — only visible when a dev-server URL has
+            // been detected for this tab (CSS gates on [data-has-preview]).
+            const previewUrl = this._previewUrls.get(t.id);
+            const previewActive = !!this._previewVisible.get(t.id);
+            const pvBtn = el('button', {
+                class: 'tab-preview-btn' + (previewActive ? ' preview-on' : ''),
+                title: previewUrl ? `Toggle preview  ${previewUrl}` : 'Toggle preview',
+                'data-preview-id': String(t.id),
+                onclick: (e) => { e.stopPropagation(); this._togglePreviewPane(t.id); },
+            }, ['⧉']);
+            const main = el('span', { class: 'tab-main' }, [label, sub, pvBtn]);
+            const dot = this._makeCtxBar(this._ctxPct.get(t.id) || 0, t.id);
+            const modelBadge = this._makeModelBadge(t.id);
+            const effortBadge = this._makeEffortBadge(t.id);
+            // No group chip here: the auto-group is the cwd folder name, which
+            // just duplicated the (folder-named) title on most tabs. Groups
+            // still show in the tiles + manager views. Rename is dblclick or
+            // right-click anywhere on the tab.
             const x = el('span', { class: 'x', text: '×', onclick: (e) => {
                 e.stopPropagation();
                 this._requestCloseTab(t.id);
             }});
             const root = el('button', {
                 class: 'tab' + (t.id === this.activeId ? ' active' : ''),
-                'data-agent': this._agentStatus.get(t.id) || '',
+                title: this._tabTooltip(t.id, t.title),
+                'data-agent': this._displayAgent(t.id),
                 'data-tab-id': String(t.id),
+                'data-has-preview': previewUrl ? '1' : null,
                 draggable: 'true',
                 onclick: () => this._activate(t.id),
+                ondblclick: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
-            }, [dot, label, x]);
+            }, [dot, main, modelBadge, effortBadge, x].filter(Boolean));
             this._attachTabDrag(root, t.id);
             this._attachTabLongPress(root, t.id);
             return root;
@@ -725,33 +1137,225 @@ class Shell {
 
     // Context consumption at a glance: green (healthy) → yellow → red (near full).
     _ctxColor(pct) {
-        return pct >= 80 ? '#ff5555' : pct >= 50 ? '#f1c40f' : '#2ecc71';
+        // Use the teal accent palette so context% is visually distinct from
+        // agent-status colors (green=working, orange=done, red=attention).
+        // Orange and red still signal "getting full" but don't clash.
+        if (pct >= 90) return 'var(--soa-red)';
+        if (pct >= 70) return 'var(--soa-orange)';
+        if (pct >= 40) return 'var(--soa-accent)';
+        return 'var(--soa-accent-dim)';
     }
 
-    _makePie(pct, tabId) {
+    // Context as a vertical fuel-gauge: a thin full-height bar that fills from
+    // the bottom by consumption %, colored green→yellow→red. Narrower than the
+    // old circular pie (reclaims tab-row width) and uses the full tab height, so
+    // the reading is legible at a glance instead of a 10px dot.
+    _makeCtxBar(pct, tabId) {
         const color = this._ctxColor(pct);
         const span = el('span', {
-            class: 'ctx-pie',
+            class: 'ctx-bar',
             title: pct > 0 ? `Context: ${pct}%\nClick for details` : 'Context: —',
             onclick: (e) => { e.stopPropagation(); this._showCtxModal(tabId, pct); }
         });
+        // Fill the bottom pct% with the health color; hard stop so it reads as a
+        // bar level rather than a fade. Empty → just the faint track.
         span.style.background = pct <= 0
-            ? 'rgba(255,255,255,0.15)'
-            : `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
+            ? 'var(--soa-line-soft)'
+            : `linear-gradient(to top, ${color} ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
         return span;
     }
 
-    _updateCtxPie(id, pct) {
-        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-pie`);
+    _updateCtxBar(id, pct) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-bar`);
         if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
-        node.replaceWith(this._makePie(pct, id));
+        node.replaceWith(this._makeCtxBar(pct, id));
+    }
+
+    // Collapse a raw model id ("claude-opus-4-8[1m]") to its tier for the badge
+    // label + color. Fable is the odd-one-out (unstick model), so it gets its
+    // own color and stands out in the row.
+    _modelTier(raw) {
+        const m = String(raw || '').toLowerCase();
+        if (m.includes('opus')) return 'opus';
+        if (m.includes('sonnet')) return 'sonnet';
+        if (m.includes('haiku')) return 'haiku';
+        if (m.includes('fable') || m.includes('mythos')) return 'fable';
+        return m ? 'other' : '';
+    }
+
+    // A compact, tier-colored pill showing which model a session runs — for
+    // at-a-glance fleet management. Color encodes the model TIER only; session
+    // STATUS stays on the tab border + ctx-bar, so the two never collide.
+    _makeModelBadge(id) {
+        const raw = this._agentModel.get(id);
+        const tier = this._modelTier(raw);
+        if (!tier) return null;
+        return el('span', {
+            class: 'tab-model',
+            'data-tier': tier,
+            title: `Model: ${raw}\n(live — reflects in-session /model switches)`,
+            text: tier,
+        });
+    }
+
+    // Effort level, parsed from the Claude Code footer ("◉ xhigh · /effort" /
+    // "/effort ultracode") in the tab's stream buffer — the transcript carries
+    // the model but not the effort, so this is client-side. Shown as a badge
+    // beside the model badge. Whitespace-flexible: the cursor-positioned footer
+    // strips to no spaces ("◉xhigh·/effort"), so match without relying on gaps.
+    _detectEffort(id, recent) {
+        if (!recent) return;
+        const t = recent.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').slice(-900);
+        const LV = 'ultracode|xhigh|high|medium|low|minimal';
+        let m, eff = null;
+        if ((m = t.match(new RegExp('[◉●]\\s*(' + LV + ')\\b', 'i')))) eff = m[1];               // persistent footer bullet
+        else if ((m = t.match(new RegExp('\\b(' + LV + ')\\b\\s*[·|]?\\s*/effort', 'i')))) eff = m[1];
+        else if ((m = t.match(new RegExp('effort\\s*(?:level\\s*to\\s*)?[:·|]?\\s*(' + LV + ')\\b', 'i')))) eff = m[1]; // /effort echo
+        if (!eff) return;
+        eff = eff.toLowerCase();
+        if (this._agentEffort.get(id) === eff) return;    // unchanged — no rebuild
+        this._agentEffort.set(id, eff);
+        // Effort changed (rare — only on /effort). Debounced tab-row rebuild so
+        // the badge updates without thrashing on every stream frame.
+        if (!this._effortDirtyTimer) {
+            this._effortDirtyTimer = setTimeout(() => { this._effortDirtyTimer = null; this._tabsUISig = null; this._syncTabsUI(); }, 250);
+        }
+    }
+
+    // Short, colored effort badge. ultracode is the fleet default (xhigh + dynamic
+    // workflows); the shorter labels keep the tab compact next to the model tier.
+    _makeEffortBadge(id) {
+        const eff = this._agentEffort.get(id);
+        if (!eff) return null;
+        const label = { ultracode: 'ultra', xhigh: 'xhigh', high: 'high', medium: 'med', low: 'low', minimal: 'min' }[eff] || eff;
+        return el('span', {
+            class: 'tab-effort',
+            'data-effort': eff,
+            title: `Effort: ${eff}\n(live — from the /effort footer)`,
+            text: label,
+        });
+    }
+
+    // ── Per-tab memory occupation (hover tooltip) ───────────────────────────
+    // The daemon samples each tab's process-tree RSS every ~10s and pushes a
+    // {id:bytes} frame; we patch the tab button's title in place (no row
+    // rebuild — mirrors _updateCtxBar). The tooltip doubles as a one-stop peek:
+    // memory + context % + the rename hint.
+    _onTabMem(detail) {
+        const mem = detail && detail.mem;
+        if (!mem) return;
+        for (const k of Object.keys(mem)) {
+            const id = Number(k);
+            this._tabMem.set(id, mem[k]);
+            this._refreshTabTitle(id);
+        }
+    }
+
+    _refreshTabTitle(id) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (!node) return;
+        const rt = this.tabs.get(id);
+        node.title = this._tabTooltip(id, rt ? rt.title : '');
+    }
+
+    _tabTooltip(id, title) {
+        const lines = [];
+        if (title) lines.push(title);
+        const bytes = this._tabMem.get(id);
+        lines.push('Memory: ' + (bytes != null ? this._fmtBytes(bytes) : '—'));
+        const pct = this._ctxPct.get(id);
+        if (pct) lines.push('Context: ' + pct + '%');
+        lines.push('Double-click to rename');
+        return lines.join('\n');
+    }
+
+    _fmtBytes(b) {
+        if (!(b > 0)) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let n = b, i = 0;
+        while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+        return (n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)) + ' ' + units[i];
+    }
+
+    // One-line peek at what a tab last emitted, shown as the tab's dim subtitle.
+    // Prefers the live "Thinking…/Running…" status line while the agent works
+    // (that IS the latest output then); otherwise the last meaningful output
+    // line; otherwise the detector's activity label. Capped for the strip.
+    _tabPreview(id) {
+        const s = this._agentBuf && this._agentBuf.get(id);
+        if (this._agentStatus.get(id) === 'working' && s && s.statusLine) {
+            return s.statusLine.slice(0, 64);
+        }
+        const line = this._lastMeaningfulLine(id);
+        if (line) return line.slice(0, 64);
+        if (s && s.activity) return s.activity.slice(0, 64);
+        return '';
+    }
+
+    // Last non-blank, non-chrome line of a tab's output. Reads the real xterm
+    // buffer when the tab has been opened (gold source); falls back to the
+    // always-fed raw stream window so tabs never visited in this view still
+    // get a preview. Skips box frames, the empty input prompt, and CC footers.
+    _lastMeaningfulLine(id) {
+        const skip = (t) =>
+            !t ||
+            /^[\s│┃─━╭╮╰╯┄┈·•>]+$/.test(t) ||          // box frame / bare prompt marks
+            /^\?\s+for\s+shortcuts/i.test(t) ||         // Claude Code footer hint
+            /^│\s*>/.test(t);                            // Claude Code input prompt row
+        const rt = this.tabs.get(id);
+        // Only the tab you're actually looking at pays the ~60-row buffer scan;
+        // back-tabs derive their preview from the cheap raw-stream window below.
+        // With many sessions this keeps the 500ms poll off the heavy path.
+        if (rt && rt._opened && id === this.activeId) {
+            try {
+                const buf = rt.term.buffer.active;
+                const end = buf.baseY + rt.term.rows;
+                for (let row = end - 1; row >= 0 && row > end - 60; row--) {
+                    const ln = buf.getLine(row);
+                    if (!ln) continue;
+                    const t = ln.translateToString(true).replace(/\s+$/, '').trim();
+                    if (!skip(t)) return t;
+                }
+            } catch (_) {}
+        }
+        const sb = this._streamBuf && this._streamBuf.get(id);
+        if (sb && sb.recent) {
+            // Raw PTY bytes — strip ALL escape families before reading text, or
+            // window-title (OSC), keypad, and parameterized CSI sequences leak
+            // into the preview as garbage. xterm's buffer path above is already
+            // parsed; this fallback must parse here. OSC accepts BOTH the BEL
+            // and ST (ESC \) terminators — the same dual form the title reader
+            // elsewhere in this file handles.
+            const clean = sb.recent
+                .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')   // OSC … BEL | ST (titles)
+                .replace(/\x1b[P^_X][\s\S]*?\x1b\\/g, '')        // DCS / PM / APC / SOS … ST
+                .replace(/\x1b\[[0-9;?>=!]*[ -/]*[@-~]/g, '')    // CSI: params + intermediates + final
+                .replace(/\x1b[()*+#][0-9A-Za-z]/g, '')          // charset designation
+                .replace(/\x1b[=>78cMno|}~]/g, '')               // misc 2-char ESC (keypad, save/restore)
+                .replace(/\r/g, '\n')
+                .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''); // stray control bytes (keep \t \n)
+            const lines = clean.split('\n');
+            for (let i = lines.length - 1; i >= 0; i--) {
+                const t = lines[i].replace(/\s+$/, '').trim();
+                if (!skip(t)) return t;
+            }
+        }
+        return '';
+    }
+
+    // Refresh just the subtitle text for one tab, in place — no row rebuild.
+    _updateTabPreview(id) {
+        const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .tab-sub`);
+        if (!node) return;
+        const text = this._tabPreview(id);
+        if (node.textContent !== text) node.textContent = text;
     }
 
     _showCtxModal(tabId, pct) {
         // Remove any existing popover
         document.getElementById('ctx-popover')?.remove();
 
-        const pie = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(tabId))}"] .ctx-pie`);
+        const pie = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(tabId))}"] .ctx-bar`);
         if (!pie) return;
 
         const bar = pct > 0
@@ -777,23 +1381,117 @@ class Shell {
         setTimeout(() => document.addEventListener('pointerdown', dismiss, true), 0);
     }
 
+    // ── Long-press help ──────────────────────────────────────────────────────
+    // Press-and-hold (~500ms) any labelled control to see what it does, in a
+    // small popover sourced from the element's own help text (data-help → title
+    // → aria-label). One Pointer-Events handler covers mouse (desktop) and touch
+    // (mobile browsers). Tab tiles keep their own long-press menu
+    // (_attachTabLongPress), so we bail inside a tab node to avoid double-firing.
+    _initHelpLongPress() {
+        const HOLD = 500, MOVE = 8;
+        let timer = null, sx = 0, sy = 0, fired = false;
+        const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        const helpFor = (target) => {
+            const t = target && target.closest && target.closest('[data-help],[title],[aria-label]');
+            if (!t) return null;
+            if (t.closest('[data-tab-id], #tabs')) return null;          // tabs own their long-press
+            if (t.closest('#help-popover, #ctx-popover')) return null;   // don't explain the popover itself
+            const txt = (t.dataset && t.dataset.help) || t.getAttribute('title') || t.getAttribute('aria-label');
+            return txt && txt.trim() ? { el: t, text: txt.trim() } : null;
+        };
+        document.addEventListener('pointerdown', (e) => {
+            if (e.button && e.button !== 0) return;   // primary button / touch only
+            clear();
+            fired = false;
+            const hit = helpFor(e.target);
+            if (!hit) return;
+            sx = e.clientX; sy = e.clientY;
+            timer = setTimeout(() => {
+                timer = null; fired = true;
+                try { navigator.vibrate && navigator.vibrate(10); } catch (_) {}
+                this._showHelpPopover(hit.el, hit.text);
+            }, HOLD);
+        }, true);
+        document.addEventListener('pointermove', (e) => {
+            if (timer && (Math.abs(e.clientX - sx) > MOVE || Math.abs(e.clientY - sy) > MOVE)) clear();
+        }, true);
+        document.addEventListener('pointerup', clear, true);
+        document.addEventListener('pointercancel', clear, true);
+        window.addEventListener('scroll', clear, true);
+        // A fired long-press must not also trigger the control's click.
+        document.addEventListener('click', (e) => {
+            if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); }
+        }, true);
+    }
+
+    // Popover explaining a control, anchored under it (flips above near the
+    // viewport edge). Dismiss: × / outside pointerdown / Escape — mirrors
+    // _showCtxModal's teardown.
+    _showHelpPopover(anchor, text) {
+        document.getElementById('help-popover')?.remove();
+        const pop = document.createElement('div');
+        pop.id = 'help-popover';
+        pop.className = 'ctx-popover help-popover';
+        pop.setAttribute('role', 'tooltip');
+        pop.innerHTML = '<div class="ctx-pop-head"><span></span><button class="ctx-pop-close" aria-label="Close help">×</button></div><p class="help-pop-body"></p>';
+        const label = (anchor.getAttribute('aria-label') || anchor.textContent || '').trim();
+        pop.querySelector('.ctx-pop-head span').textContent = (label && label !== text) ? label : 'What this does';
+        pop.querySelector('.help-pop-body').textContent = text;
+        document.body.appendChild(pop);
+        const r = anchor.getBoundingClientRect();
+        const pw = pop.offsetWidth, ph = pop.offsetHeight;
+        const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+        let top = r.bottom + 6;
+        if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+        pop.style.left = left + 'px';
+        pop.style.top = top + 'px';
+        const close = () => {
+            pop.remove();
+            document.removeEventListener('pointerdown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+        };
+        const onDown = (e) => { if (!pop.contains(e.target)) close(); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+        pop.querySelector('.ctx-pop-close').onclick = close;
+        setTimeout(() => {
+            document.addEventListener('pointerdown', onDown, true);
+            document.addEventListener('keydown', onKey, true);
+        }, 0);
+    }
+
     _pollCtxLines() {
+        // Don't burn the main thread scanning 16 terminals while the page is in
+        // a background tab — resume with a full sweep once it's foregrounded.
+        if (document.hidden) { this._pollWasHidden = true; return; }
+        // Fast path: only re-scan tabs that emitted output since the last tick.
+        // Full sweep every ~8s (and on return from hidden) guarantees eventual
+        // consistency even if a dirty-seed site is ever missed.
+        const full = this._pollWasHidden || (++this._pollTickN % 16 === 0);
+        this._pollWasHidden = false;
         for (const [id, rt] of this.tabs) {
-            if (!rt._opened) continue;
-            try {
-                const pct = this._extractCtxPct(rt);
-                if (pct !== null && pct !== this._ctxPct.get(id)) {
-                    this._ctxPct.set(id, pct);
-                    this._updateCtxPie(id, pct);
-                    if (this.viewMode === 'tiles') {
-                        const tnode = this._tilesGridEl && this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
-                        if (tnode) this._paintTilePie(tnode, pct);
+            if (!full && !this._pollDirty.has(id)) continue;
+            this._pollDirty.delete(id);
+            if (rt._opened) {
+                try {
+                    const pct = this._extractCtxPct(rt);
+                    if (pct !== null && pct !== this._ctxPct.get(id)) {
+                        this._ctxPct.set(id, pct);
+                        this._updateCtxBar(id, pct);
+                        if (this.viewMode === 'tiles') {
+                            const tnode = this._tilesGridEl && this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
+                            if (tnode) this._paintTilePie(tnode, pct);
+                        }
+                        this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
                     }
-                    this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct });
-                }
-            } catch (_) {}
+                } catch (_) {}
+                this._pollAgentStatusForTab(id);
+            } else {
+                // Tiles mode / unopened xterm: re-run detection on the buffer.
+                this._detectAgentFromStream(id, '', true);
+            }
+            // Keep the tab strip's subtitle in step with fresh output.
+            this._updateTabPreview(id);
         }
-        this._pollAgentStatus();
     }
 
     // Pull Claude Code's context reading out of the live screen. Claude prints
@@ -849,10 +1547,15 @@ class Shell {
 
         sb.recent += data;
         if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
+        this._detectEffort(id, sb.recent);   // effort badge — parsed from the /effort footer in the stream
 
-        // Throttle: at most one detection per 200ms per tab
+        // Throttle: at most one detection per 200ms for the tab you're looking
+        // at; back-tabs run far less often (~700ms) since their status only
+        // feeds the strip colour, and the periodic full-sweep poll backstops
+        // them. With ~18 sessions this is the bulk of the saved regex work.
         const now = performance.now();
-        if (!forceNow && now - sb.lastDetect < 200) return;
+        const minGap = (id === this.activeId) ? 200 : 700;
+        if (!forceNow && now - sb.lastDetect < minGap) return;
         sb.lastDetect = now;
 
         // Strip ANSI escape sequences for pattern matching
@@ -876,11 +1579,29 @@ class Shell {
         // Check last 500 chars for working signals (recent activity)
         const tail = clean.slice(-500);
 
-        if (workingSignals.some(p => p.test(tail))) {
+        // Error signals win over everything — an API/connection failure (model
+        // switch, internet drop, provider outage) must be unmistakably RED, per
+        // the status-color rule (red = stuck/broken, not merely awaiting input).
+        // Auto-clears once real output resumes and the error scrolls out.
+        const errorPatterns = [
+            /API Error\b/i,
+            /Unable to connect to API/i,
+            /\bECONNREFUSED\b/,
+            /\bConnection\s*Refused\b/i,
+            /\bConnection error\b/i,
+            /\bfetch failed\b/i,
+            /\boverloaded_error\b/i,
+        ];
+        if (errorPatterns.some(p => p.test(tail))) {
+            next = 'error';
+            activity = 'API error';
+        }
+
+        if (!next && workingSignals.some(p => p.test(tail))) {
             next = 'working';
             const vm = tail.match(workingVerbs);
             activity = vm ? vm[1] + '...' : 'Working...';
-        } else if (workingVerbs.test(tail)) {
+        } else if (!next && workingVerbs.test(tail)) {
             next = 'working';
             const vm = tail.match(workingVerbs);
             activity = vm ? vm[1] + '...' : 'Working...';
@@ -888,20 +1609,26 @@ class Shell {
 
         // Attention signals — permission prompts, interactive questions
         if (!next) {
+            // Attention = the agent genuinely needs a decision: an explicit
+            // choice/permission prompt. Deliberately NARROW — idle input-box
+            // placeholders ("Try …", "Type something", "Chat about this") and
+            // prose that merely mentions approve/confirm are NOT attention; they
+            // fall through to done/idle. (Old over-broad /\bApprove\b/, the
+            // placeholder strings, and /press .* to confirm/ caused false reds.)
             const attentionPatterns = [
-                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+                /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /─{10,}[\s\S]{0,200}☐/,
                 /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
-                /Type something\.\s*─/i,
-                /Chat about this\s*$/m,
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
-                /Permission\s+(?:required|needed)/i,
-                /\bApprove\b/i,
-                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
+                /\bPermission\s+(?:required|needed)\b/i,
+                // Codex CLI approval modal ("No, and tell Codex what to do differently").
+                /tell Codex what to do/i,
+                /Would you like to (?:run|approve|allow)\b/i,
             ];
             if (attentionPatterns.some(p => p.test(tail))) {
                 next = 'attention';
@@ -909,14 +1636,28 @@ class Shell {
             }
         }
 
-        // Done signals — the boxed input prompt or bypass-mode idle
+        // Done signals — a Claude agent finished its turn and is idle at its
+        // input box, waiting for YOU (orange). Covers the legacy boxed prompt AND
+        // modern Claude Code, whose footer ("bypass permissions on" / "shift+tab
+        // to cycle" / mode line) is rendered with cursor-positioning codes that
+        // the ANSI strip collapses to NO spaces ("bypasspermissionson") — so we
+        // match whitespace-flexibly (\s*). Without this, a finished agent misses
+        // every done signal, the bare ❯ matches the shell-prompt rule below, and
+        // it wrongly reads as a plain idle shell (BLUE instead of orange).
         if (!next) {
             const donePatterns = [
                 /╭─+╮/,
                 /│\s*>\s*│/,
                 /╰─+╯/,
                 /│\s*>\s*$/m,
-                /BYPASS PERMISSIONS\s+ON/i,
+                /bypass\s*permissions\s*on/i,
+                /accept\s*edits\s*on/i,
+                /plan\s*mode\s*on/i,
+                /shift\s*\+?\s*tab\s*to\s*cycle/i,
+                /⏵⏵/,
+                // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+                /(?:^|\n)\s*›\s/m,
+                /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
             ];
             if (donePatterns.some(p => p.test(tail))) {
                 next = 'done';
@@ -958,7 +1699,7 @@ class Shell {
 
         // Working and attention are urgent — apply with minimal delay
         // Done needs a short debounce to avoid flicker from partial renders
-        const delay = (next === 'working' || next === 'attention') ? 50 : 300;
+        const delay = (next === 'working' || next === 'attention' || next === 'error') ? 50 : 300;
 
         if (s.pendingStatus === next) return;
         if (s.pending) clearTimeout(s.pending);
@@ -988,6 +1729,64 @@ class Shell {
         }
     }
 
+    // Pull the server supervisor's view — status + ctx% for EVERY tab, derived
+    // from each PTY stream server-side — and apply it locally. This is what
+    // makes all tiles/tabs show correct status on startup instead of only the
+    // tabs you've opened. One authed in-memory GET; cheap to repeat.
+    async _pullServerStatus() {
+        let j;
+        try {
+            const r = await fetch('/api/manager', { credentials: 'same-origin', cache: 'no-store' });
+            if (!r.ok) return;
+            j = await r.json();
+        } catch (_) { return; }
+        if (!j || !Array.isArray(j.sessions)) return;
+        let tabsDirty = false;
+        for (const sess of j.sessions) {
+            const id = sess.id;
+            const rt = this.tabs.get(id);
+            if (!rt) continue;
+            // The tab you're actively viewing is owned by live (sub-second)
+            // client-side detection — don't let the 4s pull fight it.
+            if (id === this.activeId && rt._opened && this.viewMode !== 'tiles') continue;
+            if (sess.status) this._setStatus(id, sess.status);
+            if (sess.model && sess.model !== this._agentModel.get(id)) {
+                this._agentModel.set(id, sess.model);
+                tabsDirty = true;   // model badge changed → rebuild the tab row below
+            }
+            // Effort badge — server-detected effort covers EVERY tab (client-side
+            // footer parsing only covers tabs whose stream is buffered). Only set
+            // when the server actually has a value, so it never wipes a
+            // client-detected effort before the server ships the field.
+            if (sess.effort && sess.effort !== this._agentEffort.get(id)) {
+                this._agentEffort.set(id, sess.effort);
+                tabsDirty = true;
+            }
+            if (sess.ctxPct != null && sess.ctxPct !== this._ctxPct.get(id)) {
+                this._ctxPct.set(id, sess.ctxPct);
+                this._updateCtxBar(id, sess.ctxPct);
+                if (this.viewMode === 'tiles' && this._tilesGridEl) {
+                    const tnode = this._tilesGridEl.querySelector(`[data-tile-id="${id}"] .tile-pie`);
+                    if (tnode) this._paintTilePie(tnode, sess.ctxPct);
+                }
+            }
+        }
+        if (tabsDirty) { this._tabsUISig = null; this._syncTabsUI(); }
+        this._statusSeeded = true;
+    }
+
+    // Ask for OS notification permission on the first user gesture (Safari and
+    // others reject requestPermission() without one). Non-intrusive: hooks the
+    // next pointerdown anywhere, once.
+    _armNotifications() {
+        if (typeof Notification === 'undefined' || Notification.permission !== 'default') return;
+        const ask = () => {
+            document.removeEventListener('pointerdown', ask);
+            try { Notification.requestPermission().catch(() => {}); } catch (_) {}
+        };
+        document.addEventListener('pointerdown', ask, { once: true });
+    }
+
     _getDetector() {
         return this._detector || (this._detector = {
             working: [
@@ -998,28 +1797,51 @@ class Shell {
                 /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b[.…]/i,
                 /\b(?:Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b.*[…⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/i,
             ],
+            error: [
+                /API Error\b/i,
+                /Unable to connect to API/i,
+                /\bECONNREFUSED\b/,
+                /\bConnection\s*Refused\b/i,
+                /\bConnection error\b/i,
+                /\bfetch failed\b/i,
+                /\boverloaded_error\b/i,
+            ],
+            // done = finished, waiting for the user (orange). Legacy boxed prompt
+            // + modern Claude Code footer, matched whitespace-flexibly so the
+            // cursor-positioned (space-collapsed) status line still registers —
+            // else a waiting agent falls through to the idle shell-prompt rule
+            // and shows BLUE. Keep in sync with the stream detector above.
             done: [
                 /╭─+╮[\s\S]*│\s*>/,
                 /╰─+╯/,
                 /│\s*>\s*│/,
                 /│\s*>\s*$/m,
-                /BYPASS PERMISSIONS\s+ON/i,
+                /bypass\s*permissions\s*on/i,
+                /accept\s*edits\s*on/i,
+                /plan\s*mode\s*on/i,
+                /shift\s*\+?\s*tab\s*to\s*cycle/i,
+                /⏵⏵/,
+                // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+                /(?:^|\n)\s*›\s/m,
+                /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
             ],
+            // See the stream detector above: attention is narrow — only genuine
+            // choice/permission prompts. Idle placeholders and prose that just
+            // mentions approve/confirm must NOT trigger a red status.
             attention: [
-                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
+                /❯\s+(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)\b/i,
+                /❯\s*\d+\.\s*(?:Yes|No|Allow|Deny|Accept|Reject)/i,
                 /─{10,}[\s\S]{0,200}☐/,
                 /☐\s+\S+[\s\S]{0,300}❯\s+\d+\./,
-                /Type something\.\s*─/i,
-                /Chat about this\s*$/m,
-                /Do you want to (?:proceed|continue|make this change|accept)/i,
+                /Do you want to (?:proceed|continue|make this change|accept|create|run|overwrite|delete)/i,
                 /\(y\/n\)/i,
                 /\[Y\/n\]/i,
                 /\(Y\)es\s*\/\s*\(N\)o/i,
-                /waiting\s+for\s+(?:your\s+)?input/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
-                /\bApprove\b/i,
-                /press\s+.*\s+to\s+(?:allow|approve|confirm)/i,
+                // Codex CLI approval modal ("No, and tell Codex what to do differently").
+                /tell Codex what to do/i,
+                /Would you like to (?:run|approve|allow)\b/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });
@@ -1060,8 +1882,13 @@ class Shell {
 
             let next;
             let activity = '';
-            // Priority: working > attention > done > idle
-            if (DET.working.some(p => p.test(visible))) {
+            // Priority: error > working > attention > done > idle. An API/
+            // connection failure must surface as RED even while idle (the error
+            // sits on screen with no new output to drive the stream detector).
+            if (DET.error.some(p => p.test(bottomWide))) {
+                next = 'error';
+                activity = 'API error';
+            } else if (DET.working.some(p => p.test(visible))) {
                 next = 'working';
                 const vm = visible.match(/\b(Thinking|Pondering|Crafting|Running|Executing|Processing|Working|Reading|Writing|Editing|Searching|Fetching|Analyzing|Wrangling|Brewing|Planning|Compiling|Installing|Building|Testing|Formatting|Linting|Deploying|Pushing|Pulling|Cloning|Downloading|Uploading|Generating|Updating|Checking|Scanning|Indexing|Resolving|Compacting|Streaming|Connecting|Waiting|Loading|Preparing|Initializing|Starting|Applying|Committing|Merging|Rebasing|Diffing)\b/i);
                 activity = vm ? vm[1] + '...' : 'Working...';
@@ -1135,7 +1962,8 @@ class Shell {
             }
 
             // Debounce: attention is urgent, working is quick, done/idle wait
-            const delay = next === 'attention' ? 100
+            const delay = next === 'error'     ? 100
+                        : next === 'attention' ? 100
                         : next === 'working'   ? 100
                         : 400;
 
@@ -1393,6 +2221,8 @@ class Shell {
             : this.graveyard[this.graveyard.length - 1];
         if (!target) return;
         const size = this._sendSize();
+        // This device restored the tab from the graveyard — follow the new id.
+        this._adoptNewTabIds = new Set(this.tabs.keys());
         this.bridge.input(INPUT_KIND.RESTORE_TAB, { id: target.id, ...size });
         this.audio.play('granted');
     }
@@ -1475,30 +2305,47 @@ class Shell {
         const prev = this._agentStatus.get(id);
         if (prev === status) return;
         this._agentStatus.set(id, status);
+        // Audible cue when an agent FINISHES a turn (working → done). Gated on the
+        // agentDoneSound setting and on prev === 'working' so loading a fleet of
+        // already-done tabs (prev === undefined) stays silent — no chime storm.
+        if (status === 'done' && prev === 'working' && getSettings().agentDoneSound) {
+            this.audio.play('agentdone', 'tab' + id);
+        }
         // Track when this status started for elapsed time display
         const s = this._agentBuf.get(id);
         if (s) s.lastChange = Date.now();
-        this._tabsUISig = null;
-        this._syncTabsUI();
+        // Status drives only a CSS color/pulse via the tab button's
+        // data-agent attribute (and, in tiles mode, the tile node updated
+        // below). Swap that one attribute instead of nulling the whole
+        // tab-row cache and replaceChildren-rebuilding all N buttons + pies
+        // on every working↔done flip — the dominant DOM churn with many live
+        // tabs. Fall back to a full sync only if the node isn't rendered yet.
+        const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (tabNode) tabNode.setAttribute('data-agent', this._displayAgent(id));
+        else { this._tabsUISig = null; this._syncTabsUI(); }
+        // A status flip usually means new activity/status-line text — repaint the
+        // subtitle now rather than waiting for the next poll tick.
+        this._updateTabPreview(id);
         // Live-update the tile if in tiles mode without a full re-render.
         if (this.viewMode === 'tiles' && this._tilesGridEl) {
             const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);
             if (node) this._updateTileNode(node, id);
         }
-        if (status === 'attention' && prev !== 'attention') {
-            const tab = this.tabs.get(id);
-            const title = (tab && tab.title) || tr('tab.default', { id });
-            if (!this._attentionTimers) this._attentionTimers = new Map();
-            clearTimeout(this._attentionTimers.get(id));
-            this._attentionTimers.set(id, setTimeout(() => {
-                if (this._agentStatus.get(id) === 'attention') {
-                    this._notifyAttention(title);
-                }
-                this._attentionTimers.delete(id);
-            }, 2000));
-        } else if (status !== 'attention' && this._attentionTimers && this._attentionTimers.has(id)) {
-            clearTimeout(this._attentionTimers.get(id));
-            this._attentionTimers.delete(id);
+        // Notify on a *meaningful* status change (needs-input / finished / error).
+        // Never on the very first classification of a tab (prev === undefined):
+        // that's just the startup seed from the server supervisor and would fire
+        // a notification storm on load. Debounced so a brief working→done→working
+        // flicker stays quiet. Fires an OS-level notification (see _notifyStatus)
+        // when you're not already looking at that tab.
+        if (!this._statusTimers) this._statusTimers = new Map();
+        clearTimeout(this._statusTimers.get(id));
+        this._statusTimers.delete(id);
+        const meaningful = (status === 'attention' || status === 'done' || status === 'error');
+        if (meaningful && prev !== undefined && prev !== status) {
+            this._statusTimers.set(id, setTimeout(() => {
+                this._statusTimers.delete(id);
+                if (this._agentStatus.get(id) === status) this._notifyStatus(id, status);
+            }, status === 'attention' ? 2000 : 1200));
         }
         // Visual debug overlay — shows detected status on screen
         this._updateDebugOverlay(id, status, prev);
@@ -1515,28 +2362,49 @@ class Shell {
         }
         const entries = [];
         for (const [tid, st] of this._agentStatus) {
-            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ffb86c' : st === 'attention' ? '#ff5555' : '#6272a4';
+            const color = st === 'working' ? '#50fa7b' : st === 'done' ? '#ffb86c' : (st === 'attention' || st === 'error') ? '#ff5555' : '#6272a4';
             entries.push(`<span style="color:${color}">tab${tid}:${st}</span>`);
         }
         overlay.innerHTML = entries.join(' | ') + `<br><span style="color:#888">last: tab${id} ${prev}→${status}</span>`;
     }
 
-    _notifyAttention(tabTitle) {
-        // Web Notification if permitted
-        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-            new Notification(`Tab ${tabTitle} needs your attention.`, { silent: true });
-        } else if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-            Notification.requestPermission().then(p => {
-                if (p === 'granted') new Notification(`Tab ${tabTitle} needs your attention.`, { silent: true });
+    // Route a meaningful status change to an OS notification (when you're not
+    // already looking at the tab) plus an in-app toast for the urgent ones.
+    _notifyStatus(id, status) {
+        const tab = this.tabs.get(id);
+        const title = (tab && tab.title) || tr('tab.default', { id });
+        const label = status === 'attention' ? 'needs your input'
+                    : status === 'error'     ? 'hit an error'
+                    :                          'finished — awaiting next prompt';
+        const msg = `${title} ${label}`;
+        // Skip the OS notification only when the window is focused AND this exact
+        // tab is the one on screen — anything else (backgrounded window, another
+        // tab open, tiles grid) means the user could miss it, so notify.
+        const focused = (typeof document.hasFocus === 'function') ? document.hasFocus() : !document.hidden;
+        const lookingRightAtIt = focused && this.activeId === id && this.viewMode !== 'tiles';
+        if (!lookingRightAtIt) this._osNotify(msg, id);
+        if (status === 'attention' || status === 'error') this._showStatusToast(msg);
+    }
+
+    // Fire an OS-level (browser) notification. tag+renotify so repeated alerts
+    // for the same tab replace rather than stack; click focuses + opens the tab.
+    _osNotify(body, id) {
+        if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+        try {
+            const n = new Notification('Son of Anton', {
+                body, tag: 'soa-tab-' + id, renotify: true, silent: false,
             });
-        }
-        // In-app toast as fallback / supplement
+            n.onclick = () => { try { window.focus(); } catch (_) {} this._activate(id); n.close(); };
+        } catch (_) {}
+    }
+
+    _showStatusToast(text) {
         const existing = document.getElementById('soa-agent-toast');
         if (existing) existing.remove();
         const toast = el('div', { id: 'soa-agent-toast', class: 'soa-toast soa-toast--agent', role: 'alert', 'aria-live': 'assertive' }, [
             el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '!' }),
             el('div', { class: 'soa-toast-body' }, [
-                el('p', { class: 'soa-toast-title', text: `Tab ${tabTitle} needs your attention.` }),
+                el('p', { class: 'soa-toast-title', text }),
             ]),
         ]);
         document.body.appendChild(toast);
@@ -1545,6 +2413,203 @@ class Shell {
         toast.addEventListener('click', dismiss);
         setTimeout(dismiss, 4000);
     }
+
+    // ── Localhost preview detection ─────────────────────────────────────────
+
+    // Scan a raw PTY chunk for dev-server URL patterns. Called on every
+    // TERM_DATA chunk (and replay). When a new URL is found for a tab the
+    // toggle button appears in the strip.
+    _detectDevServer(id, data) {
+        // Only scan if we don't already have a URL for this tab (first-wins,
+        // avoids repeated regex work on busy streams). To reset, the tab must
+        // be closed. The "most recent" strategy could be added later if needed.
+        if (this._previewUrls.has(id)) return;
+        if (!data) return;
+
+        // Strip ANSI escape sequences before matching.
+        const clean = data
+            .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+            .replace(/\x1b\][^\x07]*\x07/g, '')
+            .replace(/\x1b[()][AB012]/g, '')
+            .replace(/\x1b\x5b[0-9;]*[mGHJKfsu]/g, '');
+
+        // Patterns ordered by specificity (most specific first).
+        // IMPORTANT: each pattern must require startup-message context so a
+        // stray localhost URL in logs / curl output / error text doesn't trigger
+        // detection. The old first-pass generic URL pattern was removed because
+        // it matched every http://localhost:PORT occurrence, including the SoA
+        // server's own port in scrollback and tool output.
+        const patterns = [
+            // "Local:  http://…" (Vite, Next.js, SvelteKit, Astro, Nuxt…)
+            /[Ll]ocal[:\s]+https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/g,
+            // "Network: http://…" companion line (Vite)
+            /[Nn]etwork[:\s]+https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // "running at http://…" / "ready on http://…"
+            /running at https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/gi,
+            /ready on https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/gi,
+            // "started server on …:N" / "started on …:N"
+            /started(?: server| on)[^:]*:(\d+)/gi,
+            // "Listening on http://…" (Deno, Fastify, Hono…)
+            /[Ll]istening on https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // Generic "listening on :N" / "listening on port N"
+            /[Ll]istening on (?:port )?:?(\d{4,5})\b/g,
+            // Flask/Django: "Running on http://127.0.0.1:5000"
+            /Running on https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+            // Django: "Starting development server at http://…"
+            /Starting development server at https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/gi,
+            // python -m http.server: "Serving HTTP on … port N"
+            /Serving HTTP on .+ port (\d+)/gi,
+            // "Server running at http://…" / "Server listening on http://…"
+            /[Ss]erver (?:running|listening) (?:at|on) https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/g,
+        ];
+
+        // Derive the backend port from the actual configured backend URL so
+        // both :7332 (personal fleet) and :4010 (product instance) are always
+        // skipped — whichever one this page is connected to AND the other one.
+        let backendPort = this._ownPort;
+        try {
+            const beUrl = new URL((window.__SOA_WEB__ || {})._resolvedBackend || location.origin);
+            backendPort = parseInt(beUrl.port, 10) || (beUrl.protocol === 'https:' ? 443 : 80);
+        } catch (_) {}
+        // Well-known non-dev-server ports to skip.
+        const SKIP_PORTS = new Set([22, 25, 53, 80, 443, 3306, 5432, 27017,
+            this._ownPort, backendPort,
+            4010, 7332,   // both SoA instance ports, always
+        ]);
+
+        for (const pat of patterns) {
+            pat.lastIndex = 0;
+            let m;
+            while ((m = pat.exec(clean)) !== null) {
+                const port = parseInt(m[1], 10);
+                if (!port || port < 1024 || port > 65535) continue;
+                if (SKIP_PORTS.has(port)) continue;
+                const url = `http://localhost:${port}/`;
+                this._setPreviewUrl(id, url);
+                return;
+            }
+        }
+    }
+
+    // Store a detected preview URL for a tab and update the tab strip UI.
+    _setPreviewUrl(id, url) {
+        this._previewUrls.set(id, url);
+        this._updatePreviewToggle(id, url);
+    }
+
+    // Show/update the preview toggle button for a tab without rebuilding the
+    // whole tab row. Adds data-has-preview and updates the button title.
+    _updatePreviewToggle(id, url) {
+        const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (!tabNode) {
+            // Tab button not yet in DOM (or just rebuilt) — null the cache so
+            // the next _syncTabsUI call picks up the URL.
+            this._tabsUISig = null;
+            this._syncTabsUI();
+            return;
+        }
+        tabNode.setAttribute('data-has-preview', '1');
+        const pvBtn = tabNode.querySelector('.tab-preview-btn');
+        if (pvBtn) {
+            pvBtn.title = `Toggle preview  ${url}`;
+            pvBtn.setAttribute('data-preview-id', String(id));
+            // Flash the button briefly to draw attention.
+            pvBtn.classList.add('preview-btn-pulse');
+            setTimeout(() => pvBtn.classList.remove('preview-btn-pulse'), 2000);
+        }
+    }
+
+    // Toggle the preview pane for a tab: off → visible → off.
+    _togglePreviewPane(id) {
+        const wasVisible = !!this._previewVisible.get(id);
+        const nowVisible = !wasVisible;
+        this._previewVisible.set(id, nowVisible);
+        // Update the toggle button state immediately.
+        const pvBtn = this.tabsEl.querySelector(`[data-preview-id="${CSS.escape(String(id))}"]`);
+        if (pvBtn) pvBtn.classList.toggle('preview-on', nowVisible);
+        // Only manipulate the DOM for the active tab.
+        if (id === this.activeId) {
+            this._syncPreviewPaneVisibility(id, nowVisible);
+        }
+    }
+
+    // Create or destroy the preview pane DOM for `id`. `show` controls whether
+    // to display it. Safe to call repeatedly — idempotent.
+    _syncPreviewPaneVisibility(id, show) {
+        const PANE_ID = 'preview-pane-' + id;
+
+        if (!show) {
+            const existing = document.getElementById(PANE_ID);
+            if (existing) existing.remove();
+            return;
+        }
+
+        const url = this._previewUrls.get(id);
+        if (!url) return;
+
+        // Derive the proxy path so the iframe stays same-origin (avoids mixed
+        // content and CORS issues when the dashboard is served over HTTPS).
+        let iframeSrc;
+        try {
+            const parsed = new URL(url);
+            const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+            iframeSrc = `/preview/${port}/`;
+        } catch (_) {
+            iframeSrc = url;
+        }
+
+        // Reuse an existing pane (e.g. switching back to this tab).
+        let pane = document.getElementById(PANE_ID);
+        if (pane) {
+            pane.style.display = '';
+            return;
+        }
+
+        // Build the pane.
+        const bar = el('div', { class: 'preview-split-bar' }, [
+            el('span', { class: 'psb-url', text: url, title: url }),
+            el('button', {
+                class: 'psb-btn', type: 'button', title: 'Reload preview',
+                text: '↺',
+                onclick: () => {
+                    const iframe = pane.querySelector('.preview-split-frame');
+                    if (iframe) { try { iframe.contentWindow.location.reload(); } catch (_) { iframe.src = iframe.src; } }
+                },
+            }),
+            el('button', {
+                class: 'psb-btn', type: 'button', title: 'Open in new tab',
+                text: '⧉',
+                onclick: () => window.open(iframeSrc, '_blank'),
+            }),
+            el('button', {
+                class: 'psb-btn psb-back', type: 'button', title: 'Back to terminal',
+                text: '← Terminal',
+                onclick: () => this._togglePreviewPane(id),
+            }),
+        ]);
+        const iframe = el('iframe', {
+            class: 'preview-split-frame',
+            src: iframeSrc,
+            sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals',
+            // allow: 'fullscreen',  -- not in el() props; set manually below
+        });
+        try { iframe.allow = 'fullscreen'; } catch (_) {}
+
+        pane = el('div', {
+            id: PANE_ID,
+            class: 'preview-split-pane',
+        }, [bar, iframe]);
+
+        this.termsEl.appendChild(pane);
+        // Trigger reflow of the active terminal after the pane appears so
+        // xterm fills the updated (narrower) container.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            const rt = this.tabs.get(id);
+            if (rt) rt.fitNow();
+        }));
+    }
+
+    // ── end localhost preview ───────────────────────────────────────────────
 
     _promptRename(id, current) {
         const next = window.prompt(
@@ -1560,6 +2625,59 @@ class Shell {
         const rt = this.tabs.get(id);
         if (rt) { rt.title = title || current; this._tabsUISig = null; this._syncTabsUI(); }
         this.bridge.input(INPUT_KIND.RENAME_TAB, { id, title });
+    }
+
+    // ── Agent groups ────────────────────────────────────────────────────────
+    // Assign one agent to a group. Empty reverts it to the auto project group
+    // (the cwd folder name). Membership is server-persisted, keyed by cwd.
+    _promptSetGroup(id) {
+        const current = this._agentGroup.get(id) || '';
+        const next = window.prompt(
+            'Group for this agent\n(Clear to revert to the auto project group)',
+            current === 'ungrouped' ? '' : current
+        );
+        if (next == null) return;
+        this._setGroup({ id, group: next });
+    }
+
+    // Rename a whole group → reassigns every current member.
+    _promptRenameGroup(group) {
+        const next = window.prompt(
+            `Rename group "${group}" — moves every agent in it`,
+            group === 'ungrouped' ? '' : group
+        );
+        if (next == null) return;
+        const name = next.trim().slice(0, 40);
+        if (name === group) return;
+        const ids = this.order.filter(id => (this._agentGroup.get(id) || 'ungrouped') === group);
+        if (this._collapsedGroups.delete(group) && name) this._collapsedGroups.add(name);
+        ids.forEach(id => this._setGroup({ id, group: name }, false));
+        this._reflowGroups();
+    }
+
+    // POST the override (authed → works from desktop and phone). Optimistically
+    // moves the agent locally; the server's pushed 'manager' snapshot reconciles.
+    _setGroup({ id, cwd, group }, render = true) {
+        const g = (group || '').trim().slice(0, 40);
+        if (id != null) this._agentGroup.set(id, g || 'ungrouped');
+        if (render) this._reflowGroups();
+        const cfg = window.__SOA_WEB__ || {};
+        const base = String(cfg._resolvedBackend || cfg.backend || '').replace(/\/+$/, '');
+        const url = new URL(base + '/api/manager/group', location.origin);
+        if (cfg._resolvedToken) url.searchParams.set('t', cfg._resolvedToken);
+        fetch(url.toString(), {
+            method: 'POST', credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id, cwd, group: g }),
+        }).catch(() => { /* next manager frame reconciles truth */ });
+    }
+
+    // Re-render the group-aware surfaces (tiles sections + tab chips) at once.
+    _reflowGroups() {
+        this._groupSig = null;
+        if (this.viewMode === 'tiles') this._renderTiles();
+        this._tabsUISig = null;
+        this._syncTabsUI();
     }
 
     _fitActive() {
@@ -1713,6 +2831,8 @@ class Shell {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
             this.audio.play('granted');
+            // This device opened the new tab — focus its new id when it lands.
+            this._adoptNewTabIds = new Set(this.tabs.keys());
             this.bridge.input(INPUT_KIND.NEW_TAB, this._sendSize());
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'w') {
@@ -1735,10 +2855,40 @@ class Shell {
             e.preventDefault();
             this._toggleViewMode();
         }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'h') {
+            e.preventDefault();
+            if (this._toggleActions) this._toggleActions();
+        }
+    }
+
+    // Resolve the saved theme setting, set <html data-theme> (re-themes the CSS
+    // chrome instantly), and swap every live terminal's xterm palette to match.
+    _applyTheme() {
+        const resolved = applyThemeAttr(getSettings().theme);
+        const xt = xtermTheme(resolved);
+        for (const rt of this.tabs.values()) {
+            try { if (rt.term) rt.term.options.theme = xt; } catch (_) {}
+        }
+        const tb = $('#toggle-theme');
+        if (tb) {
+            const dark = resolved === 'dark';
+            tb.dataset.icon = dark ? '☀' : '☾';   // show what a click switches TO
+            tb.setAttribute('aria-pressed', dark ? 'false' : 'true');
+            tb.title = dark ? 'Switch to light theme' : 'Switch to dark theme';
+        }
+        return resolved;
+    }
+
+    // Toolbar quick-toggle: dark <-> light (Settings has the full Auto/Dark/Light/Dim).
+    _toggleTheme() {
+        const next = resolveTheme(getSettings().theme) === 'dark' ? 'light' : 'dark';
+        saveSettings({ theme: next });   // → 'soa:settings' → _applySettings → _applyTheme
+        if (this.audio) this.audio.play('panels');
     }
 
     _applySettings(s) {
         for (const rt of this.tabs.values()) rt.applySettings(s);
+        this._applyTheme();
         this._fitActive();
         if (this.audio) {
             if (typeof this.audio.setEnabled === 'function') this.audio.setEnabled(!!s.audio);
@@ -1750,37 +2900,205 @@ class Shell {
             audioBtn.dataset.state = s.audio ? 'on' : 'off';
             audioBtn.textContent = s.audio ? tr('topbar.audio_on') : tr('topbar.audio_off');
         }
+        // Re-apply which view-switcher cells the user chose to show.
+        this._applyViewButtonsVisibility(s);
+    }
+
+    // ── User profile chip ──────────────────────────────────────────────────
+
+    async _initUserProfile() {
+        const chip = $('#user-chip');
+        if (!chip) return;
+
+        // Open Settings → Profile tab on click
+        chip.addEventListener('click', () => {
+            this.audio.play('panels');
+            openSettingsModal({ tab: 'profile' });
+        });
+
+        // Refresh chip whenever profile is saved from settings
+        window.addEventListener('soa:profile-updated', e => this._updateUserChip(e.detail));
+        // The profile pane broadcasts the egress country as it polls — mirror its
+        // flag onto the always-visible chip.
+        window.addEventListener('soa:user-geo', e => this._setChipFlag(e.detail && e.detail.flag));
+        // The CLAUDE sidebar widget deep-links here: manager view, USAGE pane.
+        window.addEventListener('soa:open-usage', () => {
+            if (!this._managerEnabled()) return; // entitlement gate: no manager deep-link when unentitled
+            this.viewMode = 'manager';
+            try { localStorage.setItem('soa_web_view_mode', 'manager'); } catch (_) {}
+            this._applyViewMode();
+            this._setManagerSub('usage');
+        });
+
+        // Load current profile from server
+        try {
+            const { ok, profile } = await this._apiJson('/api/user/profile');
+            if (ok && profile) {
+                this._updateUserChip(profile);
+                // Start GPS watcher if user previously permitted
+                if (profile.locationPermission && navigator.geolocation) {
+                    this._startGeoWatch(profile.displayName || 'You');
+                }
+            }
+        } catch (_) {}
+
+        // Seed the chip's country flag immediately (don't wait for the pane to open).
+        try {
+            const stats = await this._apiJson('/api/user/stats');
+            if (stats && stats.ok) this._setChipFlag(iso2ToFlagEmoji(stats.country));
+        } catch (_) {}
+    }
+
+    // Small same-origin JSON GET that carries the resolved backend + token.
+    async _apiJson(path) {
+        const cfg = window.__SOA_WEB__ || {};
+        const url = new URL((cfg._resolvedBackend || '') + path);
+        if (cfg._resolvedToken) url.searchParams.set('t', cfg._resolvedToken);
+        const res = await fetch(url.toString(), { credentials: 'include' });
+        return res.json();
+    }
+
+    _setChipFlag(flag) {
+        const el = $('#user-chip .user-chip-flag');
+        if (!el) return;
+        // Hide the generic globe so the chip stays clean until we know the country.
+        if (!flag || flag === '🌍') { el.textContent = ''; return; }
+        el.textContent = flag;
+    }
+
+    _updateUserChip(profile) {
+        const chip = $('#user-chip');
+        if (!chip) return;
+        const avatar = chip.querySelector('.user-avatar');
+        const nameEl = chip.querySelector('.user-chip-name');
+        const name = (profile.displayName || 'User').trim();
+        const color = profile.avatarColor || '#4a6566';
+        if (avatar) {
+            avatar.dataset.initial = name.charAt(0).toUpperCase();
+            avatar.style.background = color;
+        }
+        if (nameEl) nameEl.textContent = name;
+        chip.title = `${name} — click to edit profile`;
+    }
+
+    _startGeoWatch(displayName) {
+        if (this._geoWatchId != null) return; // already watching
+        this._geoWatchId = navigator.geolocation.watchPosition(
+            pos => {
+                window.dispatchEvent(new CustomEvent('soa:user-location', {
+                    detail: { lat: pos.coords.latitude, lon: pos.coords.longitude, name: displayName },
+                }));
+            },
+            () => {},
+            { timeout: 15_000, maximumAge: 5 * 60_000 },
+        );
     }
 
     // ── Tiles view ──────────────────────────────────────────────────────
 
     _toggleViewMode() {
-        this.viewMode = this.viewMode === 'tiles' ? 'tabs' : 'tiles';
-        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        // Cycle: tabs → dashboard (flat tiles) → grouped (category rows) → tabs.
+        if (this.viewMode !== 'tiles') { this.viewMode = 'tiles'; this.tilesGrouped = false; }
+        else if (!this.tilesGrouped) { this.tilesGrouped = true; }
+        else { this.viewMode = 'tabs'; this.tilesGrouped = false; }
+        try {
+            localStorage.setItem('soa_web_view_mode', this.viewMode);
+            localStorage.setItem('soa_web_tiles_grouped', this.tilesGrouped ? '1' : '0');
+        } catch (_) {}
         this._applyViewMode();
         this._updateViewBtn();
         this.audio.play('panels');
     }
 
-    _updateViewBtn() {
-        const btn = $('#toggle-view');
-        if (!btn) return;
-        if (this.viewMode === 'tiles') {
-            btn.setAttribute('data-icon', '☰');
-            btn.title = 'Switch to tabs view';
+    // Direct view selection from the unified switcher. SELECT semantics (unlike
+    // the toggle-* methods the keyboard shortcuts use): a cell click enters that
+    // view; clicking TILES again toggles the grouped sub-layout.
+    _setView(mode) {
+        if (mode === 'manager' && !this._managerEnabled()) return;
+        if (mode === 'tiles') {
+            if (this.viewMode !== 'tiles') { this.viewMode = 'tiles'; this.tilesGrouped = false; }
+            else { this.tilesGrouped = !this.tilesGrouped; }
+        } else if (!mode || mode === 'tabs') {
+            this.viewMode = 'tabs'; this.tilesGrouped = false;
         } else {
-            btn.setAttribute('data-icon', '⊞');
-            btn.title = 'Switch to tiles view';
+            this.viewMode = mode;   // manager | chat | monitor
         }
+        try {
+            localStorage.setItem('soa_web_view_mode', this.viewMode);
+            localStorage.setItem('soa_web_tiles_grouped', this.tilesGrouped ? '1' : '0');
+        } catch (_) {}
+        this._applyViewMode();
+        this._syncViewSwitch();
+        this.audio.play('panels');
     }
+
+    // Single source of truth for the switcher chrome: highlight the active
+    // view's cell, refresh the chat unread badge, and re-apply cell visibility
+    // (settings + manager entitlement). Every legacy _update*Btn name delegates
+    // here so all existing call sites keep the switcher in sync.
+    _syncViewSwitch() {
+        const sw = $('#view-switch');
+        if (!sw) return;
+        const active = this.viewMode || 'tabs';
+        sw.querySelectorAll('.view-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.view === active);
+        });
+        const badge = sw.querySelector('#view-chat .chat-badge');
+        if (badge) {
+            const n = (active === 'chat') ? 0 : (this._chatUnread || 0);
+            badge.textContent = n > 99 ? '99+' : String(n);
+            badge.hidden = !n;
+        }
+        this._applyViewButtonsVisibility(getSettings());
+    }
+
+    // Show/hide each switcher cell per the user's Settings preference (all shown
+    // by default). The manager cell is additionally gated on the entitlement.
+    _applyViewButtonsVisibility(s) {
+        const sw = $('#view-switch');
+        if (!sw) return;
+        const pref = (s && s.viewButtons) || {};
+        sw.querySelectorAll('.view-btn').forEach(btn => {
+            const v = btn.dataset.view;           // tabs|tiles|manager|chat|monitor
+            let show = pref[v] !== false;         // default: shown unless explicitly off
+            if (v === 'manager') show = show && this._managerEnabled();
+            if (v === 'tabs') show = true;        // never hide the escape hatch to the terminal
+            btn.hidden = !show;
+        });
+    }
+
+    // Back-compat shims — the toggle-* flows and entitlement code call these.
+    _updateViewBtn()    { this._syncViewSwitch(); }
 
     _applyViewMode() {
         const shell = $('#shell');
+        // Leaving the monitor → stop its stream + poll before switching away.
+        if (this.viewMode !== 'monitor') this._teardownMonitor();
+        if (this.viewMode !== 'manager') this._teardownManager();
+        if (this.viewMode !== 'chat') this._teardownChat();
         if (this.viewMode === 'tiles') {
             shell.setAttribute('data-view', 'tiles');
             this._closeTileTerminal();
             this._renderTiles();
             for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+        } else if (this.viewMode === 'monitor') {
+            shell.setAttribute('data-view', 'monitor');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterMonitor();
+        } else if (this.viewMode === 'manager') {
+            shell.setAttribute('data-view', 'manager');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterManager();
+        } else if (this.viewMode === 'chat') {
+            shell.setAttribute('data-view', 'chat');
+            this._removeTilesGrid();
+            this._removeTileOverlay();
+            for (const [, rt] of this.tabs) rt.container.classList.remove('active');
+            this._enterChat();
         } else {
             shell.removeAttribute('data-view');
             this._removeTilesGrid();
@@ -1793,6 +3111,1312 @@ class Shell {
                 rt.focus();
             }
         }
+        this._updateManagerBtn();
+        this._updateChatBtn();
+    }
+
+    // ── MONITOR view ────────────────────────────────────────────────────────
+    // One screen showing every agent's OWN live browser (per-tab isolated
+    // instances) plus every open localhost port. Browser frames arrive over the
+    // WS stamped with their tab id and get routed to the matching cell.
+    _toggleMonitor() {
+        this.viewMode = this.viewMode === 'monitor' ? 'tabs' : 'monitor';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this._updateMonitorBtn();
+        this.audio.play('panels');
+    }
+
+    _updateMonitorBtn() { this._syncViewSwitch(); }
+
+    _enterMonitor() {
+        if (!this._monitorEl) {
+            this._monitorGridEl = el('div', { class: 'monitor-grid', 'data-empty': 'Loading…' });
+            this._monitorPortsEl = el('div', { class: 'monitor-ports' });
+            this._monitorEl = el('div', { class: 'monitor-view' }, [
+                el('div', { class: 'monitor-head', text: '◉ AGENT BROWSERS' }),
+                this._monitorGridEl,
+                el('div', { class: 'monitor-head', text: '⊞ LOCALHOST PORTS' }),
+                this._monitorPortsEl,
+            ]);
+            this.termsEl.appendChild(this._monitorEl);
+        }
+        this._monitorEl.style.display = '';
+        if (!this._monitorFrames) this._monitorFrames = new Map();
+        // Watch every agent browser instance; the server streams each one's
+        // frames stamped with its tab id (routed by _onBrowserFrame).
+        try { this.bridge.input(INPUT_KIND.BROWSER_SUBSCRIBE, { id: '*' }); } catch (_) {}
+        this._monitorSubscribed = true;
+        this._renderMonitor();
+        if (this._monitorTimer) clearInterval(this._monitorTimer);
+        // Re-list instances/ports periodically so new browsers + ports appear.
+        this._monitorTimer = setInterval(() => { if (!document.hidden) this._renderMonitor(); }, 4000);
+    }
+
+    _teardownMonitor() {
+        if (this._monitorTimer) { clearInterval(this._monitorTimer); this._monitorTimer = null; }
+        if (this._monitorSubscribed) {
+            try { this.bridge.input(INPUT_KIND.BROWSER_UNSUBSCRIBE, { id: '*' }); } catch (_) {}
+            this._monitorSubscribed = false;
+        }
+        if (this._monitorEl) this._monitorEl.style.display = 'none';
+    }
+
+    _onBrowserFrame(d) {
+        if (!d || d.tabId == null) return;
+        const key = String(d.tabId);
+        // Cache the latest frame for every instance, unconditionally. CDP emits
+        // the initial screencast frame the instant the cast starts — often the
+        // ONLY frame for an idle page — and it can land BEFORE the 4s instance
+        // poll has built this tab's grid cell. Without this cache that first
+        // frame was dropped and the cell stayed blank forever (the bug).
+        if (d.data) {
+            if (!this._monitorFrames) this._monitorFrames = new Map();
+            this._monitorFrames.set(key, d.data);
+        }
+        if (this.viewMode !== 'monitor' || !this._monitorGridEl) return;
+        // Build the cell on demand so the first frame paints immediately rather
+        // than waiting up to 4s for the next _renderMonitor poll to create it.
+        const cell = this._ensureMonitorCell(key);
+        const img = cell && cell.querySelector('.mon-frame');
+        if (img && d.data) img.src = 'data:image/jpeg;base64,' + d.data;
+    }
+
+    // Create (or fetch) the grid cell for an agent-browser instance, painting
+    // any cached frame so a cell is never blank while we already hold a frame.
+    _ensureMonitorCell(key) {
+        if (!this._monitorGridEl) return null;
+        let cell = this._monitorGridEl.querySelector(`[data-mon-tab="${CSS.escape(key)}"]`);
+        if (!cell) {
+            cell = el('div', { class: 'mon-cell', 'data-mon-tab': key }, [
+                el('div', { class: 'mon-bar' }, [
+                    el('span', { class: 'mon-title', text: 'tab ' + key }),
+                    el('span', { class: 'mon-url' }),
+                ]),
+                el('img', { class: 'mon-frame', alt: '' }),
+            ]);
+            this._monitorGridEl.appendChild(cell);
+            this._monitorGridEl.dataset.empty = '';
+        }
+        const cached = this._monitorFrames && this._monitorFrames.get(key);
+        const img = cell.querySelector('.mon-frame');
+        if (cached && img && !img.getAttribute('src')) img.src = 'data:image/jpeg;base64,' + cached;
+        return cell;
+    }
+
+    async _fetchBrowserInstances() {
+        try {
+            const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+            const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+            const url = new URL(backend + '/api/agent-browser');
+            if (token) url.searchParams.set('t', token);
+            const res = await fetch(url.toString(), {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'list' }),
+            });
+            if (!res.ok) return [];
+            const j = await res.json();
+            return (j && j.instances) || [];
+        } catch (_) { return []; }
+    }
+
+    async _renderMonitor() {
+        if (this.viewMode !== 'monitor' || !this._monitorGridEl) return;
+        const instances = await this._fetchBrowserInstances();
+        if (this.viewMode !== 'monitor' || !this._monitorGridEl) return; // re-check post-await
+        const seen = new Set();
+        for (const inst of instances) {
+            const key = String(inst.tabId);
+            seen.add(key);
+            const cell = this._ensureMonitorCell(key);
+            const tab = this.tabs.get(Number(inst.tabId));
+            cell.querySelector('.mon-title').textContent = (tab && tab.title) || ('tab ' + inst.tabId);
+            cell.querySelector('.mon-url').textContent = inst.url || '';
+        }
+        for (const node of [...this._monitorGridEl.querySelectorAll('.mon-cell')]) {
+            if (!seen.has(node.dataset.monTab)) {
+                if (this._monitorFrames) this._monitorFrames.delete(node.dataset.monTab);
+                node.remove();
+            }
+        }
+        this._monitorGridEl.dataset.empty = instances.length ? ''
+            : 'No agent browsers yet — when an agent runs `soa-browser open …` its session appears here.';
+        this._renderMonitorPorts();
+    }
+
+    async _renderMonitorPorts() {
+        if (!this._monitorPortsEl) return;
+        let ports = [];
+        try {
+            const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+            const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+            const url = new URL(backend + '/api/ports');
+            if (token) url.searchParams.set('t', token);
+            const res = await fetch(url.toString(), { credentials: 'include' });
+            if (res.ok) { const { data } = await res.json(); ports = (data && data.ports) || []; }
+        } catch (_) { return; }
+        if (this.viewMode !== 'monitor' || !this._monitorPortsEl) return;
+        this._monitorPortsEl.replaceChildren(...ports.map(p => el('button', {
+            class: 'mon-port', type: 'button',
+            title: `Open localhost:${p.port} (${p.process}) in the preview`,
+            text: `:${p.port} — ${p.process}`,
+            onclick: async () => {
+                try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(this, String(p.port)); }
+                catch (err) { console.warn('[monitor] preview open failed', err); }
+            },
+        })));
+        if (!ports.length) this._monitorPortsEl.dataset.empty = 'No open localhost ports.';
+        else this._monitorPortsEl.dataset.empty = '';
+    }
+
+    // ── Manager entitlement (premium gate) ───────────────────────────────────
+    // The fleet-manager view is manager-only. Fetch the entitlement on boot;
+    // fails safe — on any error the default (manager: false → hidden) stands.
+    async _loadCapabilities() {
+        try {
+            const { ok, capabilities } = await this._apiJson('/api/capabilities');
+            if (ok && capabilities) this._caps = capabilities;
+        } catch (_) { /* keep fail-safe default (manager hidden) */ }
+        this._applyManagerEntitlement();
+    }
+
+    _managerEnabled() { return !!(this._caps && this._caps.manager); }
+
+    // Show/hide the fleet-manager entry point based on the entitlement, and
+    // bounce out of the manager view if we somehow landed there unentitled
+    // (e.g. a stale localStorage view mode).
+    _applyManagerEntitlement() {
+        if (!this._managerEnabled() && this.viewMode === 'manager') {
+            this.viewMode = 'tabs';
+            try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
+            this._applyViewMode();
+        }
+        // _syncViewSwitch re-applies cell visibility, which gates the manager
+        // cell on the entitlement (and the user's Settings preference).
+        this._syncViewSwitch();
+    }
+
+    // ── MANAGER view — interactive fleet dashboard ──────────────────────────
+    // Desktop mirror of the mobile DASH: live fleet counts, the per-session
+    // oversight list with actions, the shared manager to-do list, agent
+    // browsers + ports, a chat line into the manager agent's terminal, and a
+    // cohort broadcast (CAST). Reads the same `manager` WS snapshot the fleet
+    // bar uses; actions go over the WS input path (term-keys / hotkey — the
+    // same reliable path the keyboard uses) and the /api/manager endpoints.
+    _toggleManager() {
+        // Entitlement gate: never switch into the manager view when unentitled.
+        if (!this._managerEnabled()) { if (this.viewMode === 'manager') this.viewMode = 'tabs'; return; }
+        this.viewMode = this.viewMode === 'manager' ? 'tabs' : 'manager';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this._updateMonitorBtn();
+        this.audio.play('panels');
+    }
+
+    _updateManagerBtn() { this._syncViewSwitch(); }
+
+    async _managerApi(path, body) {
+        const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
+        const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
+        const url = new URL(backend + path);
+        if (token) url.searchParams.set('t', token);
+        const res = await fetch(url.toString(), body == null
+            ? { credentials: 'include' }
+            : { method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+    }
+
+    // Freshen the fleet snapshot (todos included). The WS `manager` frame keeps
+    // it live afterwards; the fetch avoids a cold first paint on entry.
+    async _pullManager() {
+        try {
+            const d = await this._managerApi('/api/manager');
+            if (d && d.ok !== false && d.counts) { this._manager = d; this._renderManagerView(); }
+        } catch (_) { /* keep the last WS frame */ }
+    }
+
+    // The manager agent's tab: server-designated when available, else best
+    // effort by title so chat still lands somewhere sensible.
+    _managerTabId() {
+        const d = this._manager || {};
+        if (d.managerTabId != null) return d.managerTabId;
+        const s = (d.sessions || []).find(x => /manager|chef/i.test(x.title || ''));
+        return s ? s.id : null;
+    }
+
+    _enterManager() {
+        if (!this._managerEl) this._buildManagerView();
+        this._managerEl.style.display = '';
+        this._renderManagerView();
+        this._pullManager();
+        this._refreshManagerMonitor();
+        if (this._managerTimer) clearInterval(this._managerTimer);
+        // Sessions update live via WS manager frames; this poll only freshens
+        // what has no push channel (to-dos edited by the manager agent, ports).
+        this._managerTimer = setInterval(() => {
+            if (document.hidden || this.viewMode !== 'manager') return;
+            this._pullManager();
+            if (this._mgrvSub === 'monitor') this._refreshManagerMonitor();
+            if (this._mgrvSub === 'usage') this._refreshManagerUsage();
+        }, 10_000);
+    }
+
+    _teardownManager() {
+        if (this._managerTimer) { clearInterval(this._managerTimer); this._managerTimer = null; }
+        if (this._mgruTimer) { clearInterval(this._mgruTimer); this._mgruTimer = null; }
+        if (this._managerEl) this._managerEl.style.display = 'none';
+    }
+
+    // ── CHAT view — IM-style messaging with any agent (or the manager) ──────────
+    // Desktop port of the mobile CHAT. Talk to a chosen session in plain bubbles
+    // instead of the raw terminal: your line is typed into that session's PTY
+    // (the same term-keys path the keyboard uses), and the agent's turn-final
+    // messages — the `tts` frames the Stop hook / soa-msg emit, each tagged with
+    // its source tab — come back as summarized bubbles in that agent's thread.
+    // A target picker lets you message the MANAGER agent from anywhere, regardless
+    // of which terminal tab happens to be active (the gap that made "where is the
+    // manager chat?" confusing).
+    _toggleChat() {
+        this.viewMode = this.viewMode === 'chat' ? 'tabs' : 'chat';
+        try { localStorage.setItem('soa_web_view_mode', this.viewMode); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        this._updateManagerBtn();
+        this.audio.play('panels');
+    }
+
+    _updateChatBtn() { this._syncViewSwitch(); }
+
+    _enterChat() {
+        if (!this._chatEl) this._buildChatView();
+        this._chatUnread = 0;
+        this._chatEl.style.display = '';
+        this._renderChatHead();
+        this._renderChat();
+        this._renderChatStatus();
+        this._updateChatBtn();
+        if (this._chatInput) setTimeout(() => { try { this._chatInput.focus(); } catch (_) {} }, 0);
+    }
+
+    _teardownChat() {
+        if (this._chatEl) this._chatEl.style.display = 'none';
+    }
+
+    // Built once; only the log/targets/status re-render on frames, so typing in
+    // the composer never loses focus.
+    _buildChatView() {
+        this._chatHeadLabel = el('span', { class: 'chat-head-target' });
+        this._chatStatusEl = el('div', { class: 'chat-status' }, [
+            el('span', { class: 'chat-status-dot' }),
+            el('span', { class: 'chat-status-text' }),
+        ]);
+        this._chatHeadEl = el('div', { class: 'chat-head' }, [
+            el('span', { class: 'chat-head-label', text: 'CHATTING WITH' }),
+            this._chatHeadLabel,
+            this._chatStatusEl,
+        ]);
+        this._chatLogEl = el('div', { class: 'chat-log' });
+        this._chatInput = el('textarea', { class: 'chat-input', rows: '1', autocomplete: 'off', spellcheck: 'true',
+            placeholder: 'Message this agent — lands in its terminal…' });
+        this._chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
+        });
+        const composer = el('form', { class: 'chat-composer',
+            onsubmit: (e) => { e.preventDefault(); this._sendChat(); } }, [
+            this._chatInput,
+            el('button', { class: 'chat-send', type: 'submit', title: 'Send', text: '➤' }),
+        ]);
+        this._chatEl = el('div', { class: 'chat-view' }, [
+            this._chatHeadEl,
+            this._chatLogEl,
+            composer,
+        ]);
+        this.termsEl.appendChild(this._chatEl);
+    }
+
+    // Who the CHAT is talking to = the active tab (selected via the top strip).
+    _chatTitleFor(id) {
+        if (id == null) return null;
+        const s = ((this._manager && this._manager.sessions) || []).find(x => x.id === id);
+        if (s && s.title) return s.title;
+        const rt = this.tabs.get(id);
+        return (rt && rt.title) || ('tab ' + id);
+    }
+
+    _renderChatHead() {
+        if (!this._chatHeadLabel) return;
+        const id = this.activeId;
+        if (id == null) { this._chatHeadLabel.textContent = '—'; return; }
+        const isMgr = id === this._managerTabId();
+        this._chatHeadLabel.textContent =
+            (isMgr ? '🧭 ' : '') + '#' + id + ' ' + this._chatTitleFor(id) + (isMgr ? '  (manager)' : '');
+    }
+
+    _pushChat(tabId, msg) {
+        if (tabId == null) return;
+        if (!this._chatThreads.has(tabId)) this._chatThreads.set(tabId, []);
+        const thread = this._chatThreads.get(tabId);
+        thread.push(msg);
+        if (thread.length > 200) thread.shift();   // cap memory per thread
+    }
+
+    // Every agent turn-final message becomes a bubble in that agent's thread —
+    // independent of whether speech is on or which tab is live.
+    _onAgentMessage(d) {
+        const text = d && d.text;
+        if (!text) return;
+        const tab = (d.tab != null) ? d.tab : this.activeId;
+        if (tab == null) return;
+        this._pushChat(tab, { from: 'agent', full: String(text), t: Date.now() });
+        if (this.viewMode === 'chat' && tab === this.activeId) {
+            this._renderChat();
+        } else {
+            this._chatUnread++;
+            this._updateChatBtn();
+            this._showImBanner(tab, String(text));
+        }
+    }
+
+    // iOS-style notification banner for an incoming IM. Rendered on <body> via the
+    // shared .soa-toast (fixed, top, safe-area-aware, width-capped) so it can never
+    // clip the way the in-tray corner badge does. Tap → open that agent's thread.
+    _showImBanner(tabId, text) {
+        const existing = document.getElementById('soa-im-banner');
+        if (existing) existing.remove();
+        const banner = el('div', { id: 'soa-im-banner', class: 'soa-toast soa-toast--im', role: 'alert', 'aria-live': 'polite' }, [
+            el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '🗨︎' }),
+            el('div', { class: 'soa-toast-body' }, [
+                el('p', { class: 'soa-toast-title', text: '#' + tabId + ' ' + this._chatTitleFor(tabId) }),
+                el('p', { class: 'soa-toast-text', text: String(text).replace(/\s+/g, ' ').trim() }),
+            ]),
+        ]);
+        document.body.appendChild(banner);
+        requestAnimationFrame(() => banner.setAttribute('data-show', '1'));
+        const dismiss = () => {
+            banner.removeAttribute('data-show');
+            clearTimeout(this._imBannerTimer);
+            setTimeout(() => banner.remove(), 320);
+        };
+        banner.addEventListener('click', () => {
+            if (this.viewMode !== 'chat') this._toggleChat();
+            this._activate(tabId);
+            dismiss();
+        });
+        clearTimeout(this._imBannerTimer);
+        this._imBannerTimer = setTimeout(dismiss, 5000);
+    }
+
+    _sendChat() {
+        const raw = (this._chatInput && this._chatInput.value || '').trim();
+        if (!raw) return;
+        const id = this.activeId;
+        if (id == null) return;
+        // Type it into the PTY (newline submits, like Enter in the terminal).
+        this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: raw + '\r' });
+        this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
+        this._chatInput.value = '';
+        this._chatInput.style.height = 'auto';
+        this._renderChat();
+        this.audio.play('tabSwitch');
+    }
+
+    _summarizeChat(text, limit = 60) {
+        const clean = String(text).replace(/\s+/g, ' ').trim();
+        const words = clean.split(' ');
+        if (words.length <= limit) return { short: clean, truncated: false };
+        return { short: words.slice(0, limit).join(' ') + '…', truncated: true };
+    }
+
+    _renderChat() {
+        if (!this._chatLogEl) return;
+        const thread = this._chatThreads.get(this.activeId) || [];
+        if (!thread.length) {
+            this._chatLogEl.replaceChildren(el('div', { class: 'chat-empty' }, [
+                'No messages yet with this agent.', el('br'),
+                'Type below — your line goes into its terminal, and its replies appear here (summarized). Switch tabs up top to talk to the manager or another agent.',
+            ]));
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const m of thread) {
+            const bubble = el('div', { class: 'chat-msg ' + (m.from === 'you' ? 'you' : 'agent') });
+            if (m.from === 'agent') {
+                const { short, truncated } = this._summarizeChat(m.full);
+                if (truncated) {
+                    bubble.classList.add('expandable');
+                    bubble.dataset.expanded = '0';
+                    bubble.textContent = short;
+                    bubble.appendChild(el('span', { class: 'chat-more', text: ' more' }));
+                    bubble.addEventListener('click', () => {
+                        const exp = bubble.dataset.expanded === '1';
+                        bubble.dataset.expanded = exp ? '0' : '1';
+                        bubble.textContent = exp ? short : m.full.replace(/\s+/g, ' ').trim();
+                        if (exp) bubble.appendChild(el('span', { class: 'chat-more', text: ' more' }));
+                        this._scrollChatBottom();
+                    });
+                } else {
+                    bubble.textContent = short;
+                }
+            } else {
+                bubble.textContent = m.full;
+            }
+            frag.appendChild(bubble);
+        }
+        this._chatLogEl.replaceChildren(frag);
+        this._scrollChatBottom();
+    }
+
+    _scrollChatBottom() {
+        if (this._chatLogEl) this._chatLogEl.scrollTop = this._chatLogEl.scrollHeight;
+    }
+
+    // Reflect the target agent's live state (from the fleet snapshot) so you can
+    // see it's thinking / waiting on you even between final messages.
+    _renderChatStatus() {
+        if (!this._chatStatusEl) return;
+        const s = ((this._manager && this._manager.sessions) || []).find(x => x.id === this.activeId);
+        const textEl = this._chatStatusEl.querySelector('.chat-status-text');
+        let state = '', label = 'ready';
+        if (s) {
+            if (s.status === 'working')        { state = 'working';   label = 'working'; }
+            else if (s.status === 'attention') { state = 'input';     label = 'awaiting your input'; }
+            else if (s.status === 'done')      { state = 'completed'; label = 'done'; }
+            else                               { state = '';          label = 'idle'; }
+            if (s.ctxPct != null) label += ' · ctx ' + s.ctxPct + '%';
+        }
+        if (state) this._chatStatusEl.setAttribute('data-state', state);
+        else this._chatStatusEl.removeAttribute('data-state');
+        if (textEl) textEl.textContent = label;
+    }
+
+    _setManagerSub(sub) {
+        this._mgrvSub = sub;
+        if (sub === 'monitor') this._refreshManagerMonitor();
+        if (sub === 'usage') this._refreshManagerUsage();
+        // The USAGE pane gets its own 5s cadence while on screen — the shared
+        // 10s manager poll reads as "delayed" for a live burn/cost readout.
+        if (this._mgruTimer) { clearInterval(this._mgruTimer); this._mgruTimer = null; }
+        if (sub === 'usage') {
+            this._mgruTimer = setInterval(() => {
+                if (document.hidden || this.viewMode !== 'manager' || this._mgrvSub !== 'usage') return;
+                this._refreshManagerUsage();
+            }, 5000);
+        }
+        this._renderManagerView();
+    }
+
+    // Static chrome, built once. Only the lists/chips re-render on snapshots,
+    // so typing in the chat / to-do / cast inputs never loses focus.
+    _buildManagerView() {
+        this._mgrvSub = 'sessions';
+        this._mgrvCohort = 'attention';
+        this._mgrvCastOpen = false;
+        this._mgrvCastPre = null;
+
+        this._mgrvHeadEl = el('div', { class: 'mgrv-head' });
+
+        this._mgrvTodoBadge = el('span', { class: 'mgrv-badge', hidden: '' });
+        const seg = (key, label, extra) => el('button', {
+            class: 'mgrv-seg-btn', type: 'button', 'data-seg': key,
+            onclick: () => this._setManagerSub(key),
+        }, [label, extra]);
+        this._mgrvSegBtns = [
+            seg('sessions', 'SESSIONS'),
+            seg('monitor', 'MONITOR'),
+            seg('usage', 'USAGE'),
+            seg('todos', 'TO-DO', this._mgrvTodoBadge),
+        ];
+        const castBtn = el('button', {
+            class: 'mgrv-cast-btn', type: 'button', text: '⇄ CAST',
+            title: 'Broadcast a command to a cohort of sessions',
+            onclick: () => this._toggleManagerCast(),
+        });
+        const toolbar = el('div', { class: 'mgrv-toolbar' }, [
+            el('div', { class: 'mgrv-seg' }, this._mgrvSegBtns),
+            castBtn,
+        ]);
+
+        // CAST panel (hidden until ⇄ CAST) — cohort chips + presets + command.
+        this._mgrvCastCohortsEl = el('div', { class: 'mgrv-cast-cohorts' });
+        this._mgrvCastInput = el('input', {
+            class: 'mgrv-input', type: 'text', spellcheck: 'false',
+            placeholder: 'e.g. continue, /compact, npm test…',
+        });
+        this._mgrvCastEnter = el('input', { type: 'checkbox', checked: '' });
+        const presets = [
+            { label: 'continue', text: 'continue' },
+            { label: '/compact', text: '/compact' },
+            { label: '/clear', text: '/clear' },
+            { label: 'Esc', key: '\x1b' },
+            { label: 'Ctrl-C', key: '\x03' },
+        ];
+        const presetsEl = el('div', { class: 'mgrv-cast-presets' }, presets.map(p =>
+            el('button', { class: 'mgrv-chip', type: 'button', text: p.label,
+                onclick: () => this._sendManagerCast(p) })));
+        const castForm = el('form', { class: 'mgrv-cast-form',
+            onsubmit: (e) => { e.preventDefault(); this._sendManagerCast(); } }, [
+            this._mgrvCastInput,
+            el('button', { class: 'mgrv-send', type: 'submit', text: 'SEND' }),
+        ]);
+        this._mgrvCastEl = el('div', { class: 'mgrv-cast', hidden: '' }, [
+            el('div', { class: 'mgrv-label', text: 'TARGET COHORT' }),
+            this._mgrvCastCohortsEl,
+            el('div', { class: 'mgrv-label', text: 'COMMAND' }),
+            presetsEl,
+            castForm,
+            el('label', { class: 'mgrv-enter' }, [this._mgrvCastEnter, ' press Enter after sending']),
+        ]);
+
+        // Panes.
+        this._mgrvSessionsEl = el('div', { class: 'mgrv-pane mgrv-cards' });
+        this._mgrvMonitorEl = el('div', { class: 'mgrv-pane', hidden: '' });
+        this._mgrvUsageEl = el('div', { class: 'mgrv-pane mgru', hidden: '' });
+        this._mgrvTodoListEl = el('div', { class: 'mgrv-todo-list' });
+        this._mgrvTodoInput = el('input', {
+            class: 'mgrv-input', type: 'text', autocomplete: 'off',
+            placeholder: 'Add a to-do for the fleet…',
+        });
+        const todoForm = el('form', { class: 'mgrv-todo-form',
+            onsubmit: (e) => {
+                e.preventDefault();
+                const text = this._mgrvTodoInput.value.trim();
+                if (text) { this._managerTodoOp({ op: 'add', text, source: 'user' }); this._mgrvTodoInput.value = ''; }
+            } }, [
+            this._mgrvTodoInput,
+            el('button', { class: 'mgrv-send', type: 'submit', text: '＋ ADD' }),
+        ]);
+        this._mgrvTodosEl = el('div', { class: 'mgrv-pane', hidden: '' }, [todoForm, this._mgrvTodoListEl]);
+
+        // Chat line into a session's terminal — defaults to the manager agent.
+        this._mgrvTargetSel = el('select', { class: 'mgrv-target', title: 'Which session receives the message' });
+        this._mgrvChatInput = el('input', {
+            class: 'mgrv-input', type: 'text', autocomplete: 'off', spellcheck: 'true',
+            placeholder: 'Message the manager agent — lands in its terminal…',
+        });
+        const chatForm = el('form', { class: 'mgrv-chat',
+            onsubmit: (e) => { e.preventDefault(); this._sendManagerChat(); } }, [
+            this._mgrvTargetSel,
+            this._mgrvChatInput,
+            el('button', { class: 'mgrv-send', type: 'submit', text: 'SEND ➤' }),
+        ]);
+
+        this._managerEl = el('div', { class: 'manager-view' }, [
+            this._mgrvHeadEl,
+            toolbar,
+            this._mgrvCastEl,
+            this._mgrvSessionsEl,
+            this._mgrvMonitorEl,
+            this._mgrvUsageEl,
+            this._mgrvTodosEl,
+            chatForm,
+        ]);
+        this.termsEl.appendChild(this._managerEl);
+    }
+
+    _renderManagerView() {
+        if (this.viewMode !== 'manager' || !this._managerEl) return;
+        this._renderManagerHead();
+        const open = ((this._manager && this._manager.todos) || []).filter(t => !t.done).length;
+        this._mgrvTodoBadge.textContent = open ? String(open) : '';
+        this._mgrvTodoBadge.hidden = !open;
+        const sub = this._mgrvSub || 'sessions';
+        for (const b of this._mgrvSegBtns) b.classList.toggle('active', b.dataset.seg === sub);
+        this._mgrvSessionsEl.hidden = sub !== 'sessions';
+        this._mgrvMonitorEl.hidden = sub !== 'monitor';
+        this._mgrvUsageEl.hidden = sub !== 'usage';
+        this._mgrvTodosEl.hidden = sub !== 'todos';
+        if (sub === 'sessions') this._renderManagerSessions();
+        else if (sub === 'todos') this._renderManagerTodos();
+        else if (sub === 'monitor') this._renderManagerMonitor();
+        else if (sub === 'usage') this._renderManagerUsage();
+        this._renderManagerTargets();
+        if (this._mgrvCastOpen) this._renderManagerCast();
+    }
+
+    _renderManagerHead() {
+        const d = this._manager;
+        if (!d || !d.counts || !d.counts.total) {
+            this._mgrvHeadEl.replaceChildren(el('div', { class: 'mgrv-empty',
+                text: 'No fleet yet — the supervisor reports sessions here as they open.' }));
+            return;
+        }
+        const c = d.counts;
+        const row = el('div', { class: 'fleet-row' });
+        row.appendChild(el('span', { class: 'fleet-title', text: `◉ FLEET · ${c.total}` }));
+        const mgrId = this._managerTabId();
+        const mgrS = mgrId != null && (d.sessions || []).find(s => s.id === mgrId);
+        if (mgrS) row.appendChild(el('span', { class: 'fleet-chip mgrv-mgr-chip', text: `◉ manager: ${mgrS.title}` }));
+        const chip = (label, n, cls) => {
+            if (n > 0) row.appendChild(el('span', { class: `fleet-chip ${cls}`, text: `${n} ${label}` }));
+        };
+        chip('working',    c.working,     'fleet-working');
+        chip('need input', c.attention,   'fleet-attention');
+        chip('stuck',      c.stuck,       'fleet-stuck');
+        chip('idle',       c.idle,        'fleet-idle');
+        chip('high ctx',   c.highContext, 'fleet-ctx');
+        chip('limited',    c.limited,     'fleet-limited');
+        this._mgrvHeadEl.replaceChildren(row);
+    }
+
+    // ── USAGE pane ──────────────────────────────────────────────────────
+    // The fleet's live Claude bill: 5h window + burn + projection, today with
+    // the per-model split, a 30-minute burn chart, and the per-session
+    // leaderboard (which session is burning the most — subagents folded into
+    // their parent). Fed by /api/claude-usage; the leaderboard needs the v2
+    // usage engine and degrades to a restart hint on an older backend.
+
+    _mgruFmtTok(n) {
+        n = n || 0;
+        if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k';
+        return String(Math.round(n));
+    }
+    _mgruFmtUsd(n) {
+        n = n || 0;
+        if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
+        if (n >= 100) return '$' + n.toFixed(0);
+        return '$' + n.toFixed(2);
+    }
+    _mgruFmtDur(ms) {
+        const s = Math.max(0, Math.round(ms / 1000));
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+        return h ? `${h}h ${m}m` : `${m}m`;
+    }
+
+    // ── Usage-cap calibration ────────────────────────────────────────────────
+    // "How much until the cap" needs the cap value, which /usage knows (from
+    // Anthropic) but the local cost engine doesn't. We calibrate it: the user
+    // enters the % /usage currently shows, and we back-solve cap = liveCost /
+    // (pct/100). Cost is a fine proxy for cap-share (the limit is ~proportional
+    // to weighted consumption, and this fleet is opus-dominated). Stored in
+    // localStorage so it's live with no daemon restart; the user re-enters a %
+    // anytime to re-calibrate. Seeded with a rough estimate so it works day-one.
+    _usageCapCfg() {
+        if (this._usageCap) return this._usageCap;
+        let c = null;
+        try { c = JSON.parse(localStorage.getItem('soa-web:usage-cap') || 'null'); } catch (_) {}
+        if (!c || typeof c !== 'object') c = {};
+        if (!(c.block5hUsd > 0)) { c.block5hUsd = 313; c.estimated = true; }   // ≈ 5h cap, calibrated 2026-07-30
+        if (!(c.weekUsd > 0)) { c.weekUsd = 6300; c.weekEstimated = true; }    // ≈ weekly cap (needs engine d.week)
+        return (this._usageCap = c);
+    }
+    _saveUsageCap(patch) {
+        const c = { ...this._usageCapCfg(), ...patch };
+        this._usageCap = c;
+        try { localStorage.setItem('soa-web:usage-cap', JSON.stringify(c)); } catch (_) {}
+    }
+    // Prompt for the current /usage % and back-solve the cap from live cost.
+    _calibrateUsageCap(scope, liveCost) {
+        const label = scope === 'week' ? 'weekly' : '5-hour';
+        const raw = window.prompt(`What % does /usage show for the ${label} limit right now?\n(Enter just the number, e.g. 44)`, '');
+        if (raw == null) return;
+        const pct = parseFloat(String(raw).replace('%', '').trim());
+        if (!(pct > 0) || pct > 100 || !(liveCost > 0)) { this._mgrvToast && this._mgrvToast('Calibration needs a live cost + a 1–100 %'); return; }
+        const cap = liveCost / (pct / 100);
+        this._saveUsageCap(scope === 'week'
+            ? { weekUsd: cap, weekCalibAt: Date.now(), weekEstimated: false }
+            : { block5hUsd: cap, calibAt: Date.now(), estimated: false });
+        this._renderManagerUsage();
+        this._mgrvToast && this._mgrvToast(`Calibrated ${label} cap ≈ ${this._mgruFmtUsd(cap)} (${pct}% = ${this._mgruFmtUsd(liveCost)})`);
+    }
+
+    async _refreshManagerUsage() {
+        if (this._mgruBusy) return;
+        this._mgruBusy = true;
+        try {
+            const j = await this._managerApi('/api/claude-usage');
+            if (j && j.ok !== false && j.data) { this._usage = j.data; this._usageErr = null; }
+        } catch (e) {
+            this._usageErr = e;
+        } finally {
+            this._mgruBusy = false;
+        }
+        if (this.viewMode === 'manager' && this._mgrvSub === 'usage') this._renderManagerUsage();
+    }
+
+    _renderManagerUsage() {
+        const root = this._mgrvUsageEl;
+        if (!root) return;
+        const d = this._usage;
+        if (!d) {
+            const msg = this._usageErr && /\b404\b/.test(String(this._usageErr.message || this._usageErr))
+                ? 'The usage engine is not live on this backend yet — restart the local daemon to enable it.'
+                : (this._usageErr ? 'Usage endpoint unreachable — retrying…' : 'Reading transcripts…');
+            root.replaceChildren(el('div', { class: 'mgrv-empty', text: msg }));
+            return;
+        }
+        const fmtTok = (n) => this._mgruFmtTok(n), fmtUsd = (n) => this._mgruFmtUsd(n);
+        const head = (label, right) => el('div', { class: 'mgru-head' }, [
+            el('span', { class: 'mgru-head-l', text: label }),
+            right || null,
+        ]);
+        const big = (usd) => el('div', { class: 'mgru-big' }, [
+            el('span', { class: 'mgru-approx', text: '≈' }), fmtUsd(usd),
+        ]);
+
+        // 5H WINDOW — the number that maps to Claude's rolling limit block.
+        const b = d.block || {};
+        let windowCard;
+        if (b.active) {
+            windowCard = el('div', { class: 'mgru-card mgru-window' }, [
+                head('5H WINDOW', el('span', { class: 'mgru-reset', text: `resets in ${this._mgruFmtDur(b.remainingMs)}` })),
+                big(b.cost),
+                el('div', { class: 'mgru-dim', text: `${fmtTok((b.tokens || {}).total)} tok · ${b.requests} req` }),
+                el('div', { class: 'mgru-gauge', title: `${Math.round(b.pct || 0)}% of the 5h window elapsed` }, [
+                    el('span', { class: 'mgru-gauge-fill', style: `width:${Math.min(100, b.pct || 0)}%` }),
+                ]),
+                el('div', { class: 'mgru-kline' }, [
+                    el('span', {}, ['burn ', el('b', { text: `${fmtTok(b.burnRatePerMin)}/min` })]),
+                    el('span', {}, ['projected ', el('b', { text: `≈${fmtUsd(b.projectedCost || 0)}` }), ' by reset']),
+                ]),
+            ]);
+        } else {
+            windowCard = el('div', { class: 'mgru-card mgru-window idle' }, [
+                head('5H WINDOW'),
+                el('div', { class: 'mgru-big mgru-idle-big', text: 'idle' }),
+                el('div', { class: 'mgru-dim', text: d.hasData ? 'window reset — next request opens a fresh block' : 'no recent usage' }),
+                el('div', { class: 'mgru-gauge' }, [el('span', { class: 'mgru-gauge-fill', style: 'width:0%' })]),
+            ]);
+        }
+
+        // TODAY — totals since local midnight + how they split across models.
+        const t = d.today || { tokens: {}, cost: 0, requests: 0 };
+        // Drop rows that would render as ≈$0.00 (stray records with no model).
+        const models = (d.models || []).filter(m => m.cost >= 0.005);
+        const maxModel = Math.max(1, ...models.map(m => m.cost));
+        const todayCard = el('div', { class: 'mgru-card mgru-today' }, [
+            head('TODAY'),
+            big(t.cost),
+            el('div', { class: 'mgru-dim', text: `${fmtTok((t.tokens || {}).total)} tok · ${t.requests} req` }),
+            el('div', { class: 'mgru-models' }, models.slice(0, 4).map(m =>
+                el('div', { class: 'mgru-model', title: `${m.tier}: ${fmtTok(m.tokens)} tok · ${m.requests} req`
+                    + (m.input != null ? `\n${fmtTok(m.input)} in · ${fmtTok(m.output)} out · ${fmtTok(m.cacheRead)} cache-read · ${fmtTok(m.cacheCreate)} cache-write` : '') }, [
+                    el('span', { class: 'mgru-model-name', text: m.tier }),
+                    el('span', { class: 'mgru-model-bar' }, [
+                        el('span', { class: 'mgru-model-fill', style: `width:${Math.max(2, (m.cost / maxModel) * 100)}%` }),
+                    ]),
+                    el('span', { class: 'mgru-model-val', text: '≈' + fmtUsd(m.cost) }),
+                ]))),
+        ]);
+
+        // BURN — per-minute token series, painted in the active accent so it
+        // re-tints across UI languages for free.
+        const spark = el('canvas', { class: 'mgru-spark', width: 720, height: 64 });
+        this._paintUsageSpark(spark, d.series || []);
+        const burnCard = el('div', { class: 'mgru-card mgru-burn' }, [
+            head(`BURN · LAST ${d.seriesMinutes || 30} MIN`),
+            spark,
+        ]);
+
+        // SESSIONS — the leaderboard. Bars scale to the top burner; the inner
+        // brighter segment is the share its subagents spent.
+        const scope = this._mgruScope || d.sessionScope || 'today';
+        const scopeBtn = (key, label) => el('button', {
+            class: 'mgrv-chip mgru-scope' + (scope === key ? ' active' : ''), type: 'button', text: label,
+            onclick: () => { this._mgruScope = key; this._renderManagerUsage(); },
+        });
+        let sessBody;
+        if (!d.sessions) {
+            sessBody = [el('div', { class: 'mgrv-empty', text: 'Per-session rows need the updated backend — restart the local daemon to enable them.' })];
+        } else {
+            const rows = d.sessions
+                .map(s => ({ s, sc: (scope === 'block' ? s.block : s.today) || {} }))
+                .filter(x => x.sc.tok > 0)
+                .sort((a, z) => z.sc.cost - a.sc.cost);
+            const maxCost = Math.max(0.01, ...rows.map(x => x.sc.cost));
+            sessBody = rows.length ? rows.map(({ s, sc }, i) => {
+                const subShare = sc.cost > 0 ? sc.subCost / sc.cost : 0;
+                const tip = [
+                    `${s.project || '?'} — ${s.slug || s.shortId || ''}`,
+                    `5h window: ${fmtTok((s.block || {}).tok)} tok · ≈${fmtUsd((s.block || {}).cost)} · ${(s.block || {}).req || 0} req`,
+                    `today: ${fmtTok((s.today || {}).tok)} tok · ≈${fmtUsd((s.today || {}).cost)} · ${(s.today || {}).req || 0} req`,
+                ];
+                if (subShare > 0.005) tip.push(`subagents: ${Math.round(subShare * 100)}% of this scope's cost`);
+                return el('div', { class: 'mgru-sess' + (i === 0 ? ' top' : ''), title: tip.join('\n') }, [
+                    el('span', { class: 'mgru-rank', text: String(i + 1).padStart(2, '0') }),
+                    el('div', { class: 'mgru-sess-main' }, [
+                        el('div', { class: 'mgru-sess-name' }, [
+                            el('span', { class: 'mgru-sess-proj', text: s.project || '?' }),
+                            el('span', { class: 'mgru-sess-slug', text: s.slug || s.shortId || '' }),
+                        ]),
+                        el('div', { class: 'mgru-sess-bar' }, [
+                            el('span', { class: 'mgru-sess-fill', style: `width:${Math.max(1.5, (sc.cost / maxCost) * 100)}%` },
+                                subShare > 0.005 ? [el('span', { class: 'mgru-sess-sub', style: `width:${Math.min(100, subShare * 100)}%` })] : []),
+                        ]),
+                        el('div', { class: 'mgru-sess-meta', text: `${fmtTok(sc.tok)} tok · ${sc.req || 0} req` + (subShare > 0.005 ? ` · ${Math.round(subShare * 100)}% subagents` : '') }),
+                    ]),
+                    el('span', { class: 'mgru-sess-cost', text: '≈' + fmtUsd(sc.cost) }),
+                ]);
+            }) : [el('div', { class: 'mgrv-empty', text: scope === 'block' ? 'No usage in the current 5h window.' : 'No usage today yet.' })];
+        }
+        const sessCard = el('div', { class: 'mgru-card mgru-sessions' }, [
+            head('SESSIONS', el('span', { class: 'mgru-scopes' }, [scopeBtn('block', '5H'), scopeBtn('today', 'TODAY')])),
+            ...sessBody,
+            el('div', { class: 'mgru-note', text: 'cost is an API-list-price estimate — a flat-rate seat does not pay per token' }),
+        ]);
+
+        // USAGE CAP — the headline "how much until the cap" the user cares about.
+        // % of the plan limit spent, computed live from cost / a cap calibrated to
+        // /usage. The 5h block works with no restart (block.cost is already live);
+        // the weekly row appears once the engine ships d.week (7-day window).
+        const cap = this._usageCapCfg();
+        const bcost = b.cost || 0;
+        const blockCapUsd = cap.block5hUsd || 0;
+        const blockPct = blockCapUsd > 0 ? (bcost / blockCapUsd) * 100 : 0;
+        const tokTotal = (b.tokens && b.tokens.total) || 0;
+        const burnUsdMin = tokTotal > 0 ? (bcost / tokTotal) * (b.burnRatePerMin || 0) : 0;
+        const leftUsd = Math.max(0, blockCapUsd - bcost);
+        const etaCapMin = burnUsdMin > 0 ? leftUsd / burnUsdMin : Infinity;
+        const resetMin = (b.remainingMs || 0) / 60000;
+        const projPct = blockCapUsd > 0 ? ((b.projectedCost || bcost) / blockCapUsd) * 100 : 0;
+        const capLevel = (p) => p >= 90 ? 'crit' : p >= 70 ? 'warn' : 'ok';
+        const capRow = (label, pct, sub, onCalibrate, estimated) => el('div', { class: 'mgru-cap-row' }, [
+            el('div', { class: 'mgru-cap-top' }, [
+                el('span', { class: 'mgru-cap-label', text: label }),
+                el('span', { class: 'mgru-cap-pct', 'data-level': capLevel(pct || 0), text: (pct != null ? Math.round(pct) : '—') + '%' + (estimated ? ' est' : '') }),
+                el('button', { class: 'mgru-cap-cal', type: 'button', title: 'Calibrate to the % /usage shows now', text: 'calibrate', onclick: onCalibrate }),
+            ]),
+            el('div', { class: 'mgru-gauge mgru-cap-gauge', 'data-level': capLevel(pct || 0) }, [
+                el('span', { class: 'mgru-gauge-fill', style: `width:${Math.min(100, pct || 0)}%` }),
+            ]),
+            el('div', { class: 'mgru-cap-sub', text: sub }),
+        ]);
+        const blockSub = !b.active ? 'block idle — resets on the next request'
+            : blockCapUsd > 0
+                ? `≈${fmtUsd(bcost)} of ≈${fmtUsd(blockCapUsd)} · ≈${fmtUsd(leftUsd)} left`
+                  + (isFinite(etaCapMin) && etaCapMin < resetMin ? ` · cap in ~${Math.round(etaCapMin)}m` : ` · resets in ${this._mgruFmtDur(b.remainingMs || 0)}`)
+                : 'calibrate to see headroom';
+        const capCard = el('div', { class: 'mgru-card mgru-cap' }, [
+            head('USAGE CAP', el('span', { class: 'mgru-reset', text: 'calibrated to /usage' })),
+            capRow('5H BLOCK', b.active ? blockPct : 0, blockSub, () => this._calibrateUsageCap('block', bcost), cap.estimated),
+        ]);
+        if (d.week && d.week.cost != null) {
+            const wcost = d.week.cost;
+            const wcap = cap.weekUsd || d.week.capUsd || 0;
+            const wpct = wcap > 0 ? (wcost / wcap) * 100 : (d.week.pctOfCap || 0);
+            const wsub = `≈${fmtUsd(wcost)}` + (wcap ? ` of ≈${fmtUsd(wcap)} · ≈${fmtUsd(Math.max(0, wcap - wcost))} left` : '')
+                + (d.week.resetTs ? ` · resets ${new Date(d.week.resetTs).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '');
+            capCard.appendChild(capRow('WEEK', wpct, wsub, () => this._calibrateUsageCap('week', wcost), cap.weekEstimated));
+        }
+        if (b.active && projPct > 0) capCard.appendChild(el('div', { class: 'mgru-note', text: `projected ≈${Math.round(projPct)}% of the 5h cap by reset at the current burn` + (cap.estimated ? ' · cap is an estimate — hit “calibrate”' : '') }));
+
+        // WHAT'S DRIVING USAGE — the /usage "what's contributing to your limits"
+        // breakdown, estimated from local transcripts over a rolling 24h. Shares
+        // are independent characteristics (not a partition), so they don't sum to
+        // 100. Only appears once the engine ships it (needs a daemon restart).
+        const ins = d.insights;
+        let insightsCard = null;
+        if (ins && ins.cost > 0) {
+            const defs = [
+                ['subagentPct',     'from subagent-heavy sessions', 'Each subagent runs its own requests — be deliberate about spawning them, and consider a cheaper model for simple ones.'],
+                ['highContextPct',  'at >150k context',            'Longer sessions cost more even when cached. /compact mid-task; /clear when switching tasks.'],
+                ['longSessionPct',  'from 8+ hour sessions',       'Often background/loop sessions — continuous burn adds up, so make sure it is intentional.'],
+                ['parallelPct',     'while 4+ sessions ran in parallel', 'All sessions share one limit — queue when you don’t need them all at once.'],
+            ].map(([k, label, tip]) => ({ pct: ins[k] || 0, label, tip }))
+             .filter(r => r.pct > 0)
+             .sort((a, z) => z.pct - a.pct);
+            insightsCard = el('div', { class: 'mgru-card mgru-insights' }, [
+                head("WHAT’S DRIVING USAGE", el('span', { class: 'mgru-reset', text: `est · last ${ins.windowHours || 24}h` })),
+                ...defs.map(r => el('div', { class: 'mgru-insight', title: r.tip }, [
+                    el('span', { class: 'mgru-insight-pct', text: r.pct + '%' }),
+                    el('div', { class: 'mgru-insight-main' }, [
+                        el('div', { class: 'mgru-insight-label', text: r.label }),
+                        el('div', { class: 'mgru-insight-bar' }, [
+                            el('span', { class: 'mgru-insight-fill', style: `width:${Math.min(100, r.pct)}%` }),
+                        ]),
+                        el('div', { class: 'mgru-insight-tip', text: r.tip }),
+                    ]),
+                ])),
+                el('div', { class: 'mgru-note', text: 'approximate, from local transcripts — independent characteristics, not a 100% split' }),
+            ]);
+        }
+
+        root.replaceChildren(...[
+            el('div', { class: 'mgru-grid' }, [windowCard, todayCard]),
+            capCard,
+            insightsCard,
+            burnCard,
+            sessCard,
+        ].filter(Boolean));
+    }
+
+    _paintUsageSpark(canvas, series) {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+        const n = series.length;
+        if (!n) return;
+        const cs = getComputedStyle(document.documentElement);
+        const acc = (cs.getPropertyValue('--soa-accent-rgb') || '0,229,255').trim();
+        const max = Math.max(1, ...series);
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            const y = h - (series[i] / max) * (h - 4) - 2;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = `rgba(${acc}, 0.9)`;
+        ctx.lineWidth = 1.75;
+        ctx.stroke();
+        ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        ctx.fillStyle = `rgba(${acc}, 0.10)`;
+        ctx.fill();
+        // Faint midline so an empty-ish chart still reads as instrumentation.
+        ctx.strokeStyle = `rgba(${acc}, 0.12)`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 5]);
+        ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    _renderManagerSessions() {
+        const sessions = (this._manager && this._manager.sessions) || [];
+        if (!sessions.length) {
+            this._mgrvSessionsEl.replaceChildren(el('div', { class: 'mgrv-empty', text: 'No sessions yet.' }));
+            return;
+        }
+        const ago = (ms) => {
+            const s = Math.round(ms / 1000);
+            if (s < 60) return s + 's';
+            const m = Math.round(s / 60);
+            return m < 60 ? m + 'm' : Math.round(m / 60) + 'h';
+        };
+        const hhmm = (ms) => { const t = new Date(ms); return t.getHours() + ':' + String(t.getMinutes()).padStart(2, '0'); };
+        const statusLabel = (s) => ({
+            working: 'Working…', attention: 'Needs input', done: 'Awaiting next prompt', idle: 'Idle',
+        })[s] || 'Shell ready';
+        const mgrId = this._managerTabId();
+        this._mgrvPreEls = new Map();
+        const tile = (s) => {
+            const flags = [];
+            if (s.id === mgrId) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-mgr', text: '◉ MGR' }));
+            if (s.stuck) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-stuck', text: 'STUCK' }));
+            if (s.attention) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-attn', text: 'NEEDS YOU' }));
+            if (s.highContext) flags.push(el('span', { class: 'mgrv-fl mgrv-fl-ctx', text: 'HIGH CTX' }));
+            if (s.limited) {
+                const when = s.resumeAt ? `resume ${hhmm(s.resumeAt)}` : (s.limitResetAt ? `resets ${hhmm(s.limitResetAt)}` : 'limited');
+                flags.push(el('span', { class: 'mgrv-fl mgrv-fl-limit', text: '⏾ ' + when }));
+            }
+            // Dashboard tile: rich local data (status/activity/live preview) when
+            // this client has the buffer, else the manager snapshot + the daemon's
+            // scrollback tail (async, see _mgrvFillTails) so tiles are never blank.
+            const status = this._agentStatus.get(s.id) || s.status || 'idle';
+            const pct = (this._ctxPct.get(s.id) != null ? this._ctxPct.get(s.id) : s.ctxPct) || 0;
+            const buf = this._agentBuf.get(s.id);
+            const fallback = (s.status === 'idle' || s.status === 'done') && s.idleMs != null
+                ? `${statusLabel(s.status)} · ${ago(s.idleMs)}`
+                : statusLabel(s.status);
+            const activity = (buf && buf.activity) || fallback;
+            const statusLine = (buf && buf.statusLine) || '';
+            const actionLine = (buf && buf.actionLine) || '';
+            const pie = el('span', { class: 'tile-pie', title: `Context ${pct}% used` });
+            this._paintTilePie(pie, pct);
+            const pctEl = el('span', { class: 'mgrv-pct', text: pct ? pct + '%' : '' });
+            const icon = el('img', {
+                class: 'tile-icon', alt: '', loading: 'lazy', decoding: 'async',
+                src: `/api/tabs/${s.id}/icon`,
+                onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
+                onerror: () => icon.remove(),
+            });
+            const group = s.group || this._agentGroup.get(s.id) || '';
+            // Hide the chip when the title already ends with the group name
+            // (e.g. "#23 iPlan" + "iPlan") — avoid showing the name twice.
+            const gl = group.trim().toLowerCase();
+            const grpRedundant = gl && String(s.title || '').trim().toLowerCase().endsWith(gl);
+            const grpChip = (group && group !== 'ungrouped' && !grpRedundant)
+                ? el('span', { class: 'tile-group-chip mgrv-grp', text: group }) : null;
+            const pre = el('pre', { class: 'tile-preview', text: this._mgrvTailFor(s.id) });
+            this._mgrvPreEls.set(s.id, pre);
+            const act = (label, fn, title) => el('button', {
+                class: 'mgrv-act', type: 'button', text: label, title: title || '',
+                onclick: (e) => { e.stopPropagation(); fn(); } });
+            return el('div', { class: 'tile mgrv-tile', 'data-agent': this._displayAgent(s.id, status), 'data-status': s.status || 'idle' }, [
+                pie, pctEl,
+                el('div', { class: 'tile-head', onclick: () => this._openFromManager(s.id) }, [
+                    icon,
+                    el('span', { class: 'tile-title', text: `#${s.id} ${s.title}` }),
+                    grpChip,
+                ]),
+                flags.length ? el('div', { class: 'mgrv-flags' }, flags) : null,
+                el('span', { class: 'tile-status-line', text: statusLine }),
+                el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
+                pre,
+                el('span', { class: 'tile-activity', text: activity }),
+                el('div', { class: 'mgrv-acts' }, [
+                    act('OPEN', () => this._openFromManager(s.id), 'Jump into this terminal'),
+                    act('STOP', () => {
+                        this.bridge.input(INPUT_KIND.HOTKEY, { id: s.id, combo: 'ctrl+c' });
+                        this._mgrvToast('Ctrl-C → #' + s.id);
+                    }, 'Interrupt (Ctrl-C)'),
+                    act('CMP', () => {
+                        this.bridge.input(INPUT_KIND.TERM_KEYS, { id: s.id, text: '/compact' });
+                        setTimeout(() => this.bridge.input(INPUT_KIND.TERM_KEYS, { id: s.id, text: '\r' }), 160);
+                        this._mgrvToast('/compact → #' + s.id);
+                    }, 'Run /compact'),
+                    act('CAST', () => this._openManagerCast([s.id]), 'Broadcast starting from this session'),
+                ]),
+            ]);
+        };
+        // Triage sections — the dashboard read: what needs me, what's moving,
+        // what's parked. Severity-ordered inside NEEDS YOU.
+        const needs = [], working = [], resting = [];
+        for (const s of sessions) {
+            const live = this._agentStatus.get(s.id) || s.status;
+            if (s.attention || s.stuck || s.limited || s.highContext || live === 'attention' || live === 'error') needs.push(s);
+            else if (live === 'working') working.push(s);
+            else resting.push(s);
+        }
+        const sev = (s) => s.stuck ? 0 : s.attention ? 1 : s.limited ? 2 : 3;
+        needs.sort((a, b) => sev(a) - sev(b) || a.id - b.id);
+        const sec = (label, cls, arr) => !arr.length ? [] : [
+            el('div', { class: 'mgrv-sec ' + cls }, [
+                el('span', { class: 'mgrv-sec-name', text: label }),
+                el('span', { class: 'mgrv-sec-count', text: String(arr.length) }),
+            ]),
+            ...arr.map(tile),
+        ];
+        this._mgrvSessionsEl.replaceChildren(
+            ...sec('▲ NEEDS YOU', 'mgrv-sec-attn', needs),
+            ...sec('● WORKING', 'mgrv-sec-work', working),
+            ...sec('○ IDLE / DONE', 'mgrv-sec-idle', resting),
+        );
+        this._mgrvFillTails(sessions.map(s => s.id));
+    }
+
+    // ── Manager tile previews — daemon scrollback fallback ──────────────────
+    // The local xterm buffer only exists for tabs this client has streamed;
+    // after a reload (or for a never-opened tab) it's empty and the tile looks
+    // like a bare box. The daemon's scrollback covers every session, so fetch
+    // the tail for blank tiles ({action:'read'} — loopback-trusted, so this
+    // works on the desktop at localhost and fails quiet through a tunnel).
+    _mgrvCleanTail(text, n = 4) {
+        const clean = String(text || '')
+            .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?/g, '')   // OSC titles/links
+            .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')             // CSI colors/moves
+            .replace(/^[0-9;]{2,}m/gm, '')                       // clipped SGR residue
+            .replace(/\x1b/g, '');
+        const lines = clean.split(/\r\n|\r|\n/).map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+        return lines.slice(-n).join('\n');
+    }
+
+    _mgrvTailFor(id) {
+        const local = this._tileTailText(id);
+        if (local) return local;
+        const c = this._mgrvReadCache && this._mgrvReadCache.get(id);
+        return (c && c.text) || '';
+    }
+
+    _mgrvFillTails(ids) {
+        if (!this._mgrvReadCache) this._mgrvReadCache = new Map();
+        const now = Date.now();
+        const stale = ids.filter(id => {
+            if (this._tileTailText(id)) return false;
+            const c = this._mgrvReadCache.get(id);
+            return !c || (now - c.ts > 9000);
+        }).slice(0, 16);
+        for (const id of stale) {
+            const prev = this._mgrvReadCache.get(id);
+            this._mgrvReadCache.set(id, { ts: now, text: (prev && prev.text) || '' });
+            this._managerApi('/api/sessions', { action: 'read', id, lines: 12 })
+                .then(r => {
+                    if (!r || r.ok === false) return;
+                    const text = this._mgrvCleanTail(r.text, 4);
+                    this._mgrvReadCache.set(id, { ts: Date.now(), text });
+                    const pre = this._mgrvPreEls && this._mgrvPreEls.get(id);
+                    if (text && pre && pre.isConnected && !this._tileTailText(id)) pre.textContent = text;
+                })
+                .catch(() => {});
+        }
+    }
+
+    _openFromManager(id) {
+        this.viewMode = 'tabs';
+        try { localStorage.setItem('soa_web_view_mode', 'tabs'); } catch (_) {}
+        this._applyViewMode();
+        this._updateViewBtn();
+        if (this.tabs.has(id)) this._activate(id);
+    }
+
+    // ── Manager to-dos (shared with the manager agent + mobile DASH) ────────
+    _renderManagerTodos() {
+        const todos = (this._manager && this._manager.todos) || [];
+        if (!todos.length) {
+            this._mgrvTodoListEl.replaceChildren(el('div', { class: 'mgrv-empty',
+                text: 'No to-dos. Add one above — the fleet manager sees it too.' }));
+            return;
+        }
+        this._mgrvTodoListEl.replaceChildren(...todos.map(td => el('div', {
+            class: 'mgrv-todo' + (td.done ? ' done' : '') }, [
+            el('button', { class: 'mgrv-todo-check', type: 'button', text: td.done ? '☑' : '☐',
+                onclick: () => this._managerTodoOp({ op: 'toggle', id: td.id }) }),
+            el('span', { class: 'mgrv-todo-text' }, [
+                td.text,
+                td.tab != null ? el('span', { class: 'mgrv-todo-tab', text: ` #${td.tab}` }) : null,
+                td.source === 'manager' ? el('span', { class: 'mgrv-todo-src', text: ' ◉ mgr' }) : null,
+            ]),
+            el('button', { class: 'mgrv-todo-del', type: 'button', text: '×',
+                onclick: () => this._managerTodoOp({ op: 'del', id: td.id }) }),
+        ])));
+    }
+
+    async _managerTodoOp(body) {
+        try {
+            const r = await this._managerApi('/api/manager/todo', body);
+            if (r && r.todos) {
+                if (!this._manager) this._manager = {};
+                this._manager.todos = r.todos;
+                this._renderManagerView();
+            }
+        } catch (_) { this._mgrvToast('To-do API unavailable on this server.'); }
+    }
+
+    // ── Manager monitor pane — agent browsers + localhost ports ─────────────
+    async _refreshManagerMonitor() {
+        const [instances, ports] = await Promise.all([
+            this._fetchBrowserInstances(),
+            this._managerApi('/api/ports').then(j => (j && j.data && j.data.ports) || []).catch(() => []),
+        ]);
+        this._mgrvMonitorData = { instances, ports };
+        this._renderManagerMonitor();
+    }
+
+    _renderManagerMonitor() {
+        if (!this._mgrvMonitorEl) return;
+        const d = this._mgrvMonitorData || { instances: [], ports: [] };
+        const cells = d.instances.length
+            ? d.instances.map(ins => {
+                const tab = this.tabs.get(Number(ins.tabId));
+                return el('div', { class: 'mon-cell mgrv-mon-cell' }, [
+                    el('div', { class: 'mon-bar' }, [
+                        el('span', { class: 'mon-title', text: (tab && tab.title) || ('tab ' + ins.tabId) }),
+                        el('span', { class: 'mon-url', text: ins.url || 'idle' }),
+                    ]),
+                ]);
+            })
+            : [el('div', { class: 'mgrv-empty', text: 'No agent browsers yet — `soa-browser open …` sessions appear here.' })];
+        const ports = d.ports.length
+            ? d.ports.map(p => el('button', {
+                class: 'mon-port', type: 'button',
+                title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                text: `:${p.port} — ${p.process}`,
+                onclick: async () => {
+                    try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(this, String(p.port)); }
+                    catch (err) { console.warn('[manager] preview open failed', err); }
+                } }))
+            : [el('div', { class: 'mgrv-empty', text: 'No open localhost ports.' })];
+        this._mgrvMonitorEl.replaceChildren(
+            el('div', { class: 'monitor-head', text: '◉ AGENT BROWSERS' }),
+            el('div', { class: 'mgrv-mon-grid' }, cells),
+            el('div', { class: 'monitor-head', text: '⊞ LOCALHOST PORTS' }),
+            el('div', { class: 'monitor-ports' }, ports),
+            el('div', { class: 'mgrv-hint', text: 'Live browser streams: ⋯ MORE → ⊡ MON.' }),
+        );
+    }
+
+    // ── Chat to a session (manager agent by default) ─────────────────────────
+    _renderManagerTargets() {
+        const sel = this._mgrvTargetSel;
+        if (!sel) return;
+        const sessions = (this._manager && this._manager.sessions) || [];
+        const mgrId = this._managerTabId();
+        const prev = sel.value;
+        sel.replaceChildren(...sessions.map(s => el('option', {
+            value: String(s.id),
+            text: (s.id === mgrId ? '◉ ' : '') + `#${s.id} ${s.title}`,
+        })));
+        // Keep the user's pick across re-renders; default to the manager tab.
+        if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+        else if (mgrId != null) sel.value = String(mgrId);
+    }
+
+    _sendManagerChat() {
+        const id = Number(this._mgrvTargetSel && this._mgrvTargetSel.value);
+        const text = ((this._mgrvChatInput && this._mgrvChatInput.value) || '').trim();
+        if (!id || !text) return;
+        this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text });
+        // Discrete Enter a beat later so the TUI submits instead of treating a
+        // glued CR as a pasted newline (same trick as the broadcast modal).
+        setTimeout(() => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: '\r' }), 160);
+        this._mgrvChatInput.value = '';
+        this.audio.play('granted');
+        this._mgrvToast('Sent to #' + id + '.');
+    }
+
+    // ── CAST — fan a command to a cohort ─────────────────────────────────────
+    _toggleManagerCast() {
+        this._mgrvCastOpen = !this._mgrvCastOpen;
+        if (!this._mgrvCastOpen) this._mgrvCastPre = null;
+        this._mgrvCastEl.hidden = !this._mgrvCastOpen;
+        if (this._mgrvCastOpen) { this._renderManagerCast(); this._mgrvCastInput.focus(); }
+    }
+
+    _openManagerCast(preIds) {
+        this._mgrvCastPre = Array.isArray(preIds) ? preIds : null;
+        if (this._mgrvCastPre) this._mgrvCohort = 'selected';
+        this._mgrvCastOpen = true;
+        this._mgrvCastEl.hidden = false;
+        this._renderManagerCast();
+        this._mgrvCastInput.focus();
+    }
+
+    _managerCohortIds(c) {
+        const ss = (this._manager && this._manager.sessions) || [];
+        if (c === 'selected') return (this._mgrvCastPre || []).slice();
+        if (c === 'all') return ss.map(s => s.id);
+        if (c === 'working') return ss.filter(s => s.status === 'working').map(s => s.id);
+        const key = { attention: 'attention', stuck: 'stuck', idle: 'idle', highContext: 'highContext' }[c];
+        return key ? ss.filter(s => s[key]).map(s => s.id) : [];
+    }
+
+    _renderManagerCast() {
+        const cohorts = [
+            ['all', 'All'], ['attention', 'Needs you'], ['stuck', 'Stuck'],
+            ['idle', 'Idle'], ['working', 'Working'], ['highContext', 'High ctx'],
+        ];
+        if (this._mgrvCastPre) cohorts.unshift(['selected', '#' + this._mgrvCastPre.join(', #')]);
+        this._mgrvCastCohortsEl.replaceChildren(...cohorts.map(([key, label]) => {
+            const n = this._managerCohortIds(key).length;
+            return el('button', {
+                class: 'mgrv-chip' + (key === this._mgrvCohort ? ' on' : '') + (n ? '' : ' empty'),
+                type: 'button', text: `${label} · ${n}`,
+                onclick: () => { this._mgrvCohort = key; this._renderManagerCast(); },
+            });
+        }));
+    }
+
+    _sendManagerCast(preset) {
+        const ids = this._managerCohortIds(this._mgrvCohort);
+        if (!ids.length) { this._mgrvToast('No sessions in that cohort.'); return; }
+        if (preset && preset.key != null) {
+            this._broadcastRaw(preset.key, ids);
+        } else {
+            const text = preset ? preset.text : ((this._mgrvCastInput.value) || '').trim();
+            if (!text) { this._mgrvCastInput.focus(); return; }
+            this._broadcastRaw(text, ids);
+            const wantEnter = preset ? true : this._mgrvCastEnter.checked;
+            if (wantEnter) setTimeout(() => this._broadcastRaw('\r', ids), 160);
+            if (!preset) this._mgrvCastInput.value = '';
+        }
+        this.audio.play('granted');
+        this._mgrvToast(`Sent to ${ids.length} session${ids.length > 1 ? 's' : ''}.`);
+    }
+
+    _mgrvToast(text) {
+        if (!this._managerEl) return;
+        if (!this._mgrvToastEl || !this._mgrvToastEl.isConnected) {
+            this._mgrvToastEl = el('div', { class: 'mgrv-toast' });
+            this._managerEl.appendChild(this._mgrvToastEl);
+        }
+        this._mgrvToastEl.textContent = text;
+        this._mgrvToastEl.classList.add('show');
+        clearTimeout(this._mgrvToastTimer);
+        this._mgrvToastTimer = setTimeout(() => this._mgrvToastEl.classList.remove('show'), 1800);
     }
 
     _renderTiles() {
@@ -1802,25 +4426,61 @@ class Shell {
             this.termsEl.appendChild(this._tilesGridEl);
         }
         this._tilesGridEl.style.display = '';
+        this._tilesGridEl.classList.toggle('tiles-grouped', !!this.tilesGrouped);
         this._installTilesDrop();
         this._updateDashboardPortInfo();
         const existing = new Map();
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             existing.set(Number(node.dataset.tileId), node);
         }
-        const fragment = document.createDocumentFragment();
-        for (const id of this.order) {
+        // Diff-render: reuse a live tile node when we already have one.
+        const takeTile = (id) => {
             let node = existing.get(id);
-            if (node) {
-                existing.delete(id);
-                this._updateTileNode(node, id);
-            } else {
-                node = this._createTileNode(id);
+            if (node) { existing.delete(id); this._updateTileNode(node, id); }
+            else node = this._createTileNode(id);
+            node.style.display = '';
+            return node;
+        };
+        const fragment = document.createDocumentFragment();
+        if (this.tilesGrouped) {
+            // Grouped view: ONE horizontal-scrolling row per category. Tiles keep
+            // their dashboard size; the user scrolls each category sideways.
+            const buckets = new Map();
+            for (const id of this.order) {
+                const g = this._agentGroup.get(id) || 'ungrouped';
+                if (!buckets.has(g)) buckets.set(g, []);
+                buckets.get(g).push(id);
             }
-            fragment.appendChild(node);
+            const groupNames = [...buckets.keys()].sort((a, b) => (
+                a === 'ungrouped' ? 1 : b === 'ungrouped' ? -1 : a.localeCompare(b)
+            ));
+            for (const g of groupNames) {
+                const ids = buckets.get(g);
+                const collapsed = this._collapsedGroups.has(g);
+                const strip = el('div', { class: 'cat-strip' });
+                if (!collapsed) for (const id of ids) {
+                    const n = takeTile(id); n.classList.add('cat-tile'); strip.appendChild(n);
+                }
+                fragment.appendChild(el('div', { class: 'cat-row' + (collapsed ? ' collapsed' : '') }, [
+                    this._tileGroupHeader(g, ids.length),
+                    strip,
+                ]));
+            }
+        } else {
+            // Flat dashboard: every tile in one wrapping grid, no categories.
+            for (const id of this.order) {
+                const n = takeTile(id); n.classList.remove('cat-tile');
+                fragment.appendChild(n);
+            }
         }
         for (const old of existing.values()) old.remove();
+        // replaceChildren wipes the pinned header cards too — carry them
+        // across the re-render (FLEET bar above, port info below) instead of
+        // waiting for the next async refresh to repaint them.
+        const pinnedPorts = this._tilesGridEl.querySelector('.dashboard-port-info');
         this._tilesGridEl.replaceChildren(fragment);
+        if (pinnedPorts) this._tilesGridEl.insertBefore(pinnedPorts, this._tilesGridEl.firstChild);
+        this._renderFleetBar();
     }
 
     // New-tab chooser: every "+" asks what to open — a Terminal (shell tab), a
@@ -1850,11 +4510,183 @@ class Shell {
         document.body.appendChild(backdrop);
     }
 
+    // Broadcast a command/keystroke to EVERY terminal at once. Built for fleet
+    // recovery — switching model across all agents, or nudging them all to
+    // retry/resume after an internet drop or provider outage. Pure client-side:
+    // it types into each tab's PTY via TERM_KEYS, the same path a keypress takes,
+    // so it needs no server support and can't desync tab state.
+    _openBroadcast() {
+        const ids = this.order.slice();
+        const n = ids.length;
+        const backdrop = el('div', { class: 'soa-modal-backdrop' });
+        const card = el('div', { class: 'soa-modal soa-bcast' });
+        const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+
+        // Which tabs receive the broadcast. Restore the LAST selection (persisted)
+        // so a 7-of-10 pick isn't reset to "all" each time — intersect with the
+        // tabs that still exist. Fall back to ALL when there's no usable saved set
+        // (first run, or every saved tab is gone). The chips + checkboxes below
+        // let you re-narrow it.
+        let _savedSel = null;
+        try { _savedSel = JSON.parse(localStorage.getItem('soa_bcast_selection') || 'null'); } catch (_) {}
+        const _savedSet = Array.isArray(_savedSel) ? new Set(_savedSel.filter(id => this.tabs.has(id))) : null;
+        const selected = (_savedSet && _savedSet.size) ? _savedSet : new Set(ids);
+        const persistSel = () => { try { localStorage.setItem('soa_bcast_selection', JSON.stringify([...selected])); } catch (_) {} };
+
+        // ---- target selector: one checkbox row per tab --------------------
+        const STATUS_LABELS = { working: 'Working', attention: 'Needs input', done: 'Done', idle: 'Idle' };
+        const rows = ids.map((id) => {
+            const rt = this.tabs.get(id);
+            const title = (rt && rt.title) || tr('tab.default', { id });
+            const status = this._agentStatus.get(id) || 'idle';
+            const pct = this._ctxPct.get(id) || 0;
+            const chk = el('input', { type: 'checkbox', class: 'bcast-row-chk' });
+            chk.checked = selected.has(id);
+            const row = el('label', { class: 'bcast-row', 'data-agent': status }, [
+                chk,
+                el('span', { class: 'bcast-row-dot' }),
+                el('span', { class: 'bcast-row-title', text: title }),
+                el('span', { class: 'bcast-row-ctx', text: pct ? pct + '%' : '' }),
+            ]);
+            chk.addEventListener('change', () => {
+                if (chk.checked) selected.add(id); else selected.delete(id);
+                refresh(); persistSel();
+            });
+            return { row, chk, id, status };
+        });
+        const listEl = el('div', { class: 'bcast-list' }, rows.map(r => r.row));
+
+        // Quick-select chips: All / None, plus one per agent status present, so
+        // "send to everyone that needs input" is a single tap.
+        const setSel = (predicate) => {
+            selected.clear();
+            for (const r of rows) {
+                r.chk.checked = predicate(r);
+                if (r.chk.checked) selected.add(r.id);
+            }
+            refresh(); persistSel();
+        };
+        const present = [...new Set(rows.map(r => r.status))].filter(s => STATUS_LABELS[s]);
+        const quickEl = el('div', { class: 'bcast-quick-row' }, [
+            el('button', { class: 'bcast-quick', type: 'button', text: `All ${n}`, onclick: () => setSel(() => true) }),
+            el('button', { class: 'bcast-quick', type: 'button', text: 'None', onclick: () => setSel(() => false) }),
+            ...present.map(s => el('button', {
+                class: 'bcast-quick', type: 'button', 'data-agent': s,
+                text: STATUS_LABELS[s], onclick: () => setSel(r => r.status === s),
+            })),
+        ]);
+        const countEl = el('span', { class: 'bcast-count' });
+
+        const input = el('input', { class: 'bcast-input', type: 'text', spellcheck: 'false',
+            placeholder: 'Command to send to the selected terminals…' });
+        const enterChk = el('input', { type: 'checkbox', id: 'bcast-enter', checked: 'checked' });
+        const enterLbl = el('label', { class: 'bcast-chk', for: 'bcast-enter' }, [enterChk, ' auto-press Enter to submit']);
+
+        // Briefly highlight the selector when the user tries to send with nothing
+        // selected — cheaper than a disabled-button explanation.
+        const flashEmpty = () => { quickEl.classList.remove('bcast-flash'); void quickEl.offsetWidth; quickEl.classList.add('bcast-flash'); };
+
+        // Recovery presets. A preset with `key` blasts a bare control key to the
+        // selected tabs immediately; otherwise it just fills the input to review
+        // first. `claude --continue` resumes the most recent conversation in each
+        // tab's cwd in-place — the fix for "tabs reopened after a restart but
+        // Claude is a dead shell". (Bare `claude` would start fresh and lose context.)
+        const presets = [
+            { label: 'Resume ⟲ (claude -c)', text: 'claude --continue' },
+            { label: 'claude --resume (pick)', text: 'claude --resume' },
+            { label: '/model opus', text: '/model opus' },
+            { label: 'Enter ⏎ (retry)', key: '\r' },
+            { label: 'Esc', key: '\x1b' },
+            { label: 'Ctrl-C', key: '\x03' },
+        ];
+        const chips = el('div', { class: 'bcast-presets' }, presets.map(p => el('button', {
+            class: 'bcast-chip', type: 'button', text: p.label,
+            onclick: () => {
+                if (p.key != null) {
+                    if (!selected.size) { flashEmpty(); return; }
+                    persistSel();
+                    this._broadcastRaw(p.key, [...selected]); this.audio.play('granted'); close();
+                } else { input.value = p.text; input.focus(); }
+            },
+        })));
+
+        const sendBtn = el('button', { class: 'bcast-send', type: 'button', text: `SEND TO ALL ${n}` });
+        const cancelBtn = el('button', { class: 'bcast-cancel', type: 'button', text: 'Cancel' });
+        const doSend = () => {
+            if (!selected.size) { flashEmpty(); return; }
+            const text = input.value;
+            if (!text.trim() && !enterChk.checked) { input.focus(); return; }
+            const targets = [...selected];
+            persistSel();
+            // Auto-submit: after the command text lands, send a DISCRETE Enter
+            // (CR) so every selected agent actually RUNS the command — the user
+            // shouldn't have to press Enter in each tab. Claude Code's TUI can
+            // treat a CR glued to the text (or arriving too fast) as a pasted
+            // newline that inserts instead of submits, so the CR goes as its own
+            // keystroke a beat later. Under a many-tab fan-out the slowest PTY
+            // needs more headroom than the single-tab case, so 160ms (was 90ms,
+            // which left commands typed-but-unsubmitted on big broadcasts).
+            if (text) this._broadcastRaw(text, targets);
+            if (enterChk.checked) {
+                setTimeout(() => this._broadcastRaw('\r', targets), text ? 160 : 0);
+            }
+            this.audio.play('granted');
+            close();
+        };
+        sendBtn.addEventListener('click', doSend);
+        cancelBtn.addEventListener('click', close);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+
+        // Keep the count read-out and the send-button label in sync with the
+        // current selection.
+        const refresh = () => {
+            const k = selected.size;
+            countEl.textContent = `${k} of ${n} selected`;
+            sendBtn.textContent = k === n ? `SEND TO ALL ${n}` : `SEND TO ${k}`;
+            sendBtn.classList.toggle('is-empty', k === 0);
+        };
+        refresh();
+
+        card.append(
+            el('div', { class: 'bcast-title', text: 'BROADCAST' }),
+            el('div', { class: 'bcast-sub', text: 'Types into the selected terminals at once — resume Claude after a restart (claude -c), switch model, or recover from a disruption. Pick targets below; defaults to all.' }),
+            quickEl,
+            countEl,
+            listEl,
+            chips,
+            input,
+            enterLbl,
+            el('div', { class: 'bcast-actions' }, [cancelBtn, sendBtn]),
+        );
+        backdrop.appendChild(card);
+        backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(backdrop);
+        input.focus();
+    }
+
+    // Type raw bytes into a set of tabs' PTYs. `ids` defaults to every tab
+    // (legacy broadcast-to-all). Returns the number of live tabs reached.
+    _broadcastRaw(text, ids) {
+        if (!text) return 0;
+        const targets = (ids && ids.length) ? ids : this.order;
+        let n = 0;
+        for (const id of targets) {
+            if (!this.tabs.has(id)) continue;
+            this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text });
+            n++;
+        }
+        return n;
+    }
+
     async _newTabPick(kind) {
         if (kind === 'terminal') {
             const cwd = await pickFolder();
             if (!cwd) return;
             this.audio.play('granted');
+            // This device opened the new tab — focus its new id when it lands.
+            this._adoptNewTabIds = new Set(this.tabs.keys());
             this.bridge.input(INPUT_KIND.NEW_TAB, { ...this._sendSize(), cwd });
             return;
         }
@@ -1871,7 +4703,7 @@ class Shell {
             if (!target) return;
         }
         try {
-            const wp = await import('/assets/previewPanel.js?v=2');
+            const wp = await import('/assets/previewPanel.js?v=3');
             wp.openPreviewModal(this, target);
         } catch (err) { console.warn('[preview] open failed', err); }
     }
@@ -1897,13 +4729,69 @@ class Shell {
         } catch (_) { return ''; }
     }
 
+    // Tile header: optional per-project icon + title. The icon is hidden until
+    // it actually loads — a 404 (project has no icon) removes the <img>, so
+    // icon-less tiles look exactly as before with no broken-image glyph.
+    // Full-width group section header in the tiles grid. Click toggles collapse;
+    // the ✎ button renames the whole group (reassigns every member agent).
+    _tileGroupHeader(group, count) {
+        const collapsed = this._collapsedGroups.has(group);
+        const caret = el('span', { class: 'tile-group-caret', text: collapsed ? '▸' : '▾' });
+        const name = el('span', { class: 'tile-group-name', text: group });
+        const cnt = el('span', { class: 'tile-group-count', text: String(count) });
+        const edit = el('button', {
+            class: 'tile-group-edit', title: 'Rename this group', text: '✎',
+            onclick: (e) => { e.stopPropagation(); this._promptRenameGroup(group); },
+        });
+        const header = el('div', {
+            class: 'tile-group-header' + (collapsed ? ' collapsed' : ''),
+            'data-group': group,
+            title: collapsed ? 'Expand group' : 'Collapse group',
+            onclick: () => {
+                if (this._collapsedGroups.has(group)) this._collapsedGroups.delete(group);
+                else this._collapsedGroups.add(group);
+                this._renderTiles();
+            },
+        }, [caret, name, cnt, edit]);
+        return header;
+    }
+
+    _tileHead(id, title) {
+        const icon = el('img', {
+            class: 'tile-icon', alt: '', loading: 'lazy', decoding: 'async',
+            src: `/api/tabs/${id}/icon`,
+            onload: () => { if (icon.naturalWidth) icon.classList.add('show'); },
+            onerror: () => icon.remove(),
+        });
+        // Two-line head: the NAME gets the full first line (was being crushed to
+        // "so…"/"P." by the fixed-width badges); model/effort/group chips drop to
+        // a compact meta line below. Right-click the head reassigns the group
+        // (the chip — the usual affordance — is hidden when it just echoes the
+        // name, so this keeps grouping reachable). See _syncTileGroupChip.
+        const head = el('div', {
+            class: 'tile-head',
+            oncontextmenu: (e) => { e.preventDefault(); e.stopPropagation(); this._promptSetGroup(id); },
+        }, [
+            icon,
+            el('span', { class: 'tile-title', text: title }),
+        ]);
+        const meta = el('div', { class: 'tile-meta' });
+        const badge = this._makeModelBadge(id);
+        if (badge) meta.appendChild(badge);
+        const effBadge = this._makeEffortBadge(id);
+        if (effBadge) meta.appendChild(effBadge);
+        head.appendChild(meta);   // group chip is appended into .tile-meta later
+        return head;
+    }
+
     _createTileNode(id) {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || tr('tab.default', { id });
         const status = this._agentStatus.get(id) || 'idle';
+        const disp = this._displayAgent(id);
         const pct = this._ctxPct.get(id) || 0;
         const s = this._agentBuf.get(id);
-        const activity = (s && s.activity) || this._statusLabel(status);
+        const activity = disp === 'delegating' ? this._statusLabel('delegating') : ((s && s.activity) || this._statusLabel(status));
         const statusLine = (s && s.statusLine) || '';
         const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
@@ -1919,7 +4807,7 @@ class Shell {
         const node = el('div', {
             class: 'tile',
             'data-tile-id': String(id),
-            'data-agent': status,
+            'data-agent': disp,
             draggable: 'true',
             onclick: () => {
                 if (this._tileDragDidMove) { this._tileDragDidMove = false; return; }
@@ -1928,7 +4816,7 @@ class Shell {
         }, [
             closeBtn,
             pie,
-            el('span', { class: 'tile-title', text: title }),
+            this._tileHead(id, title),
             el('span', { class: 'tile-status-line', text: statusLine }),
             el('span', { class: 'tile-action-line', text: actionLine ? '⏺ ' + actionLine : '' }),
             el('pre', { class: 'tile-preview', text: tail }),
@@ -1949,21 +4837,53 @@ class Shell {
             this._clearTileDropTarget();
         });
 
+        this._syncTileGroupChip(node, id);
         return node;
+    }
+
+    // Group chip in a tile head — shows the agent's group, click to reassign.
+    // Kept in sync on both create and in-place update so a group change (which
+    // re-renders via _updateTileNode without rebuilding the head) is reflected.
+    _syncTileGroupChip(node, id) {
+        const head = node.querySelector('.tile-head');
+        if (!head) return;
+        const meta = head.querySelector('.tile-meta') || head;
+        const group = this._agentGroup.get(id) || '';
+        const rt = this.tabs.get(id);
+        const title = (rt && rt.title) || '';
+        // Suppress the chip when it would just echo the tab name — the title line
+        // already shows it, so a redundant "socialrizz · socialrizz" is noise.
+        // Right-clicking the head still reassigns the group (see _tileHead).
+        const redundant = group && title && group.trim().toLowerCase() === title.trim().toLowerCase();
+        let chip = meta.querySelector('.tile-group-chip');
+        if (group && group !== 'ungrouped' && !redundant) {
+            if (!chip) {
+                chip = el('span', {
+                    class: 'tile-group-chip',
+                    title: "Click to set this agent's group",
+                    onclick: (e) => { e.stopPropagation(); this._promptSetGroup(id); },
+                });
+                meta.appendChild(chip);
+            }
+            if (chip.textContent !== group) chip.textContent = group;
+        } else if (chip) {
+            chip.remove();
+        }
     }
 
     _updateTileNode(node, id) {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || tr('tab.default', { id });
         const status = this._agentStatus.get(id) || 'idle';
+        const disp = this._displayAgent(id);
         const pct = this._ctxPct.get(id) || 0;
         const s = this._agentBuf.get(id);
-        const activity = (s && s.activity) || this._statusLabel(status);
+        const activity = disp === 'delegating' ? this._statusLabel('delegating') : ((s && s.activity) || this._statusLabel(status));
         const statusLine = (s && s.statusLine) || '';
         const actionLine = (s && s.actionLine) || '';
         const elapsed = (s && s.lastChange) ? this._formatElapsed(s.lastChange) : '';
 
-        node.setAttribute('data-agent', status);
+        node.setAttribute('data-agent', disp);
         const titleEl = node.querySelector('.tile-title');
         if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
         const statusEl = node.querySelector('.tile-status-line');
@@ -1979,12 +4899,51 @@ class Shell {
         if (elapsedEl && elapsedEl.textContent !== elapsed) elapsedEl.textContent = elapsed;
         const pie = node.querySelector('.tile-pie');
         if (pie) this._paintTilePie(pie, pct);
+        this._syncTileGroupChip(node, id);
+    }
+
+    // Server sampler: tabId → running background subagents, read from the
+    // session transcript + task output files on disk. The stream classifier
+    // stays the status of record ('working'/'done'/…) — delegation is a
+    // DISPLAY overlay only, so chimes, notifications and cohort filters keep
+    // their existing, battle-tested semantics.
+    _onTabAgents(d) {
+        const agents = (d && d.agents) || {};
+        const touched = new Set(this._tabAgents.keys());
+        this._tabAgents = new Map();
+        for (const k of Object.keys(agents)) {
+            const id = Number(k);
+            this._tabAgents.set(id, agents[k] | 0);
+            touched.add(id);
+        }
+        for (const id of touched) this._refreshAgentAttr(id);
+    }
+
+    // What the tab/tile should LOOK like: 'delegating' (breathing green) while
+    // background subagents run — unless the agent needs input right now, which
+    // outranks everything and stays red.
+    _displayAgent(id, base) {
+        const st = base || this._agentStatus.get(id) || 'idle';
+        if (st === 'attention' || st === 'error') return st;
+        return (this._tabAgents.get(id) | 0) > 0 ? 'delegating' : st;
+    }
+
+    _refreshAgentAttr(id) {
+        const disp = this._displayAgent(id);
+        const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
+        if (tabNode && tabNode.getAttribute('data-agent') !== disp) tabNode.setAttribute('data-agent', disp);
+        if (this.viewMode === 'tiles' && this._tilesGridEl) {
+            const node = this._tilesGridEl.querySelector(`[data-tile-id="${id}"]`);
+            if (node) this._updateTileNode(node, id);
+        }
     }
 
     _statusLabel(status) {
+        if (status === 'delegating') return 'Waiting on subagents…';
         if (status === 'working') return 'Working...';
         if (status === 'done') return 'Awaiting next prompt';
         if (status === 'attention') return 'Needs input';
+        if (status === 'error') return 'API error';
         return 'Shell ready';
     }
 
@@ -2001,6 +4960,9 @@ class Shell {
 
     _refreshTileElapsed() {
         if (this.viewMode !== 'tiles' || !this._tilesGridEl) return;
+        // Skip the per-second 17-tile buffer scan while backgrounded (phone
+        // screen off / app in another tab) — it resumes on foreground.
+        if (document.hidden) return;
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             const id = Number(node.dataset.tileId);
             // Live terminal tail — refreshed for every tile, even idle shells.
@@ -2021,21 +4983,104 @@ class Shell {
     }
 
     _paintTilePie(pie, pct) {
+        const empty = 'var(--soa-line-soft)';
         if (pct <= 0) {
-            pie.style.background = 'rgba(255,255,255,0.15)';
+            pie.style.background = empty;
         } else {
             const color = this._ctxColor(pct);
-            pie.style.background = `conic-gradient(${color} ${pct}%, rgba(255,255,255,0.15) 0%)`;
+            pie.style.background = `conic-gradient(${color} ${pct}%, ${empty} 0%)`;
         }
         pie.title = pct > 0 ? `Context: ${pct}%` : '';
+    }
+
+    // Overarching supervisor summary — same data as the mobile FLEET bar.
+    // The daemon streams `manager` frames whenever supervisor state changes;
+    // this pins them as a card at the top of the tiles dashboard. Display
+    // only: it never sends anything, so it can't disturb the daemon or the
+    // sessions it reports on.
+    _onManager(d) {
+        // A frame from an older server build may omit todos/managerTabId —
+        // keep the last known values instead of wiping the manager view.
+        if (d && !d.todos && this._manager && this._manager.todos) d.todos = this._manager.todos;
+        if (d && d.managerTabId == null && this._manager && this._manager.managerTabId != null) {
+            d.managerTabId = this._manager.managerTabId;
+        }
+        this._manager = d;
+        // Fold each agent's group (server-resolved: cwd auto-group or manual
+        // override) into a client map. Only re-render structure when the group
+        // mapping actually changes — status-only manager frames must stay cheap.
+        const groups = new Map();
+        const models = new Map();
+        let sig = '';
+        for (const s of (d.sessions || [])) {
+            const g = s.group || 'ungrouped';
+            groups.set(s.id, g);
+            if (s.model) models.set(s.id, s.model);
+            if (s.effort) this._agentEffort.set(s.id, s.effort);   // server-detected effort (all tabs)
+            // Model + effort fold into the signature too: a /model or /effort
+            // switch is rare but must rebuild the tab row so the badge updates.
+            sig += s.id + ':' + g + ':' + (s.model || '') + ':' + (this._agentEffort.get(s.id) || '') + ';';
+        }
+        this._agentGroup = groups;
+        this._agentModel = models;
+        if (this.viewMode === 'tiles') this._renderFleetBar();
+        if (this.viewMode === 'manager') this._renderManagerView();
+        if (this.viewMode === 'chat') { this._renderChatHead(); this._renderChatStatus(); }
+        if (sig !== this._groupSig) {
+            this._groupSig = sig;
+            if (this.viewMode === 'tiles') this._renderTiles();
+            this._tabsUISig = null;   // force the tab row to rebuild with fresh chips
+            this._syncTabsUI();
+        }
+    }
+
+    _renderFleetBar() {
+        if (!this._tilesGridEl) return;
+        const d = this._manager;
+        if (!d || !d.counts || !d.counts.total) {
+            if (this._fleetBarEl) { this._fleetBarEl.remove(); this._fleetBarEl = null; }
+            return;
+        }
+        if (!this._fleetBarEl || !this._fleetBarEl.isConnected) {
+            this._fleetBarEl = el('div', { class: 'dashboard-fleet-bar' });
+        }
+        // Always pinned above the port info card.
+        if (this._tilesGridEl.firstChild !== this._fleetBarEl) {
+            this._tilesGridEl.insertBefore(this._fleetBarEl, this._tilesGridEl.firstChild);
+        }
+        const c = d.counts;
+        const row = el('div', { class: 'fleet-row' });
+        row.appendChild(el('span', { class: 'fleet-title', text: `FLEET · ${c.total}` }));
+        const chip = (label, n, cls) => {
+            if (n > 0) row.appendChild(el('span', { class: `fleet-chip ${cls}`, text: `${n} ${label}` }));
+        };
+        chip('working',    c.working,     'fleet-working');
+        chip('need input', c.attention,   'fleet-attention');
+        chip('stuck',      c.stuck,       'fleet-stuck');
+        chip('idle',       c.idle,        'fleet-idle');
+        chip('high ctx',   c.highContext, 'fleet-ctx');
+        chip('limited',    c.limited,     'fleet-limited');
+        const attention = (d.sessions || []).filter(s => s.attention).map(s => s.title);
+        const stuck     = (d.sessions || []).filter(s => s.stuck).map(s => s.title);
+        const callout = [];
+        if (attention.length) callout.push(`⚠ awaiting you: ${attention.slice(0, 3).join(', ')}${attention.length > 3 ? '…' : ''}`);
+        if (stuck.length) callout.push(`◷ stuck: ${stuck.slice(0, 3).join(', ')}`);
+        const kids = [row];
+        if (callout.length) kids.push(el('div', { class: 'fleet-callout', text: callout.join('  ·  ') }));
+        this._fleetBarEl.replaceChildren(...kids);
     }
 
     async _updateDashboardPortInfo() {
         if (!this._tilesGridEl) return;
 
-        // Remove existing port info if any
-        const existing = this._tilesGridEl.querySelector('.dashboard-port-info');
-        if (existing) existing.remove();
+        // _renderTiles fires on every snapshot, and each call used to start
+        // its own fetch; concurrent slow responses then stacked duplicate
+        // "Active Ports" cards (each removed the old card BEFORE its fetch
+        // and inserted AFTER). One in-flight fetch at a time, refreshed at
+        // most every 10s — the existing card stays up in the meantime.
+        if (this._portInfoBusy) return;
+        if (this._portInfoAt && Date.now() - this._portInfoAt < 10_000) return;
+        this._portInfoBusy = true;
 
         try {
             const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
@@ -2047,6 +5092,8 @@ class Shell {
             if (!res.ok) return;
 
             const { data } = await res.json();
+            this._portInfoAt = Date.now();
+            if (!this._tilesGridEl) return;
             const count = data.ports.length;
 
             const portInfo = el('div', { class: 'dashboard-port-info' });
@@ -2067,19 +5114,40 @@ class Shell {
 
             if (count > 0) {
                 const list = el('div', { class: 'dashboard-port-list' });
-                data.ports.slice(0, 5).forEach(p => {
-                    const item = el('div', {
+                // Every port is clickable → opens it in the preview (proxied
+                // through /preview/<port>/ so it's viewable here and on paired
+                // phones). It's always safe — the proxy only ever reaches your
+                // own localhost; non-web ports just render whatever they serve.
+                data.ports.forEach(p => {
+                    const item = el('button', {
                         class: 'dashboard-port-item',
-                        text: `:${p.port} — ${p.process}`
+                        type: 'button',
+                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                        text: `:${p.port} — ${p.process}`,
+                        onclick: async () => {
+                            try {
+                                const wp = await import('/assets/previewPanel.js?v=3');
+                                wp.openPreviewModal(this, String(p.port));
+                            } catch (err) { console.warn('[ports] preview open failed', err); }
+                        },
                     });
                     list.appendChild(item);
                 });
                 portInfo.appendChild(list);
             }
 
-            this._tilesGridEl.insertBefore(portInfo, this._tilesGridEl.firstChild);
+            // Swap in atomically: clear every existing copy (including any
+            // duplicates an older build left behind) only now that the
+            // replacement is ready, then pin below the FLEET bar if present.
+            this._tilesGridEl.querySelectorAll('.dashboard-port-info').forEach(n => n.remove());
+            const anchor = (this._fleetBarEl && this._fleetBarEl.isConnected)
+                ? this._fleetBarEl.nextSibling
+                : this._tilesGridEl.firstChild;
+            this._tilesGridEl.insertBefore(portInfo, anchor);
         } catch (e) {
             // Silently fail - port info is optional
+        } finally {
+            this._portInfoBusy = false;
         }
     }
 
@@ -2175,6 +5243,7 @@ class Shell {
             rt.flushPendingReplay();
             rt.scrollToBottom();
             rt.focus();
+            this._pollDirty.add(id);   // re-scan ctx%/status after the flush paint
         });
 
         this.bridge.input(INPUT_KIND.SWITCH_TAB, { id });
@@ -2229,13 +5298,21 @@ async function resolveBackend() {
             saveBackend(fromURL.backend, fromURL.token);
             return fromURL;
         }
-        return null;
+        // Pairing via deep link failed — say so, but keep going: a saved or
+        // local backend may still be reachable (previously this dead-ended).
+        console.warn('[soa-web] ?backend= pairing failed (unreachable):', fromURL.backend);
+        const bs = $('#boot-status');
+        if (bs) bs.textContent = tr('boot.negotiating') + ' (pairing link unreachable — trying known backends)';
     }
     const saved = loadSaved();
     if (saved) {
         const probed = await probePing(saved.backend, saved.token, 2500);
         if (probed && probed.ok) return saved;
-        clearSaved();
+        // Do NOT clear the pairing on one failed ping — a daemon restart or a
+        // transient outage used to permanently un-pair the browser here and
+        // funnel boot into the sandbox fallback. Keep it; it is re-probed on
+        // every load and the user can overwrite it via ?backend= any time.
+        console.warn('[soa-web] saved backend unreachable, keeping pairing:', saved.backend);
     }
     if (CFG.backend) {
         const cfgBackend = String(CFG.backend).replace(/\/+$/, '');
@@ -2261,8 +5338,17 @@ async function resolveBackend() {
         // Use localhost (not 127.0.0.1) when on HTTPS — browsers treat localhost
         // as a secure origin but block http://IP as mixed content.
         const local = location.protocol === 'https:' ? 'http://localhost:4010' : 'http://127.0.0.1:4010';
-        const probed = await probePing(local, '', 1000);
-        if (probed && probed.ok) return { backend: local, token: '' };
+        // A single 1s probe here was the #1 "cannot find backend after
+        // installing" cause: immediately after install.sh the daemon is cold
+        // (node start + restoring any saved tabs) and its first /api/ping can
+        // exceed 1s — the probe timed out and we fell SILENTLY into the sandbox.
+        // Give it a generous first budget, and one longer retry, so a freshly
+        // installed local backend is reliably found. (Only the failure path pays
+        // the extra wait, so pure sandbox visitors aren't penalised much.)
+        for (const ms of [2500, 4000]) {
+            const probed = await probePing(local, '', ms);
+            if (probed && probed.ok) return { backend: local, token: '' };
+        }
     }
     return null;
 }
@@ -2290,11 +5376,11 @@ async function bootServerMode({ backend, token }) {
         $('#boot').classList.add('hidden');
         $('#shell').classList.remove('hidden');
         shell._fitActive();
-        if (shell.viewMode === 'tiles') shell._applyViewMode();
+        if (shell.viewMode === 'tiles' || shell.viewMode === 'manager') shell._applyViewMode();
         audio.play('theme');
     }, s0.nointro ? 0 : 250);
 
-    import('/assets/timemachine.js?v=1')
+    import('/assets/timemachine.js?v=3')
         .then(tm => tm.startTimemachine(shell))
         .catch(err => console.warn('[timemachine] boot failed', err));
 }
@@ -2304,32 +5390,187 @@ async function _doBoot() {
     wireReleaseLink();
     wireVersion();
     applyStatic();
-    const backend = await resolveBackend();
+    let backend = await resolveBackend();
+    // Establish-on-init resilience: if we have a SAVED/pinned backend but it
+    // wasn't reachable on the first pass, it's almost always just starting (cold
+    // daemon after install/restart) or briefly flaky (tunnel re-adopting). Retry
+    // the full resolution a few times before dead-ending to the sandbox, so the
+    // connection reliably comes up at boot instead of silently downgrading.
+    // Pure sandbox visitors (no saved backend) skip this entirely — no extra wait.
+    if (!backend && loadSaved()) {
+        for (let attempt = 1; attempt <= 3 && !backend; attempt++) {
+            const bs = $('#boot-status');
+            if (bs) bs.textContent = tr('boot.negotiating') + ` (reconnecting… ${attempt}/3)`;
+            await new Promise(r => setTimeout(r, 1500));
+            backend = await resolveBackend();
+        }
+    }
     if (backend) {
         await bootServerMode(backend);
         return;
     }
-    // No reachable backend — hand off to the in-browser sandbox.
-    await import('/assets/app-wc.js?v=13');
-}
-
-async function boot() {
-    const html = document.documentElement;
-    // Welcome gate: first visit stops here, but we expose __soaBootNow so
-    // the "ENTER TERMINAL" button can drop the gate and finish boot
-    // without a full reload.
-    if (html.dataset.welcome === '1') {
-        window.__soaBootNow = () => _doBoot();
-        return;
+    // On a phone with no paired desktop there's nothing to boot — the sandbox
+    // needs a desktop browser. Show the companion welcome instead of a failure.
+    if (isPhone()) { renderMobileWelcome(); return; }
+    // No reachable backend — hand off to the in-browser sandbox. The import
+    // is guarded: if ANY module in the sandbox graph fails to fetch, Chrome
+    // rejects with "Failed to fetch dynamically imported module: app-wc.js"
+    // naming only the top-level file. Without the guard that error killed
+    // boot dead with no retry and no way to pair a backend.
+    try {
+        await import('/assets/app-wc.js?v=30');
+    } catch (err) {
+        console.error('[soa-web] sandbox module graph failed to load', err);
+        // Name the actual failing resource(s) — the error string won't.
+        try {
+            const bad = performance.getEntriesByType('resource')
+                .filter(e => (e.initiatorType === 'script' || e.initiatorType === 'other')
+                    && e.transferSize === 0 && e.decodedBodySize === 0
+                    && /\/assets\/|esm\.sh|webcontainer/.test(e.name));
+            if (bad.length) console.error('[soa-web] suspect resources:', bad.map(e => e.name));
+        } catch (_) {}
+        renderSandboxFailure(err);
     }
-    await _doBoot();
 }
 
-boot().catch(err => {
+// Sandbox failed to load (CDN/network/deploy hiccup). Give the user real
+// options instead of a dead boot screen: retry, or pair a backend directly
+// (the manual-connect prompt normally lives inside app-wc.js — unreachable
+// when the import itself is what failed).
+function renderSandboxFailure(err) {
+    const node = $('#boot-status');
+    if (!node) return;
+    const detail = err && err.message ? err.message : String(err);
+    node.textContent = tr('boot.failed', { detail });
+    const actions = document.createElement('div');
+    actions.style.cssText = 'margin-top:12px;display:flex;gap:10px;justify-content:center;';
+    const mkBtn = (label, fn) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.style.cssText = 'padding:6px 14px;background:transparent;border:1px solid currentColor;color:inherit;cursor:pointer;font:inherit;';
+        b.addEventListener('click', fn);
+        return b;
+    };
+    actions.appendChild(mkBtn('RETRY', () => location.reload()));
+    actions.appendChild(mkBtn('CONNECT BACKEND…', () => {
+        const backend = window.prompt('Backend URL (e.g. http://localhost:4010, or from `npm run selfhost`):', 'http://localhost:4010');
+        if (!backend) return;
+        const token = window.prompt('Session token (leave empty if none):') || '';
+        saveBackend(backend, token.trim());
+        location.reload();
+    }));
+    node.insertAdjacentElement('afterend', actions);
+}
+
+// A phone can't host the in-browser WebContainer sandbox (it needs a desktop
+// browser) and the install wizard is desktop-only — so a mobile visitor with no
+// paired desktop would otherwise hit a failed boot. Detect that case up front.
+function isPhone() {
+    try {
+        return window.matchMedia('(max-width: 820px)').matches
+            && window.matchMedia('(pointer: coarse)').matches;
+    } catch (_) { return false; }
+}
+
+// Friendly mobile landing: showcase the product and explain that the phone is a
+// companion to a desktop, not a host — instead of dropping into a broken boot.
+function renderMobileWelcome() {
+    const boot = $('#boot');
+    if (boot) boot.classList.add('hidden');
+    const prior = document.querySelector('.mwel');
+    if (prior) prior.remove();   // rebuilt in place on a language switch
+
+    const copyBtn = el('button', { class: 'mwel-btn', type: 'button', text: tr('mwel.copy') });
+    copyBtn.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText('https://www.s0a.app'); copyBtn.textContent = tr('mwel.copied'); }
+        catch (_) { copyBtn.textContent = 'www.s0a.app'; }
+        setTimeout(() => { copyBtn.textContent = tr('mwel.copy'); }, 1800);
+    });
+
+    const sandboxBtn = el('button', { class: 'mwel-ghost', type: 'button', text: tr('mwel.sandbox') });
+    sandboxBtn.addEventListener('click', () => {
+        const v = document.querySelector('.mwel'); if (v) v.remove();
+        if (boot) boot.classList.remove('hidden');
+        const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
+        import('/assets/app-wc.js?v=30').catch((err) => renderSandboxFailure(err));
+    });
+
+    // Language switcher — flips the page and re-renders the welcome in place.
+    const langNav = el('nav', { class: 'mwel-langs', 'aria-label': 'Language' },
+        LANGS.map(l => {
+            const btn = el('button', {
+                class: 'mwel-lang' + (l.code === getLang() ? ' on' : ''),
+                type: 'button', text: l.label, 'aria-pressed': l.code === getLang() ? 'true' : 'false',
+            });
+            btn.addEventListener('click', () => { setLang(l.code); renderMobileWelcome(); });
+            return btn;
+        })
+    );
+
+    const step = (n, h, p, extra) => el('div', { class: 'mwel-step' }, [
+        el('span', { class: 'mwel-step-n', text: String(n) }),
+        el('div', { class: 'mwel-step-body' }, [
+            el('h3', { class: 'mwel-step-h', text: h }),
+            el('p', { class: 'mwel-step-p', text: p }),
+            ...(extra ? [extra] : []),
+        ]),
+    ]);
+
+    const view = el('div', { class: 'mwel' }, [
+        langNav,
+        el('div', { class: 'mwel-inner' }, [
+            el('header', { class: 'mwel-head' }, [
+                el('h1', { class: 'mwel-title', text: 'SON OF ANTON' }),
+                el('p', { class: 'mwel-sub', text: tr('brand.sub') }),
+            ]),
+            el('p', { class: 'mwel-lead', text: tr('mwel.lead') }),
+            el('div', { class: 'mwel-note' }, [
+                el('div', { class: 'mwel-note-h', text: tr('mwel.note_h') }),
+                el('p', { class: 'mwel-note-p', text: tr('mwel.note_p') }),
+            ]),
+            el('div', { class: 'mwel-steps' }, [
+                step(1, tr('mwel.s1_h'), tr('mwel.s1_p'), copyBtn),
+                step(2, tr('mwel.s2_h'), tr('mwel.s2_p')),
+            ]),
+            el('ul', { class: 'mwel-feats' }, [
+                el('li', { text: tr('mwel.feat1') }),
+                el('li', { text: tr('mwel.feat2') }),
+                el('li', { text: tr('mwel.feat3') }),
+                el('li', { text: tr('mwel.feat4') }),
+            ]),
+            el('nav', { class: 'mwel-foot' }, [
+                el('a', { class: 'mwel-ghost', href: 'https://github.com/SimonSaysGiveMeSmile/SoA-Web', target: '_blank', rel: 'noopener', text: 'github ↗' }),
+                sandboxBtn,
+            ]),
+            el('p', { class: 'mwel-credit' }, [
+                'Made by ',
+                el('a', { class: 'mwel-credit-link', href: 'https://github.com/SimonSaysGiveMeSmile', target: '_blank', rel: 'noopener', text: 'Simon Says ↗' }),
+            ]),
+        ]),
+    ]);
+    document.body.appendChild(view);
+}
+
+function bootFailed(err) {
     console.error('[soa-web] boot failed', err);
     const detail = err && err.stack
         ? err.stack.split('\n').slice(0, 3).join(' | ')
         : String(err);
     const node = $('#boot-status');
     if (node) node.textContent = tr('boot.failed', { detail });
-});
+}
+
+async function boot() {
+    const html = document.documentElement;
+    // Welcome gate: first visit stops here, but we expose __soaBootNow so
+    // the "ENTER TERMINAL" button can drop the gate and finish boot
+    // without a full reload. The .catch matters: this path used to swallow
+    // boot errors entirely (first visits never saw boot.failed).
+    if (html.dataset.welcome === '1') {
+        window.__soaBootNow = () => _doBoot().catch(bootFailed);
+        return;
+    }
+    await _doBoot();
+}
+
+boot().catch(bootFailed);

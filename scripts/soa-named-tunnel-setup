@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# soa-named-tunnel-setup — stand up a STABLE, free named Cloudflare tunnel on
+# m.s0a.app fronting the local SoA backend (:4010). Unlike the quick tunnels the
+# healer mints, a NAMED tunnel keeps a FIXED hostname forever (no rotation, no
+# request quota), so s0a.app/?backend=https://m.s0a.app never goes stale.
+#
+# Run this ONCE, AFTER the three things only YOU can do (all free):
+#   1. Create / sign in to a Cloudflare account.
+#   2. In Cloudflare: Add a site → enter  m.s0a.app  (a delegated subdomain zone).
+#      Cloudflare shows you TWO nameservers like  xxx.ns.cloudflare.com.
+#   3. At Namecheap (s0a.app → Advanced DNS) add TWO records, leaving the apex +
+#      www + Vercel untouched:
+#         Type=NS  Host=m  Value=<first  cloudflare nameserver>
+#         Type=NS  Host=m  Value=<second cloudflare nameserver>
+#      Then back in Cloudflare wait until the m.s0a.app zone shows "Active".
+#   4. Authorize cloudflared:   cloudflared tunnel login   (pick the m.s0a.app zone)
+#
+# Then run me. Idempotent — safe to re-run. Touches only the tunnel + the local
+# channel state; never restarts the SoA daemon.
+set -euo pipefail
+
+HOSTNAME_FQDN="${SOA_TUNNEL_HOSTNAME:-m.s0a.app}"
+TUNNEL_NAME="${SOA_TUNNEL_NAME:-soa-mobile}"
+PORT="${SOA_WEB_PORT:-4010}"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
+CF_DIR="$HOME/.cloudflared"
+CONFIG="$CF_DIR/config.yml"
+
+step(){ printf '\n\033[1m▶ %s\033[0m\n' "$*"; }
+die(){ printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+warn(){ printf '\033[33m⚠ %s\033[0m\n' "$*"; }
+
+command -v cloudflared >/dev/null 2>&1 || die "cloudflared not installed (brew install cloudflared)"
+mkdir -p "$STATE_DIR/logs" 2>/dev/null || true
+
+# ── prerequisite 1: logged in? ────────────────────────────────────────────────
+[ -f "$CF_DIR/cert.pem" ] || die "cloudflared not logged in. Run:
+    cloudflared tunnel login
+  (authorize the $HOSTNAME_FQDN zone in the browser), then re-run me."
+
+# ── prerequisite 2: is the subdomain zone delegated to Cloudflare yet? ─────────
+ns="$(curl -fsS -m 8 -H 'accept: application/dns-json' \
+        "https://1.1.1.1/dns-query?name=${HOSTNAME_FQDN}&type=NS" 2>/dev/null \
+      | python3 -c "import sys,json;print(','.join(a.get('data','') for a in json.load(sys.stdin).get('Answer',[])))" 2>/dev/null || true)"
+case "$ns" in
+  *cloudflare.com*) echo "✓ ${HOSTNAME_FQDN} delegated to Cloudflare ($ns)";;
+  *) warn "${HOSTNAME_FQDN} NS = ${ns:-none} (expected *.ns.cloudflare.com).
+  If you JUST added the NS records at Namecheap, delegation can take 5–60 min.
+  Proceed ONLY if the Cloudflare dashboard already shows the zone 'Active'.";;
+esac
+
+# ── create the tunnel (idempotent) ────────────────────────────────────────────
+step "Creating tunnel '$TUNNEL_NAME' (if absent)"
+if cloudflared tunnel list 2>/dev/null | awk 'NR>1{print $2}' | grep -qx "$TUNNEL_NAME"; then
+  echo "tunnel '$TUNNEL_NAME' already exists"
+else
+  cloudflared tunnel create "$TUNNEL_NAME"
+fi
+TUNNEL_ID="$(cloudflared tunnel list 2>/dev/null | awk -v n="$TUNNEL_NAME" 'NR>1 && $2==n{print $1}')"
+[ -n "$TUNNEL_ID" ] || die "could not determine tunnel id for '$TUNNEL_NAME'"
+echo "tunnel id: $TUNNEL_ID"
+
+# ── config.yml: route the hostname to the local backend ───────────────────────
+step "Writing $CONFIG"
+cat > "$CONFIG" <<YAML
+tunnel: ${TUNNEL_ID}
+credentials-file: ${CF_DIR}/${TUNNEL_ID}.json
+ingress:
+  - hostname: ${HOSTNAME_FQDN}
+    service: http://localhost:${PORT}
+  - service: http_status:404
+YAML
+
+# ── DNS route: CNAME m.s0a.app → <id>.cfargotunnel.com (inside the CF zone) ────
+step "Routing DNS ${HOSTNAME_FQDN} → tunnel"
+cloudflared tunnel route dns "$TUNNEL_NAME" "$HOSTNAME_FQDN" 2>&1 || echo "(route may already exist — ok)"
+
+# ── launchd service (KeepAlive → survives reboots / crashes) ───────────────────
+step "Installing launchd service com.soa-web.named-tunnel"
+PLIST="$HOME/Library/LaunchAgents/com.soa-web.named-tunnel.plist"
+cat > "$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.soa-web.named-tunnel</string>
+  <key>ProgramArguments</key><array>
+    <string>$(command -v cloudflared)</string>
+    <string>tunnel</string><string>--config</string><string>${CONFIG}</string>
+    <string>--no-autoupdate</string><string>run</string><string>${TUNNEL_NAME}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${STATE_DIR}/logs/named-tunnel.log</string>
+  <key>StandardErrorPath</key><string>${STATE_DIR}/logs/named-tunnel.log</string>
+</dict></plist>
+PL
+launchctl bootout "gui/$(id -u)/com.soa-web.named-tunnel" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+echo "service installed + started (log: ${STATE_DIR}/logs/named-tunnel.log)"
+
+# ── wait until the hostname actually serves the backend ───────────────────────
+step "Verifying https://${HOSTNAME_FQDN} serves the backend"
+ok=""
+for i in $(seq 1 20); do
+  if curl -fsS -m 8 "https://${HOSTNAME_FQDN}/api/ping" >/dev/null 2>&1; then ok=1; break; fi
+  sleep 3
+done
+[ -n "$ok" ] || die "named tunnel not reachable yet. Check ${STATE_DIR}/logs/named-tunnel.log
+  and that the Cloudflare zone is Active. Re-run me once it is."
+
+# ── adopt as the live door (no daemon restart). Label channel 'cloudflare' so the
+#    existing soa-channels healer treats it as healthy and does NOT try to
+#    "upgrade" it to a quick tunnel (its upgrade path only fires when cur_ch is
+#    not already cloudflare). SIGHUP makes the daemon trust the origin for /ws. ─
+URL="https://${HOSTNAME_FQDN}"
+NOW="$(date '+%Y-%m-%dT%H:%M:%S')"
+printf '{"channel":"cloudflare","url":"%s","userUrl":"https://s0a.app/?backend=%s","note":"stable named tunnel (works on s0a.app)","verifiedAt":"%s"}\n' \
+  "$URL" "$URL" "$NOW" > "$STATE_DIR/channels.json"
+printf '{"provider":"cloudflare-named","url":"%s","port":%s,"startedAt":0}\n' "$URL" "$PORT" > "$STATE_DIR/tunnel.json"
+for pid in $(lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null); do kill -HUP "$pid" 2>/dev/null || true; done
+
+step "DONE — stable mobile door is live"
+echo "  Direct : ${URL}"
+echo "  s0a.app: https://s0a.app/?backend=${URL}"
+echo
+echo "Optional (permanence across daemon restarts): add the origin to the :${PORT}"
+echo "server's launchd plist so it's trusted even before SIGHUP, e.g."
+echo "  <key>SOA_WEB_ALLOWED_ORIGINS</key><string>${URL}</string>"

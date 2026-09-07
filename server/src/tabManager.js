@@ -112,7 +112,7 @@ function requirePty() {
 }
 
 class Tab {
-    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit }) {
+    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, onInput, agent }) {
         this.id = id;
         this.cwd = cwd || process.cwd();
         // Default the tab label to the cwd's folder name so "Hireal" shows
@@ -126,6 +126,10 @@ class Tab {
         this.rows = rows || DEFAULT_ROWS;
         this.onData = onData || (() => {});
         this.onExit = onExit || (() => {});
+        this.onInput = onInput || (() => {});
+        // 'claude' | 'codex' | null — which agent this tab runs (set by the
+        // supervisor from the stream; seeded from tabs.json on restore).
+        this.agent = agent || null;
         this.pty = null;
         this.exited = false;
         this.exitCode = null;
@@ -168,6 +172,7 @@ class Tab {
     write(data) {
         if (this.exited || !this.pty) return;
         this.pty.write(data);
+        try { this.onInput(data); } catch (_) { /* observer only */ }
     }
 
     resize(cols, rows) {
@@ -195,11 +200,12 @@ class Tab {
 }
 
 class TabManager {
-    constructor({ onData, onTabsChange, onExit, graveyardCap } = {}) {
+    constructor({ onData, onTabsChange, onExit, onInput, graveyardCap } = {}) {
         this.tabs = new Map();
         this.order = [];
         this.next = 1;
         this.onData = onData || (() => {});
+        this.onInput = onInput || (() => {});
         this.onTabsChange = onTabsChange || (() => {});
         this.onExit = onExit || (() => {});
         // Graveyard holds a capped FIFO of recently-closed tabs so the client
@@ -217,7 +223,15 @@ class TabManager {
     list() {
         return this.order.map(id => {
             const t = this.tabs.get(id);
-            return { id: t.id, title: t.title, cols: t.cols, rows: t.rows, exited: t.exited };
+            // cwd lets clients dedup by project — soa-relaunch skips tabs whose
+            // cwd is already open instead of duplicating the whole fleet.
+            return {
+                id: t.id, title: t.title, cols: t.cols, rows: t.rows,
+                exited: t.exited, cwd: t.cwd || null,
+                // Per-tab process-tree memory (bytes), refreshed ~10s by the
+                // daemon's memory sampler. null until the first sample.
+                mem: (typeof t.memBytes === 'number' ? t.memBytes : null),
+            };
         });
     }
 
@@ -237,7 +251,7 @@ class TabManager {
         return t ? t.scrollback.snapshot() : '';
     }
 
-    open({ title, cwd, cols, rows, env, silent, seedScrollback } = {}) {
+    open({ title, cwd, cols, rows, env, silent, seedScrollback, agent } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
@@ -249,6 +263,8 @@ class TabManager {
             // `soa-browser` as bare commands (scoped to SoA shells only).
             env: withScriptsOnPath({ ...env, ...tts.envFor(id) }),
             onData: data => this.onData(id, data),
+            onInput: data => this.onInput(id, data),
+            agent,
             onExit: code => {
                 this._archive(id);
                 this.onExit(id, code);
@@ -292,7 +308,12 @@ class TabManager {
         }
         if (!entry) return null;
         const divider = `\r\n\x1b[2m── ${entry.displayTitle} · restored from closed tab (fresh shell) ──\x1b[0m\r\n`;
-        const seed = (entry.scrollback || '') + divider;
+        // Bracket the replayed scrollback with a terminal-mode reset so any
+        // mouse-tracking / alt-screen / bracketed-paste mode the prior TUI left
+        // armed can't survive into the fresh shell (see SANE_TERM_RESET in
+        // index.js — the 2026-07-13 mouse-code input flood).
+        const SANE = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b>';
+        const seed = SANE + (entry.scrollback || '') + divider + SANE;
         const tab = this.open({
             title: entry.userRenamed ? entry.displayTitle : undefined,
             cwd: entry.cwd,

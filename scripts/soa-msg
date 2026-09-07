@@ -64,9 +64,13 @@ function readStdin() {
     const url = resolveTtsUrl();
     const body = JSON.stringify({ text, tab });
     const u = new URL(url);
+    const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) };
+    // Per-daemon local secret (injected into our tab env) → trusted by the loopback
+    // gate even behind a local reverse proxy. Harmless when absent.
+    if (process.env.SOA_WEB_LOCAL_KEY) headers['x-soa-local-key'] = process.env.SOA_WEB_LOCAL_KEY;
     const req = http.request({
         hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        headers,
     }, (res) => {
         let b = ''; res.on('data', d => b += d);
         res.on('end', () => {

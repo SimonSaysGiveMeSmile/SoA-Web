@@ -1,0 +1,245 @@
+#!/usr/bin/env node
+/**
+ * soa-usage-throttle — keep the fleet under Claude's 5h usage limit by THROTTLING
+ * the heaviest sessions, WITHOUT ever stopping their work.
+ *
+ * This enacts the manager's standing policy automatically with the single
+ * always-safe lever: `/compact`. When the active 5h block is approaching the
+ * limit (or a project is over budget), it runs `/compact` on the heaviest
+ * HIGH-CONTEXT tabs — which clears context so subsequent turns cost far less
+ * while the agent keeps working. It NEVER stops, interrupts, or pauses an agent
+ * (pausing is left to the manager/user via `soa-sessions throttle --pause`), and
+ * NEVER touches effort (so it doesn't fight the soa-effort ultracode watchdog).
+ *
+ * Runs headless from launchd (com.soa-web.usage-throttle) every ~180s. Read-only
+ * except for the /compact it issues; conservative (few tabs/run, long per-tab
+ * cooldown, high-context only); logs + soa-msg's what it did. Disable instantly
+ * with SOA_THROTTLE_ENABLE=0 (or bootout the launchd job).
+ *
+ * Triggers (uses ACTUAL accumulated cost — the early-block projection overstates):
+ *   - a project's 5h cost >= its budget (usage-budgets.json; default $20), OR
+ *   - the whole 5h block cost >= SOA_THROTTLE_FLEET (default $120 — headroom
+ *     under the ~$167 that hit the weekly limit last time).
+ * Target filter: ctx >= SOA_THROTTLE_CTX% (compact only helps high-context tabs),
+ *   status not limited/exited, not a manager/self tab, not in cooldown.
+ *
+ * Env: SOA_THROTTLE_ENABLE(1) FLEET(120) CTX(45) MAX(3) COOLDOWN(1200) SOA_WEB_PORT
+ * Flags: --dry-run (decide + print, compact nothing) · --status
+ */
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+
+const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
+const LOG_DIR = path.join(os.homedir(), '.soa-web', 'logs');
+const LOG = path.join(LOG_DIR, 'usage-throttle.log');
+const STATE = path.join(LOG_DIR, '.usage-throttle-state.json');
+const MSG = path.join(__dirname, 'soa-msg');
+// Effort-throttle handshake with soa-effort: ids listed here are held at a LOWER
+// effort (ultracode→CFG.effort), so soa-effort skips re-raising them to ultracode.
+// Cleared when burn is healthy / the 5h block rolls over → ultracode resumes.
+const SKIP_FILE = path.join(STATE_DIR, 'effort-throttled.json');
+const loadSkip = () => { try { return JSON.parse(fs.readFileSync(SKIP_FILE, 'utf8')); } catch (_) { return { ids: [] }; } };
+const writeSkip = (o) => { try { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(SKIP_FILE, JSON.stringify(o)); } catch (_) {} };
+const clearSkip = () => { try { fs.unlinkSync(SKIP_FILE); } catch (_) {} };
+
+const num = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+const CFG = {
+    enable: process.env.SOA_THROTTLE_ENABLE !== '0',
+    fleet: num(process.env.SOA_THROTTLE_FLEET, 120),   // fleet 5h $ = "approaching limit"
+    ctx: num(process.env.SOA_THROTTLE_CTX, 45),        // min ctx% worth compacting
+    max: num(process.env.SOA_THROTTLE_MAX, 3),         // compacts per run
+    cooldown: num(process.env.SOA_THROTTLE_COOLDOWN, 1200),
+    effort: process.env.SOA_THROTTLE_EFFORT || 'high', // ultracode→this on the heaviest burners when the block is in DANGER (cuts subagent burn /compact can't touch)
+    maxEffort: num(process.env.SOA_THROTTLE_EFFORT_MAX, 3),
+    week: num(process.env.SOA_THROTTLE_WEEK, 2800),    // WEEKLY $ cap — FALLBACK only (rolling-cost proxy), used when the real utilization isn't cached yet. Tune via SOA_THROTTLE_WEEK.
+    weekUtil: num(process.env.SOA_THROTTLE_WEEK_UTIL, 85), // WEEK-DANGER at this REAL seven-day utilization % (d.limits.sevenDay from the OAuth usage endpoint) — the ground truth /usage shows.
+};
+const args = new Set(process.argv.slice(2));
+const DRY = args.has('--dry-run');
+const STATUS = args.has('--status');
+
+function port() {
+    if (process.env.SOA_WEB_PORT) return parseInt(process.env.SOA_WEB_PORT, 10);
+    try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'daemon.lock'), 'utf8')).port || 4010; } catch (_) { return 4010; }
+}
+const PORT = port();
+const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+const log = l => { try { fs.mkdirSync(LOG_DIR, { recursive: true }); fs.appendFileSync(LOG, ts() + ' ' + l + '\n'); } catch (_) {} };
+const money = n => '$' + (n || 0).toFixed(2);
+
+function req(method, p, body) {
+    return new Promise((resolve) => {
+        const data = body ? JSON.stringify(body) : null;
+        const headers = {};
+        if (data) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(data); }
+        if (process.env.SOA_WEB_LOCAL_KEY) headers['x-soa-local-key'] = process.env.SOA_WEB_LOCAL_KEY;
+        const r = http.request({ host: '127.0.0.1', port: PORT, path: p, method, headers, timeout: 9000 }, res => {
+            let b = ''; res.on('data', d => b += d); res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve(null); } });
+        });
+        r.on('error', () => resolve(null)); r.on('timeout', () => { r.destroy(); resolve(null); });
+        if (data) r.write(data); r.end();
+    });
+}
+const loadState = () => { try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch (_) { return { blockStartTs: 0, cd: {} }; } };
+const saveState = s => { try { fs.mkdirSync(LOG_DIR, { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s)); } catch (_) {} };
+const loadBudgets = () => { const b = { default: { blockCost: 20, todayCost: 60 }, projects: {} }; try { const j = JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'usage-budgets.json'), 'utf8')); if (j.default) b.default = { ...b.default, ...j.default }; if (j.projects) b.projects = j.projects; } catch (_) {} return b; };
+const managerId = () => { try { return parseInt(fs.readFileSync(path.join(STATE_DIR, 'manager-id'), 'utf8').trim(), 10); } catch (_) { return null; } };
+function soaMsg(text) { return new Promise(r => execFile(MSG, [text], { timeout: 15000 }, () => r())); }
+
+async function main() {
+    if (!CFG.enable) { log('disabled (SOA_THROTTLE_ENABLE=0)'); return; }
+    const usage = await req('GET', '/api/claude-usage');
+    const d = usage && usage.data;
+    if (!d || !d.hasData || !d.block || !d.block.active) { log('no active 5h block / no data — nothing to throttle'); return; }
+    const [tabsR, listR] = await Promise.all([req('GET', '/api/tabs'), req('POST', '/api/sessions', { action: 'list' })]);
+    const budgets = loadBudgets();
+    const mgr = managerId();
+
+    // cwd -> {block,today} cost (fold sessions sharing a cwd = same project)
+    const costByCwd = new Map();
+    for (const s of d.sessions || []) { if (!s.cwd) continue; const c = costByCwd.get(s.cwd) || { block: 0, today: 0, proj: s.project || s.cwd.split('/').pop() }; c.block += (s.block || {}).cost || 0; c.today += (s.today || {}).cost || 0; costByCwd.set(s.cwd, c); }
+    // tab id -> cwd/title
+    const tabById = new Map();
+    for (const t of (tabsR && tabsR.tabs) || []) tabById.set(t.id, { cwd: t.cwd, title: t.title, exited: t.exited });
+    // tab id -> ctx/status/limited/title (ground truth from the supervisor)
+    const metaById = new Map();
+    for (const s of (listR && listR.sessions) || []) metaById.set(s.id, { ctxPct: s.ctxPct, status: s.status, limited: s.limited, title: s.title });
+
+    const fleetCost = d.block.cost || 0;
+    const weekCost = (d.week && d.week.cost) || 0;
+    // The WEEKLY usage limit is the real ceiling — 5h blocks reset every few hours
+    // so fleetCost stays low while the week silently climbs to the cap. Monitor +
+    // act on both. Prefer the REAL seven-day utilization (d.limits.sevenDay, from
+    // the OAuth usage endpoint via soa-usage-limits) — the rolling-cost proxy
+    // (weekCost vs CFG.week) under-reads badly (56% vs a real 94% on 2026-08-10)
+    // because it sheds old days while the fixed weekly block accumulates. Fall
+    // back to the cost proxy only when the server has no cached limits yet.
+    const weekUtil = (d.limits && d.limits.sevenDay && d.limits.sevenDay.utilization != null)
+        ? d.limits.sevenDay.utilization : null;
+    const weekDanger = weekUtil != null
+        ? weekUtil >= CFG.weekUtil
+        : (CFG.week > 0 && weekCost >= CFG.week);
+    const weekLabel = weekUtil != null ? `week ${Math.round(weekUtil)}%` : `week ${money(weekCost)}`;
+    const fleetDanger = fleetCost >= CFG.fleet || weekDanger;
+
+    // Build throttle candidates: a tab whose project is over budget (or, in fleet
+    // danger, any heavy tab), that is high-context and safe to compact.
+    const cands = [];
+    for (const [id, tab] of tabById) {
+        const cost = tab.cwd && costByCwd.get(tab.cwd);
+        if (!cost) continue;
+        const meta = metaById.get(id) || {};
+        const bud = budgets.projects[cost.proj] || budgets.default;
+        const over = cost.block >= (bud.blockCost || 20) || cost.today >= (bud.todayCost || 60);
+        if (!(over || fleetDanger)) continue;                       // no pressure on this project
+        if (id === mgr) continue;                                    // never the manager tab
+        if (/manager|\.soa-web/i.test(meta.title || tab.title || '')) continue;
+        if (tab.exited || meta.limited) continue;                    // already stopped / limited
+        if ((meta.ctxPct || 0) < CFG.ctx) continue;                  // compact only helps high-context
+        cands.push({ id, proj: cost.proj, title: meta.title || tab.title, block: cost.block, today: cost.today, ctx: meta.ctxPct, over });
+    }
+    cands.sort((a, b) => b.block - a.block);
+
+    if (STATUS) {
+        console.log(`fleet 5h ${money(fleetCost)} (limit ${money(CFG.fleet)}${fleetDanger ? ' — DANGER' : ''}) · ctx>=${CFG.ctx}% · candidates:`);
+        for (const c of cands) console.log(`  #${c.id} ${(c.proj || '').padEnd(16)} 5h ${money(c.block)} · ctx ${c.ctx}% ${c.over ? 'OVER' : 'heavy'}`);
+        if (!cands.length) console.log('  (none — nothing over budget / no high-context heavy tab)');
+        return;
+    }
+
+    const state = loadState();
+    if (d.block.startTs && state.blockStartTs !== d.block.startTs) {
+        // New 5h block → reset cooldowns AND release any effort throttle so the
+        // fleet returns to ultracode for the fresh block (soa-effort re-raises).
+        state.blockStartTs = d.block.startTs; state.cd = {}; state.ecd = {};
+        if ((loadSkip().ids || []).length) { clearSkip(); log('new 5h block — released effort throttle (ultracode restored)'); }
+    }
+    const now = Date.now();
+
+    // ── Lever 1: /compact the heaviest HIGH-CONTEXT tabs (cheap, no interrupt) ──
+    const pick = cands.filter(c => { const last = state.cd[c.id] || 0; return (now - last) / 1000 >= CFG.cooldown; }).slice(0, CFG.max);
+    const done = [];
+    for (const c of pick) {
+        if (DRY) { done.push(`#${c.id} ${c.proj} (${money(c.block)}, ctx ${c.ctx}%)`); continue; }
+        const r = await req('POST', '/api/sessions', { action: 'compact', id: c.id });
+        if (r && r.ok) { state.cd[c.id] = now; done.push(`#${c.id} ${c.proj} (${money(c.block)}, ctx ${c.ctx}%)`); }
+        else log(`compact #${c.id} failed: ${JSON.stringify(r)}`);
+    }
+    if (!DRY && done.length) {
+        await soaMsg(`🪫 Auto-throttle: /compact ${done.map(x => x.split(' ')[0]).join(', ')} — 5h block ${money(fleetCost)} approaching limit; context cleared to lower burn, work continues (nothing stopped).`);
+        log(`THROTTLED (/compact): ${done.join(', ')} · fleet ${money(fleetCost)}${fleetDanger ? ' DANGER' : ''}`);
+    }
+
+    // ── Lever 2: LOWER EFFORT on the heaviest burners (the subagent burn) ──────
+    // /compact does nothing for subagent-heavy burn — ultracode's dynamic-workflow
+    // orchestration spawns many sub-requests regardless of context size (this is
+    // the case that ran the block to $146 unchecked while lever 1 found "0
+    // candidates"). When the block is in DANGER, drop the top burners
+    // ultracode→CFG.effort (ANY ctx): each turn then spawns far fewer subagents
+    // while the agent keeps working. Record them in SKIP_FILE so soa-effort stops
+    // re-raising them to ultracode until burn recovers. Never stops/interrupts.
+    const effDone = [];
+    if (fleetDanger || cands.some(c => c.over)) {
+        const eff = [];
+        for (const [id, tab] of tabById) {
+            const cost = tab.cwd && costByCwd.get(tab.cwd);
+            if (!cost) continue;
+            const meta = metaById.get(id) || {};
+            const bud = budgets.projects[cost.proj] || budgets.default;
+            const over = cost.block >= (bud.blockCost || 20) || cost.today >= (bud.todayCost || 60);
+            if (!(over || fleetDanger)) continue;                 // no pressure on this project
+            if (id === mgr) continue;                             // never the manager tab
+            if (/manager|\.soa-web/i.test(meta.title || tab.title || '')) continue;
+            if (tab.exited || meta.limited) continue;             // already stopped / limited
+            eff.push({ id, proj: cost.proj, block: cost.block });
+        }
+        eff.sort((a, b) => b.block - a.block);
+        const heldIds = new Set(loadSkip().ids || []);
+        const ecd = state.ecd || {};
+        const toLower = eff.filter(c => !heldIds.has(c.id) && (now - (ecd[c.id] || 0)) / 1000 >= CFG.cooldown).slice(0, CFG.maxEffort);
+        for (const c of toLower) {
+            if (DRY) { effDone.push(`#${c.id} ${c.proj} (${money(c.block)})`); continue; }
+            const r = await req('POST', '/api/sessions', { action: 'send', id: c.id, text: `/effort ${CFG.effort}`, submit: true });
+            if (r && r.ok) {
+                ecd[c.id] = now; heldIds.add(c.id); effDone.push(`#${c.id} ${c.proj} (${money(c.block)})`);
+                // Auto-confirm Claude Code's "Change effort level? 1.Yes 2.No" so the
+                // agent isn't left BLOCKED on it. Guarded: only answer if the prompt
+                // actually rendered, else a stray "1" gets injected as agent input.
+                await new Promise(res => setTimeout(res, 1200));
+                const tail = await req('POST', '/api/sessions', { action: 'read', id: c.id, lines: 14 });
+                if (tail && /Change effort level|Yes, switch/.test(JSON.stringify(tail))) {
+                    await req('POST', '/api/sessions', { action: 'send', id: c.id, text: '1', submit: true });
+                }
+            }
+            else log(`effort #${c.id} send failed: ${JSON.stringify(r)}`);
+        }
+        if (!DRY && effDone.length) {
+            state.ecd = ecd;
+            writeSkip({ ids: [...heldIds], target: CFG.effort, updatedAt: now, reason: `5h ${money(fleetCost)} DANGER` });
+            await soaMsg(`🔻 Auto-throttle: ultracode→/effort ${CFG.effort} on ${effDone.map(x => x.split(' ')[0]).join(', ')} — 5h block ${money(fleetCost)} approaching limit; fewer subagents per turn, work continues (nothing stopped). Restores to ultracode when burn recovers.`);
+            log(`EFFORT-THROTTLED: ${effDone.join(', ')} -> /effort ${CFG.effort} · fleet ${money(fleetCost)} DANGER`);
+        }
+    } else {
+        // Block healthy → release the throttle so soa-effort restores ultracode.
+        const skip = loadSkip();
+        if ((skip.ids || []).length) { clearSkip(); log(`released effort throttle (fleet ${money(fleetCost)} healthy) — ultracode restored on ${skip.ids.map(i => '#' + i).join(', ')}`); }
+    }
+
+    if (DRY) {
+        const parts = [];
+        if (done.length) parts.push(`/compact ${done.join(', ')}`);
+        if (effDone.length) parts.push(`/effort ${CFG.effort} ${effDone.join(', ')}`);
+        console.log(parts.length ? `WOULD throttle [fleet ${money(fleetCost)}${fleetDanger ? ' DANGER' : ''}]: ${parts.join(' · ')}` : `nothing actionable [fleet ${money(fleetCost)}${fleetDanger ? ' DANGER' : ''}]`);
+        log(`DRY would-throttle: ${parts.join(' · ') || 'none'}`);
+        return;
+    }
+    saveState(state);
+    if (!done.length && !effDone.length) {
+        log(`fleet 5h ${money(fleetCost)} · ${weekLabel}${weekDanger ? ' ⚠WEEK-DANGER' : ''}${fleetDanger && !weekDanger ? ' 5H-DANGER' : ''} · compact-cands ${cands.length} none-actionable · effort ${(fleetDanger || cands.some(c => c.over)) ? 'no fresh burners (cooldown/held)' : 'not in danger'}`);
+    }
+}
+main().catch(e => { log('error: ' + (e && e.message || e)); process.exit(0); });

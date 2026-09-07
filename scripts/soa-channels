@@ -1,0 +1,565 @@
+#!/usr/bin/env bash
+#
+# soa-channels — multi-channel self-healing PUBLIC ACCESS for the SoA fleet.
+#
+# Problem this solves: the fleet (your tabs/agents) lives in the daemon on
+# :7332 and survives everything, but the *front door* keeps dying — Cloudflare
+# quick-tunnels go NXDOMAIN, hostnames churn, providers throttle. When the door
+# dies the fleet looks gone even though it isn't. This script keeps a WORKING
+# door open at all times by failing over across channels, and tells you the
+# exact URL to use whenever it changes.
+#
+# CONTEXT IS NEVER LOST: this script only manages the access layer (cloudflared /
+# ngrok processes + tunnel.json) and sends you a message. It NEVER restarts the
+# daemon, never closes a tab, never resumes/kills an agent. The fleet keeps
+# running untouched while the door is swapped underneath it.
+#
+# SAVED AT EVERY MOMENT (the user's rule: "worst case the session stops, but
+# everything is saved at any given time"): every pass first writes a timestamped,
+# rotating, clobber-RESISTANT snapshot of the live fleet manifest (tab id/title/
+# status/ctx, plus cwds for resume) under ~/.soa-web/fleet-snapshots/. It refuses
+# to overwrite a good snapshot with a transient empty read — the exact failure
+# that once wiped tabs.json to 0. Combined with the agent transcripts Claude Code
+# writes continuously to ~/.claude/projects, recovery via `soa-relaunch` is always
+# possible even if EVERY door is closed. So the worst case is "no public door
+# right now" — never lost work.
+#
+# Channel priority (best UX first — first one that VERIFIES wins):
+#   1. cloudflare  quick tunnel   → works with s0a.app/?backend=<url> (no warning page)
+#   2. ngrok       http tunnel    → DIRECT url only (free-tier interstitial blocks
+#                                   s0a.app's cross-origin call; same-origin is fine)
+#   3. lan         http://<ip>:PORT → same-network direct access, no tunnel at all
+#
+# A channel is only adopted after it's verified END-TO-END: the URL must reach
+# OUR daemon AND report a live fleet (tabs > 0) — so we never hand you a dead or
+# wrong-daemon link (the recurring "please reconnect" failure).
+#
+# Run it every ~60s from launchd (deploy/launchd/com.soa-web.channels.plist) or
+# by hand. Safe to run concurrently with com.soa-web.watchdog: while a channel is
+# healthy this script keeps tunnel.json pointed at it (pings 200), so the watchdog
+# sees a healthy tunnel and stays out of the way.
+#
+# Usage:
+#   soa-channels                 # one self-heal pass (the launchd entrypoint)
+#   soa-channels status          # print the current channel + user URL, do nothing
+#   soa-channels force <ch>      # force a specific channel: cloudflare|ngrok|lan
+#   soa-channels --port 7332     # daemon port (default 7332 / $SOA_WEB_PORT)
+
+set -uo pipefail
+
+PORT="${SOA_WEB_PORT:-7332}"
+ACTION="pass"
+FORCE_CH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port) PORT="$2"; shift 2;;
+        status) ACTION="status"; shift;;
+        force)  ACTION="force"; FORCE_CH="${2:-}"; shift 2;;
+        *) shift;;
+    esac
+done
+
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web}"
+TUNJSON="$STATE_DIR/tunnel.json"
+CHJSON="$STATE_DIR/channels.json"
+SNAP_DIR="$STATE_DIR/fleet-snapshots"
+LOG="$STATE_DIR/logs/channels.log"
+NGROK_LOG="$STATE_DIR/logs/ngrok-${PORT}.log"
+CF_BACKOFF="$STATE_DIR/logs/.cf-backoff"   # epoch of last failed cloudflare probe
+CF_BACKOFF_SECS=600                        # don't re-probe a dead cloudflare for 10m
+FAILS="$STATE_DIR/logs/.channel-misses"    # consecutive failed-verify passes (anti-churn hysteresis)
+CHURN_HOLD_MISSES="${SOA_CHURN_HOLD_MISSES:-3}"  # hold a blipping tunnel this many ~60s passes before minting a NEW url
+LOCK="$STATE_DIR/logs/.channels.lock"
+S0A="https://s0a.app"
+# Stable named cloudflare tunnel (soa-named-tunnel-setup). A FIXED hostname that
+# never rotates → the ideal door. Everything below no-ops until it's set up.
+NAMED_HOST="${SOA_TUNNEL_HOSTNAME:-m.s0a.app}"
+NAMED_CFG="$HOME/.cloudflared/config.yml"
+
+# ── Per-install STABLE-tunnel config (soa-tunnel-setup) ───────────────────────
+# Provider-agnostic + per-user: when present we PREFER this fixed door and never
+# churn quick tunnels under it. Works for ANY user with their OWN tunnel — not
+# just the owner's m.s0a.app. Two providers: ngrok (reserved --domain, no domain
+# of your own needed) or cloudflare (named tunnel on a host you delegate).
+TUNCFG="$STATE_DIR/tunnel-config.json"
+STABLE_PROVIDER=""; NGROK_DOMAIN=""
+STABLE_HOST="$NAMED_HOST"   # what "already on the stable door" matches (default: named cf)
+if [ -f "$TUNCFG" ]; then
+    # One self-contained parse (jget isn't defined yet at this point): emit
+    # provider / ngrok domain / cloudflare hostname as three shell-eval lines.
+    eval "$(python3 - "$TUNCFG" <<'PY' 2>/dev/null || true
+import json,sys,shlex
+try: d=json.load(open(sys.argv[1]))
+except Exception: d={}
+prov=d.get("provider","") or ""
+dom=(d.get("ngrok") or {}).get("domain","") or ""
+host=(d.get("cloudflare") or {}).get("hostname","") or ""
+print("STABLE_PROVIDER=%s"%shlex.quote(prov))
+print("__NGROK_DOMAIN=%s"%shlex.quote(dom))
+print("__CF_HOST=%s"%shlex.quote(host))
+PY
+)"
+    if [ "$STABLE_PROVIDER" = "ngrok" ] && [ -n "${__NGROK_DOMAIN:-}" ]; then
+        NGROK_DOMAIN="$__NGROK_DOMAIN"; STABLE_HOST="$NGROK_DOMAIN"
+    elif [ "$STABLE_PROVIDER" = "cloudflare" ] && [ -n "${__CF_HOST:-}" ]; then
+        NAMED_HOST="$__CF_HOST"; STABLE_HOST="$__CF_HOST"
+    fi
+fi
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+now() { date +%s; }
+log() { echo "$(ts) $*" >> "$LOG" 2>/dev/null; }
+
+# Single-flight: a slow cloudflare probe must not overlap the next launchd tick.
+exec 9>"$LOCK" 2>/dev/null
+if command -v flock >/dev/null 2>&1; then flock -n 9 || { exit 0; }; fi
+
+# JSON field read without jq.
+jget() { python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('$1',''))
+except: pass" 2>/dev/null; }
+
+daemon_ok() { curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/ping" >/dev/null 2>&1; }
+
+# A valid pairing token, read LOCALLY. The tunnel is now QR-holder-only, so the
+# through-tunnel /api/manager probe needs one (see AUTH_HDR); locally we're
+# allowed to mint it. Empty string if unavailable (probe then falls back to
+# unauthenticated, i.e. pre-hardening behavior).
+pair_token() { curl -fsS --max-time 6 "http://127.0.0.1:${PORT}/api/pair/status" 2>/dev/null | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('data',{}).get('pairToken','') or '')
+except: print('')" 2>/dev/null; }
+
+jget_total() { python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
+except: print(0)" 2>/dev/null; }
+
+# Snapshot tuning. The ring was 30 snaps ≈ 30m at the 60s cadence — too shallow
+# to survive a clobber that isn't noticed for half an hour (the 2026-07-27
+# incident: last 20-tab snap 22:05, clobber 22:08, all good snaps rotated out by
+# ~22:40, noticed ~23:20 → nothing left to restore). Deepen it to ~8h and make
+# the guards SIZE-AWARE so a degraded reboot can't quietly poison the record.
+SNAP_KEEP="${SOA_SNAP_KEEP:-500}"     # ~8h of history at 60s (was 30 ≈ 30m)
+CLOBBER_ARM_MIN=8                     # only guard against collapse when the fleet was at least this big
+CLOBBER_GRACE=15                      # hold the good record this many suspicious passes (~15m) before believing a smaller fleet is real
+LGT="$SNAP_DIR/.last-good-total"      # last healthy fleet size (baseline for "collapsed")
+DEGC="$SNAP_DIR/.degraded-count"      # consecutive suspicious passes
+
+# Continuous save: capture the live fleet manifest every pass. NEVER overwrites a
+# good snapshot with an empty/transient read (total==0) OR a degraded reboot
+# (total collapsed far below the last-good size — the total==1 clobber that used
+# to sail straight through and poison latest.json + tabs-latest.json + the ring).
+# Keeps the last $SNAP_KEEP + a stable latest.json so recovery is clobber-proof.
+snapshot_fleet() {
+    mkdir -p "$SNAP_DIR" 2>/dev/null
+    curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/manager" -o "$SNAP_DIR/.mgr.tmp" 2>/dev/null || return 0
+    local total; total="$(jget_total < "$SNAP_DIR/.mgr.tmp")"; [ -z "$total" ] && total=0
+    local last_good; last_good="$(cat "$LGT" 2>/dev/null || echo 0)"; [ -z "$last_good" ] && last_good=0
+
+    # (a) empty/transient read — never overwrite a good record (original guard).
+    if ! [ "$total" -gt 0 ] 2>/dev/null; then
+        rm -f "$SNAP_DIR/.mgr.tmp" 2>/dev/null
+        log "snapshot SKIPPED (manager total=${total}) — keeping last good record"
+        return 0
+    fi
+
+    # (b) size-aware clobber guard. A daemon that reboots from a clobbered
+    # tabs.json comes up with a tiny fleet (typically 1) while last_good was
+    # large. Hold the good record through a grace window so restore_fleet_if_lost
+    # can rebuild from it; if the small fleet persists past the window, the user
+    # genuinely downsized — accept it as the new baseline and resume saving.
+    local floor=$(( last_good / 4 )); [ "$floor" -lt 2 ] && floor=2
+    local closed_by_user=0
+    grep -q '"closedByUser"[[:space:]]*:[[:space:]]*true' "$STATE_DIR/tabs.json" 2>/dev/null && closed_by_user=1
+    if [ "$last_good" -ge "$CLOBBER_ARM_MIN" ] && [ "$total" -lt "$floor" ] && [ "$closed_by_user" -eq 0 ]; then
+        local deg; deg="$(cat "$DEGC" 2>/dev/null || echo 0)"; deg=$(( deg + 1 ))
+        if [ "$deg" -le "$CLOBBER_GRACE" ]; then
+            echo "$deg" > "$DEGC"
+            rm -f "$SNAP_DIR/.mgr.tmp" 2>/dev/null
+            log "snapshot HELD (total=${total} << last-good=${last_good}, suspected clobber ${deg}/${CLOBBER_GRACE}) — preserving good record for recovery"
+            return 0
+        fi
+        log "snapshot: degraded total=${total} persisted ${deg} passes — accepting as the new baseline"
+    fi
+    rm -f "$DEGC" 2>/dev/null   # healthy (or accepted) — clear the suspicion counter
+
+    local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+    mv "$SNAP_DIR/.mgr.tmp" "$SNAP_DIR/fleet-${stamp}.json"
+    cp "$SNAP_DIR/fleet-${stamp}.json" "$SNAP_DIR/latest.json"
+    # cwds (needed for `claude --resume`) when /api/tabs is non-empty.
+    curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/tabs" -o "$SNAP_DIR/.tabs.tmp" 2>/dev/null
+    if [ -s "$SNAP_DIR/.tabs.tmp" ] && grep -q '"cwd"' "$SNAP_DIR/.tabs.tmp" 2>/dev/null; then
+        mv "$SNAP_DIR/.tabs.tmp" "$SNAP_DIR/tabs-latest.json"
+    else
+        rm -f "$SNAP_DIR/.tabs.tmp" 2>/dev/null
+    fi
+    echo "$total" > "$LGT"      # remember the current healthy size as the baseline
+    ls -1t "$SNAP_DIR"/fleet-*.json 2>/dev/null | tail -n +$(( SNAP_KEEP + 1 )) | xargs rm -f 2>/dev/null
+    log "snapshot saved: ${total} tabs → fleet-${stamp}.json"
+}
+
+# FLEET CLOBBER RECOVERY (self-heal). If the live daemon reports zero tabs but
+# this wasn't an intentional close-all (the daemon stamps "closedByUser" in
+# tabs.json), rebuild its tabs.json from the last good snapshot so the daemon's
+# restore-on-connect + auto-resume rehydrate the fleet on the next open. This is
+# the access layer's backstop to the daemon's own scrollback-based reconcile —
+# it covers the case where even scrollback.json was lost. Conservative: a no-op
+# when tabs are present or the user cleared them; one attempt per cooldown; and
+# the daemon's write guard keeps the repaired list from being re-clobbered. It
+# only repairs metadata — it never restarts the daemon or kills a tab.
+RECOVER_COOLDOWN="$STATE_DIR/logs/.fleet-recover"
+restore_fleet_if_lost() {
+    local total; total="$(curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/manager" 2>/dev/null | jget_total)"
+    [ -z "$total" ] && total=0
+    local last_good; last_good="$(cat "$LGT" 2>/dev/null || echo 0)"; [ -z "$last_good" ] && last_good=0
+    # "Lost" = all tabs gone (total==0) OR a degraded reboot: total collapsed to
+    # ≤2 while last_good was large (the 1-tab clobber, which the old `total>0`
+    # check wrongly treated as healthy). Conservative absolute cap (≤2) so a
+    # deliberate downsize to a handful of tabs never trips a re-add.
+    local lost=0
+    if [ "$total" -le 0 ] 2>/dev/null; then lost=1
+    elif [ "$last_good" -ge "$CLOBBER_ARM_MIN" ] && [ "$total" -le 2 ]; then lost=1; fi
+    [ "$lost" -eq 1 ] || return 0                 # fleet healthy — nothing to do
+
+    # Respect an intentional close-all (the daemon's intent marker).
+    if [ -f "$STATE_DIR/tabs.json" ] && grep -q '"closedByUser"[[:space:]]*:[[:space:]]*true' "$STATE_DIR/tabs.json" 2>/dev/null; then
+        return 0
+    fi
+    # Need a good snapshot with cwds to recover from.
+    local snap="$SNAP_DIR/tabs-latest.json"
+    { [ -f "$snap" ] && grep -q '"cwd"' "$snap" 2>/dev/null; } || return 0
+
+    # Don't thrash: at most one recovery per 5 min.
+    local now_s; now_s="$(now)"
+    if [ -f "$RECOVER_COOLDOWN" ]; then
+        local last; last="$(cat "$RECOVER_COOLDOWN" 2>/dev/null || echo 0)"
+        [ "$(( now_s - last ))" -lt 300 ] && return 0
+    fi
+
+    # Convert the /api/tabs snapshot → tabs.json shape, atomically, where the
+    # daemon reads it.
+    local n
+    n="$(python3 - "$snap" "$STATE_DIR/tabs.json" <<'PY'
+import sys, os, json
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(src))
+    rows = data.get('tabs', data) if isinstance(data, dict) else data
+    out = []
+    for t in rows:
+        cwd = t.get('cwd')
+        if not cwd:
+            continue
+        title = t.get('title')
+        renamed = bool(title and title != os.path.basename(cwd))
+        out.append({'title': title if renamed else None, 'cwd': cwd, 'userRenamed': renamed})
+    if not out:
+        print(0); sys.exit(0)
+    json.dump({'savedAt': '', 'tabs': out, 'recoveredFrom': 'snapshot'}, open(dst + '.tmp', 'w'))
+    os.replace(dst + '.tmp', dst)
+    print(len(out))
+except Exception:
+    print(0)
+PY
+)"
+    if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+        echo "$now_s" > "$RECOVER_COOLDOWN"
+        log "FLEET RECOVERED: tabs.json repaired from snapshot (${n} tabs) — reconnect to rehydrate"
+        command -v soa-msg >/dev/null 2>&1 && soa-msg "🛟 Fleet tab list was lost and auto-restored (${n} tabs) from the last snapshot — reopen the link to rehydrate (agents auto-resume)." >/dev/null 2>&1
+    fi
+}
+
+# Resolve a hostname to an IPv4 via DoH (HTTPS:443). This network's UDP/53
+# resolver intermittently NXDOMAINs live tunnel hosts (950+ ngrok "no such host"
+# errors on a STABLE host), which used to tear down tunnels that were actually
+# reachable for external clients. DoH over 443 is unaffected, so we can pin the
+# real edge IP and probe the tunnel even while getaddrinfo is briefly broken.
+doh_a() {
+    curl -fsS --max-time 6 -H 'accept: application/dns-json' \
+        "https://1.1.1.1/dns-query?name=$1&type=A" 2>/dev/null \
+        | python3 -c "import sys,json
+try: print(next(a['data'] for a in json.load(sys.stdin).get('Answer',[]) if a.get('type')==1))
+except Exception: pass" 2>/dev/null
+}
+
+# Tab count reachable THROUGH a url (proves it hits OUR live fleet, not a dead
+# host or the wrong daemon). $2 = optional extra header (ngrok skip). If the local
+# resolver fails the name, retry once pinning the DoH-resolved IP via --resolve.
+fleet_tabs() {
+    local url="$1" hdr="${2:-}" host ip out
+    out="$(curl -fsS --max-time 12 ${AUTH_HDR:+-H "$AUTH_HDR"} ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
+    if [ -z "$out" ]; then
+        host="$(printf '%s' "$url" | sed -E 's#^https?://##; s#[:/].*$##')"
+        ip="$(doh_a "$host")"
+        [ -n "$ip" ] && out="$(curl -fsS --max-time 12 --resolve "${host}:443:${ip}" ${AUTH_HDR:+-H "$AUTH_HDR"} ${hdr:+-H "$hdr"} "${url%/}/api/manager" 2>/dev/null)"
+    fi
+    printf '%s' "$out" | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('counts',{}).get('total',0))
+except: print(0)" 2>/dev/null
+}
+
+# A url is GOOD only if it reaches our daemon AND the fleet has tabs. Retries so a
+# SINGLE transient DNS/network blip never tears down a tunnel that is actually
+# live for external clients (the recurring "no door" false alarm).
+verify() {
+    local url="$1" hdr="${2:-}" i n
+    for i in 1 2 3; do
+        n="$(fleet_tabs "$url" "$hdr")"
+        [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null && return 0
+        [ "$i" -lt 3 ] && sleep 3
+    done
+    return 1
+}
+
+skip_hdr_for() { [ "$1" = "ngrok" ] && echo "ngrok-skip-browser-warning: 1"; }
+
+# The URL we actually tell the user, per channel (ngrok must be the DIRECT url).
+user_url_for() {
+    case "$1" in
+        cloudflare) echo "${S0A}/?backend=$2";;
+        *)          echo "$2";;
+    esac
+}
+note_for() {
+    case "$1" in
+        cloudflare) echo "open on any device (works on s0a.app)";;
+        ngrok)      echo "open this link DIRECTLY (not s0a.app) and click 'Visit Site' once";;
+        lan)        echo "same-wifi only — open this http link directly";;
+    esac
+}
+
+adopt() {
+    local ch="$1" url="$2" uurl note
+    uurl="$(user_url_for "$ch" "$url")"; note="$(note_for "$ch")"
+    printf '{"channel":"%s","url":"%s","userUrl":"%s","note":"%s","verifiedAt":"%s"}\n' \
+        "$ch" "$url" "$uurl" "$note" "$(ts)" > "$CHJSON"
+    # Keep tunnel.json pointed at the live channel so the watchdog pings a 200 and
+    # leaves it alone. (LAN has no tunnel process to record.)
+    if [ "$ch" != "lan" ]; then
+        printf '{"provider":"%s","url":"%s","port":%s,"startedAt":0}\n' "$ch" "$url" "$PORT" > "$TUNJSON"
+        # Register the new origin with the LIVE daemon (no restart) so browsers on
+        # the new tunnel host clear the WS origin gate immediately. The daemon's
+        # SIGHUP handler re-reads tunnel.json from its own state dir — idempotent,
+        # so harmless even when the watchdog also signals. Covers ngrok/lan-less
+        # channels where onTunnelUp didn't fire, and fresh URLs after a rotation.
+        for _pid in $(lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null); do
+            kill -HUP "$_pid" 2>/dev/null && log "SIGHUP → pid ${_pid} (trust ${url})"
+        done
+    fi
+    log "ADOPTED ${ch} → ${url}  (user: ${uurl})"
+    if command -v soa-msg >/dev/null 2>&1; then
+        soa-msg "🔁 Fleet access restored via ${ch} — your tabs are reachable (nothing lost). ${note}: ${uurl}" >/dev/null 2>&1
+    fi
+}
+
+# ── Channel providers — each prints a verified url on success, else returns 1 ──
+
+# 1. Cloudflare quick tunnel, minted THROUGH the daemon so it also registers the
+#    origin in ALLOWED_ORIGINS (onTunnelUp). Cleans up a dead cloudflared so a
+#    Cloudflare outage doesn't leave a zombie behind.
+ch_cloudflare() {
+    local url i
+    url="$(curl -fsS --max-time 45 -X POST "http://127.0.0.1:${PORT}/api/pair/start" 2>/dev/null | jget publicUrl)"
+    # /api/pair/start returns {ok,data:{publicUrl}} — re-read from data if needed.
+    if [ -z "$url" ]; then
+        url="$(curl -fsS --max-time 6 "http://127.0.0.1:${PORT}/api/pair/status" 2>/dev/null \
+              | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('publicUrl',''))" 2>/dev/null)"
+    fi
+    [ -z "$url" ] && return 1
+    # Only adopt a GENUINE cloudflare quick-tunnel host under the cloudflare label.
+    # When no cloudflared can be minted the daemon sometimes echoes back the existing
+    # tunnel (e.g. an ngrok url); adopting that as "cloudflare" mislabels channels.json
+    # and tells the user "works on s0a.app" for a host whose free interstitial blocks
+    # the cross-origin call. Fail here so failover adopts it under the CORRECT channel.
+    case "$url" in *trycloudflare.com*) ;; *) return 1;; esac
+    for i in 1 2 3 4 5 6 7 8; do
+        verify "$url" && { echo "$url"; return 0; }
+        sleep 4
+    done
+    # Dead (Cloudflare throttling / outage) — stop the zombie cloudflared.
+    curl -fsS --max-time 6 -X POST "http://127.0.0.1:${PORT}/api/pair/stop" >/dev/null 2>&1
+    return 1
+}
+
+# 2. ngrok — reuse a running agent pointed at our port, else (re)start one.
+ch_ngrok() {
+    command -v ngrok >/dev/null 2>&1 || return 1
+    # STABLE mode: when a reserved domain is configured (soa-tunnel-setup ngrok
+    # --domain), run ngrok pinned to it so the URL never rotates. (Re)start ngrok
+    # if none serves our port OR a domain is configured but the live agent isn't
+    # on it yet. Zero-config installs keep the old random-URL behavior.
+    local dom=""; [ -n "$NGROK_DOMAIN" ] && dom="--domain=$NGROK_DOMAIN"
+    local tuns need=0
+    tuns="$(curl -fsS --max-time 4 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null || true)"
+    if ! printf '%s' "$tuns" | grep -q "localhost:${PORT}\|:${PORT}\""; then need=1; fi
+    if [ -n "$NGROK_DOMAIN" ] && ! printf '%s' "$tuns" | grep -q "$NGROK_DOMAIN"; then need=1; fi
+    if [ "$need" -eq 1 ]; then
+        pkill -f "ngrok http" 2>/dev/null; sleep 1
+        nohup ngrok http "${PORT}" $dom --log="$NGROK_LOG" >/dev/null 2>&1 &
+        sleep 6
+    fi
+    local url i hdr; hdr="$(skip_hdr_for ngrok)"
+    for i in 1 2 3 4 5 6 7 8; do
+        url="$(curl -fsS --max-time 5 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null \
+              | python3 -c "import sys,json
+d=json.load(sys.stdin)
+for t in d.get('tunnels',[]):
+    if t.get('config',{}).get('addr','').endswith(':${PORT}') and t.get('public_url','').startswith('https'):
+        print(t['public_url']); break" 2>/dev/null)"
+        [ -n "$url" ] && verify "$url" "$hdr" && { echo "$url"; return 0; }
+        sleep 3
+    done
+    return 1
+}
+
+# 0. STABLE named cloudflare tunnel (m.s0a.app) — a FIXED hostname that never
+#    rotates. Detected ONLY once soa-named-tunnel-setup has written the cloudflared
+#    config for it, so this is a fast no-op (returns 1) until then. Kickstarts the
+#    KeepAlive service in case it died. Adopted under the "cloudflare" label so the
+#    client still gets the s0a.app/?backend=… convenience URL.
+ch_named() {
+    local url i
+    { [ -f "$NAMED_CFG" ] && grep -q "$NAMED_HOST" "$NAMED_CFG" 2>/dev/null; } || return 1
+    launchctl kickstart "gui/$(id -u)/com.soa-web.named-tunnel" 2>/dev/null || true
+    url="https://${NAMED_HOST}"
+    for i in 1 2 3 4 5 6; do
+        verify "$url" && { echo "$url"; return 0; }
+        sleep 3
+    done
+    return 1
+}
+
+# 3. LAN — first private IPv4 the daemon (bound 0.0.0.0) is reachable on.
+ch_lan() {
+    local ip url
+    ip="$(ipconfig getifaddr en0 2>/dev/null)"; [ -z "$ip" ] && ip="$(ipconfig getifaddr en1 2>/dev/null)"
+    [ -z "$ip" ] && ip="$(ifconfig 2>/dev/null | awk '/inet (192|10|172)\./{print $2; exit}')"
+    [ -z "$ip" ] && return 1
+    url="http://${ip}:${PORT}"
+    verify "$url" && { echo "$url"; return 0; }
+    return 1
+}
+
+failover() {
+    local ch url
+    # 0. Prefer the configured STABLE door (never rotates). No-op until set up.
+    if [ "$STABLE_PROVIDER" = "ngrok" ] && [ -n "$NGROK_DOMAIN" ]; then
+        if url="$(ch_ngrok)"; then adopt ngrok "$url"; return 0; fi
+    fi
+    if url="$(ch_named)"; then adopt cloudflare "$url"; return 0; fi
+    for ch in cloudflare ngrok lan; do
+        # Skip a recently-failed cloudflare so a multi-hour CF outage doesn't burn
+        # ~70s of every cycle re-minting dead tunnels.
+        if [ "$ch" = "cloudflare" ] && [ -f "$CF_BACKOFF" ]; then
+            local last; last="$(cat "$CF_BACKOFF" 2>/dev/null || echo 0)"
+            if [ "$(( $(now) - last ))" -lt "$CF_BACKOFF_SECS" ]; then
+                log "skip cloudflare (in ${CF_BACKOFF_SECS}s backoff)"; continue
+            fi
+        fi
+        if url="$(ch_${ch})"; then
+            [ "$ch" = "cloudflare" ] && rm -f "$CF_BACKOFF" 2>/dev/null
+            adopt "$ch" "$url"; return 0
+        fi
+        [ "$ch" = "cloudflare" ] && echo "$(now)" > "$CF_BACKOFF"
+        log "channel ${ch} unavailable"
+    done
+    # No public door right now — the ACCEPTABLE worst case. The fleet is still
+    # running on :${PORT} and just got snapshotted, so nothing is lost; access
+    # resumes automatically the moment any channel recovers.
+    log "NO channel available — fleet alive + snapshotted on :${PORT}, no public door (will retry next pass)"
+    if command -v soa-msg >/dev/null 2>&1; then
+        soa-msg "⚠️ No public door available right now (all tunnels down). Your fleet is ALIVE and saved on :${PORT} — nothing lost. I'll auto-reconnect and send the link the moment a channel recovers. (On the Mac: open http://127.0.0.1:${PORT}.)" >/dev/null 2>&1
+    fi
+    return 1
+}
+
+# ── Entry points ──────────────────────────────────────────────────────────────
+if [ "$ACTION" = "status" ]; then
+    [ -f "$CHJSON" ] && cat "$CHJSON" || echo '{"channel":null}'
+    exit 0
+fi
+
+if ! daemon_ok; then
+    log "daemon :${PORT} not responding — access self-heal deferred to KeepAlive/watchdog"
+    exit 0
+fi
+
+# Bearer token for the through-tunnel health probe (QR-holder-only gate). Minted
+# locally each run; if empty, probes stay unauthenticated (pre-hardening).
+TOKEN="$(pair_token)"
+AUTH_HDR=""
+[ -n "$TOKEN" ] && AUTH_HDR="Authorization: Bearer $TOKEN"
+
+# Save FIRST, always — before touching any door. Guarantees a fresh, clobber-proof
+# record of the fleet exists at this instant regardless of what happens next.
+snapshot_fleet
+
+# Then heal a clobbered fleet (tab list lost but not user-closed) from the last
+# good snapshot, before we worry about the public door.
+restore_fleet_if_lost
+
+if [ "$ACTION" = "force" ]; then
+    case "$FORCE_CH" in
+        cloudflare|ngrok|lan)
+            if url="$(ch_${FORCE_CH})"; then adopt "$FORCE_CH" "$url"; exit 0; fi
+            log "forced channel ${FORCE_CH} failed to verify"; exit 1;;
+        *) echo "usage: soa-channels force cloudflare|ngrok|lan" >&2; exit 2;;
+    esac
+fi
+
+# Normal self-heal pass.
+cur_ch="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget channel )"
+cur_url="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget url )"
+
+if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
+    rm -f "$FAILS" 2>/dev/null            # reachable this pass — clear the miss streak
+    # CONVERGE ON STABILITY: if we're on a ROTATING door (quick cloudflare / ngrok)
+    # but the FIXED named tunnel is up, upgrade to it. Safe — the named host never
+    # rotates, so this is a one-time move to permanence, not URL churn. Skipped once
+    # we're already on it (and a no-op entirely until the named tunnel is set up).
+    case "$cur_url" in
+        *"$STABLE_HOST"*) : ;;                      # already on the stable door
+        *)  # Upgrade a rotating door to the configured STABLE one if it's up.
+            if [ "$STABLE_PROVIDER" = "ngrok" ] && [ -n "$NGROK_DOMAIN" ]; then
+                if nurl="$(ch_ngrok)"; then
+                    log "UPGRADE ${cur_ch} ${cur_url} → stable ngrok ${nurl}"
+                    adopt ngrok "$nurl"; exit 0
+                fi
+            elif nurl="$(ch_named)"; then
+                log "UPGRADE ${cur_ch} ${cur_url} → stable named tunnel ${nurl}"
+                adopt cloudflare "$nurl"; exit 0
+            fi ;;
+    esac
+    # STABILITY over prettiness: a HEALTHY door is kept AS-IS — we do NOT re-mint a
+    # fresh cloudflare quick tunnel just to move off ngrok. Each quick tunnel gets a
+    # NEW random *.trycloudflare.com hostname, so every gratuitous swap killed the
+    # backend that clients pin via s0a.app/?backend=<url>, dropping the WebSocket and
+    # throwing the terminal stream into a reconnect/refresh loop (48 distinct URLs
+    # churned in a single day → "kept refreshing"). failover() already prefers
+    # cloudflare when a door actually DIES, so we still recover onto cloudflare
+    # without rotating a working URL underneath a live session.
+    #
+    # For a URL that NEVER rotates, stand up the fixed named tunnel (m.s0a.app):
+    #   scripts/soa-named-tunnel-setup   (one-time; needs `cloudflared tunnel login`).
+    log "channel healthy: ${cur_ch} ${cur_url}"
+    exit 0
+fi
+
+# The current door missed this pass. Cloudflare quick-tunnels blip constantly and
+# get a NEW random hostname on every mint, so failing over on a SINGLE miss churns
+# the public URL and kicks every connected client into a reconnect/refresh loop.
+# HOLD the current tunnel across transient misses; only fail over (mint a new url)
+# after CHURN_HOLD_MISSES consecutive misses (~minutes), keeping s0a.app on the
+# SAME hostname through brief cloudflare outages.
+if [ -n "$cur_url" ]; then
+    misses=0; [ -f "$FAILS" ] && misses="$(cat "$FAILS" 2>/dev/null || echo 0)"
+    misses=$(( misses + 1 ))
+    if [ "$misses" -lt "$CHURN_HOLD_MISSES" ]; then
+        echo "$misses" > "$FAILS"
+        log "channel MISS ${misses}/${CHURN_HOLD_MISSES}: ${cur_ch:-none} ${cur_url} — holding (anti-churn), not failing over"
+        exit 0
+    fi
+    log "channel DOWN after ${misses} misses: ${cur_ch:-none} ${cur_url} — failing over"
+fi
+rm -f "$FAILS" 2>/dev/null
+failover

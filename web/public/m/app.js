@@ -24,12 +24,18 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v53 · fleet manager · 2026-06-10';
+const MOBILE_BUILD = 'v56 · mobile UX · tab-jump + anti-flicker · 2026-07-16';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
 const MIC_SETTINGS_KEY = 'son-of-anton.mic-settings';
 const FONT_SCALE_KEY = 'son-of-anton.font-scale';
+// Grace period before the full-screen RECONNECTING overlay is raised. Tunnel
+// blips reconnect in well under a second; flashing the overlay on every micro
+// drop is the single jankiest thing on mobile. We keep the small status dot
+// live immediately but only raise the big overlay if we're STILL down after
+// this delay (and cancel it the instant we reconnect).
+const RECONNECT_OVERLAY_DELAY_MS = 1400;
 
 /* ── Theme definitions ──────────────────────────────── */
 
@@ -148,20 +154,20 @@ const THEMES = {
         name: 'Liquid Glass',
         preview: ['#f0f2f5', '#0071e3'],
         vars: {
-            '--bg':             '#f0f2f5',
-            '--bg-alt':         '#e8eaed',
-            '--fg':             '#1d1d1f',
-            '--fg-dim':         'rgba(29,29,31,0.5)',
-            '--fg-faint':       'rgba(29,29,31,0.15)',
-            '--accent':         '#0071e3',
-            '--accent-glow':    'rgba(0,113,227,0.3)',
-            '--accent-bg':      'rgba(0,113,227,0.08)',
-            '--accent-bg-hover':'rgba(0,113,227,0.14)',
-            '--warn':           '#e67e00',
-            '--err':            '#e3342f',
-            '--line':           'rgba(0,0,0,0.1)',
+            '--bg':             '#eef1f5',
+            '--bg-alt':         '#ffffff',
+            '--fg':             '#1c1c1e',
+            '--fg-dim':         'rgba(28,28,30,0.58)',
+            '--fg-faint':       'rgba(28,28,30,0.34)',
+            '--accent':         '#0a84ff',
+            '--accent-glow':    'rgba(10,132,255,0.3)',
+            '--accent-bg':      'rgba(10,132,255,0.1)',
+            '--accent-bg-hover':'rgba(10,132,255,0.16)',
+            '--warn':           '#d97706',
+            '--err':            '#e0352b',
+            '--line':           'rgba(17,24,39,0.1)',
             '--radius':         '14px',
-            '--panel-bg':       'rgba(255,255,255,0.55)',
+            '--panel-bg':       'rgba(255,255,255,0.68)',
             '--font':           "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif",
         },
         colorScheme: 'light',
@@ -214,6 +220,32 @@ const THEMES = {
     },
 
     // ── Liquid Glass family — translucent panels, SF font, rounded ────────
+    // LIQUID — the mobile face of the desktop LIQUID UI language: black & white,
+    // a near-pure OLED-black ground, systemBlue reserved for what you touch. The
+    // full glass treatment (ground blooms, frosted panels, edge-lensing rims and
+    // specular) lives in the [data-theme="liquid"] block in styles.css.
+    liquid: {
+        name: 'Liquid · iOS',
+        preview: ['#050506', '#0a84ff'],
+        vars: {
+            '--bg':             '#050506',
+            '--bg-alt':         '#0d0d12',
+            '--fg':             '#f5f5f7',
+            '--fg-dim':         'rgba(245,245,247,0.62)',
+            '--fg-faint':       'rgba(245,245,247,0.34)',
+            '--accent':         '#ffffff',
+            '--accent-glow':    'rgba(255,255,255,0.5)',
+            '--accent-bg':      'rgba(255,255,255,0.1)',
+            '--accent-bg-hover':'rgba(255,255,255,0.16)',
+            '--warn':           '#ff9f0a',
+            '--err':            '#ff453a',
+            '--line':           'rgba(255,255,255,0.12)',
+            '--radius':         '18px',
+            '--panel-bg':       'rgba(255,255,255,0.06)',
+            '--font':           "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif",
+        },
+        colorScheme: 'dark',
+    },
     'liquid-dark': {
         name: 'Liquid Dark',
         preview: ['#0a0c10', '#0a84ff'],
@@ -240,20 +272,20 @@ const THEMES = {
         name: 'Liquid Mint',
         preview: ['#eef5f2', '#00a884'],
         vars: {
-            '--bg':             '#eef5f2',
-            '--bg-alt':         '#e4eeea',
-            '--fg':             '#14342b',
-            '--fg-dim':         'rgba(20,52,43,0.5)',
-            '--fg-faint':       'rgba(20,52,43,0.15)',
+            '--bg':             '#eef4f1',
+            '--bg-alt':         '#ffffff',
+            '--fg':             '#12352b',
+            '--fg-dim':         'rgba(18,53,43,0.58)',
+            '--fg-faint':       'rgba(18,53,43,0.32)',
             '--accent':         '#00a884',
             '--accent-glow':    'rgba(0,168,132,0.3)',
-            '--accent-bg':      'rgba(0,168,132,0.08)',
-            '--accent-bg-hover':'rgba(0,168,132,0.14)',
-            '--warn':           '#e67e00',
-            '--err':            '#e3342f',
-            '--line':           'rgba(0,40,30,0.1)',
+            '--accent-bg':      'rgba(0,168,132,0.1)',
+            '--accent-bg-hover':'rgba(0,168,132,0.16)',
+            '--warn':           '#d97706',
+            '--err':            '#e0352b',
+            '--line':           'rgba(6,45,34,0.11)',
             '--radius':         '14px',
-            '--panel-bg':       'rgba(255,255,255,0.55)',
+            '--panel-bg':       'rgba(255,255,255,0.68)',
             '--font':           "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif",
         },
         colorScheme: 'light',
@@ -262,21 +294,47 @@ const THEMES = {
         name: 'Liquid Gold',
         preview: ['#f6f2ea', '#bf9b30'],
         vars: {
-            '--bg':             '#f6f2ea',
-            '--bg-alt':         '#efe9dd',
-            '--fg':             '#2b2418',
-            '--fg-dim':         'rgba(43,36,24,0.5)',
-            '--fg-faint':       'rgba(43,36,24,0.15)',
-            '--accent':         '#bf9b30',
-            '--accent-glow':    'rgba(191,155,48,0.35)',
-            '--accent-bg':      'rgba(191,155,48,0.1)',
-            '--accent-bg-hover':'rgba(191,155,48,0.18)',
-            '--warn':           '#e67e00',
-            '--err':            '#e3342f',
-            '--line':           'rgba(60,45,15,0.12)',
+            '--bg':             '#f5f1e8',
+            '--bg-alt':         '#fffdf8',
+            '--fg':             '#2a2214',
+            '--fg-dim':         'rgba(42,34,20,0.58)',
+            '--fg-faint':       'rgba(42,34,20,0.32)',
+            '--accent':         '#a9822a',
+            '--accent-glow':    'rgba(169,130,42,0.35)',
+            '--accent-bg':      'rgba(169,130,42,0.12)',
+            '--accent-bg-hover':'rgba(169,130,42,0.2)',
+            '--warn':           '#c2410c',
+            '--err':            '#c02826',
+            '--line':           'rgba(60,45,15,0.14)',
             '--radius':         '14px',
-            '--panel-bg':       'rgba(255,253,248,0.55)',
+            '--panel-bg':       'rgba(255,253,248,0.7)',
             '--font':           "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif",
+        },
+        colorScheme: 'light',
+    },
+
+    // ── MINIMAL — mobile face of the desktop MINIMAL UI language ──────────
+    // Porcelain chrome, ink text, ONE teal accent; the terminal stays dark
+    // (slate card) via the [data-theme="minimal"] block in styles.css.
+    minimal: {
+        name: 'Minimal',
+        preview: ['#f2f0ea', '#0c7d72'],
+        vars: {
+            '--bg':             '#f2f0ea',
+            '--bg-alt':         '#faf9f5',
+            '--fg':             '#22252b',
+            '--fg-dim':         'rgba(34,37,43,0.58)',
+            '--fg-faint':       'rgba(34,37,43,0.32)',
+            '--accent':         '#0c7d72',
+            '--accent-glow':    'rgba(12,125,114,0.28)',
+            '--accent-bg':      'rgba(12,125,114,0.09)',
+            '--accent-bg-hover':'rgba(12,125,114,0.16)',
+            '--warn':           '#a16207',
+            '--err':            '#c02626',
+            '--line':           'rgba(34,37,43,0.13)',
+            '--radius':         '10px',
+            '--panel-bg':       'rgba(250,249,245,0.86)',
+            '--font':           "'Familjen Grotesk', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
         },
         colorScheme: 'light',
     },
@@ -291,6 +349,7 @@ function applyTheme(name) {
         root.style.setProperty(prop, val);
     }
     root.setAttribute('data-theme', name);
+    root.setAttribute('data-scheme', theme.colorScheme);   // 'light' | 'dark' — powers scheme-wide styling
     root.style.colorScheme = theme.colorScheme;
     root.style.fontFamily = theme.vars['--font'];
     const meta = document.querySelector('meta[name="theme-color"]');
@@ -311,6 +370,46 @@ applyTheme(loadSavedTheme());
 
 /* ── App ─────────────────────────────────────────── */
 
+// In a native shell (the Capacitor iOS/Android app) the page is served from the
+// app bundle — location.origin is `capacitor://localhost`, which is NOT a usable
+// backend. The backend URL is supplied by the bundled native config
+// (window.__SOA_BACKEND__, injected before this script) or by a user-set override
+// persisted on-device. On the plain web `/m/` build both are absent and the app
+// falls back to location.origin exactly as before, so this is a no-op there.
+// Deep-link the initial view via `?view=` (search) or `#view=` (hash), so the
+// app can open straight onto CHAT / DASH / BROWSER / SYSTEM instead of always
+// the terminal — handy for bookmarking a view, and for capturing per-view
+// screenshots on a device without any tapping. Accepts the friendly aliases the
+// bottom-bar uses. Captured at module load because readToken() rewrites the
+// hash away once a session token is present.
+const VIEW_ALIASES = {
+    terminal: 'terminal-view', term: 'terminal-view',
+    chat: 'chat-view',
+    dash: 'tiles-view', fleet: 'tiles-view', tiles: 'tiles-view',
+    browser: 'web-view', web: 'web-view',
+    system: 'widgets-view', widgets: 'widgets-view',
+};
+const INITIAL_VIEW = (() => {
+    try {
+        const search = new URLSearchParams(location.search);
+        const hash = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+        const raw = (search.get('view') || hash.get('view') || '').toLowerCase();
+        return VIEW_ALIASES[raw] || null;
+    } catch (_) { return null; }
+})();
+
+const NATIVE_BACKEND_KEY = 'soa.native.backend';
+function nativeBackend() {
+    try {
+        const saved = localStorage.getItem(NATIVE_BACKEND_KEY);
+        if (saved) return saved.replace(/\/+$/, '');
+    } catch (_) {}
+    if (typeof window !== 'undefined' && window.__SOA_BACKEND__) {
+        return String(window.__SOA_BACKEND__).replace(/\/+$/, '');
+    }
+    return null;
+}
+
 function readToken() {
     const params = new URLSearchParams(location.search);
     let t = params.get('t');
@@ -330,7 +429,8 @@ function readToken() {
     }
     // When served same-origin as the backend (the common case via the local
     // server's /m/), there's no `backend` param — fall back to location.origin.
-    const effectiveBackend = backend || null;
+    // In the native shell, fall back to the configured native backend instead.
+    const effectiveBackend = backend || nativeBackend() || null;
     if (t) {
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -357,7 +457,7 @@ function readToken() {
             };
         }
     } catch (_) {}
-    return { token: null, backend: null, altOrigin: null };
+    return { token: null, backend: nativeBackend(), altOrigin: null };
 }
 
 function wsBaseFromHttp(origin) {
@@ -377,6 +477,7 @@ class App {
         this.kbdEl       = document.getElementById('kbd');
         this.viewEls     = Array.from(document.querySelectorAll('.view'));
         this.viewBtns    = Array.from(document.querySelectorAll('.bb-btn[data-view]'));
+        this._initHelpLongPress();   // press-and-hold any control → help overlay
         this.btnNewTab   = document.getElementById('btn-newtab');
         this.btnMic      = document.getElementById('btn-mic');
         this.btnSpeak    = document.getElementById('btn-speak');
@@ -384,6 +485,20 @@ class App {
         this.btnFullscreen = document.getElementById('btn-fullscreen');
         this.cameraInput = document.getElementById('camera-input');
         this.btnSettings = document.getElementById('btn-settings');
+        // Tab jump: a persistent chip in the top bar shows the CURRENT tab (which
+        // otherwise scrolls off among 20+ pills) and opens a searchable sheet of
+        // every tab so you can jump straight to one instead of scrubbing the strip.
+        this.btnTabchip   = document.getElementById('btn-tabchip');
+        this.tabchipName  = document.getElementById('tabchip-name');
+        this.tabchipCount = document.getElementById('tabchip-count');
+        this.tabsheetOverlay = document.getElementById('tabsheet-overlay');
+        this.tabsheetList    = document.getElementById('tabsheet-list');
+        this.tabsheetSearch  = document.getElementById('tabsheet-search');
+        // Overflow sheet: the secondary action buttons (mic/speak/camera/…) were
+        // moved out of the top strip into this sheet so the view-switchers fit a
+        // phone; the buttons keep their IDs so their handlers wire unchanged.
+        this.btnOverflow     = document.getElementById('btn-overflow');
+        this.overflowOverlay = document.getElementById('overflow-overlay');
         this.reconnectOverlay = document.getElementById('reconnect-overlay');
         this.reconnectSub     = document.getElementById('reconnect-sub');
         this.reconnectDiag    = document.getElementById('reconnect-diag');
@@ -418,6 +533,19 @@ class App {
         this._snapshot = null;
         this._activeTab = 0;
         this._activeTabId = 0;
+        // Per-device active tab. The server keeps ONE session-global active tab
+        // and stamps it into every snapshot's activeId (3s cwd poll, device
+        // connect/disconnect, and any device's switch). We must NOT blindly
+        // follow that — otherwise this phone's view gets yanked whenever another
+        // device switches tabs. A user TAP is handled optimistically-local
+        // (_switchTabLocal), so it never depends on the server echo. The only
+        // thing we follow from the server is a tab THIS device just CREATED,
+        // whose id the server assigns: when we send new-tab we capture the set
+        // of ids that exist right then, and _applySnapshot adopts the activeId
+        // of the first snapshot naming an id NOT in that set (the genuinely new
+        // tab), then clears it. Matching the NEW id — not "any valid activeId" —
+        // stops a racing poll/device-count snapshot from stealing the focus.
+        this._adoptNewTabIds = null;
         this._connectedDevices = 0;
         this._tabStates = new Map();
         this._tabStatuses = new Map();
@@ -431,8 +559,14 @@ class App {
         this._idleTimer = null;
         this._chromeHidden = false;
 
-        this._minFontSize = 5;
-        this._maxFontSize = 15;
+        // Readability floor: on a phone, fitting the desktop's ~80 cols would
+        // push the auto-fit down to ~8px, which is painful to read. Hold a
+        // legible minimum instead — content wider than the screen pans
+        // horizontally (#term is overflow-x:auto / white-space:pre), which is a
+        // better trade than unreadable text. Users can still fine-tune via the
+        // font-scale control (_fontScale).
+        this._minFontSize = 12;
+        this._maxFontSize = 20;
         // User font preference: a multiplier over the auto-fit size. 1.0 = the
         // default auto-fit; >1 enlarges (terminal scrolls horizontally), <1 shrinks.
         this._fontScale = 1;
@@ -442,6 +576,8 @@ class App {
         } catch (_) {}
         this._termCols = 80;
         this._userScrolledUp = false;
+        this._currentView = 'terminal-view';   // HTML default; kept in sync by _showView
+        this.termJump = document.getElementById('term-jump');
 
         this._micStream = null;
         this._micAnalyser = null;
@@ -458,7 +594,11 @@ class App {
         if (this.soundGrid) this._renderSoundGrid();
         if (this.btnSettings) this._wireSettings();
         this._wireFontSetting();
+        this._wireModelAccess();
         this._wireMicSettings();
+        this._wireFleet();
+        this._wireTabSheet();
+        this._wireOverflow();
         this._wireIdleHide();
 
         const { token, backend, altOrigin } = readToken();
@@ -510,16 +650,37 @@ class App {
             },
         });
 
+        // Premium-feature gate — default the DASH/FLEET manager tab to HIDDEN
+        // (fail safe) until /api/capabilities proves this install is entitled.
+        this._caps = { manager: false };
+        this._applyManagerGate();
+        this._pullCapabilities();
+
         this._wireSocket();
         this._wireUi();
         this._buildDiagPanel();
         this._wireWebPreview();
 
+        // Honour a `?view=`/`#view=` deep link (see INITIAL_VIEW) once the views
+        // and bottom-bar are wired; otherwise the HTML default (terminal) stands.
+        if (INITIAL_VIEW) this._showView(INITIAL_VIEW);
+
         window.addEventListener('resize', () => this._fitTerminalFont());
 
         this.termEl.addEventListener('scroll', () => {
             this._userScrolledUp = !this._isAtBottom();
+            this._updateTermJump();
         }, { passive: true });
+
+        // "Jump to latest" pill: when the user has scrolled up in the terminal
+        // and new output is streaming below, tap to snap back to the live tail.
+        if (this.termJump) {
+            this.termJump.addEventListener('click', () => {
+                this._userScrolledUp = false;
+                this._scrollTermBottom();
+                this._updateTermJump();
+            });
+        }
 
         this.socket.connect();
     }
@@ -654,6 +815,150 @@ class App {
 
     _openSettings() {
         if (this.settingsOverlay) this.settingsOverlay.classList.add('open');
+        this._refreshModelAccess();
+    }
+
+    // Authed JSON call against the backend (cookie + ?t= token like _refreshWidgets).
+    async _api(path, body) {
+        const base = (this.socket && this.socket.baseUrl)
+            ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
+        const tok = this.socket && this.socket.token;
+        const url = base + path + (tok ? (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(tok) : '');
+        const res = await fetch(url, {
+            method: body ? 'POST' : 'GET',
+            credentials: 'include',
+            cache: 'no-store',
+            headers: body ? { 'content-type': 'application/json' } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        return res.json();
+    }
+
+    /* ── Model Access (provider profiles) + Auto-Resume settings ── */
+
+    async _refreshModelAccess() {
+        const listEl = document.getElementById('provider-list');
+        if (!listEl) return;
+        try {
+            const env = await this._api('/api/env');
+            this._envConfig = env;
+            this._renderProviderList(env);
+        } catch (_) {
+            listEl.innerHTML = '<div class="settings-hint">Could not load providers.</div>';
+        }
+        // Manager-gated: skip the fetch on a free install (403 anyway).
+        if (this._caps && this._caps.manager) {
+            try {
+                const mgr = await this._api('/api/manager');
+                this._setAutoResumeBtn(!!mgr.autoResume);
+                this._setCloseInactiveBtn(!!mgr.closeInactive);
+            } catch (_) {}
+        }
+    }
+
+    _setAutoResumeBtn(on) {
+        const btn = document.getElementById('btn-auto-resume');
+        if (!btn) return;
+        this._autoResume = on;
+        btn.textContent = 'AUTO-RESUME: ' + (on ? 'ON' : 'OFF');
+        btn.classList.toggle('active', on);
+    }
+
+    _setCloseInactiveBtn(on) {
+        const btn = document.getElementById('btn-close-inactive');
+        if (!btn) return;
+        this._closeInactive = on;
+        btn.textContent = 'CLOSE INACTIVE: ' + (on ? 'ON' : 'OFF');
+        btn.classList.toggle('active', on);
+    }
+
+    _renderProviderList(env) {
+        const listEl = document.getElementById('provider-list');
+        if (!listEl) return;
+        const rows = [];
+        const mkRow = (id, name, detail, isActive, deletable) =>
+            `<div class="provider-row${isActive ? ' active' : ''}" data-pid="${escapeHtml(id)}">` +
+            `<span class="provider-dot"></span>` +
+            `<span class="provider-name">${escapeHtml(name)}</span>` +
+            `<span class="provider-detail">${escapeHtml(detail)}</span>` +
+            (deletable ? `<button type="button" class="provider-edit" data-edit="${escapeHtml(id)}">✎</button>` +
+                         `<button type="button" class="provider-del" data-del="${escapeHtml(id)}">×</button>` : '') +
+            `</div>`;
+        rows.push(mkRow('', 'Subscription', 'claude.ai login (default)', !env.active, false));
+        for (const p of env.providers || []) {
+            const host = (p.baseUrl || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+            rows.push(mkRow(p.id, p.name, `${host || 'api.anthropic.com'} · ${p.token || 'no key'}`, env.active === p.id, true));
+        }
+        listEl.innerHTML = rows.join('');
+    }
+
+    _wireModelAccess() {
+        const listEl = document.getElementById('provider-list');
+        const form = document.getElementById('provider-form');
+        const addBtn = document.getElementById('btn-provider-add');
+        const arBtn = document.getElementById('btn-auto-resume');
+        const ciBtn = document.getElementById('btn-close-inactive');
+        if (!listEl || !form) return;
+        const f = (id) => document.getElementById(id);
+        const showForm = (p) => {
+            form.hidden = false;
+            f('pf-id').value = p ? p.id : '';
+            f('pf-name').value = p ? p.name : '';
+            f('pf-baseurl').value = p ? p.baseUrl : '';
+            f('pf-token').value = p ? (p.token || '') : '';   // masked = keep stored
+            f('pf-tokenvar').value = p ? p.tokenVar : 'ANTHROPIC_AUTH_TOKEN';
+            f('pf-model').value = p ? p.model : '';
+        };
+        listEl.addEventListener('click', async (e) => {
+            const del = e.target.closest('[data-del]');
+            const edit = e.target.closest('[data-edit]');
+            const row = e.target.closest('.provider-row');
+            try {
+                if (del) {
+                    const r = await this._api('/api/env', { providerAction: 'delete', providerId: del.dataset.del });
+                    this._envConfig = r; this._renderProviderList(r);
+                } else if (edit) {
+                    const p = (this._envConfig.providers || []).find(x => x.id === edit.dataset.edit);
+                    if (p) showForm(p);
+                } else if (row) {
+                    const r = await this._api('/api/env', { active: row.dataset.pid });
+                    this._envConfig = r; this._renderProviderList(r);
+                    this._toast(row.dataset.pid ? 'Provider set for new shells' : 'Back to subscription');
+                }
+            } catch (_) { this._toast('Update failed'); }
+        });
+        if (addBtn) addBtn.addEventListener('click', () => showForm(null));
+        const cancel = f('pf-cancel');
+        if (cancel) cancel.addEventListener('click', () => { form.hidden = true; });
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const provider = {
+                id: f('pf-id').value || undefined,
+                name: f('pf-name').value,
+                baseUrl: f('pf-baseurl').value,
+                token: f('pf-token').value,
+                tokenVar: f('pf-tokenvar').value,
+                model: f('pf-model').value,
+            };
+            if (!provider.name.trim()) return this._toast('Name required');
+            try {
+                const r = await this._api('/api/env', { providerAction: 'upsert', provider });
+                this._envConfig = r; this._renderProviderList(r);
+                form.hidden = true;
+            } catch (_) { this._toast('Save failed'); }
+        });
+        if (arBtn) arBtn.addEventListener('click', async () => {
+            try {
+                const r = await this._api('/api/manager/config', { autoResume: !this._autoResume });
+                this._setAutoResumeBtn(!!r.autoResume);
+            } catch (_) { this._toast('Update failed'); }
+        });
+        if (ciBtn) ciBtn.addEventListener('click', async () => {
+            try {
+                const r = await this._api('/api/manager/config', { closeInactive: !this._closeInactive });
+                this._setCloseInactiveBtn(!!r.closeInactive);
+            } catch (_) { this._toast('Update failed'); }
+        });
     }
 
     _closeSettings() {
@@ -753,17 +1058,23 @@ class App {
 
         // Refresh devices button
         if (this.btnRefreshDevices) {
-            this.btnRefreshDevices.addEventListener('click', () => this._enumerateMicDevices());
+            this.btnRefreshDevices.addEventListener('click', () => this._enumerateMicDevices(true));
         }
     }
 
-    async _enumerateMicDevices() {
+    async _enumerateMicDevices(requestPermission = false) {
         if (!this.micDeviceSelect) return;
 
         try {
-            // Request permission first to get device labels
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            stream.getTracks().forEach(t => t.stop());
+            // Only prompt for the microphone when the user explicitly opts in
+            // (taps REFRESH DEVICES / TEST MIC). On load we just list devices —
+            // labels stay generic until permission is granted. Requesting mic on
+            // boot is intrusive and an App Store review risk (sensitive perm with
+            // no user intent), so it is gated behind an explicit action.
+            if (requestPermission) {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(t => t.stop());
+            }
 
             const devices = await navigator.mediaDevices.enumerateDevices();
             this._micDevices = devices.filter(d => d.kind === 'audioinput');
@@ -952,6 +1263,10 @@ class App {
 
     _hideChrome() {
         if (this._chromeHidden) return;
+        // Only auto-hide over the terminal (to maximise reading area). On the
+        // DASH/FLEET, CHAT, BROWSER and SYSTEM views the top bar is the primary
+        // navigation, so hiding it would strand the user.
+        if (this._currentView && this._currentView !== 'terminal-view') return;
         this._chromeHidden = true;
         const top = document.getElementById('topbar');
         if (top) top.classList.add('chrome-hidden');
@@ -978,7 +1293,7 @@ class App {
             switch (state) {
                 case SocketState.CONNECTING:
                     this._setStatus('connecting', `connecting${attempt > 1 ? ` · try ${attempt}` : '…'}`);
-                    if (attempt > 1) this._showReconnect(`attempt ${attempt}`);
+                    if (attempt > 1) this._scheduleReconnect(`attempt ${attempt}`);
                     break;
                 case SocketState.CONNECTED:
                     this._setStatus('connected', 'paired');
@@ -988,7 +1303,7 @@ class App {
                     break;
                 case SocketState.DISCONNECTED:
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
-                    this._showReconnect('link lost · retrying');
+                    this._scheduleReconnect('link lost · retrying');
                     this._releaseWakeLock();
                     if (this._prevSocketState === SocketState.CONNECTED) sounds.play('disconnect');
                     break;
@@ -1014,6 +1329,10 @@ class App {
             switch (msg.t) {
                 case 'hello':    this._applyHello(msg.d); break;
                 case 'snapshot': this._applySnapshot(msg.d); break;
+                // Background tabs' scrollback, streamed one frame per tab after
+                // HELLO (active tab ships inline with HELLO). Same handling as a
+                // live term-data chunk: write the off-screen buffer + classify.
+                case 'replay':    this._applyTerminalChunk(msg.d); break;
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
                 case 'term-exit': break;
                 case 'notice':    this._showNotice(msg.d); break;
@@ -1101,10 +1420,15 @@ class App {
         // Keyboard-aware layout: pin #app to the *visible* viewport so the bottom
         // bar / keyboard toolbar sit above the on-screen keyboard, not under it.
         if (window.visualViewport) {
+            const appEl = document.getElementById('app');
             const fit = () => {
                 const vv = window.visualViewport;
-                document.getElementById('app').style.height = vv.height + 'px';
-                this._scrollTermBottom();
+                appEl.style.height = vv.height + 'px';
+                // Keep the prompt in view as the keyboard animates — but ONLY if
+                // the user is already parked at the bottom. If they've scrolled up
+                // to read, yanking them back to the bottom on every keyboard
+                // open/close/scroll event is the classic mobile-terminal fight.
+                if (!this._userScrolledUp) this._scrollTermBottom();
             };
             window.visualViewport.addEventListener('resize', fit);
             window.visualViewport.addEventListener('scroll', fit);
@@ -1129,10 +1453,75 @@ class App {
         });
     }
 
+    // Long-press (~500ms) any button/control → a bottom-sheet explaining it,
+    // sourced from the element's help text (data-help → title → aria-label).
+    // Touch-based; swallows the tap that would otherwise follow the hold.
+    _initHelpLongPress() {
+        const HOLD = 500, MOVE = 10;
+        let timer = null, sx = 0, sy = 0, fired = false;
+        const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        const helpFor = (target) => {
+            const t = target && target.closest && target.closest('[data-help],[title],[aria-label]');
+            if (!t || t.closest('#help-overlay')) return null;
+            const txt = (t.dataset && t.dataset.help) || t.getAttribute('title') || t.getAttribute('aria-label');
+            if (!txt || !txt.trim()) return null;
+            const label = (t.getAttribute('aria-label') || t.textContent || '').replace(/\s+/g, ' ').trim();
+            return { text: txt.trim(), label: (label && label !== txt.trim()) ? label : 'What this does' };
+        };
+        document.addEventListener('touchstart', (e) => {
+            clear(); fired = false;
+            if (e.touches.length !== 1) return;
+            const hit = helpFor(e.target);
+            if (!hit) return;
+            sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+            timer = setTimeout(() => {
+                timer = null; fired = true;
+                try { navigator.vibrate && navigator.vibrate(10); } catch (_) {}
+                this._showHelp(hit.label, hit.text);
+            }, HOLD);
+        }, { passive: true });
+        document.addEventListener('touchmove', (e) => {
+            if (timer && e.touches[0] &&
+                (Math.abs(e.touches[0].clientX - sx) > MOVE || Math.abs(e.touches[0].clientY - sy) > MOVE)) clear();
+        }, { passive: true });
+        document.addEventListener('touchend', clear, { passive: true });
+        document.addEventListener('touchcancel', clear, { passive: true });
+        document.addEventListener('click', (e) => {
+            if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); }
+        }, true);
+        const ov = document.getElementById('help-overlay');
+        if (ov) {
+            ov.addEventListener('click', (e) => { if (e.target === ov) this._closeHelp(); });
+            const cb = ov.querySelector('.help-close');
+            if (cb) cb.addEventListener('click', () => this._closeHelp());
+        }
+    }
+
+    _showHelp(label, text) {
+        const ov = document.getElementById('help-overlay');
+        if (!ov) return;
+        const t = ov.querySelector('.help-title'); if (t) t.textContent = label || 'Help';
+        const b = ov.querySelector('.help-body');  if (b) b.textContent = text;
+        ov.classList.add('open');
+    }
+
+    _closeHelp() {
+        const ov = document.getElementById('help-overlay');
+        if (ov) ov.classList.remove('open');
+    }
+
     _showView(target) {
+        // Premium-feature gate: the DASH/FLEET view is manager-only. On a
+        // free/unlicensed install (`capabilities.manager` false) navigating to
+        // it is a no-op that falls back to the terminal — the /api/manager
+        // endpoint would only 403 anyway. Fails safe to hidden (see _caps init).
+        if (target === 'tiles-view' && !(this._caps && this._caps.manager)) {
+            target = 'terminal-view';
+        }
         this._currentView = target;
         this.viewEls.forEach(v => v.classList.toggle('active', v.id === target));
         this.viewBtns.forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-view') === target ? 'true' : 'false'));
+        this._updateTermJump();
         if (target === 'terminal-view') {
             // Don't auto-raise the keyboard on entry (e.g. tapping a dashboard
             // tile). It appears only when the user taps the terminal to type.
@@ -1157,8 +1546,9 @@ class App {
         // Dashboard: render immediately, then keep the terminal-tail previews
         // live with a 1s tick while the view is open (cheap; stopped on leave).
         if (target === 'tiles-view') {
-            this._renderTiles();
-            if (!this._tilesTimer) this._tilesTimer = setInterval(() => this._renderTiles(), 1000);
+            this._pullManager();          // freshen the server fleet view on open
+            this._renderFleet();
+            if (!this._tilesTimer) this._tilesTimer = setInterval(() => this._renderFleet(), 1200);
         } else if (this._tilesTimer) {
             clearInterval(this._tilesTimer);
             this._tilesTimer = null;
@@ -1220,8 +1610,97 @@ class App {
     // Overarching supervisor summary (server-side, always-on). Shows fleet-wide
     // counts and flags which sessions need attention / are stuck / high-context.
     _onManager(d) {
+        // Manager-gated: ignore fleet frames on a free/unlicensed install.
+        if (!(this._caps && this._caps.manager)) return;
         this._manager = d;
-        if (this._currentView === 'tiles-view') this._renderManagerBar();
+        this._updateTodoBadge();
+        if (this._currentView === 'tiles-view') this._renderFleet();
+    }
+
+    // Pull the authoritative server fleet view (also arrives live via the WS
+    // `manager` frame, but a fetch on view-open avoids a cold first paint).
+    async _pullManager() {
+        // Manager-gated: skip the fetch entirely on a free install (403 anyway).
+        if (!(this._caps && this._caps.manager)) return;
+        try {
+            const d = await this._api('/api/manager');
+            if (d && d.ok !== false && d.counts) { this._manager = d; this._updateTodoBadge(); }
+        } catch (_) { /* fall back to the last WS frame */ }
+    }
+
+    // Premium-feature gate — fetch the server's capability set and (re)apply the
+    // manager gate. Fails safe: any error leaves `manager` DISABLED (hidden).
+    async _pullCapabilities() {
+        try {
+            const d = await this._api('/api/capabilities');
+            const mgr = !!(d && d.ok !== false && d.capabilities && d.capabilities.manager);
+            this._caps = { manager: mgr };
+        } catch (_) {
+            this._caps = { manager: false };
+        }
+        this._applyManagerGate();
+    }
+
+    // Show/hide the DASH (tiles-view) top-bar tab per entitlement, and bounce
+    // off the fleet view if it was somehow open while unentitled.
+    _applyManagerGate() {
+        const on = !!(this._caps && this._caps.manager);
+        this.viewBtns.forEach(btn => {
+            if (btn.getAttribute('data-view') === 'tiles-view') btn.hidden = !on;
+        });
+        if (!on && this._currentView === 'tiles-view') this._showView('terminal-view');
+    }
+
+    // ── FLEET manager view (SESSIONS · MONITOR · TO-DO + BROADCAST) ──────────
+    _wireFleet() {
+        this._fleetSub = 'sessions';
+        this._bcastCohort = 'attention';
+        document.querySelectorAll('.fleet-seg-btn').forEach(btn => {
+            btn.addEventListener('click', () => this._setFleetSub(btn.dataset.fleet));
+        });
+        const bcBtn = document.getElementById('btn-broadcast');
+        if (bcBtn) bcBtn.addEventListener('click', () => this._openBroadcast());
+        const bcClose = document.getElementById('bcast-close');
+        if (bcClose) bcClose.addEventListener('click', () => this._closeBroadcast());
+        const bcOverlay = document.getElementById('broadcast-overlay');
+        if (bcOverlay) bcOverlay.addEventListener('click', (e) => { if (e.target === bcOverlay) this._closeBroadcast(); });
+        const bcForm = document.getElementById('bcast-form');
+        if (bcForm) bcForm.addEventListener('submit', (e) => { e.preventDefault(); this._sendBroadcast(); });
+        const todoForm = document.getElementById('todo-form');
+        if (todoForm) todoForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const inp = document.getElementById('todo-input');
+            const text = inp && inp.value.trim();
+            if (text) { this._todoOp({ op: 'add', text, source: 'user' }); inp.value = ''; }
+        });
+    }
+
+    _setFleetSub(sub) {
+        this._fleetSub = sub;
+        document.querySelectorAll('.fleet-seg-btn').forEach(b => b.classList.toggle('active', b.dataset.fleet === sub));
+        ['sessions', 'monitor', 'todos'].forEach(s => {
+            const pane = document.getElementById('fleet-' + s);
+            if (pane) pane.hidden = s !== sub;
+        });
+        this._renderFleet();
+        if (sub === 'monitor') this._refreshMonitor();
+    }
+
+    // Master render for the DASH/FLEET view — dispatches to the active sub-pane.
+    _renderFleet() {
+        this._renderManagerBar();
+        const sub = this._fleetSub || 'sessions';
+        if (sub === 'sessions') this._renderTiles();
+        else if (sub === 'todos') this._renderTodos();
+        else if (sub === 'monitor') this._renderMonitor();
+    }
+
+    _updateTodoBadge() {
+        const badge = document.getElementById('fleet-todo-badge');
+        if (!badge) return;
+        const open = ((this._manager && this._manager.todos) || []).filter(t => !t.done).length;
+        badge.textContent = open ? String(open) : '';
+        badge.hidden = !open;
     }
 
     _renderManagerBar() {
@@ -1237,77 +1716,349 @@ class App {
         const callout = [];
         if (attentionTabs.length) callout.push(`⚠ awaiting you: ${attentionTabs.slice(0, 3).join(', ')}${attentionTabs.length > 3 ? '…' : ''}`);
         if (stuckTabs.length) callout.push(`◷ stuck: ${stuckTabs.slice(0, 3).join(', ')}`);
+        // Manager-active badge: lit when a fleet-manager tab is running; flips to
+        // a warning style if tab-closing was opted into (closeInactive).
+        const mgrBadge = d.managerActive
+            ? `<span class="mgr-chip mgr-active${d.closeInactive ? ' mgr-active-reaping' : ''}">${d.closeInactive ? '◉ MGR · closing ON' : '◉ MGR'}</span>`
+            : '';
         bar.innerHTML =
             `<div class="mgr-row">` +
             `<span class="mgr-title">FLEET · ${c.total}</span>` +
+            mgrBadge +
             chip('working', c.working, 'mgr-working') +
             chip('need input', c.attention, 'mgr-attention') +
             chip('stuck', c.stuck, 'mgr-stuck') +
             chip('idle', c.idle, 'mgr-idle') +
             chip('high&nbsp;ctx', c.highContext, 'mgr-ctx') +
+            chip('limited', c.limited, 'mgr-limited') +
             `</div>` +
             (callout.length ? `<div class="mgr-callout">${escapeHtml(callout.join('  ·  '))}</div>` : '');
         bar.hidden = false;
     }
 
+    // Per-session oversight list. Uses the server supervisor view
+    // (this._manager.sessions — the whole fleet, with authoritative status +
+    // flags) as the source of truth, merged with local tab data (preview,
+    // exited). Falls back to the local tab list before the first manager frame.
     _renderTiles() {
         if (!this.tilesEl) return;
-        this._renderManagerBar();
+        const sup = (this._manager && this._manager.sessions) || [];
         const tabs = (this._snapshot && this._snapshot.tabs) || [];
-        if (!tabs.length) {
-            this.tilesEl.innerHTML = '<div class="m-tile-empty">No tabs yet — tap + to open one.</div>';
+        const byId = new Map(tabs.map(t => [t.id, t]));
+        // Prefer the supervisor list (full fleet); else the local tabs.
+        const rows = sup.length
+            ? sup.map(s => ({ sup: s, tab: byId.get(s.id) }))
+            : tabs.map(t => ({ sup: null, tab: t }));
+        if (!rows.length) {
+            this.tilesEl.innerHTML = '<div class="m-tile-empty">No sessions yet — tap + to open one.</div>';
             return;
         }
+        const hhmm = (ms) => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
+        const ago = (ms) => {
+            if (ms == null) return '';
+            const s = Math.round(ms / 1000);
+            if (s < 60) return s + 's';
+            const m = Math.round(s / 60);
+            return m < 60 ? m + 'm' : Math.round(m / 60) + 'h';
+        };
         const frag = document.createDocumentFragment();
-        tabs.forEach((t, i) => {
-            const id = t.id;
-            const mob = this._mobileStatus && this._mobileStatus.get(id);
-            const css = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
-            const ts = this._getTabState(id);
-            // Freshly scan this tab's screen so context + preview are current
-            // even for tabs that haven't streamed in the last detection window.
+        rows.forEach(({ sup: s, tab: t }, i) => {
+            const id = s ? s.id : t.id;
+            const exited = t ? !!t.exited : false;
+            // Status: server truth first, else the local heuristic.
+            const status = exited ? 'exited' : (s ? s.status : (this._mobileStatus && this._mobileStatus.get(id)) || 'idle');
+            const css = exited ? 'exited' : cssStatus(status);
+            const name = (s && s.title) || (t && t.title) || `TAB ${i + 1}`;
+            const ts = this._tabStates && this._tabStates.get(id);
             if (ts && ts.term) this._scanCtx(id);
-            // Cleaner preview: real content lines, decoration stripped. Fall back
-            // to the raw tail only if nothing meaningful is found.
-            let preview = (ts && ts.term) ? ts.term.previewLines(3) : '';
-            if (!preview && ts && ts.term) preview = ts.term.tailText(3);
-            const name = t.title || `TAB ${i + 1}`;
-            const pct = this._ctxPct.get(id);
-            const tile = document.createElement('button');
-            tile.type = 'button';
-            tile.className = 'm-tile' + (id === this._activeTabId ? ' active' : '');
-            tile.dataset.tabId = String(id);
-            if (css) tile.setAttribute('data-status', css);
+            const pct = (s && s.ctxPct != null) ? s.ctxPct : this._ctxPct.get(id);
+
+            // Flags — the reason a human should care about this row.
+            const flags = [];
+            if (s && s.stuck) flags.push('<span class="fl fl-stuck">STUCK</span>');
+            if (s && s.attention) flags.push('<span class="fl fl-attn">NEEDS YOU</span>');
+            if (s && s.highContext) flags.push('<span class="fl fl-ctx">HIGH CTX</span>');
+            if (s && s.limited) {
+                const when = s.resumeAt ? `resume ${hhmm(s.resumeAt)}` : (s.limitResetAt ? `resets ${hhmm(s.limitResetAt)}` : 'limited');
+                flags.push(`<span class="fl fl-limit">⏾ ${escapeHtml(when)}</span>`);
+            }
+            const idle = (s && s.idleMs != null && (status === 'idle' || status === 'done')) ? `idle ${ago(s.idleMs)}` : '';
+            const meta = [this._tileStatusLabel(exited ? null : status, exited), idle].filter(Boolean).join(' · ');
+
             const ctxHtml = (pct != null)
-                ? `<span class="m-tile-ctx" title="Context ${pct}% used">` +
-                  `<span class="m-tile-pie" style="background:conic-gradient(${ctxColor(pct)} ${pct}%, rgba(255,255,255,0.16) 0)"></span>` +
-                  `<span class="m-tile-pct">${pct}%</span></span>`
+                ? `<span class="fleet-ctx" title="Context ${pct}% used"><span class="fleet-ctx-bar"><span style="width:${pct}%;background:${ctxColor(pct)}"></span></span><span class="fleet-ctx-pct">${pct}%</span></span>`
                 : '';
-            tile.innerHTML =
-                `<span class="m-tile-dot"></span>` +
-                `<span class="m-tile-title">${escapeHtml(name)}</span>` +
-                ctxHtml +
-                `<span class="m-tile-status">${escapeHtml(this._tileStatusLabel(mob, t.exited))}</span>` +
-                `<pre class="m-tile-preview">${escapeHtml(preview)}</pre>`;
-            tile.addEventListener('click', () => {
-                this.socket.sendInput('switch-tab', { id });
-                this._showView('terminal-view');
-                // No keyboard here — opening a tab from the dashboard just shows
-                // its terminal. Tap the terminal when you actually want to type.
-            });
-            frag.appendChild(tile);
+
+            // Model tier chip — which Claude model this session runs, from the
+            // supervisor snapshot (live, tracks /model switches). Color-coded so
+            // the odd one out (e.g. a Fable unstick) is spottable in the list.
+            const mt = (function (r) {
+                r = String(r || '').toLowerCase();
+                if (r.includes('opus')) return 'opus';
+                if (r.includes('sonnet')) return 'sonnet';
+                if (r.includes('haiku')) return 'haiku';
+                if (r.includes('fable') || r.includes('mythos')) return 'fable';
+                return '';
+            })(s && s.model);
+            const modelHtml = mt ? `<span class="fleet-model" data-tier="${mt}">${mt}</span>` : '';
+
+            const row = document.createElement('div');
+            row.className = 'fleet-row' + (id === this._activeTabId ? ' active' : '');
+            row.dataset.tabId = String(id);
+            if (css) row.setAttribute('data-status', css);
+            row.innerHTML =
+                `<div class="fleet-main" data-open="${id}">` +
+                    `<span class="fleet-dot"></span>` +
+                    `<div class="fleet-body">` +
+                        `<div class="fleet-line1"><span class="fleet-name">${escapeHtml(name)}</span>${flags.join('')}</div>` +
+                        `<div class="fleet-line2"><span class="fleet-meta">${escapeHtml(meta)}</span>${modelHtml}${ctxHtml}</div>` +
+                    `</div>` +
+                `</div>` +
+                `<button class="fleet-act" data-act-toggle="${id}" aria-label="Session actions">⋯</button>` +
+                `<div class="fleet-actions" hidden>` +
+                    `<button class="fleet-a" data-a="open" data-id="${id}">OPEN</button>` +
+                    `<button class="fleet-a" data-a="interrupt" data-id="${id}">INTERRUPT</button>` +
+                    `<button class="fleet-a" data-a="compact" data-id="${id}">COMPACT</button>` +
+                    `<button class="fleet-a" data-a="cast" data-id="${id}">CAST…</button>` +
+                `</div>`;
+            frag.appendChild(row);
         });
         this.tilesEl.replaceChildren(frag);
+        if (!this._fleetDelegated) {
+            this._fleetDelegated = true;
+            this.tilesEl.addEventListener('click', (e) => this._onFleetClick(e));
+        }
     }
 
-    _tileStatusLabel(mob, exited) {
+    _onFleetClick(e) {
+        const open = e.target.closest('[data-open]');
+        if (open) { this._openSession(+open.dataset.open); return; }
+        const toggle = e.target.closest('[data-act-toggle]');
+        if (toggle) {
+            const row = toggle.closest('.fleet-row');
+            const menu = row && row.querySelector('.fleet-actions');
+            if (menu) menu.hidden = !menu.hidden;
+            return;
+        }
+        const a = e.target.closest('.fleet-a');
+        if (a) { this._fleetAction(a.dataset.a, +a.dataset.id); }
+    }
+
+    _openSession(id) {
+        this._switchTabLocal(id);
+        this._showView('terminal-view');
+    }
+
+    // Per-session actions, driven over the WS input path (the same reliable path
+    // the keyboard uses) so they work from the phone over the tunnel.
+    _fleetAction(action, id) {
+        if (action === 'open') { this._openSession(id); return; }
+        if (action === 'interrupt') { this.socket.sendInput('hotkey', { id, combo: 'ctrl+c' }); this._toast('Ctrl-C → ' + this._tabName(id)); }
+        else if (action === 'compact') { this.socket.sendInput('term-keys', { id, text: '/compact\r' }); this._toast('/compact → ' + this._tabName(id)); }
+        else if (action === 'cast') { this._openBroadcast([id]); return; }
+        // collapse the menu after acting
+        const row = this.tilesEl.querySelector(`.fleet-row[data-tab-id="${id}"] .fleet-actions`);
+        if (row) row.hidden = true;
+    }
+
+    _tileStatusLabel(status, exited) {
         if (exited) return 'exited';
-        switch (mob) {
+        switch (status) {
             case 'working':   return 'Working…';
             case 'attention': return 'Needs input';
             case 'done':      return 'Awaiting next prompt';
+            case 'idle':      return 'Idle';
             default:          return 'Shell ready';
         }
+    }
+
+    // ── TO-DO list (manager) ─────────────────────────────────────────────────
+    _renderTodos() {
+        const listEl = document.getElementById('todo-list');
+        if (!listEl) return;
+        const todos = (this._manager && this._manager.todos) || [];
+        if (!todos.length) {
+            listEl.innerHTML = '<div class="m-tile-empty">No to-dos. Add one above — the fleet manager sees it too.</div>';
+            return;
+        }
+        const rows = todos.map(td => {
+            const tab = td.tab != null ? ` <span class="todo-tab">#${td.tab}</span>` : '';
+            const src = td.source === 'manager' ? ' <span class="todo-src">◉ mgr</span>' : '';
+            return `<div class="todo-item${td.done ? ' done' : ''}">` +
+                `<button class="todo-check" data-toggle="${td.id}" aria-label="Toggle">${td.done ? '☑' : '☐'}</button>` +
+                `<span class="todo-text">${escapeHtml(td.text)}${tab}${src}</span>` +
+                `<button class="todo-del" data-del="${td.id}" aria-label="Delete">×</button>` +
+                `</div>`;
+        }).join('');
+        listEl.innerHTML = rows;
+        if (!this._todoDelegated) {
+            this._todoDelegated = true;
+            listEl.addEventListener('click', (e) => {
+                const tog = e.target.closest('[data-toggle]');
+                if (tog) { this._todoOp({ op: 'toggle', id: tog.dataset.toggle }); return; }
+                const del = e.target.closest('[data-del]');
+                if (del) { this._todoOp({ op: 'del', id: del.dataset.del }); }
+            });
+        }
+    }
+
+    async _todoOp(body) {
+        try {
+            const r = await this._api('/api/manager/todo', body);
+            if (r && r.todos) {
+                if (!this._manager) this._manager = {};
+                this._manager.todos = r.todos;
+                this._updateTodoBadge();
+                this._renderTodos();
+            }
+        } catch (_) { this._toast('Could not reach the fleet manager.'); }
+    }
+
+    // ── MONITOR — agent browsers + localhost ports ───────────────────────────
+    async _refreshMonitor() {
+        try {
+            const [ab, ports] = await Promise.all([
+                this._api('/api/agent-browser', { action: 'list' }).catch(() => null),
+                this._api('/api/ports').catch(() => null),
+            ]);
+            this._monitorData = { ab, ports };
+        } catch (_) { this._monitorData = null; }
+        this._renderMonitor();
+    }
+
+    _renderMonitor() {
+        const el = document.getElementById('fleet-monitor');
+        if (!el) return;
+        const d = this._monitorData || {};
+        const instances = (d.ab && (d.ab.instances || d.ab.list || d.ab.sessions)) || [];
+        const portList = (d.ports && d.ports.data && d.ports.data.ports) || [];
+        const abHtml = instances.length
+            ? instances.map(ins => {
+                const title = ins.title || ins.tabTitle || ('tab ' + (ins.tabId ?? ins.id ?? '?'));
+                const url = ins.url || ins.currentUrl || '';
+                return `<div class="mon-cell"><div class="mon-cell-t">${escapeHtml(title)}</div>` +
+                    `<div class="mon-cell-u">${escapeHtml(url || 'idle')}</div></div>`;
+            }).join('')
+            : '<div class="m-tile-empty">No agent browsers open.</div>';
+        const portHtml = portList.length
+            ? portList.map(p => {
+                const port = p.port || p;
+                const name = p.name || p.process || '';
+                return `<button class="mon-port" data-port="${escapeHtml(String(port))}">:${escapeHtml(String(port))}${name ? ` <span>${escapeHtml(name)}</span>` : ''}</button>`;
+            }).join('')
+            : '<div class="m-tile-empty">No local ports detected.</div>';
+        el.innerHTML =
+            `<div class="mon-sec-title">◉ AGENT BROWSERS</div>` +
+            `<div class="mon-grid">${abHtml}</div>` +
+            `<div class="mon-sec-title">⊞ LOCALHOST PORTS</div>` +
+            `<div class="mon-ports">${portHtml}</div>`;
+        if (!this._monDelegated) {
+            this._monDelegated = true;
+            el.addEventListener('click', (e) => {
+                const p = e.target.closest('[data-port]');
+                if (p) { this._openPortInWebView(p.dataset.port); }
+            });
+        }
+    }
+
+    _openPortInWebView(port) {
+        this._showView('web-view');
+        const inp = document.getElementById('web-url');
+        if (inp) { inp.value = 'localhost:' + port; }
+        const go = document.getElementById('web-go');
+        if (go) go.click();
+    }
+
+    // ── BROADCAST — fan a command to a cohort of sessions ────────────────────
+    _openBroadcast(preIds) {
+        const overlay = document.getElementById('broadcast-overlay');
+        if (!overlay) return;
+        this._bcastPreIds = Array.isArray(preIds) ? preIds : null;
+        if (this._bcastPreIds) this._bcastCohort = 'selected';
+        this._renderBroadcast();
+        overlay.classList.add('visible');
+        setTimeout(() => { const i = document.getElementById('bcast-input'); if (i) i.focus(); }, 80);
+    }
+
+    _closeBroadcast() {
+        const overlay = document.getElementById('broadcast-overlay');
+        if (overlay) overlay.classList.remove('visible');
+    }
+
+    _renderBroadcast() {
+        const sessions = (this._manager && this._manager.sessions) || [];
+        const count = (pred) => sessions.filter(pred).length;
+        const cohorts = [
+            { key: 'all', label: 'All', n: sessions.length },
+            { key: 'attention', label: 'Needs you', n: count(s => s.attention) },
+            { key: 'stuck', label: 'Stuck', n: count(s => s.stuck) },
+            { key: 'idle', label: 'Idle', n: count(s => s.idle) },
+            { key: 'working', label: 'Working', n: count(s => s.status === 'working') },
+            { key: 'highContext', label: 'High ctx', n: count(s => s.highContext) },
+        ];
+        if (this._bcastPreIds) cohorts.unshift({ key: 'selected', label: `#${this._bcastPreIds.join(', #')}`, n: this._bcastPreIds.length });
+        const cEl = document.getElementById('bcast-cohorts');
+        if (cEl) cEl.innerHTML = cohorts.map(c =>
+            `<button class="bcast-chip${c.key === this._bcastCohort ? ' on' : ''}${c.n ? '' : ' empty'}" data-cohort="${c.key}">${escapeHtml(c.label)}<span class="bcast-n">${c.n}</span></button>`
+        ).join('');
+        const presets = [
+            { label: 'continue', text: 'continue', enter: true },
+            { label: '/compact', text: '/compact', enter: true },
+            { label: '/clear', text: '/clear', enter: true },
+            { label: 'Esc', hotkey: 'esc' },
+            { label: 'Ctrl-C', hotkey: 'ctrl+c' },
+        ];
+        const pEl = document.getElementById('bcast-presets');
+        if (pEl) pEl.innerHTML = presets.map((p, i) =>
+            `<button class="bcast-preset" data-preset="${i}">${escapeHtml(p.label)}</button>`).join('');
+        this._bcastPresets = presets;
+        if (!this._bcastDelegated) {
+            this._bcastDelegated = true;
+            if (cEl) cEl.addEventListener('click', (e) => {
+                const c = e.target.closest('[data-cohort]');
+                if (c) { this._bcastCohort = c.dataset.cohort; this._renderBroadcast(); }
+            });
+            if (pEl) pEl.addEventListener('click', (e) => {
+                const b = e.target.closest('[data-preset]');
+                if (!b) return;
+                const p = this._bcastPresets[+b.dataset.preset];
+                if (p.hotkey) this._sendBroadcast(p);
+                else { const inp = document.getElementById('bcast-input'); if (inp) inp.value = p.text; this._sendBroadcast(p); }
+            });
+        }
+    }
+
+    _broadcastTargets() {
+        const sessions = (this._manager && this._manager.sessions) || [];
+        const c = this._bcastCohort;
+        if (c === 'selected' && this._bcastPreIds) return this._bcastPreIds.slice();
+        if (c === 'all') return sessions.map(s => s.id);
+        if (c === 'attention') return sessions.filter(s => s.attention).map(s => s.id);
+        if (c === 'stuck') return sessions.filter(s => s.stuck).map(s => s.id);
+        if (c === 'idle') return sessions.filter(s => s.idle).map(s => s.id);
+        if (c === 'working') return sessions.filter(s => s.status === 'working').map(s => s.id);
+        if (c === 'highContext') return sessions.filter(s => s.highContext).map(s => s.id);
+        return [];
+    }
+
+    _sendBroadcast(preset) {
+        const ids = this._broadcastTargets();
+        if (!ids.length) { this._toast('No sessions in that cohort.'); return; }
+        const enterEl = document.getElementById('bcast-enter');
+        const wantEnter = enterEl ? enterEl.checked : true;
+        if (preset && preset.hotkey) {
+            ids.forEach(id => this.socket.sendInput('hotkey', { id, combo: preset.hotkey }));
+        } else {
+            const inp = document.getElementById('bcast-input');
+            const text = preset ? preset.text : (inp ? inp.value : '');
+            if (!text) { this._toast('Type a command first.'); return; }
+            const line = text + ((preset ? preset.enter : wantEnter) ? '\r' : '');
+            ids.forEach(id => this.socket.sendInput('term-keys', { id, text: line }));
+            if (inp && !preset) inp.value = '';
+        }
+        sounds.play('tabSwitch');
+        this._toast(`Sent to ${ids.length} session${ids.length > 1 ? 's' : ''}.`);
+        this._closeBroadcast();
     }
 
     // ── Text-to-speech ───────────────────────────────────────────────────
@@ -1354,13 +2105,28 @@ class App {
         if (!raw) return;
         const id = this._activeTabId;
         if (id == null) return;
+        // Chat-mode verbosity commands (/brief, /verbose, /details) rewrite to a
+        // plain instruction so the agent adjusts how it replies — the terminal
+        // stays clean and the bubble still shows what you typed.
+        const text = this._chatCommand(raw) || raw;
         // Type it into the PTY (newline submits, like pressing Enter in terminal).
-        this.socket.sendInput('term-keys', { id, text: raw + '\r' });
+        this.socket.sendInput('term-keys', { id, text: text + '\r' });
         this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
         this.chatInput.value = '';
         this.chatInput.style.height = 'auto';
         this._renderChat();
         sounds.play('tabSwitch');
+    }
+
+    // Chat-mode quick commands: map a typed slash-command to a plain-English
+    // instruction the agent understands. Returns null for normal messages.
+    _chatCommand(raw) {
+        const map = {
+            '/brief':   '[chat-mode] Keep replies brief: short, direct, proportional to my input — no tables or headers.',
+            '/verbose': '[chat-mode] Verbose replies are OK until I send /brief.',
+            '/details': '[chat-mode] Expand your previous reply with full detail.',
+        };
+        return map[raw.toLowerCase()] || null;
     }
 
     // Trim an agent message to ≤50 words for the bubble; the full text stays
@@ -1383,7 +2149,7 @@ class App {
             return;
         }
         const frag = document.createDocumentFragment();
-        for (const m of thread) {
+        thread.forEach((m, i) => {
             const bubble = document.createElement('div');
             bubble.className = 'chat-msg ' + (m.from === 'you' ? 'you' : 'agent');
             if (m.from === 'agent') {
@@ -1410,10 +2176,35 @@ class App {
                 bubble.textContent = m.full;
             }
             frag.appendChild(bubble);
-        }
+
+            // Timestamp at the end of each sender "run" — a sender change or a
+            // >2min gap ends a run, so rapid bursts collapse into one time label
+            // instead of a stamp under every bubble. Completes the long-defined
+            // but never-rendered .chat-meta style.
+            const next = thread[i + 1];
+            const endOfRun = !next || next.from !== m.from ||
+                (next.t && m.t && (next.t - m.t) > 2 * 60 * 1000);
+            if (endOfRun && m.t) {
+                const meta = document.createElement('div');
+                meta.className = 'chat-meta' + (m.from === 'you' ? ' you' : '');
+                meta.textContent = this._fmtTime(m.t);
+                frag.appendChild(meta);
+            }
+        });
         this.chatLog.innerHTML = '';
         this.chatLog.appendChild(frag);
         this._scrollChatBottom();
+    }
+
+    // Compact IM timestamp: "9:41 AM" today, "Jul 15, 9:41 AM" on earlier days.
+    _fmtTime(t) {
+        try {
+            const d = new Date(t);
+            const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            const sameDay = d.toDateString() === new Date().toDateString();
+            return sameDay ? time
+                : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
+        } catch (_) { return ''; }
     }
 
     _scrollChatBottom() {
@@ -1657,7 +2448,15 @@ class App {
             if (!opt) return;
             const kind = opt.dataset.kind;
             close();
-            if (kind === 'terminal') this.socket.sendInput('new-tab');
+            if (kind === 'terminal') {
+                // This device is creating the tab, so it SHOULD focus the new
+                // server-assigned tab. Capture the current id set; _applySnapshot
+                // adopts the activeId of the first snapshot naming an id NOT in
+                // this set (the genuinely new tab), so a racing poll/device-count
+                // snapshot carrying an old id can't steal the focus.
+                this._adoptNewTabIds = new Set((this._snapshot && this._snapshot.tabs || []).map(t => t.id));
+                this.socket.sendInput('new-tab');
+            }
             else if (kind === 'localhost') this._promptLocalhost();
             else if (kind === 'webpage') this._promptWebpage();
         });
@@ -1846,12 +2645,34 @@ class App {
         this._diagLogEl.textContent = lines.join('\n');
     }
 
+    // Debounced overlay: only raise RECONNECTING if we're STILL down after a
+    // grace period. If the link comes back first (the common case for a tunnel
+    // blip), _hideReconnect cancels the pending show and nothing ever flashes.
+    _scheduleReconnect(text) {
+        if (text) this._pendingReconnectText = text;
+        // Already visible → just keep the subtext fresh, no re-arm needed.
+        if (this.reconnectOverlay && !this.reconnectOverlay.hidden) {
+            if (text) this.reconnectSub.textContent = text;
+            return;
+        }
+        if (this._reconnectTimer) return;   // one pending show at a time
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            // Reconciled? Only show if we haven't recovered in the meantime.
+            if (!this.socket || this.socket.state !== SocketState.CONNECTED) {
+                this._showReconnect(this._pendingReconnectText || 'reconnecting…');
+            }
+        }, RECONNECT_OVERLAY_DELAY_MS);
+    }
+
     _showReconnect(text) {
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
         this.reconnectOverlay.hidden = false;
         if (text) this.reconnectSub.textContent = text;
         this.reconnectRetry.hidden = false;
     }
     _hideReconnect() {
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
         this.reconnectOverlay.hidden = true;
         this.reconnectDiag.hidden = true;
         this.reconnectRetry.hidden = true;
@@ -1864,6 +2685,10 @@ class App {
             this.reconnectOpenBrowser.hidden = true;
             return;
         }
+        // A real diagnosis (captive portal, server unreachable, offline) is a
+        // persistent problem, not a blip — surface the overlay now rather than
+        // waiting out the debounce.
+        this._showReconnect();
         this.reconnectDiag.hidden = false;
         this.reconnectRetry.hidden = false;
         this.reconnectOpenBrowser.hidden = true;
@@ -1919,6 +2744,24 @@ class App {
         if (this._currentView === 'chat-view') this._renderChatStatus();
     }
 
+    // Switch the viewed tab OPTIMISTICALLY-LOCAL, then notify the server. A
+    // mobile switch is a server round-trip, but we must NOT wait for the echo:
+    // the server suppresses the echo snapshot when the session-global active tab
+    // is already this id (e.g. the desktop is sitting on it), which would leave
+    // the tap dead. Rendering locally also means no intent flag that could dangle
+    // and later hijack an unrelated snapshot. We re-apply the last snapshot with
+    // _activeTabId pre-set: its keep-path resolves activeId to our new id and
+    // repaints tabs + terminal. Output for every tab is already buffered, so the
+    // switched-to tab shows correct content immediately.
+    _switchTabLocal(id) {
+        if (id == null) return;
+        if (this._activeTabId !== id && this._snapshot) {
+            this._activeTabId = id;
+            this._applySnapshot(this._snapshot);
+        }
+        this.socket.sendInput('switch-tab', { id });
+    }
+
     _applySnapshot(snap) {
         if (!snap) return;
         this._snapshot = snap;
@@ -1926,17 +2769,47 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
-        // Defensive activeId resolution. Snapshot broadcasts can carry
-        // activeId:0 or omit it entirely (undefined) — the server's HELLO
-        // resolves a real id via a tabList fallback, but its periodic/
-        // device-count/REQUEST snapshots don't. Blindly trusting that clobbers
-        // a known-good _activeTabId to 0, after which TERM_DATA frames for the
-        // real tab mismatch _activeTabId and get buffered forever (T counter
-        // rises, screen stays blank). Only accept activeId when it names a real
-        // tab; otherwise keep the current active tab, falling back to the first.
+        // Per-device active-tab resolution.
+        //
+        // "Which tab this phone is viewing" is a CLIENT-LOCAL concept. The server
+        // keeps one session-global active tab and re-stamps it into snap.activeId
+        // on its 3s cwd poll, on device connect/disconnect, and on ANY device's
+        // switch. If we adopted snap.activeId every time, another device switching
+        // tabs would involuntarily yank this phone's view. So we adopt the server
+        // activeId in only two cases:
+        //   1. INITIAL load / manual resync — !this._hasReceivedSnapshot. Covers
+        //      a fresh page and _resync() (which clears the flag); _applyHello()
+        //      funnels through here before _hasReceivedSnapshot is set, so HELLO
+        //      is covered. NOTE: a transparent auto-reconnect does NOT clear the
+        //      flag, so it intentionally keeps this phone's current tab.
+        //   2. THIS device just created a tab: _adoptNewTabIds holds the id set
+        //      captured at new-tab time, and we adopt the activeId of the first
+        //      snapshot naming an id NOT in that set (the genuinely new tab).
+        //      Matching the NEW id rather than "any valid activeId" means a racing
+        //      cwd-poll/device-count/foreign-switch snapshot carrying the
+        //      old-but-still-valid activeId cannot burn the intent.
+        // A user TAP is not handled here at all — _switchTabLocal sets the active
+        // tab optimistically, so it works even when the server suppresses the echo
+        // (it does when the session-global tab is already that id). For every
+        // other snapshot we KEEP this._activeTabId, applying the close-active-tab
+        // fallback only if the tab we're viewing vanished from the list.
+        //
+        // Defensive note (kept): snapshot broadcasts can carry activeId:0 or omit
+        // it entirely. We only accept activeId when it names a real tab; otherwise
+        // we keep the current tab so TERM_DATA frames keep matching _activeTabId
+        // (mismatched frames buffer forever — blank screen).
         const idList = rawTabs.map(t => t.id);
-        let activeId = snap.activeId;
-        if (!idList.includes(activeId)) {
+        let activeId;
+        if (!this._hasReceivedSnapshot) {
+            this._adoptNewTabIds = null;
+            activeId = idList.includes(snap.activeId) ? snap.activeId
+                : (idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0));
+        } else if (this._adoptNewTabIds && idList.includes(snap.activeId) && !this._adoptNewTabIds.has(snap.activeId)) {
+            this._adoptNewTabIds = null;
+            activeId = snap.activeId;
+        } else {
+            // Keep the device-local active tab; fall back to the first tab only if
+            // the one we were viewing is gone (e.g. it was just closed).
             activeId = idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0);
         }
         const tabs = rawTabs.map((t, i) => ({
@@ -1969,6 +2842,8 @@ class App {
 
         this._connectedDevices = snap.connectedDevices || 0;
         this._renderTabs(tabs);
+        this._updateTabChip();
+        if (this.tabsheetOverlay && this.tabsheetOverlay.classList.contains('open')) this._renderTabSheet();
         this._renderActiveTerminal();
         this._updateDeviceCount();
         // Keep the dashboard in sync with tab add/remove/switch when it's open.
@@ -2012,6 +2887,110 @@ class App {
 
         this.tabsEl.innerHTML = '';
         this.tabsEl.appendChild(frag);
+    }
+
+    /* ── Overflow actions sheet ── */
+
+    _wireOverflow() {
+        if (this.btnOverflow) this.btnOverflow.addEventListener('click', () => this._openOverflow());
+        if (this.overflowOverlay) {
+            this.overflowOverlay.addEventListener('click', (e) => {
+                if (e.target === this.overflowOverlay) this._closeOverflow();
+            });
+            const closeBtn = document.getElementById('overflow-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this._closeOverflow());
+            // Dismiss the sheet after any action button is tapped — the button's
+            // own handler still runs (this is a bubbled listener), so e.g. tapping
+            // Settings closes this sheet and opens the settings overlay.
+            const grid = this.overflowOverlay.querySelector('.overflow-grid');
+            if (grid) grid.addEventListener('click', (e) => {
+                if (e.target.closest('.overflow-btn')) this._closeOverflow();
+            });
+        }
+    }
+
+    _openOverflow() {
+        if (this.overflowOverlay) this.overflowOverlay.classList.add('open');
+    }
+
+    _closeOverflow() {
+        if (this.overflowOverlay) this.overflowOverlay.classList.remove('open');
+    }
+
+    /* ── Tab jump sheet ── */
+
+    _wireTabSheet() {
+        if (this.btnTabchip) this.btnTabchip.addEventListener('click', () => this._openTabSheet());
+        if (this.tabsheetOverlay) {
+            this.tabsheetOverlay.addEventListener('click', (e) => {
+                if (e.target === this.tabsheetOverlay) this._closeTabSheet();
+            });
+            const closeBtn = document.getElementById('tabsheet-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this._closeTabSheet());
+        }
+        if (this.tabsheetSearch) {
+            this.tabsheetSearch.addEventListener('input', () => this._renderTabSheet());
+        }
+    }
+
+    // Keep the top-bar chip showing the tab this phone is viewing (the active
+    // pill often scrolls off the strip) plus the total count.
+    _updateTabChip() {
+        if (!this.btnTabchip) return;
+        const tabs = (this._snapshot && this._snapshot.tabs) || [];
+        if (this.tabchipName)  this.tabchipName.textContent = this._tabName(this._activeTabId) || '—';
+        if (this.tabchipCount) this.tabchipCount.textContent = tabs.length ? String(tabs.length) : '';
+    }
+
+    _openTabSheet() {
+        if (!this.tabsheetOverlay) return;
+        if (this.tabsheetSearch) this.tabsheetSearch.value = '';
+        this._renderTabSheet();
+        this.tabsheetOverlay.classList.add('open');
+    }
+
+    _closeTabSheet() {
+        if (this.tabsheetOverlay) this.tabsheetOverlay.classList.remove('open');
+        try { if (this.tabsheetSearch) this.tabsheetSearch.blur(); } catch (_) {}
+    }
+
+    _renderTabSheet() {
+        if (!this.tabsheetList) return;
+        const tabs = (this._snapshot && this._snapshot.tabs) || [];
+        const q = (this.tabsheetSearch && this.tabsheetSearch.value || '').trim().toLowerCase();
+        const frag = document.createDocumentFragment();
+        let shown = 0;
+        tabs.forEach((t, i) => {
+            const name = t.title || `TAB ${i + 1}`;
+            if (q && !name.toLowerCase().includes(q)) return;
+            shown++;
+            const mob = this._mobileStatus && this._mobileStatus.get(t.id);
+            const status = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
+            const pct = this._ctxPct && this._ctxPct.get(t.id);
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'tabsheet-row' + (t.id === this._activeTabId ? ' active' : '');
+            if (status) row.setAttribute('data-status', status);
+            row.innerHTML =
+                `<span class="tabsheet-dot"></span>` +
+                `<span class="tabsheet-name">${escapeHtml(name)}</span>` +
+                (pct != null ? `<span class="tabsheet-ctx">${pct}%</span>` : '') +
+                (t.id === this._activeTabId ? `<span class="tabsheet-here">VIEWING</span>` : '');
+            row.addEventListener('click', () => {
+                this._switchTabLocal(t.id);
+                this._showView('terminal-view');
+                this._closeTabSheet();
+            });
+            frag.appendChild(row);
+        });
+        if (!shown) {
+            const empty = document.createElement('div');
+            empty.className = 'tabsheet-empty';
+            empty.textContent = q ? 'No tabs match.' : 'No open tabs.';
+            frag.appendChild(empty);
+        }
+        this.tabsheetList.innerHTML = '';
+        this.tabsheetList.appendChild(frag);
     }
 
     _renderActiveTerminal() {
@@ -2092,7 +3071,10 @@ class App {
 
         const endTap = (e) => {
             if (!state.dragging && !state.cancelled && !state.didMenu && !state.armed) {
-                this.socket.sendInput('switch-tab', { id: tab.id });
+                // User tapped this tab on THIS device — switch optimistically
+                // (a mobile switch is a server round-trip whose echo may be
+                // suppressed when another device already sits on this tab).
+                this._switchTabLocal(tab.id);
             } else if (state.armed && !state.dragging && !state.didMenu) {
                 el.classList.remove('tab-armed');
                 this._showTabMenu(tab, el);
@@ -2268,6 +3250,7 @@ class App {
     _resync() {
         this._tabStates.clear();
         this._hasReceivedSnapshot = false;
+        this._adoptNewTabIds = null;
         this.termEl.innerHTML = '';
         this.socket.send('request', { what: 'snapshot' });
     }
@@ -2373,6 +3356,14 @@ class App {
         });
     }
 
+    // Show the "↓ latest" pill only while the user is scrolled up AND looking at
+    // the terminal. Snapping back to bottom fires a scroll event that clears it.
+    _updateTermJump() {
+        if (!this.termJump) return;
+        const show = !!this._userScrolledUp && this._currentView === 'terminal-view';
+        this.termJump.classList.toggle('visible', show);
+    }
+
     _isAtBottom() {
         const el = this.termEl;
         return (el.scrollHeight - el.scrollTop - el.clientHeight) < 10;
@@ -2455,6 +3446,16 @@ class App {
         this._applyTerminalChunk({ data: `\r\n${colour}[${(level || 'info').toUpperCase()}] ${text}\x1b[0m\r\n` });
     }
 
+    // Generic brief toast (reuses the agent-toast element).
+    _toast(msg) {
+        const toast = document.getElementById('agent-toast');
+        if (!toast) return;
+        clearTimeout(this._toastTimer);
+        toast.textContent = msg;
+        toast.classList.add('visible');
+        this._toastTimer = setTimeout(() => toast.classList.remove('visible'), 2500);
+    }
+
     _showAgentToast(tabName) {
         const toast = document.getElementById('agent-toast');
         if (!toast) return;
@@ -2535,7 +3536,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // Only register the service worker when served at the root scope (i.e.
     // same-origin as the backend). On Vercel we live under /m/ which would
     // give the SW the wrong scope and cache stale assets.
-    if ('serviceWorker' in navigator && location.pathname === '/') {
+    // Skip the SW inside the native shell: Capacitor already serves the assets
+    // from the app bundle (offline works without it) and registering a SW on the
+    // capacitor:// scheme is unreliable. window.Capacitor is injected by the
+    // native runtime and is undefined on the plain web build.
+    if ('serviceWorker' in navigator && location.pathname === '/' && !window.Capacitor) {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
         navigator.serviceWorker.addEventListener('controllerchange', () => {
             location.reload();

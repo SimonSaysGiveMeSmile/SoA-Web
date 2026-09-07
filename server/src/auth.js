@@ -14,7 +14,7 @@ const os = require('os');
 const COOKIE_NAME = 'soa_web_auth';
 const COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 7;  // 7 days
 
-const SIGN_KEY_FILE = path.join(os.homedir(), '.soa-web', 'sign-key');
+const SIGN_KEY_FILE = require('./stateDir').stateFile('sign-key');
 
 function resolveSignKey(env = process.env) {
     const k = env.SOA_WEB_SIGN_KEY;

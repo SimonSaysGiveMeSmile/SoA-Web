@@ -10,8 +10,8 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=12';
-import { getSettings } from '/assets/settings.js?v=12';
+import { t as tr } from '/assets/i18n.js?v=28';
+import { getSettings } from '/assets/settings.js?v=25';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -57,6 +57,17 @@ function api(path) {
     if (t) u.searchParams.set('t', t);
     return u.toString();
 }
+// Live accent for canvas paints (sparklines, charts, globe). Canvases can't
+// use CSS var() directly, so read the token off :root — this is what lets the
+// MINIMAL UI language re-tint every hand-painted pixel without code forks.
+function accentRGB() {
+    try {
+        const v = getComputedStyle(document.documentElement).getPropertyValue('--soa-accent-rgb').trim();
+        if (v) return v;
+    } catch (_) {}
+    return '170, 207, 209';
+}
+
 // Widgets call this to decide which data path to use. mountSandboxSidebar
 // sets _sandbox=true before starting widgets; mountSidebar leaves it false.
 // Keeping the decision in a flag (rather than inspecting the network on
@@ -78,20 +89,67 @@ async function jpost(url, body) {
     return r.json();
 }
 
+// Pause every widget's polling while the page is in a background tab. A single
+// document-level listener drives all live widgets, so a dozen sidebar widgets
+// don't each attach their own. Hidden tabs stop firing fetches entirely — which
+// also means far fewer in-flight requests to abort during a network change.
+const _liveWidgets = new Set();
+let _visBound = false;
+let _sidebarHidden = false;
+
+// Widgets run only when actually visible: the tab is foregrounded AND the
+// sidebar is open. Collapsing the sidebar (the common full-screen terminal
+// state) otherwise leaves ~14 widgets polling /api/* against an invisible pane.
+function _widgetsActive() { return !document.hidden && !_sidebarHidden; }
+function _applyWidgetActivity() {
+    const active = _widgetsActive();
+    for (const w of _liveWidgets) {
+        try { active ? w._resume() : w._suspend(); } catch (_) {}
+    }
+}
+function _bindWidgetVisibility() {
+    if (_visBound) return;
+    _visBound = true;
+    document.addEventListener('visibilitychange', _applyWidgetActivity);
+}
+
+// Called by the shell when the sidebar collapses/expands so widgets pause while
+// hidden. Combines with document.hidden via _widgetsActive().
+export function setSidebarHidden(hidden) {
+    hidden = !!hidden;
+    if (hidden === _sidebarHidden) return;
+    _sidebarHidden = hidden;
+    _applyWidgetActivity();
+}
+
 class Widget {
-    constructor({ title, titleKey, parent, intervalMs }) {
+    constructor({ title, titleKey, helpKey, parent, intervalMs }) {
         this.titleKey = titleKey || null;
+        this.helpKey = helpKey || null;   // instructional prose, hidden behind the ⓘ button
         this.title = titleKey ? tr(titleKey) : title;
         this.intervalMs = intervalMs || 0;
-        this._titleEl = $el('span', { class: 'widget-title', text: `// ${this.title}` });
-        this.root = $el('section', { class: 'widget' }, [
-            $el('header', { class: 'widget-h' }, [
-                this._titleEl,
-                $el('span', { class: 'widget-pulse' }),
-            ]),
-            $el('div', { class: 'widget-body' }),
-        ]);
+        // The '// ' prefix is applied via CSS ::before (sidebar.css) so the
+        // MINIMAL UI language can drop it without touching this text node.
+        this._titleEl = $el('span', { class: 'widget-title', text: this.title });
+        this._pulseEl = $el('span', { class: 'widget-pulse' });
+        // Header controls (info button + pulse) sit on the right; the title
+        // takes the left — justify-content:space-between keeps them apart.
+        this._headCtl = $el('span', { class: 'widget-h-ctl' }, [this._pulseEl]);
+        const header = $el('header', { class: 'widget-h' }, [this._titleEl, this._headCtl]);
+        this.root = $el('section', { class: 'widget' }, [header, $el('div', { class: 'widget-body' })]);
         this.body = this.root.querySelector('.widget-body');
+        // ⓘ — a per-widget help toggle. Keeps instructions out of the body
+        // (less clutter) until the user asks for them.
+        if (this.helpKey) {
+            this._infoEl = $el('div', { class: 'widget-info', text: tr(this.helpKey) });
+            this._infoEl.hidden = true;
+            this._infoBtn = $el('button', {
+                class: 'widget-info-btn', title: tr('widget.info'), 'aria-label': tr('widget.info'),
+                text: 'ⓘ', onclick: () => this._toggleInfo(),
+            });
+            this._headCtl.insertBefore(this._infoBtn, this._pulseEl);
+            header.after(this._infoEl);
+        }
         parent.appendChild(this.root);
         this._timer = null;
         this._destroyed = false;
@@ -99,7 +157,8 @@ class Widget {
         if (this.titleKey) {
             const retitle = () => {
                 this.title = tr(this.titleKey);
-                this._titleEl.textContent = `// ${this.title}`;
+                this._titleEl.textContent = this.title;
+                if (this._infoEl) this._infoEl.textContent = tr(this.helpKey);
                 if (typeof this.onLangChange === 'function') this.onLangChange();
             };
             window.addEventListener('soa:lang', retitle);
@@ -107,9 +166,19 @@ class Widget {
         }
     }
 
+    _toggleInfo() {
+        if (!this._infoEl) return;
+        this._infoEl.hidden = !this._infoEl.hidden;
+        if (this._infoBtn) this._infoBtn.classList.toggle('open', !this._infoEl.hidden);
+    }
+
     start() {
+        _liveWidgets.add(this);
+        _bindWidgetVisibility();
         this.tick();
-        if (this.intervalMs && !this._timer) {
+        // Don't arm a polling timer while the page is hidden — _resume starts it
+        // when the tab is foregrounded again.
+        if (this.intervalMs && !this._timer && _widgetsActive()) {
             this._timer = setInterval(() => this.tick(), this.intervalMs);
         }
     }
@@ -118,8 +187,22 @@ class Widget {
         if (this._timer) { clearInterval(this._timer); this._timer = null; }
     }
 
+    // Visibility hooks (driven by the shared listener). _suspend only pauses the
+    // polling cadence; _resume refreshes once and re-arms it. Event-driven /
+    // static widgets (intervalMs 0) are no-ops here.
+    _suspend() {
+        if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    }
+
+    _resume() {
+        if (this._destroyed || this._timer || !this.intervalMs) return;
+        this.tick();
+        this._timer = setInterval(() => this.tick(), this.intervalMs);
+    }
+
     destroy() {
         this._destroyed = true;
+        _liveWidgets.delete(this);
         this.stop();
         if (this._langOff) { this._langOff(); this._langOff = null; }
         this.root.remove();
@@ -156,6 +239,232 @@ class ClockWidget extends Widget {
             ['DATE', date],
             ['UTC', utc],
         ]);
+    }
+}
+
+// ── CLAUDE USAGE ─────────────────────────────────────────────────────────
+// Live Claude token usage, read from the local transcripts by /api/claude-usage.
+// Leads with the 5-hour rolling window (Claude's usage-limit block) + a reset
+// countdown, then today's totals, a live burn rate, top model, and a per-minute
+// sparkline. Cost is shown small and labelled "≈" — it's an API-equivalent
+// estimate, not a bill (a Max/Pro seat is flat-rate).
+const _fmtTok = n => {
+    n = n || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k';
+    return String(Math.round(n));
+};
+const _fmtUsd = n => {
+    n = n || 0;
+    if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
+    if (n >= 100) return '$' + n.toFixed(0);
+    return '$' + n.toFixed(2);
+};
+// Per-session "leaning hard on the model" thresholds (est. USD) — mirror the
+// soa-usage-alert push watchdog's defaults so the dashboard highlight and the
+// phone alert agree. block = the active 5h usage-limit window, today = midnight.
+const HOT_COST = { block: 20, today: 60 };
+// Estimated weekly usage-limit ceiling (USD-equiv) for the WEEKLY bar's 100%.
+// The local transcript engine can't read Claude's real weekly cap, so we
+// approximate it from an observed calibration point: ≈82% ⇔ ≈$3002 → 100% ≈
+// $3660. Only affects the bar's fill %/label; the tok+cost figures are exact.
+// Tune if the ceiling drifts (or the plan changes).
+const WEEK_LIMIT_USD = 3660;
+const _fmtDur = ms => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+};
+
+class ClaudeUsageWidget extends Widget {
+    constructor({ parent }) {
+        // 2.5s poll: the server memoizes compute() for 1.2s and tails only
+        // appended bytes, so the fast cadence is cheap — the remaining lag is
+        // transcript flush timing (a record lands when its message completes).
+        super({ titleKey: 'widget.claude', title: 'CLAUDE', parent, intervalMs: 2500 });
+        // Persistent DOM — tick() only updates text/width/canvas so the
+        // sparkline never flickers on refresh.
+        this._reset = $el('span', { class: 'claude-reset', text: '—' });
+        this._fill = $el('span', { class: 'bar-fill' });
+        this._sub = $el('div', { class: 'claude-sub', text: '—' });
+        // Weekly usage-limit window (mirrors the 5H block above it). The weekly
+        // is the constraint that resets slowest, so surface it alongside the 5H.
+        this._weekPct = $el('span', { class: 'claude-reset', text: '—' });
+        this._weekFill = $el('span', { class: 'bar-fill' });
+        this._weekSub = $el('div', { class: 'claude-sub', text: '—' });
+        this._spark = $el('canvas', { class: 'claude-spark', width: 240, height: 34 });
+        this._series = new Array(30).fill(0);
+        const kv = (k) => {
+            const v = $el('span', { class: 'v' });
+            const row = $el('div', { class: 'kv' }, [$el('span', { class: 'k', text: k }), v]);
+            return { row, v };
+        };
+        this._burn = kv('BURN');
+        this._today = kv('TODAY');
+        this._model = kv('MODEL');
+        // Per-session breakdown ("which session is burning the tokens") — fed
+        // by the same endpoint; hidden until the server ships session rows.
+        this._sessHead = $el('div', { class: 'claude-sess-head', text: 'TOP SESSIONS' });
+        this._sessList = $el('div', { class: 'claude-sess-list' });
+        this._sessHead.style.display = 'none';
+        this._sessList.style.display = 'none';
+        this._mountStructure();
+        // The widget is the teaser; the full usage dashboard lives in the
+        // manager view's USAGE pane. app.js listens for this event.
+        this.body.classList.add('claude-clickable');
+        this.body.title = 'Open the usage dashboard';
+        this.body.addEventListener('click', () =>
+            window.dispatchEvent(new CustomEvent('soa:open-usage')));
+    }
+
+    // Assemble the persistent DOM. Re-callable: a 404/sandbox tick swaps in a
+    // note (detaching these nodes), so _render re-mounts before updating them.
+    _mountStructure() {
+        this.body.replaceChildren(
+            $el('div', { class: 'claude-head' }, [
+                $el('span', { class: 'claude-head-l', text: '5H WINDOW' }),
+                this._reset,
+            ]),
+            $el('div', { class: 'bar claude-bar' }, [this._fill]),
+            this._sub,
+            $el('div', { class: 'claude-head claude-head-week' }, [
+                $el('span', { class: 'claude-head-l', text: 'WEEKLY' }),
+                this._weekPct,
+            ]),
+            $el('div', { class: 'bar claude-bar' }, [this._weekFill]),
+            this._weekSub,
+            this._spark,
+            this._burn.row, this._today.row, this._model.row,
+            this._sessHead, this._sessList,
+        );
+    }
+
+    async tick() {
+        if (isSandbox()) { this._note(tr('widget.claude.sandbox')); return; }
+        let data;
+        try {
+            ({ data } = await jget('/api/claude-usage'));
+        } catch (e) {
+            // The endpoint ships in a server build; before the backend restarts
+            // it 404s — show a hint rather than a scary ERR.
+            if (/\b404\b/.test(e.message)) this._note(tr('widget.claude.restart'));
+            return;
+        }
+        this._render(data);
+    }
+
+    _note(text) {
+        this.body.replaceChildren($el('div', { class: 'widget-note', text }));
+    }
+
+    _render(d) {
+        // A prior note tick may have detached the structure — re-mount it.
+        if (!this.body.contains(this._reset)) this._mountStructure();
+        const b = d.block || {};
+        if (b.active) {
+            this._reset.textContent = tr('widget.claude.resets', { t: _fmtDur(b.remainingMs) });
+            this._reset.classList.toggle('warn', b.remainingMs < 20 * 60000);
+            this._fill.style.width = `${Math.min(100, b.pct || 0)}%`;
+            this._sub.textContent = `${_fmtTok(b.tokens.total)} ${tr('widget.claude.tok')} · ${b.requests} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
+            this._burn.v.textContent = `${_fmtTok(b.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
+        } else {
+            this._reset.textContent = tr('widget.claude.idle');
+            this._reset.classList.remove('warn');
+            this._fill.style.width = '0%';
+            this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
+            this._burn.v.textContent = '0 ' + tr('widget.claude.tokmin');
+        }
+        // Weekly window — the slow-reset ceiling. No server-side pct (the local
+        // engine has no cap), so estimate against WEEK_LIMIT_USD; tok+cost exact.
+        const wk = d.week || {};
+        const wkCost = wk.cost || 0;
+        const wkTok = (wk.tokens && wk.tokens.total) || 0;
+        const wkPct = Math.min(100, Math.round((wkCost / WEEK_LIMIT_USD) * 100));
+        this._weekPct.textContent = `${wkPct}% used`;
+        this._weekPct.classList.toggle('warn', wkPct >= 80);
+        this._weekFill.style.width = `${wkPct}%`;
+        this._weekFill.classList.toggle('hot', wkPct >= 80);
+        this._weekSub.textContent = `${_fmtTok(wkTok)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(wkCost)}`;
+        const today = d.today || { tokens: { total: 0 }, cost: 0 };
+        this._today.v.textContent = `${_fmtTok(today.tokens.total)} · ≈${_fmtUsd(today.cost)}`;
+        const top = (d.models || [])[0];
+        if (top) {
+            const totAll = (d.models || []).reduce((s, m) => s + m.tokens, 0) || 1;
+            const share = Math.round((top.tokens / totAll) * 100);
+            this._model.v.textContent = `${top.tier} ${share}%`;
+        } else {
+            this._model.v.textContent = '—';
+        }
+        this._renderSessions(d);
+        this._series = (d.series || []).slice(-30);
+        this._paintSpark();
+    }
+
+    // Top sessions by estimated cost — in the live 5h window while one is
+    // active, else today. Subagent usage is already folded into its parent
+    // session server-side, so an agent-heavy session shows its whole bill.
+    _renderSessions(d) {
+        const scope = d.sessionScope === 'block' ? 'block' : 'today';
+        const rows = (d.sessions || [])
+            .map(s => ({ s, sc: (scope === 'block' ? s.block : s.today) || {} }))
+            .filter(x => x.sc.tok > 0)
+            .slice(0, 6);
+        if (!rows.length) {
+            this._sessHead.style.display = 'none';
+            this._sessList.style.display = 'none';
+            this._sessList.replaceChildren();
+            return;
+        }
+        this._sessHead.style.display = '';
+        this._sessList.style.display = '';
+        this._sessHead.textContent = 'TOP SESSIONS · ' + (scope === 'block' ? '5H' : 'TODAY');
+        this._sessList.replaceChildren(...rows.map(({ s, sc }) => {
+            // "project · first-slug-word" tells same-project sessions apart
+            // without eating the row ("soa-web · keen" vs "soa-web · noble").
+            const slugBit = s.slug ? s.slug.split('-')[0] : (s.shortId || '').slice(0, 4);
+            const label = (s.project || '?') + (slugBit ? ' · ' + slugBit : '');
+            const b = s.block || {}, t = s.today || {};
+            // Flag a session leaning hard on the model — same per-session
+            // thresholds as the soa-usage-alert push watchdog (block $20 / today
+            // $60), so the dashboard and the phone alert agree on "too much".
+            const hot = (sc.cost || 0) >= (scope === 'block' ? HOT_COST.block : HOT_COST.today);
+            const tip = [
+                (s.project || '?') + ' — ' + (s.slug || s.shortId || ''),
+                `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
+                `today: ${_fmtTok(t.tok)} tok · ≈${_fmtUsd(t.cost)} · ${t.req || 0} req`,
+            ];
+            if (t.subCost > 0.01) tip.push(`of which subagents today: ≈${_fmtUsd(t.subCost)}`);
+            if (hot) tip.push(`⚠ heavy this ${scope === 'block' ? '5h block' : 'day'} — the token-usage alerter has flagged this session`);
+            return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.join('\n') }, [
+                $el('span', { class: 'claude-sess-name', text: (hot ? '⚠ ' : '') + label }),
+                $el('span', { class: 'claude-sess-val', text: `${_fmtTok(sc.tok)} · ≈${_fmtUsd(sc.cost)}` }),
+            ]);
+        }));
+    }
+
+    onLangChange() { /* labels refresh on next tick */ }
+
+    _paintSpark() {
+        const c = this._spark, ctx = c.getContext('2d');
+        const w = c.width, h = c.height;
+        ctx.clearRect(0, 0, w, h);
+        const n = this._series.length;
+        if (!n) return;
+        const max = Math.max(1, ...this._series);
+        // Filled area + line, Tron accent.
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            const y = h - (this._series[i] / max) * (h - 3) - 1.5;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        const acc = accentRGB();
+        ctx.strokeStyle = `rgba(${acc}, 0.9)`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        ctx.fillStyle = `rgba(${acc}, 0.12)`;
+        ctx.fill();
     }
 }
 
@@ -385,8 +694,89 @@ class MobileQRWidget extends Widget {
             return u.toString();
         }
 
+        // "Simulate device" — opens the REAL mobile client (/m/) in a phone-sized
+        // popup window: a genuine browser context (WS, fetch, service worker, the
+        // lot) pointed at the same backend a phone would use, so the desktop↔mobile
+        // bridge can be tested live without a real phone or an Xcode simulator.
+        // Always available (the local bridge works even with the tunnel off); it
+        // only connects when the user clicks, so it never interferes on its own.
+        const simUrl = () => {
+            const backend = backendBase();
+            const token = (snap && snap.pairToken) || currentToken();
+            const u = new URL('/m/', backend);
+            u.searchParams.set('backend', backend);
+            if (token) u.searchParams.set('t', token);
+            return u.toString();
+        };
+        const SIM_TAB = 'mobile-sim';
+        const SIM_VW = 1024, SIM_VH = 768; // the managed browser's CDP viewport
+        const callBrowser = (body) => fetch(api('/api/agent-browser'), {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }).then(r => r.json());
+
+        const openSim = () => {
+            const url = simUrl();
+            // Self-contained, always-visible modal. Clicking SIM ALWAYS shows
+            // this — it doesn't depend on the shell, the active view, the WS
+            // bridge, popups, or framing rules (the reasons earlier versions did
+            // "nothing"). It renders the AGENT's managed browser (a separate,
+            // independent Chromium the agent drives via soa-browser) by polling
+            // its screenshots over the SAME /api the dashboard already uses, and
+            // forwards taps as clicks — so it never touches the shared PTYs and
+            // it's the exact instance the agent controls.
+            document.getElementById('soa-mobile-sim-modal')?.remove();
+            let alive = true;
+            const shot = $el('img', { class: 'msim-shot', alt: 'mobile device' });
+            const statusEl = $el('span', { class: 'msim-status', text: 'launching…' });
+            const closeBtn = $el('button', { class: 'msim-x', text: '×', title: 'Close' });
+            const frame = $el('div', { class: 'msim-frame' }, [
+                $el('div', { class: 'msim-bar' }, [
+                    $el('span', { class: 'msim-title', text: '📱 MOBILE · agent-controlled' }),
+                    statusEl, closeBtn,
+                ]),
+                shot,
+            ]);
+            const backdrop = $el('div', { class: 'msim-backdrop', id: 'soa-mobile-sim-modal' }, [frame]);
+            const onEsc = (e) => { if (e.key === 'Escape') close(); };
+            function close() { alive = false; backdrop.remove(); document.removeEventListener('keydown', onEsc); }
+            closeBtn.onclick = close;
+            backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+            document.addEventListener('keydown', onEsc);
+            document.body.appendChild(backdrop);
+
+            // Tap → click in the managed browser, scaled from the rendered frame.
+            shot.addEventListener('click', (e) => {
+                const r = shot.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                const x = Math.round((e.clientX - r.left) / r.width * SIM_VW);
+                const y = Math.round((e.clientY - r.top) / r.height * SIM_VH);
+                callBrowser({ action: 'click', tab: SIM_TAB, x, y }).catch(() => {});
+            });
+
+            const poll = async () => {
+                if (!alive) return;
+                try {
+                    const j = await callBrowser({ action: 'screenshot', tab: SIM_TAB });
+                    if (alive && j && j.data) { shot.src = 'data:image/jpeg;base64,' + j.data; statusEl.textContent = 'live · tap to interact'; }
+                } catch (_) {}
+                if (alive) setTimeout(poll, 1200);
+            };
+            callBrowser({ action: 'navigate', tab: SIM_TAB, url })
+                .then(() => { statusEl.textContent = 'connecting…'; poll(); })
+                .catch((e) => { statusEl.textContent = 'launch failed — ' + (e && e.message || e); });
+        };
+        const simBtn = $el('button', {
+            class: 'mqr-toggle mqr-sim',
+            text: '📱 SIM',
+            title: 'Open the mobile client in a phone-sized window to test the bridge live',
+            onclick: openSim,
+        });
+
         const actions = state === 'online'
             ? [
+                simBtn,
                 $el('button', {
                     class: 'mqr-toggle mqr-restart',
                     text: tr('mqr.restart'),
@@ -399,6 +789,7 @@ class MobileQRWidget extends Widget {
                 }),
             ]
             : [
+                simBtn,
                 $el('button', {
                     class: 'mqr-toggle mqr-start',
                     text: state === 'starting' ? '…' : tr('mqr.start'),
@@ -407,14 +798,23 @@ class MobileQRWidget extends Widget {
                 }),
             ];
 
+        // First-time setup on a fresh machine: the server auto-downloads
+        // cloudflared during START and narrates progress via /api/pair/status
+        // — surface it so a ~20 MB one-time fetch doesn't look like a hang.
+        const prog = state === 'starting' && snap && snap.progress;
+        const progText = prog
+            ? `${tr('mqr.provisioning')} ${prog.pct}% (${prog.receivedMB}/${prog.totalMB} MB)`
+            : null;
+
         this.body.replaceChildren(
             $el('div', { class: `mqr-status mqr-${state}` }, [
                 $el('span', { class: 'mqr-dot' }),
                 $el('span', { text: tr(`mqr.state.${state}`) }),
             ]),
+            progText ? $el('div', { class: 'mqr-note', text: progText }) : '',
             $el('div', { class: 'mqr-qr' }, target
                 ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(pairUrl(target))}`), alt: 'pairing QR' })]
-                : [$el('div', { class: 'mqr-empty', text: tr('mqr.empty') })]),
+                : [$el('div', { class: 'mqr-empty', text: state === 'starting' ? tr('mqr.empty_starting') : tr('mqr.empty') })]),
             $el('div', { class: 'mqr-urls' },
                 state === 'online'
                     ? lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
@@ -547,7 +947,16 @@ class LocationGlobeWidget extends Widget {
         this._meta = $el('div', { class: 'globe-meta', text: '—' });
         this.body.append(this._canvasHost, this._meta);
         this._pin = null;
+        this._userPin = null;
         this._lastLoc = null;
+        this._lastUserLoc = null;
+        this._offscreen = false;  // set by IntersectionObserver in _boot
+        this._geoFails = 0;       // consecutive /api/geo failures (backoff)
+        this._geoNextAt = 0;      // epoch ms before which tick() skips the fetch
+        this._peerPins = new Map(); // "lat,lon" -> globe pin for each connected client
+        this._peerCount = null;   // total connected clients (null until first poll)
+        this._onUserLocation = e => this.setUserLocation(e.detail.lat, e.detail.lon, e.detail.name || 'You');
+        window.addEventListener('soa:user-location', this._onUserLocation);
         this._bootPromise = this._boot();
     }
 
@@ -560,9 +969,13 @@ class LocationGlobeWidget extends Widget {
             // Encom measures the host by offsetWidth/Height synchronously, so
             // it must be in the DOM and painted before we instantiate.
             await new Promise(r => requestAnimationFrame(r));
+            // destroy() can land during the await above (tab-switch / WS
+            // reconnect re-mounts the sidebar); bail before wiring up the globe,
+            // resize listener and IntersectionObserver onto a dead widget.
+            if (this._destroyed) return;
             const w = this._canvasHost.offsetWidth || 240;
             const h = this._canvasHost.offsetHeight || 200;
-            const tron = 'rgb(170,207,209)';
+            const tron = `rgb(${accentRGB()})`;
             this.globe = new window.ENCOM.Globe(w, h, {
                 font: 'Fira Mono, ui-monospace, Menlo, monospace',
                 data: [],
@@ -580,7 +993,9 @@ class LocationGlobeWidget extends Widget {
                 maxMarkers: 32,
             });
             this._canvasHost.appendChild(this.globe.domElement);
-            this.globe.init('#05080d', () => { this._tickAnim(); });
+            // Clear color follows the active UI language's surface token.
+            const clearBg = (getComputedStyle(document.documentElement).getPropertyValue('--soa-bg') || '#05080d').trim() || '#05080d';
+            this.globe.init(clearBg, () => { this._tickAnim(); });
             this._onResize = () => {
                 if (!this.globe || !this.globe.camera || !this.globe.renderer) return;
                 const c = this._canvasHost;
@@ -599,26 +1014,72 @@ class LocationGlobeWidget extends Widget {
                 }
             }
             this.globe.addConstellation(sats);
+            // Pause the render loop when the globe scrolls out of the sidebar
+            // viewport (the heaviest continuous cost shouldn't run unseen).
+            try {
+                this._io = new IntersectionObserver((entries) => {
+                    const e = entries[entries.length - 1];
+                    this._offscreen = !(e && e.isIntersecting);
+                    if (!this._offscreen) this._kickAnim();
+                }, { threshold: 0.01 });
+                this._io.observe(this._canvasHost);
+            } catch (_) { this._offscreen = false; }
         } catch (e) {
             this._canvasHost.replaceChildren($el('div', { class: 'globe-err', text: tr('widget.globe.unavailable') + ': ' + e.message }));
         }
     }
 
     _tickAnim() {
+        this._rafId = null;
         if (this._destroyed) return;
+        // The globe is pure decoration — don't spin a 60fps WebGL loop while the
+        // page is backgrounded or the canvas is scrolled out of view. _kickAnim
+        // restarts it when it becomes visible again.
+        if (document.hidden || this._offscreen) return;
         try { this.globe.tick(); } catch (_) {}
         this._rafId = requestAnimationFrame(() => this._tickAnim());
     }
 
+    _kickAnim() {
+        if (this._destroyed || this._rafId || !this.globe) return;
+        if (document.hidden || this._offscreen) return;
+        this._tickAnim();
+    }
+
+    _suspend() {
+        super._suspend();
+        if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+    }
+
+    _resume() {
+        super._resume();
+        this._kickAnim();
+    }
+
     async tick() {
         if (isSandbox()) { this._renderSandbox(); return; }
+        // Multiuser peer pins refresh every tick (~30s), independent of the geo
+        // throttle below — clients connect/disconnect far more often than the
+        // server's own egress location changes.
+        this._refreshPeers();
+        // /api/geo reports the server's public IP/location — effectively static.
+        // Once we have a fix, recheck only every ~10 min; on failure (e.g. the
+        // upstream 502s) back off exponentially instead of retrying every cycle.
+        const now = Date.now();
+        if (this._geoNextAt && now < this._geoNextAt) return;
         try {
             const { data } = await jget('/api/geo');
             this._lastGeo = data;
             this._placePin(data);
             this._refreshMeta(data);
+            this._geoFails = 0;
+            this._geoNextAt = now + 10 * 60_000;
         } catch (e) {
-            this._meta.textContent = tr('widget.globe.unavailable');
+            this._geoFails++;
+            // Keep the last good location on screen; only show "unavailable" if
+            // we never managed to get one.
+            if (!this._lastGeo) this._meta.textContent = tr('widget.globe.unavailable');
+            this._geoNextAt = now + Math.min(10 * 60_000, 30_000 * 2 ** this._geoFails);
         }
     }
 
@@ -667,18 +1128,87 @@ class LocationGlobeWidget extends Widget {
         } catch (_) { /* globe not fully ready yet */ }
     }
 
+    setUserLocation(lat, lon, name) {
+        if (lat == null || lon == null || !isFinite(lat) || !isFinite(lon)) return;
+        const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+        if (this._lastUserLoc === key) return;
+        this._lastUserLoc = key;
+        // Update meta text below the globe with user location
+        const coord = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+        const label = name ? `${name}  ·  ${coord}` : coord;
+        if (!this.globe) {
+            // Globe still booting — place the pin once boot resolves
+            this._bootPromise.then(() => this._placeUserPin(lat, lon, name)).catch(() => {});
+            return;
+        }
+        this._placeUserPin(lat, lon, name);
+    }
+
+    _placeUserPin(lat, lon, name) {
+        if (!this.globe) return;
+        try {
+            if (this._userPin && typeof this._userPin.remove === 'function') this._userPin.remove();
+            // Slightly larger pin than server location so it's visually distinct
+            this._userPin = this.globe.addPin(lat, lon, `▲ ${name || 'You'}`, 1.8);
+        } catch (_) {}
+    }
+
+    // Pin every connected client on the globe (multiuser). /api/geo/peers returns
+    // one city-level entry per distinct public IP (LAN/localhost clients arrive
+    // as a single "self" cluster at the server location, which the server pin
+    // already marks, so we skip drawing it here). Pins are diffed by rounded
+    // coord so unchanged peers aren't churned each poll.
+    async _refreshPeers() {
+        if (!this.globe || this._destroyed) return;
+        let data;
+        try { ({ data } = await jget('/api/geo/peers')); }
+        catch (_) { return; }
+        const peers = (data && data.peers) || [];
+        const want = new Map();
+        for (const p of peers) {
+            if (p.self || p.lat == null || p.lon == null) continue;
+            want.set(`${p.lat.toFixed(2)},${p.lon.toFixed(2)}`, p);
+        }
+        for (const [k, pin] of this._peerPins) {
+            if (want.has(k)) continue;
+            try { if (pin && pin.remove) pin.remove(); } catch (_) {}
+            this._peerPins.delete(k);
+        }
+        for (const [k, p] of want) {
+            if (this._peerPins.has(k)) continue;
+            try {
+                const label = (p.city || p.country || 'peer') + (p.count > 1 ? ` ×${p.count}` : '');
+                this._peerPins.set(k, this.globe.addPin(p.lat, p.lon, label, 1.0));
+            } catch (_) { /* globe not ready yet — retried next poll */ }
+        }
+        this._peerCount = (data && typeof data.total === 'number')
+            ? data.total
+            : peers.reduce((n, p) => n + (p.count || 1), 0);
+        this._refreshMeta(this._lastGeo || null);
+    }
+
     _refreshMeta(geo) {
-        if (!geo) { this._meta.textContent = '—'; return; }
-        const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
-        const coord = (geo.lat != null && geo.lon != null)
-            ? `${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)}`
-            : '—';
-        this._meta.textContent = `${place}  ·  ${coord}`;
+        let base = '—';
+        if (geo) {
+            const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
+            const coord = (geo.lat != null && geo.lon != null)
+                ? `${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)}`
+                : '—';
+            base = `${place}  ·  ${coord}`;
+        }
+        const online = (this._peerCount != null)
+            ? `  ·  ${this._peerCount} ${tr('widget.globe.online')}`
+            : '';
+        this._meta.textContent = base + online;
     }
 
     destroy() {
         if (this._rafId) cancelAnimationFrame(this._rafId);
+        if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
         if (this._onResize) window.removeEventListener('resize', this._onResize);
+        if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);
+        for (const pin of this._peerPins.values()) { try { if (pin && pin.remove) pin.remove(); } catch (_) {} }
+        this._peerPins.clear();
         try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
         super.destroy();
     }
@@ -722,8 +1252,9 @@ class NetChartWidget extends Widget {
         const ctx = c.getContext('2d');
         const w = c.width, h = c.height;
         ctx.clearRect(0, 0, w, h);
-        ctx.strokeStyle = 'rgba(170,207,209,0.9)';
-        ctx.fillStyle = 'rgba(170,207,209,0.15)';
+        const acc = accentRGB();
+        ctx.strokeStyle = `rgba(${acc}, 0.9)`;
+        ctx.fillStyle = `rgba(${acc}, 0.15)`;
         ctx.lineWidth = 1.5;
         const n = this._samples.length;
         const max = Math.max(1, ...this._samples);
@@ -771,17 +1302,31 @@ class PortScanWidget extends Widget {
                 summary.appendChild(conflictEl);
             }
 
-            const rows = data.ports.slice(0, 6).map(p => {
-                const label = `${p.port}`;
-                const val = `${p.process} (${p.pid})`;
-                const cls = (data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port) ? 'warn' : '';
-                return [label, val, cls];
-            });
-            if (!rows.length) rows.push(['SCAN', 'no listeners']);
-
             this.body.replaceChildren();
             this.body.appendChild(summary);
-            this.setRows(rows);
+
+            // Clickable list of EVERY port → opens it in the preview (proxied via
+            // /preview/<port>/, localhost-only so it's safe). Non-web ports just
+            // render whatever they serve.
+            const portList = $el('div', { class: 'port-scan-list' });
+            if (!data.ports.length) {
+                portList.appendChild($el('div', { class: 'kv', text: 'no listeners' }));
+            } else {
+                for (const p of data.ports) {
+                    const isConflict = data.conflict && p.pid === data.conflict.pid && p.port === data.conflict.port;
+                    portList.appendChild($el('button', {
+                        class: 'port-scan-row' + (isConflict ? ' warn' : ''),
+                        type: 'button',
+                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
+                        text: `:${p.port} — ${p.process}`,
+                        onclick: async () => {
+                            try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(null, String(p.port)); }
+                            catch (_) {}
+                        },
+                    }));
+                }
+            }
+            this.body.appendChild(portList);
 
             if (data.conflict) {
                 const actions = $el('div', { class: 'port-actions' });
@@ -861,9 +1406,14 @@ class ConsoleLogWidget extends Widget {
         this._maxLines = 80;
         this.body.appendChild(this._log);
         this._es = null;
+        this._lastSeq = 0;        // high-watermark for de-duping across SSE↔poll
+        this._polling = false;
+        this._pollTimer = null;
+        this._streamWatchdog = null;
     }
 
     start() {
+        super.start();  // registers in _liveWidgets (intervalMs:0 → no poll timer)
         if (isSandbox()) {
             this.body.replaceChildren($el('div', { class: 'widget-note', text: tr('widget.sandbox.backend_needed') }));
             return;
@@ -871,20 +1421,74 @@ class ConsoleLogWidget extends Widget {
         this._connect();
     }
 
+    // Close the EventSource while the tab is backgrounded to avoid a
+    // persistent idle connection (and the 502 spam if the backend is down).
+    _suspend() {
+        this._clearWatchdog();
+        if (this._es) { this._es.close(); this._es = null; }
+        this._stopPolling();
+    }
+
+    _resume() {
+        if (!this._destroyed && !isSandbox() && !this._es && !this._polling) this._connect();
+    }
+
     _connect() {
-        if (this._es) return;
+        if (this._es || this._polling) return;
         this._es = new EventSource(api('/api/logs'));
+        // Buffering transports (Cloudflare quick tunnels don't flush
+        // event-stream bodies) deliver no events AND never fire onerror — the
+        // widget would just hang. The server's `ready` handshake lands on any
+        // working stream within a beat; if it doesn't, switch to polling.
+        this._streamWatchdog = setTimeout(() => this._fallbackToPolling(), 4000);
+        this._es.addEventListener('ready', () => this._clearWatchdog());
         this._es.onmessage = (ev) => {
-            try {
-                const entry = JSON.parse(ev.data);
-                this._append(entry);
-            } catch (_) {}
+            this._clearWatchdog();
+            try { this._ingest(JSON.parse(ev.data)); } catch (_) {}
         };
         this._es.onerror = () => {
-            this._es.close();
-            this._es = null;
+            if (this._es) { this._es.close(); this._es = null; }
+            if (this._polling) return;   // already tailing over JSON
             setTimeout(() => { if (!this._destroyed) this._connect(); }, 5000);
         };
+    }
+
+    _clearWatchdog() {
+        if (this._streamWatchdog) { clearTimeout(this._streamWatchdog); this._streamWatchdog = null; }
+    }
+
+    // Tail the server's ring buffer over plain JSON when the SSE handshake
+    // never lands (buffering proxy). Deduped by monotonic `seq`.
+    _fallbackToPolling() {
+        this._streamWatchdog = null;
+        if (this._es) { this._es.close(); this._es = null; }
+        if (this._polling || this._destroyed) return;
+        this._polling = true;
+        const pump = async () => {
+            if (this._destroyed || !this._polling) { this._stopPolling(); return; }
+            try {
+                const r = await jget('/api/logs?poll=1');
+                for (const entry of (r.data || [])) this._ingest(entry);
+            } catch (_) {}
+        };
+        pump();
+        this._pollTimer = setInterval(pump, 4000);
+    }
+
+    _stopPolling() {
+        this._polling = false;
+        if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    }
+
+    _ingest(entry) {
+        if (!entry) return;
+        // seq is monotonic; skip anything we've already rendered (handles the
+        // SSE ring-replay, poll overlap, and same-ms collisions cleanly).
+        if (entry.seq != null) {
+            if (entry.seq <= this._lastSeq) return;
+            this._lastSeq = entry.seq;
+        }
+        this._append(entry);
     }
 
     _append(entry) {
@@ -903,7 +1507,9 @@ class ConsoleLogWidget extends Widget {
     }
 
     destroy() {
+        this._clearWatchdog();
         if (this._es) { this._es.close(); this._es = null; }
+        this._stopPolling();
         super.destroy();
     }
 }
@@ -914,7 +1520,7 @@ class ConsoleLogWidget extends Widget {
 // run in a real terminal rather than blind-execing in the background.
 class InstallerWidget extends Widget {
     constructor({ parent }) {
-        super({ titleKey: 'widget.installer', parent, intervalMs: 0 });
+        super({ titleKey: 'widget.installer', helpKey: 'widget.installer.body', parent, intervalMs: 0 });
         this._cmd = 'curl -fsSL https://www.s0a.app/install.sh | sh';
         this._lastSentAt = 0;
     }
@@ -939,9 +1545,9 @@ class InstallerWidget extends Widget {
         this._statusEl.classList.toggle('widget-note-warn', !!isWarn);
     }
     tick() {
+        // Instructions moved to the ⓘ help panel — body stays lean.
         this._statusEl = $el('div', { class: 'widget-note', text: '' });
         this.body.replaceChildren(
-            $el('div', { class: 'widget-note', text: tr('widget.installer.body') }),
             $el('button', {
                 class: 'widget-btn',
                 text: tr('widget.installer.run'),
@@ -952,28 +1558,186 @@ class InstallerWidget extends Widget {
     }
 }
 
-export function mountSidebar(parent, ctx = {}) {
-    const widgets = [
-        new ClockWidget({ parent }),
-        new InstallerWidget({ parent }),
-        new LocationGlobeWidget({ parent }),
-        new MobileQRWidget({ parent, audio: ctx.audio }),
-        new SysInfoWidget({ parent }),
-        new DeviceStatusWidget({ parent }),
-        new CpuInfoWidget({ parent }),
-        new RamWatcherWidget({ parent }),
-        new PortScanWidget({ parent }),
-        new AutoPilotWidget({ parent }),
-        new ConsoleLogWidget({ parent }),
-        new NetStatWidget({ parent }),
-        new NetChartWidget({ parent }),
-        new GitCommitsWidget({ parent }),
+// ── SKILLS ───────────────────────────────────────────────────────────────
+// Lists the Claude Code skills currently available on this machine (the user's
+// own ~/.claude/skills plus installed-plugin skills), read from /api/skills.
+// A glanceable "what can the agents reach for" panel — name, source, and the
+// skill's own one-line description (full text on hover).
+class SkillsWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.skills', helpKey: 'widget.skills.body', parent, intervalMs: 15000 });
+        this._count = $el('div', { class: 'skills-count', text: '…' });
+        this._list = $el('div', { class: 'skills-list' });
+        this.body.replaceChildren(this._count, this._list);
+    }
+    async tick() {
+        let data;
+        try { ({ data } = await jget('/api/skills')); }
+        catch (e) { if (!this._destroyed) this._count.textContent = tr('widget.skills.err'); return; }
+        if (this._destroyed || !data) return;
+        const skills = data.skills || [];
+        const c = data.counts || { total: skills.length };
+        this._count.textContent = tr('widget.skills.count')
+            .replace('{n}', c.total).replace('{u}', c.user || 0).replace('{p}', c.plugin || 0);
+        this._list.replaceChildren(...skills.map(s => {
+            const chip = $el('span', { class: 'skills-src skills-src-' + (s.source || 'user'), text: s.source === 'plugin' ? (s.plugin || 'plugin') : 'user' });
+            const name = $el('span', { class: 'skills-name', text: s.name });
+            const head = $el('div', { class: 'skills-head' }, [name, chip]);
+            const desc = $el('div', { class: 'skills-desc', text: s.description || '', title: s.description || '' });
+            return $el('div', { class: 'skills-row' }, [head, desc]);
+        }));
+        if (!skills.length) this._list.replaceChildren($el('div', { class: 'skills-desc', text: tr('widget.skills.none') }));
+    }
+}
+
+// ── Sidebar composition: registry + persisted layout ─────────────────────
+// Stable ids → constructors, in default order. Users hide/show and reorder
+// these via the CUSTOMIZE panel; the chosen layout persists in localStorage.
+function _widgetRegistry() {
+    return [
+        { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
+        { id: 'claude',    titleKey: 'widget.claude',      make: p => new ClaudeUsageWidget({ parent: p }) },
+        { id: 'skills',    titleKey: 'widget.skills',      make: p => new SkillsWidget({ parent: p }) },
+        { id: 'installer', titleKey: 'widget.installer',   make: p => new InstallerWidget({ parent: p }) },
+        { id: 'globe',     titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
+        { id: 'mobile',    titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
+        { id: 'sysinfo',   titleKey: 'widget.system',      make: p => new SysInfoWidget({ parent: p }) },
+        { id: 'device',    titleKey: 'widget.device',      make: p => new DeviceStatusWidget({ parent: p }) },
+        { id: 'cpu',       titleKey: 'widget.cpu',         make: p => new CpuInfoWidget({ parent: p }) },
+        { id: 'memory',    titleKey: 'widget.memory',      make: p => new RamWatcherWidget({ parent: p }) },
+        { id: 'ports',     titleKey: 'widget.ports',       make: p => new PortScanWidget({ parent: p }) },
+        { id: 'autopilot', titleKey: 'widget.autopilot',   make: p => new AutoPilotWidget({ parent: p }) },
+        { id: 'console',   titleKey: 'widget.console',     make: p => new ConsoleLogWidget({ parent: p }) },
+        { id: 'network',   titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
+        { id: 'netchart',  titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
+        { id: 'commits',   titleKey: 'widget.commits',     make: p => new GitCommitsWidget({ parent: p }) },
     ];
-    widgets.forEach(w => w.start());
-    return {
-        destroy: () => widgets.forEach(w => w.destroy()),
-        widgets,
+}
+
+const SIDEBAR_LAYOUT_KEY = 'soa-web:sidebar-layout';
+const SANDBOX_LAYOUT_KEY = 'soa-web:sidebar-layout-sandbox';   // sandbox keeps its own arrangement
+// Merge the saved layout with the registry: keep saved order + on/off, drop
+// unknown ids, and append any NEW widgets (on by default) at the end — so a
+// new release's widget shows up without wiping the user's arrangement.
+function _loadLayout(key, ids) {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(key)) || []; } catch (_) {}
+    const known = new Set(ids), seen = new Set(), out = [];
+    for (const e of Array.isArray(saved) ? saved : []) {
+        if (e && known.has(e.id) && !seen.has(e.id)) { out.push({ id: e.id, on: e.on !== false }); seen.add(e.id); }
+    }
+    for (const id of ids) if (!seen.has(id)) out.push({ id, on: true });
+    return out;
+}
+function _saveLayout(key, layout) { try { localStorage.setItem(key, JSON.stringify(layout)); } catch (_) {} }
+
+// Shared composition for both sidebars: a persistent tools row (CUSTOMIZE
+// button) + a host the widgets rebuild into whenever the layout changes.
+function _composeSidebar(parent, reg, layoutKey, ctx) {
+    const byId = Object.fromEntries(reg.map(w => [w.id, w]));
+    const ids = reg.map(w => w.id);
+    let layout = _loadLayout(layoutKey, ids);
+    let widgets = [];
+
+    const host = $el('div', { class: 'sidebar-widgets' });
+    const editBtn = $el('button', {
+        class: 'sidebar-edit-btn', text: '⚙ ' + tr('sidebar.customize'),
+        onclick: () => _openSidebarManager(reg, layout, next => { layout = next; _saveLayout(layoutKey, layout); build(); }),
+    });
+    parent.replaceChildren($el('div', { class: 'sidebar-tools' }, [editBtn]), host);
+
+    const build = () => {
+        widgets.forEach(w => w.destroy());
+        host.replaceChildren();
+        widgets = layout.filter(e => e.on).map(e => byId[e.id] && byId[e.id].make(host, ctx)).filter(Boolean);
+        widgets.forEach(w => w.start());
     };
+    build();
+
+    const relabel = () => { editBtn.textContent = '⚙ ' + tr('sidebar.customize'); };
+    window.addEventListener('soa:lang', relabel);
+    return {
+        destroy: () => { window.removeEventListener('soa:lang', relabel); widgets.forEach(w => w.destroy()); },
+        widgets, rebuild: build,
+    };
+}
+
+export function mountSidebar(parent, ctx = {}) {
+    return _composeSidebar(parent, _widgetRegistry(), SIDEBAR_LAYOUT_KEY, ctx);
+}
+
+// CUSTOMIZE panel — reorder (↑/↓) + show/hide each widget, applied live so the
+// sidebar behind the modal updates as you go. apply(newLayout) persists +
+// rebuilds; we keep editing the same working array we hand back.
+function _openSidebarManager(reg, layout, apply) {
+    const byId = Object.fromEntries(reg.map(w => [w.id, w]));
+    let work = layout.map(e => ({ ...e }));
+
+    const backdrop = $el('div', { class: 'soa-modal-backdrop sidebar-mgr-drop' });
+    const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
+
+    const listEl = $el('div', { class: 'smgr-list' });
+    const commit = () => { apply(work.map(e => ({ ...e }))); render(); };
+    const move = (i, d) => { const j = i + d; if (j < 0 || j >= work.length) return; [work[i], work[j]] = [work[j], work[i]]; commit(); };
+    // Drag-to-reorder (desktop). Touch devices fall back to the ↑/↓ buttons,
+    // which stay for precision + accessibility.
+    let dragId = null;
+    const clearDropHints = () => listEl.querySelectorAll('.smgr-row').forEach(r => r.classList.remove('drop-above', 'drop-below'));
+    const render = () => {
+        listEl.replaceChildren(...work.map((e, i) => {
+            const w = byId[e.id]; if (!w) return null;
+            const row = $el('div', { class: 'smgr-row' + (e.on ? '' : ' off'), draggable: 'true' }, [
+                $el('span', { class: 'smgr-grip', title: tr('sidebar.drag'), text: '⠿' }),
+                $el('span', { class: 'smgr-name', text: tr(w.titleKey) }),
+                $el('span', { class: 'smgr-btns' }, [
+                    $el('button', { class: 'smgr-mv', text: '↑', title: tr('sidebar.up'), disabled: i === 0 ? '' : null, onclick: () => move(i, -1) }),
+                    $el('button', { class: 'smgr-mv', text: '↓', title: tr('sidebar.down'), disabled: i === work.length - 1 ? '' : null, onclick: () => move(i, 1) }),
+                    $el('button', { class: 'smgr-eye' + (e.on ? ' on' : ''), text: e.on ? tr('sidebar.shown') : tr('sidebar.hidden'), onclick: () => { e.on = !e.on; commit(); } }),
+                ]),
+            ]);
+            row.addEventListener('dragstart', ev => { dragId = e.id; row.classList.add('dragging'); try { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', e.id); } catch (_) {} });
+            row.addEventListener('dragend', () => { dragId = null; row.classList.remove('dragging'); clearDropHints(); });
+            row.addEventListener('dragover', ev => {
+                if (dragId == null || dragId === e.id) return;
+                ev.preventDefault();
+                const r = row.getBoundingClientRect();
+                const below = (ev.clientY - r.top) > r.height / 2;
+                clearDropHints();
+                row.classList.add(below ? 'drop-below' : 'drop-above');
+            });
+            row.addEventListener('drop', ev => {
+                ev.preventDefault();
+                if (dragId == null || dragId === e.id) return;
+                const r = row.getBoundingClientRect();
+                const below = (ev.clientY - r.top) > r.height / 2;
+                const from = work.findIndex(x => x.id === dragId);
+                if (from < 0) return;
+                const [moved] = work.splice(from, 1);
+                let to = work.findIndex(x => x.id === e.id);
+                if (to < 0) to = work.length;
+                if (below) to += 1;
+                work.splice(to, 0, moved);
+                commit();
+            });
+            return row;
+        }).filter(Boolean));
+    };
+    render();
+
+    const panel = $el('div', { class: 'soa-modal sidebar-mgr' }, [
+        $el('div', { class: 'soa-modal-title', text: tr('sidebar.customize_title') }),
+        $el('div', { class: 'smgr-hint', text: tr('sidebar.customize_hint') }),
+        listEl,
+        $el('div', { class: 'smgr-foot' }, [
+            $el('button', { class: 'widget-btn widget-btn-ghost', text: tr('sidebar.reset'), onclick: () => { work = reg.map(w => ({ id: w.id, on: true })); commit(); } }),
+            $el('button', { class: 'widget-btn', text: tr('sidebar.done'), onclick: close }),
+        ]),
+    ]);
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
 }
 
 // ── SANDBOX (WC mode) ────────────────────────────────────────────────────
@@ -1001,14 +1765,14 @@ class SandboxInfoWidget extends Widget {
 // are wired by the WC shell to its modal flows.
 class LocalSetupWidget extends Widget {
     constructor({ parent, onInstall, onConnect }) {
-        super({ titleKey: 'widget.local', parent, intervalMs: 0 });
+        super({ titleKey: 'widget.local', helpKey: 'widget.local.body', parent, intervalMs: 0 });
         this.onInstall = onInstall;
         this.onConnect = onConnect;
     }
     onLangChange() { this.tick(); }
     tick() {
+        // Explanation moved to the ⓘ help panel.
         this.body.replaceChildren(
-            $el('div', { class: 'widget-note', text: tr('widget.local.body') }),
             $el('button', {
                 class: 'widget-btn',
                 text: tr('widget.local.install'),
@@ -1023,36 +1787,29 @@ class LocalSetupWidget extends Widget {
     }
 }
 
-export function mountSandboxSidebar(parent, ctx = {}) {
-    // Flag the page as sandbox so every widget's tick() takes its
-    // browser-only path and never pokes /api/*. Flipping this to false
-    // after an install would re-animate the sidebar against localhost,
-    // but today we simply reload into server mode instead (see app.js).
-    (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
-    // Same widget roster as server mode so the sidebar looks consistent
-    // before and after the user installs a local backend. Each widget
-    // detects isSandbox() and renders either browser-native data or a
-    // helpful "install the backend to see X" empty state.
-    const widgets = [
-        new ClockWidget({ parent }),
-        new LocalSetupWidget({
-            parent,
-            onInstall: ctx.onInstall,
-            onConnect: ctx.onConnect,
-        }),
-        new LocationGlobeWidget({ parent }),
-        new MobileQRWidget({ parent, audio: ctx.audio }),
-        new SysInfoWidget({ parent }),
-        new DeviceStatusWidget({ parent }),
-        new CpuInfoWidget({ parent }),
-        new RamWatcherWidget({ parent }),
-        new NetStatWidget({ parent }),
-        new NetChartWidget({ parent }),
-        new SandboxInfoWidget({ parent }),
+// Sandbox roster (no backend): LOCAL SETUP + SANDBOX in place of the
+// install-only widgets. Each widget detects isSandbox() and renders either
+// browser-native data or a "install the backend to see X" empty state.
+function _sandboxRegistry() {
+    return [
+        { id: 'clock',    titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
+        { id: 'local',    titleKey: 'widget.local',       make: (p, c) => new LocalSetupWidget({ parent: p, onInstall: c.onInstall, onConnect: c.onConnect }) },
+        { id: 'globe',    titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
+        { id: 'mobile',   titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
+        { id: 'sysinfo',  titleKey: 'widget.system',      make: p => new SysInfoWidget({ parent: p }) },
+        { id: 'device',   titleKey: 'widget.device',      make: p => new DeviceStatusWidget({ parent: p }) },
+        { id: 'cpu',      titleKey: 'widget.cpu',         make: p => new CpuInfoWidget({ parent: p }) },
+        { id: 'memory',   titleKey: 'widget.memory',      make: p => new RamWatcherWidget({ parent: p }) },
+        { id: 'network',  titleKey: 'widget.network',     make: p => new NetStatWidget({ parent: p }) },
+        { id: 'netchart', titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
+        { id: 'sandbox',  titleKey: 'widget.sandbox',     make: p => new SandboxInfoWidget({ parent: p }) },
     ];
-    widgets.forEach(w => w.start());
-    return {
-        destroy: () => widgets.forEach(w => w.destroy()),
-        widgets,
-    };
+}
+
+export function mountSandboxSidebar(parent, ctx = {}) {
+    // Flag the page as sandbox so every widget's tick() takes its browser-only
+    // path and never pokes /api/*. Same customize/reorder/hide + ⓘ machinery as
+    // server mode, under its own layout key.
+    (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
+    return _composeSidebar(parent, _sandboxRegistry(), SANDBOX_LAYOUT_KEY, ctx);
 }

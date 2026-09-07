@@ -1,0 +1,116 @@
+#!/bin/bash
+# soa-effort — keep every fleet agent at `/effort ultracode` (xhigh effort +
+# standing dynamic-workflow orchestration). ultracode is a SESSION-ONLY setting,
+# so it resets to the settings.json default (xhigh) whenever a session restarts/
+# resumes — this sweep re-asserts it. Runs every 15 min (launchd
+# com.soa-web.effort-4010); also safe by hand.
+#
+# Requires `enableWorkflows: true` in ~/.claude/settings.json (else /effort
+# ultracode errors "needs dynamic workflows enabled"); this script verifies it.
+#
+# Only touches PARKED tabs (idle/done) so it never interrupts a working agent.
+# Detects current effort from the live footer: the word "ultracode" there means
+# it's already set -> skip. Per-tab cooldown avoids re-sending too often.
+#   SOA_EFFORT_DRY=1 -> log/print intent, send nothing.
+set -u
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
+LOG="$DIR/logs/effort.log"
+STATED="$DIR/logs/.effort"
+mkdir -p "$STATED" 2>/dev/null
+TS="$(date '+%Y-%m-%dT%H:%M:%S')"
+NOW="$(date +%s)"
+COOLDOWN="${SOA_EFFORT_COOLDOWN:-1200}"    # 20m — don't re-send to same tab within this
+# TOKEN CRISIS (2026-08-07): weekly at 80% w/ 4 days left. Fleet default dropped
+# ultracode→high to kill the dynamic-workflow subagent multiplier (was ~43% of
+# burn). REVERT to ultracode after the weekly resets (Aug 11 6pm) if desired.
+TARGET="${SOA_EFFORT_TARGET:-high}"
+DRY="${SOA_EFFORT_DRY:-0}"
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+log(){ echo "$TS $*" >> "$LOG"; }
+
+# preflight: ultracode needs dynamic workflows enabled globally
+if [ "$TARGET" = "ultracode" ] && [ -f "$SETTINGS" ]; then
+  ew="$(python3 -c "import json,sys;print(json.load(open('$SETTINGS')).get('enableWorkflows'))" 2>/dev/null)"
+  if [ "$ew" != "True" ]; then
+    log "WARN: enableWorkflows is $ew in settings.json — /effort ultracode will error until it's true"
+  fi
+fi
+
+SELF="$(soa-sessions whoami 2>/dev/null | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+LIST="$(soa-sessions list 2>/dev/null)"
+[ -z "$LIST" ] && { log "no list (daemon down?) — skip"; exit 0; }
+MGR="$(echo "$LIST" | grep -iE '^ *#[0-9]+ +(manager|\.soa-web-[0-9])' | sed -nE 's/^ *#([0-9]+) .*/\1/p' | tr '\n' ' ')"
+clean(){ sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/[[:cntrl:]]/ /g'; }
+
+# ids the burn governor (soa-usage-throttle) has intentionally throttled to a
+# LOWER effort while the 5h block is in DANGER. Skip them here so we don't
+# re-raise them to ultracode and undo the throttle — the two watchdogs must not
+# fight. The governor CLEARS this file once burn is healthy / the block rolls
+# over, and we resume asserting ultracode on the next pass.
+THROTTLED_IDS="$(python3 -c "import json;print(' '.join(str(i) for i in json.load(open('$STATE_DIR/effort-throttled.json')).get('ids',[])))" 2>/dev/null || true)"
+
+# parked tabs only (idle/done) — never interrupt a working agent
+echo "$LIST" | sed -nE 's/^ *#([0-9]+) .* (idle|done) +ctx.*/\1/p' | while read -r id; do
+  [ -z "$id" ] && continue
+  skip=0; for m in $SELF $MGR; do [ "$id" = "$m" ] && skip=1; done
+  [ "$skip" = 1 ] && continue
+
+  # skip non-active projects (inactive/archive) — the manager only spends tokens on
+  # ACTIVE tabs. soa-sessions list flags non-active tabs with INACTIVE/ARCHIVED.
+  # …and Codex tabs: /effort is a Claude Code command (Codex answers "Unrecognized
+  # command" and the line lands in its prompt queue as noise).
+  case "$(echo "$LIST" | grep -E "^ *#$id ")" in *INACTIVE*|*ARCHIVED*|*CODEX*) continue;; esac
+
+  # skip tabs the burn governor is holding at a lower effort (don't fight it)
+  case " $THROTTLED_IDS " in *" $id "*) log "skip #$id — burn-throttled (governor owns effort)"; continue;; esac
+
+  stamp="$STATED/$id"
+  if [ -f "$stamp" ]; then last="$(cat "$stamp" 2>/dev/null || echo 0)"; else last=0; fi
+  [ -z "$last" ] && last=0
+  [ $(( NOW - last )) -lt "$COOLDOWN" ] && continue
+
+  # already at ultracode? ultracode is SESSION-ONLY Claude-process state, not
+  # terminal state — the "✦ ultracode · xhigh" footer banner only renders when
+  # the composer is on-screen, so it false-negatives on settled parked tabs
+  # (agent output fills the frame). The reliable on-screen marker is the
+  # one-time success line Claude prints in the scrollback when /effort is
+  # accepted: "Set effort level to ultracode (this session only): ...".
+  #
+  # We look ONLY at the recent tail (~last 40 rendered lines near the bottom),
+  # so a STALE pre-restart confirmation that's scrolled up is NOT matched — a
+  # genuine reset (restart/resume/spawn) re-seeds fresh scrollback whose tail
+  # lacks a recent confirmation, and we re-assert. We must NOT reuse clean()
+  # here: its `s/[[:cntrl:]]/ /g` eats CRs before the CR→NL split and blobs the
+  # buffer. Strip ANSI, then fold CR→NL so "rendered lines" ≈ real lines.
+  tail40="$(soa-sessions read "$id" 60 2>/dev/null \
+              | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tr '\r' '\n' | tail -40)"
+  # Match both the spaced form and the CR-collapsed twin
+  # ("Seteffortleveltoultracode(thissessiononly)…") by stripping all whitespace
+  # and grepping the whitespace-free needle "Setefflevelto<TARGET>" as a fixed
+  # string (so a TARGET with regex metachars can't break the match).
+  needle="Seteffortlevelto${TARGET}"
+  if printf '%s' "$tail40" | tr -d '[:space:]' | grep -qiF "$needle"; then
+    echo "$NOW" > "$stamp"          # already at target — reset cooldown, skip
+    continue
+  fi
+  foot="$(printf '%s' "$tail40" | grep -iE 'ultracode|effort' | tail -1)"
+
+  if [ "$DRY" = 1 ]; then
+    log "[dry] would set #$id -> /effort $TARGET (footer: ${foot:0:60})"
+    printf 'would set #%s -> /effort %s\n' "$id" "$TARGET"
+    continue
+  fi
+  soa-sessions send "$id" "/effort $TARGET" >/dev/null 2>&1
+  # Claude Code prompts "Change effort level? 1.Yes 2.No" on every switch — the
+  # agent BLOCKS on it (a service interruption) until answered. Auto-confirm, but
+  # ONLY if the prompt actually rendered, else a stray "1" gets injected as input.
+  sleep 1
+  case "$(soa-sessions read "$id" 14 2>/dev/null)" in
+    *"Change effort level"*|*"Yes, switch"*) soa-sessions send "$id" "1" >/dev/null 2>&1; log "auto-confirmed effort switch #$id" ;;
+  esac
+  echo "$NOW" > "$stamp"
+  log "set #$id -> /effort $TARGET"
+done
+exit 0

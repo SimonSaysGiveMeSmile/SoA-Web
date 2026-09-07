@@ -4,7 +4,7 @@ const os = require('os');
 const express = require('express');
 const crypto = require('crypto');
 
-const STATE_DIR = path.join(os.homedir(), '.soa-web');
+const { STATE_DIR } = require('./stateDir');
 const PILOT_FILE = path.join(STATE_DIR, 'autopilot.json');
 
 function ensureDir() {

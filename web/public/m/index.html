@@ -21,19 +21,27 @@
                 <span class="status-dot" data-state="connecting"></span>
                 <span class="status-text"></span>
             </div>
+            <!-- Current-tab chip: always shows which tab this phone is on (the
+                 active pill often scrolls off the strip) and opens a searchable
+                 jump sheet of every tab. -->
+            <button class="tabchip" id="btn-tabchip" title="All tabs — tap to jump" aria-label="Switch tab">
+                <span class="tabchip-glyph">≡</span>
+                <span class="tabchip-name" id="tabchip-name">—</span>
+                <span class="tabchip-count" id="tabchip-count"></span>
+            </button>
             <nav id="controls" class="controls" aria-label="Functions">
-                <button class="bb-btn" data-view="terminal-view" aria-pressed="true">TERMINAL</button>
-                <button class="bb-btn" data-view="chat-view">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
-                <button class="bb-btn" data-view="tiles-view">DASH</button>
-                <button class="bb-btn" data-view="web-view">BROWSER</button>
-                <button class="bb-btn" data-view="widgets-view">SYSTEM</button>
-                <button class="bb-btn bb-icon" id="btn-mic" title="Toggle microphone">MIC</button>
-                <button class="bb-btn bb-icon" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
-                <button class="bb-btn bb-icon" id="btn-camera" title="Send a photo to the terminal">📷</button>
-                <button class="bb-btn bb-icon" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
-                <button class="bb-btn bb-icon-sm" id="btn-settings" title="Settings">&#9881;</button>
-                <button class="bb-btn bb-icon" id="btn-newtab" title="New tab">+</button>
+                <button class="bb-btn" data-view="terminal-view" aria-pressed="true" title="Terminal — your agent's live terminal session">TERM</button>
+                <button class="bb-btn" data-view="chat-view" title="Chat — message the agent in plain chat bubbles">CHAT<span class="bb-badge" id="chat-badge" hidden></span></button>
+                <!-- Manager-only (premium gate): hidden by default; app.js reveals it when /api/capabilities reports manager=true. -->
+                <button class="bb-btn" data-view="tiles-view" hidden title="Dashboard — tiles of every agent (manager view)">DASH</button>
+                <button class="bb-btn" data-view="web-view" title="Web — the agent's browser & localhost preview">WEB</button>
+                <button class="bb-btn" data-view="widgets-view" title="System — device stats, ports & widgets">SYS</button>
             </nav>
+            <!-- Overflow trigger — pinned OUTSIDE the scrolling #controls strip so
+                 the secondary actions (mic/speak/camera/…) are always one tap away
+                 even if the view row scrolls. The buttons live in #overflow-overlay
+                 (same IDs → same JS handlers). -->
+            <button class="bb-btn bb-icon" id="btn-overflow" title="More actions" aria-label="More actions" aria-haspopup="true">⋯</button>
         </header>
         <input id="camera-input" type="file" accept="image/*" hidden />
 
@@ -42,6 +50,7 @@
         <main id="stage">
             <section id="terminal-view" class="view active">
                 <pre id="term"></pre>
+                <button id="term-jump" class="term-jump" type="button" aria-label="Jump to latest output">↓ LATEST</button>
             </section>
             <section id="chat-view" class="view">
                 <div id="chat-status" class="chat-status" hidden>
@@ -61,7 +70,26 @@
             </section>
             <section id="tiles-view" class="view">
                 <div id="manager-bar" class="manager-bar" hidden></div>
-                <div id="tiles"></div>
+                <div class="fleet-toolbar">
+                    <div class="fleet-seg" role="tablist">
+                        <button class="fleet-seg-btn active" data-fleet="sessions" role="tab">SESSIONS</button>
+                        <button class="fleet-seg-btn" data-fleet="monitor" role="tab">MONITOR</button>
+                        <button class="fleet-seg-btn" data-fleet="todos" role="tab">TO&#8209;DO<span class="fleet-seg-badge" id="fleet-todo-badge" hidden></span></button>
+                    </div>
+                    <button id="btn-broadcast" class="fleet-bcast-btn" type="button" title="Broadcast a command to a cohort">&#8646; CAST</button>
+                </div>
+                <div id="fleet-sessions" class="fleet-pane">
+                    <div id="tiles"></div>
+                </div>
+                <div id="fleet-monitor" class="fleet-pane" hidden></div>
+                <div id="fleet-todos" class="fleet-pane" hidden>
+                    <form id="todo-form" class="todo-form">
+                        <input id="todo-input" class="todo-input" type="text" placeholder="Add a to-do for the fleet…"
+                               autocomplete="off" autocapitalize="sentences" />
+                        <button class="todo-add" type="submit" aria-label="Add">＋</button>
+                    </form>
+                    <div id="todo-list" class="todo-list"></div>
+                </div>
             </section>
             <section id="web-view" class="view">
                 <div class="web-bar">
@@ -123,6 +151,41 @@
                 </div>
             </div>
             <div class="settings-section">
+                <div class="settings-label">Model Access</div>
+                <div class="settings-hint">Which API new shells use for Claude. Subscription uses your login; a provider injects its endpoint + key into every new tab.</div>
+                <div id="provider-list" class="provider-list"></div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-provider-add" type="button">+ ADD PROVIDER</button>
+                </div>
+                <form id="provider-form" class="provider-form" hidden>
+                    <input type="hidden" id="pf-id" />
+                    <input class="pf-input" id="pf-name" placeholder="Name (e.g. proxy-1)" autocomplete="off" />
+                    <input class="pf-input" id="pf-baseurl" placeholder="Base URL (https://…)" autocomplete="off" />
+                    <input class="pf-input" id="pf-token" placeholder="Token / API key" autocomplete="off" />
+                    <select class="pf-input" id="pf-tokenvar">
+                        <option value="ANTHROPIC_AUTH_TOKEN">AUTH_TOKEN (proxy / bearer)</option>
+                        <option value="ANTHROPIC_API_KEY">API_KEY (official API)</option>
+                    </select>
+                    <input class="pf-input" id="pf-model" placeholder="Model override (optional)" autocomplete="off" />
+                    <div class="settings-row">
+                        <button class="settings-btn" id="pf-save" type="submit">SAVE</button>
+                        <button class="settings-btn" id="pf-cancel" type="button">CANCEL</button>
+                    </div>
+                </form>
+            </div>
+            <div class="settings-section">
+                <div class="settings-label">Auto-Resume</div>
+                <div class="settings-hint">When a session hits its usage limit, type "continue" into it automatically ~2 min after the limit resets.</div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-auto-resume" type="button">AUTO-RESUME: …</button>
+                </div>
+                <div class="settings-label">Close inactive tabs</div>
+                <div class="settings-hint">Let the fleet manager close (stop) idle / done tabs. Off by default — the manager never reaps your tabs unless this is on.</div>
+                <div class="settings-row">
+                    <button class="settings-btn" id="btn-close-inactive" type="button">CLOSE INACTIVE: …</button>
+                </div>
+            </div>
+            <div class="settings-section">
                 <div class="settings-label">Sound</div>
                 <div class="sound-grid" id="sound-grid"></div>
             </div>
@@ -167,6 +230,70 @@
         </div>
     </div>
 
+    <div id="tabsheet-overlay">
+        <div class="tabsheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="tabsheet-header">
+                <div class="tabsheet-title">TABS</div>
+                <button class="settings-close" id="tabsheet-close">&times;</button>
+            </div>
+            <div class="tabsheet-search-wrap">
+                <input id="tabsheet-search" class="tabsheet-search" type="text"
+                       placeholder="Search tabs…" autocomplete="off" autocapitalize="off"
+                       autocorrect="off" spellcheck="false" inputmode="search" />
+            </div>
+            <div id="tabsheet-list" class="tabsheet-list"></div>
+        </div>
+    </div>
+
+    <div id="overflow-overlay">
+        <div class="overflow-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="overflow-header">
+                <div class="overflow-title">ACTIONS</div>
+                <button class="settings-close" id="overflow-close">&times;</button>
+            </div>
+            <div class="overflow-grid">
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-mic" title="Toggle microphone">🎤</button>
+                    <span class="overflow-cap">Mic</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
+                    <span class="overflow-cap">Speak</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-camera" title="Send a photo to the terminal">📷</button>
+                    <span class="overflow-cap">Photo</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
+                    <span class="overflow-cap">Fullscreen</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon-sm overflow-btn" id="btn-settings" title="Settings">&#9881;</button>
+                    <span class="overflow-cap">Settings</span>
+                </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-newtab" title="New tab">+</button>
+                    <span class="overflow-cap">New tab</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Long-press help: press-and-hold any control to see what it does. -->
+    <div id="help-overlay">
+        <div class="overflow-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="overflow-header">
+                <div class="overflow-title help-title">Help</div>
+                <button class="settings-close help-close" aria-label="Close help">&times;</button>
+            </div>
+            <p class="help-body"></p>
+        </div>
+    </div>
+
     <div id="reconnect-overlay" hidden>
         <div class="reconnect-card">
             <div class="reconnect-spinner"></div>
@@ -175,6 +302,28 @@
             <p class="reconnect-diag" id="reconnect-diag" hidden></p>
             <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY NOW</button>
             <button class="reconnect-btn reconnect-open" id="reconnect-open-browser" hidden>OPEN WIFI LOGIN</button>
+        </div>
+    </div>
+
+    <div id="broadcast-overlay">
+        <div class="bcast-sheet">
+            <div class="settings-handle"><span></span></div>
+            <div class="bcast-header">
+                <div class="bcast-title">&#8646; BROADCAST</div>
+                <button class="settings-close" id="bcast-close">&times;</button>
+            </div>
+            <div class="bcast-sub">Send a command to a cohort of sessions at once.</div>
+            <div class="bcast-label">Target</div>
+            <div class="bcast-cohorts" id="bcast-cohorts"></div>
+            <div class="bcast-label">Command</div>
+            <div class="bcast-presets" id="bcast-presets"></div>
+            <form id="bcast-form" class="bcast-form">
+                <input id="bcast-input" class="bcast-input" type="text"
+                       placeholder="e.g. continue, /compact, npm test…"
+                       autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+                <button class="bcast-send" type="submit" id="bcast-send">SEND</button>
+            </form>
+            <label class="bcast-enter"><input type="checkbox" id="bcast-enter" checked /> press Enter after sending</label>
         </div>
     </div>
 
