@@ -3188,3 +3188,40 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
   opacity: 0; transition: opacity 0.2s, transform 0.2s;
 }
 .mgrv-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ── Transcript bands ───────────────────────────────────────────────────
+   A Claude run is thousands of lines in which your question, the reply and
+   every tool call are the same monospace grey. These bands give the terminal
+   the block structure the desktop app has, without touching the text: a
+   saturated left rail does the tracking work and the fill is barely there, so
+   nothing competes with the glyphs it sits on top of.
+
+   The layer is above the canvas because the dark theme paints an opaque
+   background into it — anything underneath would simply not be seen. Hence the
+   very low alphas: this is a wash, not a highlight. */
+.term-bands {
+  position: absolute; inset: 4px 0 4px 6px;   /* match .terms .term padding */
+  pointer-events: none; overflow: hidden; z-index: 2;
+}
+.term-band {
+  position: absolute; left: 0; right: 0; top: 0;
+  border-left: 2px solid transparent;
+  will-change: transform;
+}
+/* Spend the emphasis in ONE place. Your own turn is the thing you scroll back
+   to find, so it gets the wash and a full-strength rail. */
+.term-band[data-kind="user"] {
+  background: rgba(var(--soa-accent-rgb), 0.10);
+  border-left-width: 3px;
+  border-left-color: var(--soa-accent);
+}
+/* Its work only needs a margin mark. A second wash would turn the transcript
+   into stripes and cost the contrast the first one is buying. */
+.term-band[data-kind="tool"] {
+  border-left-color: var(--soa-accent-dim);
+  opacity: 0.75;
+}
+/* On the light themes the wash has to come from the ink, not the accent glow,
+   or it vanishes against a near-white ground. */
+:root[data-theme="light"] .term-band[data-kind="user"],
+:root[data-theme="dim"] .term-band[data-kind="user"] { background: rgba(0, 0, 0, 0.06); }
