@@ -177,6 +177,12 @@ class TabRuntime {
         this.id = id;
         this.title = title || tr('tab.default', { id });
         this.container = el('div', { class: 'term', 'data-tab': String(id) });
+        // Transcript banding rides ON TOP of the grid, not behind it: the dark
+        // theme paints an opaque background into the canvas, so anything under
+        // it is invisible. A very low-alpha wash plus a saturated left rail
+        // reads as a block without touching legibility of the glyphs beneath.
+        this.bandsEl = el('div', { class: 'term-bands', 'aria-hidden': 'true' });
+        this.container.appendChild(this.bandsEl);
         const s = getSettings();
         const fontSize = s.termFontSize;
         this.term = new Terminal({
@@ -208,6 +214,9 @@ class TabRuntime {
         this._pendingReplay = '';
         this._everFit = false;
         this._renderer = null;
+        // absolute buffer line -> 'user' | 'tool' | '' (classified once; a line
+        // that has scrolled into history can never change again)
+        this._bandCache = new Map();
     }
 
     _ensureOpen() {
@@ -216,6 +225,19 @@ class TabRuntime {
         if (rect.width < 2 || rect.height < 2) return false;
         this.term.open(this.container);
         this._opened = true;
+        this._bandsOn = true;
+        // Repaint the transcript bands whenever the grid or the viewport moves.
+        // onRender covers new output; the viewport's own scroll event covers a
+        // native scroll, which since the viewport got its overflow back is how
+        // most scrolling now happens. Coalesced to one repaint per frame.
+        const repaint = () => {
+            if (this._bandRaf) return;
+            this._bandRaf = requestAnimationFrame(() => { this._bandRaf = null; this.paintBands(); });
+        };
+        try { this.term.onRender(repaint); } catch (_) {}
+        try { this.term.onScroll(repaint); } catch (_) {}
+        const vp = this.term.element && this.term.element.querySelector('.xterm-viewport');
+        if (vp) vp.addEventListener('scroll', repaint, { passive: true });
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
         if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
@@ -285,6 +307,99 @@ class TabRuntime {
         this._pendingReplay = '';
         this.term.write(data);
         return true;
+    }
+
+    // ── Transcript banding ──────────────────────────────────────────────
+    // A terminal is one undifferentiated wall of text, and a Claude transcript
+    // is the worst case: a 60-minute run is thousands of lines in which your
+    // own question, the reply, and every tool call look identical. The desktop
+    // app solves this with blocks; this is the same idea drawn over a grid.
+    //
+    // Classification reads the FIRST FEW COLUMNS only. That matters: this runs
+    // on every scroll frame, and translating whole rows to strings 46 at a time
+    // is precisely the cost that made scrolling drag in the first place. Eight
+    // columns is enough to see a prompt marker or a tool bullet, and every line
+    // below baseY is immutable once it scrolls into history, so it is
+    // classified once and cached forever.
+    static BAND_COLS = 8;
+
+    _bandFor(buf, abs) {
+        const hit = this._bandCache.get(abs);
+        if (hit !== undefined) return hit;
+        let kind = '';
+        const line = buf.getLine(abs);
+        if (line) {
+            const head = line.translateToString(true, 0, TabRuntime.BAND_COLS).trimStart();
+            const c = head.charAt(0);
+            // Claude Code marks your turn with a prompt caret and its own work
+            // with a bullet; the box-drawing continuations belong to whatever
+            // opened them, which the run-grouping below handles.
+            if (c === '>' || c === '\u276f' || c === '\u203a') kind = 'user';
+            else if (c === '\u25cf' || c === '\u23fa' || c === '\u2022') kind = 'tool';
+        }
+        // Only history is safe to remember; the live screen is still being
+        // repainted underneath us.
+        if (abs < buf.baseY) this._bandCache.set(abs, kind);
+        return kind;
+    }
+
+    // Walk the rows on screen, group each marker with the lines that follow it
+    // until the next marker, and lay one absolutely-positioned band over each
+    // run. Cheap enough to run per render and per scroll.
+    paintBands() {
+        const host = this.bandsEl;
+        if (!host || !this._opened) return;
+        if (!this._bandsOn) { if (host.childElementCount) host.replaceChildren(); return; }
+        let buf, cellH, rows;
+        try {
+            buf = this.term.buffer.active;
+            rows = this.term.rows;
+            const dims = this.term._core && this.term._core._renderService
+                && this.term._core._renderService.dimensions;
+            cellH = dims && dims.css && dims.css.cell && dims.css.cell.height;
+            if (!(cellH > 1)) {
+                const scr = this.term.element && this.term.element.querySelector('.xterm-screen');
+                const h = scr && scr.getBoundingClientRect().height;
+                cellH = h && rows ? h / rows : 0;
+            }
+        } catch (_) { return; }
+        if (!(cellH > 1)) return;
+
+        const top = buf.viewportY;
+        const runs = [];
+        let cur = null;
+        for (let i = 0; i < rows; i++) {
+            const kind = this._bandFor(buf, top + i);
+            if (kind) {
+                if (cur) runs.push(cur);
+                cur = { kind, from: i, to: i };
+            } else if (cur) {
+                cur.to = i;            // continuation of the open block
+            }
+        }
+        if (cur) runs.push(cur);
+
+        // Reuse the divs: a scroll re-lays the same handful of bands, and
+        // rebuilding the subtree every frame would undo the point of this.
+        const need = runs.length;
+        while (host.childElementCount > need) host.lastElementChild.remove();
+        while (host.childElementCount < need) host.appendChild(el('div', { class: 'term-band' }));
+        for (let i = 0; i < need; i++) {
+            const r = runs[i];
+            const node = host.children[i];
+            const y = Math.round(r.from * cellH);
+            const h = Math.round((r.to - r.from + 1) * cellH);
+            if (node.dataset.kind !== r.kind) node.dataset.kind = r.kind;
+            const t = `translateY(${y}px)`;
+            if (node.style.transform !== t) node.style.transform = t;
+            const hp = `${h}px`;
+            if (node.style.height !== hp) node.style.height = hp;
+        }
+    }
+
+    setBands(on) {
+        this._bandsOn = !!on;
+        this.paintBands();
     }
 
     // ── GPU renderer ────────────────────────────────────────────────────
