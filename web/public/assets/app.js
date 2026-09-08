@@ -207,6 +207,7 @@ class TabRuntime {
         // and flush it on the first successful fit — see flushPendingReplay.
         this._pendingReplay = '';
         this._everFit = false;
+        this._renderer = null;
     }
 
     _ensureOpen() {
@@ -286,6 +287,81 @@ class TabRuntime {
         return true;
     }
 
+    // ── GPU renderer ────────────────────────────────────────────────────
+    // xterm ships three renderers. With no addon loaded it uses the DOM one,
+    // which rebuilds a <span> per style run per row every time the viewport
+    // moves — fine for a login shell, miserable for a full-colour TUI, and the
+    // reason scrolling felt heavy. WebGL draws the same grid as one textured
+    // quad batch; canvas is the fallback where WebGL is unavailable.
+    //
+    // Only the ACTIVE terminal carries one. A browser allows on the order of 16
+    // live WebGL contexts per page and this fleet runs 19 tabs, so giving every
+    // terminal its own would silently evict the oldest contexts and blank the
+    // terminals they belonged to. One context, moved on tab switch, costs a
+    // single re-render and cannot run out.
+    attachRenderer() {
+        if (this._renderer || !this._opened) return;
+        // Escape hatch. A GPU renderer depends on the machine's driver stack, so
+        // if one ever paints wrong there has to be a way back that does not need
+        // a release: localStorage.setItem('soa.renderer', 'dom') and reload.
+        try { if (localStorage.getItem('soa.renderer') === 'dom') return; } catch (_) {}
+        const W = window.WebglAddon && window.WebglAddon.WebglAddon;
+        if (W) {
+            let addon = null;
+            try {
+                addon = new W();
+                // A lost context (GPU reset, tab backgrounded too long) must not
+                // leave a dead terminal behind: drop to canvas and carry on.
+                if (addon.onContextLoss) addon.onContextLoss(() => {
+                    try { addon.dispose(); } catch (_) {}
+                    if (this._renderer === addon) this._renderer = null;
+                    this._attachCanvasRenderer();
+                });
+                this.term.loadAddon(addon);
+                this._renderer = addon;
+                this._repaint();
+                return;
+            } catch (_) {
+                // loadAddon can throw part-way through, after the addon has
+                // already inserted its layers. Dispose it or those layers stay
+                // behind and the canvas fallback stacks a second set on top.
+                if (addon) { try { addon.dispose(); } catch (_) {} }
+            }
+        }
+        this._attachCanvasRenderer();
+    }
+
+    _attachCanvasRenderer() {
+        if (this._renderer) return;
+        const C = window.CanvasAddon && window.CanvasAddon.CanvasAddon;
+        if (!C) return;   // neither addon loaded: xterm keeps its DOM renderer
+        try {
+            const addon = new C();
+            this.term.loadAddon(addon);
+            this._renderer = addon;
+            this._repaint();
+        } catch (_) {}
+    }
+
+    // A renderer swapped in AFTER the terminal is open inherits an empty canvas:
+    // it only paints rows as they change, and rows already on screen never
+    // change. Force one full repaint, and do it again next frame because the
+    // new renderer sizes its layers asynchronously.
+    _repaint() {
+        const go = () => { try { this.term.refresh(0, this.term.rows - 1); } catch (_) {} };
+        go();
+        // fitNow, not fit.fit: the raw addon undercounts the column width when
+        // xterm's dimension lookup misses (see _fillWidth), and re-measuring
+        // with it here would undo that fix a frame after the renderer lands.
+        requestAnimationFrame(() => { this.fitNow(); go(); });
+    }
+
+    detachRenderer() {
+        if (!this._renderer) return;
+        try { this._renderer.dispose(); } catch (_) {}
+        this._renderer = null;
+    }
+
     fitNow() {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
@@ -321,6 +397,19 @@ class TabRuntime {
                 const rowsEl = this.term.element && this.term.element.querySelector('.xterm-rows');
                 const r = rowsEl && rowsEl.getBoundingClientRect();
                 if (r && r.width > 0 && this.term.cols > 0) cellW = r.width / this.term.cols;
+            }
+            // .xterm-rows only exists under the DOM renderer — canvas and WebGL
+            // paint into a <canvas> and drop the rows layer entirely. Measure the
+            // font directly as the last resort so this works under every renderer.
+            if (!(cellW > 0.5) && this.term.element) {
+                const cs2 = getComputedStyle(this.term.element);
+                const ctx = TabRuntime._measureCtx
+                    || (TabRuntime._measureCtx = document.createElement('canvas').getContext('2d'));
+                if (ctx) {
+                    ctx.font = `${cs2.fontSize} ${cs2.fontFamily}`;
+                    const w = ctx.measureText('W'.repeat(100)).width / 100;
+                    if (w > 0.5) cellW = w;
+                }
             }
             // Fill the CONTAINER's content box (the space between its padding),
             // measured independently of xterm's own element. xterm's root shrinks to
@@ -382,6 +471,7 @@ class TabRuntime {
     }
 
     dispose() {
+        this.detachRenderer();   // release the GPU context before the terminal goes
         try { this.term.dispose(); } catch (_) {}
         this.container.remove();
     }
@@ -1226,10 +1316,14 @@ class Shell {
         } else {
             for (const [tid, rt] of this.tabs) {
                 rt.container.classList.toggle('active', tid === id);
+                // The GPU context follows the visible terminal — see
+                // TabRuntime.attachRenderer for why there is only ever one.
+                if (tid !== id) rt.detachRenderer();
             }
             const rt = this.tabs.get(id);
             if (rt) {
                 rt.fitNow();
+                rt.attachRenderer();
                 rt.flushPendingReplay();
                 rt.scrollToBottom();
                 rt.focus();
@@ -2873,6 +2967,11 @@ class Shell {
         // in-flight output.
         rt.fitNow();
         requestAnimationFrame(() => { rt.fitNow(); requestAnimationFrame(() => rt.fitNow()); });
+        // Also the recovery point for the renderer: on a cold load _activate
+        // runs while #shell is still hidden, so the terminal is not open yet and
+        // attachRenderer() bails. This path runs again once the container has a
+        // real size, which is exactly when the renderer can be created.
+        rt.attachRenderer();
         this._broadcastSizeSoon();
     }
 

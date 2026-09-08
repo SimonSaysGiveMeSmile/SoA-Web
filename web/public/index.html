@@ -956,6 +956,14 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+  <!-- Renderers. Without one of these xterm falls back to its DOM renderer,
+       which rebuilds a span per style run per row on every scroll step — the
+       documented slow path, and the reason scrolling dragged. Attached to the
+       ACTIVE terminal only (see TabRuntime.attachRenderer): a browser caps WebGL
+       contexts at roughly 16 and this fleet runs 19 tabs, so keeping one context
+       alive and moving it beats handing every tab its own and losing the lot. -->
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js"></script>
   <script type="module" src="/assets/app.js?v=152"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
