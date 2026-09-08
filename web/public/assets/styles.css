@@ -777,15 +777,22 @@ html, body {
 .terms .xterm { height: 100%; width: 100%; }
 .terms .xterm-viewport {
   background: transparent !important;
-  /* FitAddon sizes the terminal by subtracting the viewport's scrollbar
-     width (offsetWidth − clientWidth) from the parent. If the viewport
-     still scrolls, Chromium on a trackpad-less machine reserves ~15px and
-     the grid stops one column short, leaving a dark gutter on the right.
-     Dropping overflow to hidden collapses that reservation to 0 — xterm
-     still receives wheel events from this element, so scrollback keeps
-     working. */
-  overflow: hidden !important;
+  /* This used to be `overflow: hidden`, to stop FitAddon subtracting a phantom
+     ~15px scrollbar and leaving a dark gutter on the right. It worked, and it
+     cost the scrolling: an element that cannot scroll natively gets no
+     compositor scrolling and no trackpad momentum, so every wheel event became
+     a whole-line jump on the main thread — steppy and a beat late.
+
+     The gutter is handled properly now. _fillWidth measures the CONTAINER and
+     grows the grid to fill it whatever the viewport reserves, and hiding the
+     scrollbar in both engines below means it reserves nothing anyway. So give
+     the viewport its native scroll back. */
+  overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: none;
+  /* A terminal at the end of its scrollback should not start scrolling the
+     page behind it. */
+  overscroll-behavior: contain;
 }
 .terms .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
 .terms .xterm-screen { width: 100% !important; }
