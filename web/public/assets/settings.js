@@ -98,7 +98,18 @@ function load() {
     } catch (_) { return normalize(null); }
 }
 
+// Sound FX start muted on EVERY load, not just the first one. Audio is the one
+// setting whose "on" is nearly always meant for the moment rather than for
+// good — you turn it on to hear something and then a reload, a reconnect, or a
+// second device brings it back unasked, usually somewhere you did not want a
+// terminal chirping. So the stored value is cleared at startup: turning it on
+// lasts for the session, and the next load is quiet again. Volume and the
+// individual cue toggles persist normally; only the master switch resets.
 let current = load();
+if (current.audio) {
+    current = normalize({ ...current, audio: false });
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(current)); } catch (_) {}
+}
 
 export function getSettings() { return { ...current }; }
 
