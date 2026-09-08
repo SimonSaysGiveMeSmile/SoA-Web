@@ -880,7 +880,10 @@ class Shell {
         // Interaction stamp — the context poll reads it to stay off the main
         // thread while you are scrolling (see _pollCtxLines). Passive and
         // capture so it is recorded no matter who handles the event.
-        const bump = () => { this._lastInteract = performance.now(); };
+        // Published on window as well: the sidebar's globe animation reads it to
+        // get out of the way while you are scrolling. A one-word global beats
+        // wiring an event bus through a decorative widget.
+        const bump = () => { this._lastInteract = window.__soaLastInteract = performance.now(); };
         window.addEventListener('wheel', bump, { passive: true, capture: true });
         window.addEventListener('keydown', bump, { capture: true });
         window.addEventListener('touchmove', bump, { passive: true, capture: true });

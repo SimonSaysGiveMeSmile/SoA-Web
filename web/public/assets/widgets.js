@@ -1042,14 +1042,27 @@ class LocationGlobeWidget extends Widget {
         }
     }
 
+    // Decoration runs at decoration's frame rate. A slowly turning globe is
+    // indistinguishable at 24fps and at 60, and the terminal shares both the
+    // main thread and the GPU with it.
+    static ANIM_MS = 42;          // ~24fps
+    // And it stops entirely while the terminal is being scrolled or typed in.
+    // Nothing decorative is worth a dropped frame in the thing you are reading.
+    static YIELD_MS = 300;
+
     _tickAnim() {
         this._rafId = null;
         if (this._destroyed) return;
-        // The globe is pure decoration — don't spin a 60fps WebGL loop while the
-        // page is backgrounded or the canvas is scrolled out of view. _kickAnim
+        // The globe is pure decoration — don't spin a WebGL loop while the page
+        // is backgrounded or the canvas is scrolled out of view. _kickAnim
         // restarts it when it becomes visible again.
         if (document.hidden || this._offscreen) return;
-        try { this.globe.tick(); } catch (_) {}
+        const now = performance.now();
+        const busy = now - (window.__soaLastInteract || 0) < LocationGlobeWidget.YIELD_MS;
+        if (!busy && now - (this._lastFrame || 0) >= LocationGlobeWidget.ANIM_MS) {
+            this._lastFrame = now;
+            try { this.globe.tick(); } catch (_) {}
+        }
         this._rafId = requestAnimationFrame(() => this._tickAnim());
     }
 
