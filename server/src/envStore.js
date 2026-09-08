@@ -64,9 +64,18 @@ function activeProvider(config) {
     return c.active ? c.providers.find(p => p.id === c.active) || null : null;
 }
 
+// launchd starts the daemon with no locale, and a PTY inherits it — so every
+// SoA shell ran with LANG unset and LC_CTYPE=C. Bytes still reach xterm intact,
+// which is why the screen always looked right, but anything that decodes and
+// re-encodes text inside that shell treats UTF-8 as single bytes: a pasted box
+// drawing character comes back out as `‚îÄ`, an em dash as `‚Äî`. That is the
+// "terminal copying" corruption — not the clipboard, the locale. A user's own
+// LANG (or one set in Settings' custom env) still wins; this is only the floor.
+const LOCALE_DEFAULTS = { LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
+
 function getEnvForShell() {
     const config = load();
-    const env = {};
+    const env = { ...LOCALE_DEFAULTS };
     // Legacy single-endpoint settings first, then the active provider profile
     // overrides — switching providers in Settings wins over old env.json fields.
     if (config.claude.baseUrl) env.ANTHROPIC_BASE_URL = config.claude.baseUrl;
