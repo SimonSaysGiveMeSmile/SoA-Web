@@ -877,6 +877,14 @@ class Shell {
         this._applyTheme();
         onSystemThemeChange(() => { if (getSettings().theme === 'auto') this._applyTheme(); });
 
+        // Interaction stamp — the context poll reads it to stay off the main
+        // thread while you are scrolling (see _pollCtxLines). Passive and
+        // capture so it is recorded no matter who handles the event.
+        const bump = () => { this._lastInteract = performance.now(); };
+        window.addEventListener('wheel', bump, { passive: true, capture: true });
+        window.addEventListener('keydown', bump, { capture: true });
+        window.addEventListener('touchmove', bump, { passive: true, capture: true });
+
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
         window.addEventListener('keydown', e => this._hotkey(e));
@@ -1745,17 +1753,52 @@ class Shell {
         }, 0);
     }
 
+    // How many tabs one tick may scan. Each tab costs ~66 row → string
+    // translations plus the regexes over them (the whole visible screen for the
+    // context reading, the last 20 rows for agent status), and on a fleet where
+    // every agent is producing output EVERY tab is dirty on EVERY tick. Nineteen
+    // of them twice a second is thousands of allocations per second competing
+    // with scrolling, which is what made scrolling feel delayed rather than
+    // slow. A budget turns that into a round-robin: the tab you are looking at
+    // is always current, the rest refresh within a few seconds.
+    static POLL_BUDGET = 4;
+
     _pollCtxLines() {
         // Don't burn the main thread scanning 16 terminals while the page is in
         // a background tab — resume with a full sweep once it's foregrounded.
         if (document.hidden) { this._pollWasHidden = true; return; }
+        // Never scan while the user is working the terminal. Scrolling is the
+        // one interaction that has to stay at frame rate, and a poll that lands
+        // mid-gesture is felt directly. It resumes a moment after the last
+        // wheel or keystroke; nothing is lost, the tabs stay dirty.
+        if (performance.now() - (this._lastInteract || 0) < 250) return;
         // Fast path: only re-scan tabs that emitted output since the last tick.
         // Full sweep every ~8s (and on return from hidden) guarantees eventual
         // consistency even if a dirty-seed site is ever missed.
         const full = this._pollWasHidden || (++this._pollTickN % 16 === 0);
         this._pollWasHidden = false;
-        for (const [id, rt] of this.tabs) {
-            if (!full && !this._pollDirty.has(id)) continue;
+
+        // Pick this tick's slice: the visible tab first — it must never be
+        // starved by the rotation — then as many others as the budget allows,
+        // resuming where the last tick stopped so every tab comes round.
+        const ids = [...this.tabs.keys()];
+        const due = ids.filter(id => full || this._pollDirty.has(id));
+        let slice;
+        if (due.length <= Shell.POLL_BUDGET) {
+            slice = due;
+        } else {
+            const start = (this._pollCursor || 0) % due.length;
+            slice = [];
+            for (let i = 0; i < Shell.POLL_BUDGET; i++) slice.push(due[(start + i) % due.length]);
+            this._pollCursor = start + Shell.POLL_BUDGET;
+            if (this.activeId != null && due.includes(this.activeId) && !slice.includes(this.activeId)) {
+                slice[slice.length - 1] = this.activeId;
+            }
+        }
+
+        for (const id of slice) {
+            const rt = this.tabs.get(id);
+            if (!rt) continue;
             this._pollDirty.delete(id);
             if (rt._opened) {
                 try {
