@@ -147,11 +147,20 @@ async function _prune() {
     for (let i = 0; i < drop; i++) await _delete(all[i].ts);
 }
 
+// Per-tab dump cache. A snapshot re-reads every tab's whole buffer, and on a
+// fleet most tabs have produced nothing since the last one — re-translating
+// their thousand lines is pure waste. buf.length and baseY together move the
+// moment a tab emits anything, so they are a sufficient change stamp.
+const _dumpCache = new Map();   // tab id -> { stamp, text }
+
 function _dumpScrollback(rt) {
     if (!rt || !rt.term) return '';
     try {
         const buf = rt.term.buffer.active;
         const total = buf.length;
+        const stamp = total + ':' + buf.baseY;
+        const hit = _dumpCache.get(rt.id);
+        if (hit && hit.stamp === stamp) return hit.text;
         const start = Math.max(0, total - MAX_LINES_PER_TAB);
         const lines = [];
         for (let y = start; y < total; y++) {
@@ -160,7 +169,9 @@ function _dumpScrollback(rt) {
             lines.push(line.translateToString(true));
         }
         while (lines.length && lines[lines.length - 1] === '') lines.pop();
-        return lines.join('\n');
+        const text = lines.join('\n');
+        _dumpCache.set(rt.id, { stamp, text });
+        return text;
     } catch (_) { return ''; }
 }
 
@@ -177,9 +188,16 @@ export async function snapshotNow(shell) {
     if (!shell) return null;
     const ts = Date.now();
     const tabs = [];
+    // Yield between tabs. Reading a buffer is ~1000 translateToString calls, and
+    // doing twenty-odd of those back to back is a single task long enough to
+    // freeze the page — which is what a snapshot every five minutes felt like.
+    // Broken up, no individual task is long enough to drop a frame.
+    const breathe = () => new Promise(r => setTimeout(r, 0));
+    let n = 0;
     for (const id of shell.order) {
         const rt = shell.tabs.get(id);
         if (!rt) continue;
+        if (n++ > 0) await breathe();
         tabs.push({
             id,
             title: rt.title || `tab #${id}`,
