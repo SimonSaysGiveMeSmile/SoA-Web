@@ -757,3 +757,102 @@ body.ctx-resizing * { cursor: inherit !important; }
 @media (max-width: 640px) {
     .recovery { right: 8px; left: 8px; bottom: 30px; width: auto; }
 }
+
+/* ── CLOCK ──────────────────────────────────────────────────────────────
+   Two faces and a secondary menu. The borrowed idea is Apple's: options laid
+   out in the open rather than hidden behind a dropdown, one clear primary
+   reading, and a world-clock list where the day offset — not the hour — is the
+   thing that answers your question. The execution stays this product's: mono
+   type, uppercase micro-labels, hairlines, phosphor rather than material. */
+
+.clock-face { display: flex; justify-content: center; padding: 2px 0 8px; }
+
+/* Digital: one big reading and a quiet date. The size difference IS the
+   hierarchy — no rules, no boxes. */
+.clock-digital { text-align: center; }
+.clock-now {
+    font-family: var(--font-mono); font-size: 26px; letter-spacing: 0.06em;
+    color: var(--soa-accent); line-height: 1.1;
+    text-shadow: 0 0 12px rgba(var(--soa-accent-rgb), 0.35);
+    font-variant-numeric: tabular-nums;
+}
+.clock-date {
+    margin-top: 3px; font-family: var(--font-mono); font-size: 9.5px;
+    letter-spacing: 0.22em; color: var(--soa-accent-dim);
+}
+
+/* The dial. A hairline ring and twelve ticks — no numerals, which at this size
+   are noise. The second hand is the only bright thing on it and the only thing
+   that moves every tick, so the eye finds the clock alive without decoration. */
+.clock-dial { width: 108px; height: 108px; display: block; }
+.dial-ring { fill: none; stroke: var(--soa-line); stroke-width: 0.8; }
+.dial-tick { stroke: var(--soa-accent-dim); stroke-width: 1; opacity: 0.55; }
+.dial-tick.major { stroke: var(--soa-accent); stroke-width: 1.4; opacity: 0.9; }
+.dial-h { stroke: var(--soa-accent); stroke-width: 2.6; stroke-linecap: round; }
+.dial-m { stroke: var(--soa-accent); stroke-width: 1.6; stroke-linecap: round; opacity: 0.85; }
+.dial-s {
+    stroke: var(--soa-red); stroke-width: 0.7; stroke-linecap: round;
+    filter: drop-shadow(0 0 2px rgba(var(--soa-accent-rgb), 0.5));
+}
+.dial-pin { fill: var(--soa-accent); }
+
+/* World clock rows. The day offset is the only coloured thing, because it is
+   the only part that changes the answer. */
+.clock-cities { display: flex; flex-direction: column; gap: 2px; }
+.city {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: baseline;
+    font-family: var(--font-mono); font-size: 10.5px;
+}
+.city-k { color: var(--soa-accent-dim); letter-spacing: 0.12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.city-v { color: var(--soa-fg); font-variant-numeric: tabular-nums; }
+.city-d { min-width: 20px; text-align: right; color: var(--soa-yellow); font-size: 9px; }
+
+/* ── The secondary menu ─────────────────────────────────────────────── */
+.clock-cfg {
+    padding: 8px 10px 10px; border-bottom: 1px solid var(--soa-line-soft);
+    display: flex; flex-direction: column; gap: 8px;
+}
+.cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cfg-k {
+    font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.2em;
+    color: var(--soa-accent-dim); flex: 0 0 auto;
+}
+
+/* Segmented control: both options always visible, the current one filled.
+   Apple's shape, drawn with this product's hairline and no gradient. */
+.seg {
+    display: inline-flex; border: 1px solid var(--soa-line); border-radius: 5px;
+    overflow: hidden; background: rgba(var(--soa-accent-rgb), 0.04);
+}
+.seg-o {
+    appearance: none; border: none; background: none; cursor: pointer;
+    padding: 3px 9px; font-family: var(--font-mono); font-size: 9px;
+    letter-spacing: 0.14em; color: var(--soa-accent-dim);
+    transition: background 140ms ease, color 140ms ease;
+}
+.seg-o + .seg-o { border-left: 1px solid var(--soa-line); }
+.seg-o:hover { color: var(--soa-accent); }
+.seg-o.on {
+    background: rgba(var(--soa-accent-rgb), 0.16);
+    color: var(--soa-accent);
+    text-shadow: 0 0 6px rgba(var(--soa-accent-rgb), 0.4);
+}
+.seg-o:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: -2px; }
+
+.cfg-cities { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; flex: 1 1 auto; }
+.cfg-chips { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.chip {
+    appearance: none; cursor: pointer;
+    border: 1px solid var(--soa-line); border-radius: 999px;
+    background: none; padding: 2px 8px;
+    font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.1em;
+    color: var(--soa-accent-dim);
+}
+.chip:hover { color: var(--soa-red); border-color: var(--soa-red); }
+.cfg-add {
+    appearance: none; width: 100%;
+    background: var(--soa-bg); color: var(--soa-accent-dim);
+    border: 1px solid var(--soa-line); border-radius: 4px; padding: 3px 6px;
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em;
+}
+.cfg-add:hover { color: var(--soa-accent); }
