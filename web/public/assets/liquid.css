@@ -564,3 +564,51 @@
 [data-ui="liquid"] .dial-ring { stroke: rgba(255, 255, 255, 0.18); }
 [data-ui="liquid"] .dial-tick { stroke: rgba(255, 255, 255, 0.3); }
 [data-ui="liquid"] .clock-cfg { border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+
+/* ── Context canvas, recovery panel, transcript bands ────────────────────
+   The last Tron-only surfaces. The palette came across with the tokens; the
+   material did not — and the band overlay was still positioned to TRON's
+   terminal padding rather than this skin's thin glass rim, so every band sat a
+   few pixels off the text it belonged to. */
+
+[data-ui="liquid"] :is(.ctx-brand, .ctx-band-h) {
+  font-family: var(--font-display); letter-spacing: 0.04em; font-weight: 590;
+  color: var(--soa-accent-dim); text-shadow: none;
+}
+[data-ui="liquid"] .ctx-head { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+[data-ui="liquid"] :is(.ctx-turns, .ctx-sub, .ctx-muted, .ctx-fact-k, .ctx-turn-n, .ctx-turn-t) {
+  color: var(--soa-accent-dim);
+}
+[data-ui="liquid"] .ctx-turn-x { font-family: var(--font-display); color: rgba(255, 255, 255, 0.86); }
+/* The current turn is the one raised piece of glass in the column. */
+[data-ui="liquid"] .ctx-turn.latest {
+  background: var(--lq-glass-2); border-radius: var(--lq-r-xs); box-shadow: var(--lq-rim);
+}
+[data-ui="liquid"] :is(.ctx-art-t, .ctx-step-x) { font-family: var(--font-display); }
+[data-ui="liquid"] .ctx-step-add { font-family: var(--font-display); border-radius: var(--lq-r-xs); }
+[data-ui="liquid"] .ctx-pull::before { background: rgba(255, 255, 255, 0.35); }
+[data-ui="liquid"] .ctx-pull:hover {
+  background-color: var(--lq-glass-2); box-shadow: var(--lq-rim);
+}
+
+/* Recovery: the one moment the interface has to be unmissable, so it is the
+   most opaque glass in the product — readable even over a busy terminal. */
+[data-ui="liquid"] .recovery {
+  background: rgba(28, 28, 32, 0.82); border: 1px solid var(--lq-edge);
+  border-radius: var(--lq-r); box-shadow: var(--lq-shadow-deep), var(--lq-rim);
+  backdrop-filter: var(--lq-blur-lg); -webkit-backdrop-filter: var(--lq-blur-lg);
+}
+[data-ui="liquid"] .recovery-head h2 {
+  font-family: var(--font-display); letter-spacing: 0.02em; color: #ffd60a;
+}
+[data-ui="liquid"] :is(.recovery-lead, .recovery-body p, .recovery-body h3) { font-family: var(--font-display); }
+[data-ui="liquid"] .recovery-pulse {
+  background: var(--lq-glass); border-left-color: rgba(255, 255, 255, 0.4);
+  border-radius: 0 var(--lq-r-xs) var(--lq-r-xs) 0;
+}
+[data-ui="liquid"] :is(.recovery-cmd code, .recovery-copy) {
+  background: var(--lq-glass); border: 1px solid var(--lq-edge); border-radius: var(--lq-r-xs);
+}
+
+/* Aligned to this skin's terminal rim rather than TRON's. */
+[data-ui="liquid"] .term-bands { inset: 8px 6px; }
