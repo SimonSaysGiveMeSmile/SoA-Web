@@ -80,6 +80,7 @@ const DICTS = {
         'settings.desc.audioVolume': 'Master volume (0.00 – 1.00).',
         'settings.desc.disableFeedbackAudio': 'Silence per-keystroke / per-output cues (stdin, stdout, keyboard).',
         'settings.desc.clockHours': 'Sidebar CLOCK format: 24 or 12.',
+        'settings.desc.clockZones': 'Cities the CLOCK widget tracks, as IANA zone names, comma separated (max 6).',
         'settings.desc.lang': 'Interface language.',
         'settings.conn.mode': 'MODE',
         'settings.conn.backend': 'BACKEND',

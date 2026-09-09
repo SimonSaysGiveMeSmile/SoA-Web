@@ -223,23 +223,56 @@ class Widget {
 }
 
 // ── CLOCK ────────────────────────────────────────────────────────────────
+// A zone's own label. The last path segment is the city, which is what anyone
+// reading a clock actually wants — 'America/New_York' is NEW YORK.
+function _zoneLabel(tz) {
+    if (!tz || tz === 'UTC') return 'UTC';
+    return tz.split('/').pop().replace(/_/g, ' ').toUpperCase();
+}
+
+// en-CA gives ISO order, which subtracts cleanly.
+function _ymdIn(now, tz) {
+    try { return now.toLocaleDateString('en-CA', { timeZone: tz }); } catch (_) { return null; }
+}
+
 class ClockWidget extends Widget {
     constructor({ parent }) {
         super({ titleKey: 'widget.clock', parent, intervalMs: 1000 });
     }
     tick() {
         const now = new Date();
-        const hours12 = getSettings().clockHours === 12;
+        const s = getSettings();
+        const hours12 = s.clockHours === 12;
         const time = hours12
             ? now.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' })
             : now.toTimeString().slice(0, 8);
-        const date = now.toISOString().slice(0, 10);
-        const utc = now.toUTCString().slice(17, 25);
-        this.setRows([
+        const rows = [
             ['LOCAL', time],
-            ['DATE', date],
-            ['UTC', utc],
-        ]);
+            ['DATE', now.toISOString().slice(0, 10)],
+        ];
+
+        // The reason to put another city on a clock is to know whether you can
+        // call it, and the hour alone does not answer that — 07:04 is a
+        // different proposition depending on whose tomorrow it is. So each zone
+        // carries the day it is on there relative to here, and nothing when the
+        // two agree.
+        const hereYmd = _ymdIn(now, undefined) || now.toISOString().slice(0, 10);
+        for (const tz of (s.clockZones || [])) {
+            let t;
+            try {
+                t = now.toLocaleTimeString('en-US', {
+                    timeZone: tz, hour12: hours12, hour: '2-digit', minute: '2-digit',
+                });
+            } catch (_) { continue; }
+            const thereYmd = _ymdIn(now, tz);
+            let delta = 0;
+            if (thereYmd && hereYmd) {
+                delta = Math.round((Date.parse(thereYmd + 'T00:00:00Z') - Date.parse(hereYmd + 'T00:00:00Z')) / 86400000);
+            }
+            const day = delta > 0 ? `  +${delta}d` : delta < 0 ? `  ${delta}d` : '';
+            rows.push([_zoneLabel(tz), t + day]);
+        }
+        this.setRows(rows);
     }
 }
 
