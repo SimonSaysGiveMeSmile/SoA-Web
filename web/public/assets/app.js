@@ -590,9 +590,7 @@ class TabRuntime {
     _repaint() {
         const go = () => { try { this.term.refresh(0, this.term.rows - 1); } catch (_) {} };
         go();
-        // fitNow, not fit.fit: the raw addon undercounts the column width when
-        // xterm's dimension lookup misses (see _fillWidth), and re-measuring
-        // with it here would undo that fix a frame after the renderer lands.
+        // fitNow, which measures the cell from the paint — see _cellSize.
         requestAnimationFrame(() => { this.fitNow(); go(); });
     }
 
@@ -602,112 +600,81 @@ class TabRuntime {
         this._renderer = null;
     }
 
+    // ONE resize, from one measurement.
+    //
+    // This used to call FitAddon and then correct it. FitAddon sizes the grid
+    // from xterm's reported cell metric — the metric that is wrong here — so
+    // every fit set the grid to ~102 columns and _fillWidth immediately grew it
+    // back to ~168. Two resizes, the first one wrong, and each one is an
+    // onResize that reaches the PTY as a SIGWINCH: Claude repaints its entire
+    // TUI at the wrong width, then repaints again at the right one. That is the
+    // layout tearing that "fixes itself after a few seconds", and with a
+    // two-second guard re-fitting whenever it sees divergence, it never stopped.
+    //
+    // So FitAddon is gone from this path. Measure the container, derive the cell
+    // from what is actually painted, resize once, and only when it changed.
     fitNow() {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
-            this.fit.fit();
-            // FitAddon subtracts a phantom ~15px scrollbar (xterm's Viewport
-            // falls back to 15 when our CSS hides the scrollbar), which strands
-            // a dead vertical strip on the right. Grow the grid into the real
-            // width — our viewport is overflow:hidden so no scrollbar takes space.
-            this._fillWidth();
+            const el = this.container;
+            const cs = getComputedStyle(el);
+            const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+            const availH = el.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+            if (availW > 40 && availH > 20) {
+                const cell = this._cellSize();
+                if (cell) {
+                    const cols = Math.max(2, Math.floor(availW / cell.w));
+                    const rows = Math.max(2, Math.floor(availH / cell.h));
+                    if (cols !== this.term.cols || rows !== this.term.rows) this.term.resize(cols, rows);
+                }
+            }
             this._everFit = true;
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
     }
 
-    // Recompute cols from the actual render width with NO scrollbar subtraction.
-    // Conservative floor() never overflows into a horizontal scroll; only grows
-    // past FitAddon's undercount, never shrinks. No-op if xterm internals or the
-    // measurement aren't available (falls back to FitAddon's result).
-    _fillWidth() {
+    // The cell, measured from the paint wherever possible. xterm's own numbers
+    // are a hint: they are believed only when the painted grid agrees with them,
+    // because the paint is what is on the screen.
+    _cellSize() {
         try {
             const core = this.term._core;
             const dims = core && core._renderService && core._renderService.dimensions;
-            let cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
-            // Cross-check xterm's own number against what it actually PAINTED.
-            // The painted grid is exactly cols x cellW, so dividing it gives the
-            // true cell width — and when the two disagree, the paint is the one
-            // that is on screen. This is the case the earlier fallbacks never
-            // caught: they only ran when the lookup returned nothing, and a
-            // lookup that returns a WRONG number (a stale metric from before the
-            // web font landed, a device-pixel value on a 2x display) sails
-            // through, undercounts the columns, and strands the right-hand
-            // third of the terminal as black.
-            let painted = 0;
-            if (this.term.element && this.term.cols > 0) {
+            const css = dims && dims.css && dims.css.cell;
+            let w = css && css.width, h = css && css.height;
+
+            let pw = 0, ph = 0;
+            if (this.term.element && this.term.cols > 0 && this.term.rows > 0) {
                 for (const c of this.term.element.querySelectorAll('.xterm-screen canvas')) {
-                    const w = c.getBoundingClientRect().width;
-                    if (w > painted) painted = w;
+                    const r = c.getBoundingClientRect();
+                    if (r.width > pw) { pw = r.width; ph = r.height; }
                 }
-                if (!painted) {
+                if (!pw) {
                     const rowsEl = this.term.element.querySelector('.xterm-rows');
-                    if (rowsEl) painted = rowsEl.getBoundingClientRect().width;
+                    if (rowsEl) { const r = rowsEl.getBoundingClientRect(); pw = r.width; ph = r.height; }
                 }
-                painted = painted / this.term.cols;
+                pw = pw / this.term.cols;
+                ph = ph / this.term.rows;
             }
-            if (painted > 0.5 && (!(cellW > 0.5) || Math.abs(cellW - painted) / painted > 0.05)) {
-                cellW = painted;
-            }
-            // xterm moves its dimension bookkeeping between versions, and when
-            // this lookup misses, FitAddon's own proposeDimensions misses with
-            // it — fit() silently becomes a no-op and the grid stays frozen at
-            // whatever size it was last measured correctly at. Measured live:
-            // a 1220px terminal stranded at 102 columns (734px of grid), so
-            // 486px — a third of the width — sat there as a black slab. Fall
-            // back to dividing the PAINTED grid by the column count, which is
-            // the cell width by definition and needs no xterm internals.
-            if (!(cellW > 0.5)) {
-                const rowsEl = this.term.element && this.term.element.querySelector('.xterm-rows');
-                const r = rowsEl && rowsEl.getBoundingClientRect();
-                if (r && r.width > 0 && this.term.cols > 0) cellW = r.width / this.term.cols;
-            }
-            // .xterm-rows only exists under the DOM renderer — canvas and WebGL
-            // paint into a <canvas> and drop the rows layer entirely, which is
-            // how the right-hand strip came back the moment a GPU renderer was
-            // switched on. The painted canvas is exactly cols x cellW, so divide
-            // it: renderer-derived, no font guessing, no rounding drift.
-            // Last resort: measure the font itself. Uses the Terminal's own
-            // options rather than computed style, which can report the stylesheet
-            // default instead of the face xterm is actually rendering with.
-            if (!(cellW > 0.5) && this.term.element) {
+            if (pw > 0.5 && (!(w > 0.5) || Math.abs(w - pw) / pw > 0.05)) w = pw;
+            if (ph > 0.5 && (!(h > 0.5) || Math.abs(h - ph) / ph > 0.05)) h = ph;
+
+            if (!(w > 0.5) && this.term.element) {
                 const o = this.term.options || {};
                 const cs2 = getComputedStyle(this.term.element);
                 const ctx = TabRuntime._measureCtx
                     || (TabRuntime._measureCtx = document.createElement('canvas').getContext('2d'));
                 if (ctx) {
-                    const fs = o.fontSize ? `${o.fontSize}px` : cs2.fontSize;
-                    ctx.font = `${fs} ${o.fontFamily || cs2.fontFamily}`;
-                    const w = ctx.measureText('W'.repeat(100)).width / 100;
-                    if (w > 0.5) cellW = w;
+                    ctx.font = `${o.fontSize ? o.fontSize + 'px' : cs2.fontSize} ${o.fontFamily || cs2.fontFamily}`;
+                    const m = ctx.measureText('W'.repeat(100)).width / 100;
+                    if (m > 0.5) w = m;
                 }
             }
-            // Fill the CONTAINER's content box (the space between its padding),
-            // measured independently of xterm's own element. xterm's root shrinks to
-            // its content (cols×cellW), so measuring `this.term.element` makes
-            // floor(width/cellW) === cols and the grid NEVER grows — stranding a wide
-            // "black void" on the right (tens of columns on a wide screen, not just a
-            // scrollbar gutter). clientWidth includes padding, so subtract it; the
-            // floor guarantees cols×cellW ≤ availW so we never overflow into a
-            // horizontal scrollbar.
-            const el = this.container;
-            if (!el || !cellW || cellW < 1) return;
-            const cs = getComputedStyle(el);
-            const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-            // Wide enough to be a settled layout, not a container mid-transition.
-            if (!(availW > 40)) return;
-            const cols = Math.max(2, Math.floor(availW / cellW));
-            // Growing is always right. Shrinking is right too — the canvas
-            // opening genuinely narrows the terminal — but only from a
-            // measurement worth trusting: a mid-layout narrow read would
-            // otherwise reflow Claude's TUI for a frame. availW is already
-            // guarded above, so require a real change rather than a 1-column
-            // rounding wobble.
-            if (cols > this.term.cols || cols <= this.term.cols - 2) {
-                this.term.resize(cols, this.term.rows);
-            }
-        } catch (_) {}
+            if (!(w > 0.5) || !(h > 0.5)) return null;
+            return { w, h };
+        } catch (_) { return null; }
     }
+
 
     // Pin the viewport to the bottom of the buffer. Used when activating a
     // tab so the user lands on the newest output regardless of where xterm
