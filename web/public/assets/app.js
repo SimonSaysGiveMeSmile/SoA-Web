@@ -220,6 +220,9 @@ class TabRuntime {
         // and flush it on the first successful fit — see flushPendingReplay.
         this._replayChunks = [];
         this._replayLen = 0;
+        this._wq = [];
+        this._wRaf = null;
+        this._wTimer = null;
         this._everFit = false;
         this._renderer = null;
         // absolute buffer line -> 'user' | 'tool' | '' (classified once; a line
@@ -281,7 +284,37 @@ class TabRuntime {
         }
     }
 
-    write(data) { this.term.write(data); }
+    // ONE xterm write per frame, not one per WebSocket chunk.
+    //
+    // A Claude TUI repaints its whole screen many times a second and every
+    // repaint arrives as its own message, so this was invoking the ANSI parser
+    // and scheduling a render dozens of times between two frames anyone could
+    // actually see — which is why the PERF widget named `xterm write` as the
+    // thing holding the main thread. Joining the chunks costs at most one frame
+    // of latency, imperceptible for echo, and collapses all of it into a single
+    // parse and a single render.
+    //
+    // While you are scrolling it batches harder still. The gesture has to hold
+    // frame rate; output that lands mid-flick can wait 50ms and nobody notices.
+    static WRITE_BUSY_MS = 50;
+
+    write(data) {
+        if (!data) return;
+        this._wq.push(data);
+        if (this._wRaf || this._wTimer) return;
+        const busy = performance.now() - (window.__soaLastInteract || 0) < 250;
+        if (busy) this._wTimer = setTimeout(() => this._flushWrites(), TabRuntime.WRITE_BUSY_MS);
+        else this._wRaf = requestAnimationFrame(() => this._flushWrites());
+    }
+
+    _flushWrites() {
+        if (this._wRaf) { cancelAnimationFrame(this._wRaf); this._wRaf = null; }
+        if (this._wTimer) { clearTimeout(this._wTimer); this._wTimer = null; }
+        if (!this._wq.length) return;
+        const s = this._wq.length === 1 ? this._wq[0] : this._wq.join('');
+        this._wq.length = 0;
+        this.term.write(s);
+    }
 
     // Queue replay bytes for later. If the container is already visible
     // and sized, we can flush immediately; otherwise the caller will call
@@ -305,6 +338,7 @@ class TabRuntime {
     }
 
     flushPendingReplay() {
+        this._flushWrites();   // keep ordering: anything already queued goes first
         if (!this._replayChunks.length) return false;
         // Only flush once xterm has actually been fit against a real-sized
         // container — otherwise absolute-column escapes in the scrollback
@@ -680,6 +714,8 @@ class TabRuntime {
     }
 
     dispose() {
+        if (this._wRaf) cancelAnimationFrame(this._wRaf);
+        if (this._wTimer) clearTimeout(this._wTimer);
         this.detachRenderer();   // release the GPU context before the terminal goes
         try { this.term.dispose(); } catch (_) {}
         this.container.remove();
