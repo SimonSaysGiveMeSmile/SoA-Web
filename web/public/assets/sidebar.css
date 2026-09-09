@@ -759,73 +759,64 @@ body.ctx-resizing * { cursor: inherit !important; }
 }
 
 /* ── CLOCK ──────────────────────────────────────────────────────────────
-   Two faces and a secondary menu. The borrowed idea is Apple's: options laid
-   out in the open rather than hidden behind a dropdown, one clear primary
-   reading, and a world-clock list where the day offset — not the hour — is the
-   thing that answers your question. The execution stays this product's: mono
-   type, uppercase micro-labels, hairlines, phosphor rather than material. */
+   One row, and everything in it is the same kind of thing: local time and each
+   city are identical cells, so the clock is a glance rather than a list you
+   read down. The analog face is not a separate mode occupying the space above
+   — it is simply what a cell's value looks like when you pick it, which is why
+   five dials fit where one used to.
 
-.clock-face { display: flex; justify-content: center; padding: 2px 0 8px; }
+   Borrowed from Apple: every option visible at once, one primary reading, and
+   a world clock whose useful fact is the day offset rather than the hour.
+   Drawn in this product's own terms — mono, hairlines, phosphor. */
 
-/* Digital: one big reading and a quiet date. The size difference IS the
-   hierarchy — no rules, no boxes. */
-.clock-digital { text-align: center; }
-.clock-now {
-    font-family: var(--font-mono); font-size: 26px; letter-spacing: 0.06em;
-    color: var(--soa-accent); line-height: 1.1;
-    text-shadow: 0 0 12px rgba(var(--soa-accent-rgb), 0.35);
-    font-variant-numeric: tabular-nums;
+.clock-strip {
+    display: flex; align-items: flex-start; gap: 4px;
+    /* Never a second row: a narrow sidebar scrolls this strip instead of
+       wrapping it, so the clock's height is the same whatever you put in it. */
+    flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+    scrollbar-width: none; padding-bottom: 2px;
 }
-.clock-date {
-    margin-top: 3px; font-family: var(--font-mono); font-size: 9.5px;
-    letter-spacing: 0.22em; color: var(--soa-accent-dim);
-}
+.clock-strip::-webkit-scrollbar { height: 0; }
 
-/* The dial. A hairline ring and twelve ticks — no numerals, which at this size
-   are noise. The second hand is the only bright thing on it and the only thing
-   that moves every tick, so the eye finds the clock alive without decoration. */
-.clock-dial { width: 108px; height: 108px; display: block; }
-.dial-ring { fill: none; stroke: var(--soa-line); stroke-width: 0.8; }
-.dial-tick { stroke: var(--soa-accent-dim); stroke-width: 1; opacity: 0.55; }
-.dial-tick.major { stroke: var(--soa-accent); stroke-width: 1.4; opacity: 0.9; }
-.dial-h { stroke: var(--soa-accent); stroke-width: 2.6; stroke-linecap: round; }
-.dial-m { stroke: var(--soa-accent); stroke-width: 1.6; stroke-linecap: round; opacity: 0.85; }
-.dial-s {
-    stroke: var(--soa-red); stroke-width: 0.7; stroke-linecap: round;
-    filter: drop-shadow(0 0 2px rgba(var(--soa-accent-rgb), 0.5));
-}
-.dial-pin { fill: var(--soa-accent); }
-
-/* World clock, laid out across rather than down. A stack of four rows reads as
-   a list you have to work through; four columns reads as one glance, which is
-   all anyone wants from a row of city times. Columns are auto-fit, so the same
-   markup gives four across a wide sidebar and two across a narrow one instead
-   of squeezing to illegibility. */
-.clock-cities {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
-    gap: 4px 6px; padding-top: 2px;
-    border-top: 1px dashed var(--soa-line-soft);
-}
 .city {
-    display: flex; flex-direction: column; gap: 1px; min-width: 0;
-    font-family: var(--font-mono);
+    display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+    flex: 1 1 0; min-width: 0; font-family: var(--font-mono);
 }
 .city-k {
-    font-size: 8px; letter-spacing: 0.14em; color: var(--soa-accent-dim);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 7.5px; letter-spacing: 0.06em; color: var(--soa-accent-dim);
+    /* City names wrap rather than ellipsing. An ellipsis on a two-word label
+       reads as a bug, and NEW YOR… is worse than two short lines. The block is
+       a fixed two lines tall so every dial below it still starts at the same
+       y — the alignment is what makes the row scannable. */
+    max-width: 100%; white-space: normal; line-height: 1.15;
+    height: 2.3em; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
-/* The time is the value; everything around it is a caption. */
-.city-v {
-    font-size: 12px; color: var(--soa-fg); font-variant-numeric: tabular-nums;
-    line-height: 1.15;
+.city-v { font-size: 12px; color: var(--soa-fg); font-variant-numeric: tabular-nums; line-height: 1.15; }
+/* Local is the one you actually live in, so it gets the accent and a touch of
+   the phosphor the rest do not. Nothing else changes — same cell, same size. */
+.city--local .city-k { color: var(--soa-accent); }
+.city--local .city-v {
+    color: var(--soa-accent);
+    text-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.3);
 }
-/* Riding the baseline of the time rather than owning a column of its own: it
-   only appears when the day differs, and an empty column would still cost
-   width on every city that agrees with you. */
-.city-d {
-    font-size: 8.5px; color: var(--soa-yellow); line-height: 1;
-    margin-top: 1px; min-height: 8px;
-}
+/* Riding under the time rather than owning a column: it only appears when the
+   day differs, and an empty column would cost width on every city that agrees. */
+.city-d { font-size: 8px; color: var(--soa-yellow); line-height: 1; min-height: 8px; }
+
+/* A dial small enough to stand in a column beside four others. Four quarter
+   ticks, not twelve — at 40px twelve is a smudge — and the second hand is the
+   only saturated thing on the face. */
+.clock-dial { width: 100%; max-width: 38px; height: auto; aspect-ratio: 1; display: block; margin: 1px 0; }
+.dial-ring { fill: none; stroke: var(--soa-line); stroke-width: 1.5; }
+.dial-tick { stroke: var(--soa-accent-dim); stroke-width: 2; opacity: 0.5; }
+.dial-tick.major { stroke: var(--soa-accent-dim); stroke-width: 2.5; opacity: 0.75; }
+.dial-h { stroke: var(--soa-fg); stroke-width: 5; stroke-linecap: round; }
+.dial-m { stroke: var(--soa-fg); stroke-width: 3.2; stroke-linecap: round; opacity: 0.9; }
+.dial-s { stroke: var(--soa-red); stroke-width: 1.6; stroke-linecap: round; }
+.dial-pin { fill: var(--soa-accent); }
+.city--local .dial-h, .city--local .dial-m { stroke: var(--soa-accent); }
+.city--local .dial-ring { stroke: rgba(var(--soa-accent-rgb), 0.45); }
 
 /* ── The secondary menu ─────────────────────────────────────────────── */
 .clock-cfg {

@@ -261,12 +261,24 @@ function _segmented(value, options, onPick) {
     return wrap;
 }
 
+// Hours/minutes/seconds in a zone, as numbers. en-GB 24h is the shortest way
+// to a parseable string, and one call covers both the digits and the hands.
+function _hmsIn(now, tz) {
+    try {
+        const s = now.toLocaleTimeString('en-GB', {
+            timeZone: tz, hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+        const [h, m, sec] = s.split(':').map(Number);
+        return { h, m, s: sec };
+    } catch (_) { return null; }
+}
+
 class ClockWidget extends Widget {
     constructor({ parent }) {
         super({ titleKey: 'widget.clock', parent, intervalMs: 1000 });
 
-        // ⚙ — the secondary menu. Same affordance as the ⓘ the other widgets
-        // carry, so the header keeps one grammar.
+        // ⚙ — the secondary menu. Same affordance the other widgets carry for
+        // ⓘ, so the header keeps one grammar.
         this._cfgBtn = $el('button', {
             class: 'widget-info-btn', type: 'button', title: tr('widget.clock.configure'),
             'aria-label': tr('widget.clock.configure'), text: '⚙',
@@ -278,13 +290,15 @@ class ClockWidget extends Widget {
         this._cfg.hidden = true;
         this.root.querySelector('.widget-h').after(this._cfg);
 
-        this._face = $el('div', { class: 'clock-face' });
-        this._cities = $el('div', { class: 'clock-cities' });
-        this.body.replaceChildren(this._face, this._cities);
-        this._buildAnalog();
+        // ONE row. Local and every city sit in it as identical cells, so the
+        // clock is a glance rather than a list — and the analog face is not a
+        // separate mode that takes the space above, it is simply what a cell's
+        // value looks like when you choose it.
+        this._strip = $el('div', { class: 'clock-strip' });
+        this.body.replaceChildren(this._strip);
+        this._cells = new Map();
+        this._stripKey = '';
         this._renderCfg();
-        // The panel writes settings and settings redraw the panel: a change made
-        // here, in the Settings modal, or on another device all land the same way.
         this._offSettings = onSettings(() => { if (!this._cfg.hidden) this._renderCfg(); });
     }
 
@@ -299,31 +313,54 @@ class ClockWidget extends Widget {
         if (!this._cfg.hidden) this._renderCfg();
     }
 
-    // ── The dial ─────────────────────────────────────────────────────────
-    // SVG, not canvas: it is three attribute writes a second to move the hands
-    // and it stays crisp at any DPR without a redraw. The face is a hairline
-    // ring and twelve ticks — no numerals, because at this size numerals are
-    // noise and the glow is what makes it legible anyway.
-    _buildAnalog() {
+    // A dial small enough to sit in a column beside four others. A hairline
+    // ring and four quarter ticks — at this size twelve of them are a smudge —
+    // and the second hand is the only saturated thing on it.
+    _makeDial() {
         const NS = 'http://www.w3.org/2000/svg';
-        const el = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
-        const svg = el('svg', { class: 'clock-dial', viewBox: '0 0 100 100', 'aria-hidden': 'true' });
-        svg.appendChild(el('circle', { class: 'dial-ring', cx: 50, cy: 50, r: 46 }));
-        for (let i = 0; i < 12; i++) {
-            const major = i % 3 === 0;
-            const t = el('line', {
-                class: 'dial-tick' + (major ? ' major' : ''),
-                x1: 50, y1: major ? 8 : 10, x2: 50, y2: major ? 16 : 14,
-                transform: `rotate(${i * 30} 50 50)`,
-            });
-            svg.appendChild(t);
+        const mk = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+        const svg = mk('svg', { class: 'clock-dial', viewBox: '0 0 100 100', 'aria-hidden': 'true' });
+        svg.appendChild(mk('circle', { class: 'dial-ring', cx: 50, cy: 50, r: 46 }));
+        for (let i = 0; i < 4; i++) {
+            svg.appendChild(mk('line', {
+                class: 'dial-tick major', x1: 50, y1: 6, x2: 50, y2: 16,
+                transform: `rotate(${i * 90} 50 50)`,
+            }));
         }
-        this._hHand = el('line', { class: 'dial-h', x1: 50, y1: 50, x2: 50, y2: 28 });
-        this._mHand = el('line', { class: 'dial-m', x1: 50, y1: 50, x2: 50, y2: 18 });
-        this._sHand = el('line', { class: 'dial-s', x1: 50, y1: 56, x2: 50, y2: 14 });
-        svg.append(this._hHand, this._mHand, this._sHand);
-        svg.appendChild(el('circle', { class: 'dial-pin', cx: 50, cy: 50, r: 1.6 }));
-        this._dial = svg;
+        const h = mk('line', { class: 'dial-h', x1: 50, y1: 50, x2: 50, y2: 30 });
+        const m = mk('line', { class: 'dial-m', x1: 50, y1: 50, x2: 50, y2: 18 });
+        const sec = mk('line', { class: 'dial-s', x1: 50, y1: 58, x2: 50, y2: 14 });
+        svg.append(h, m, sec);
+        svg.appendChild(mk('circle', { class: 'dial-pin', cx: 50, cy: 50, r: 2.4 }));
+        return { svg, h, m, s: sec };
+    }
+
+    // Cells are rebuilt only when the city list or the face changes — never on
+    // a tick, which just moves hands and swaps text.
+    _ensureCells(keys, face) {
+        const sig = face + '|' + keys.join(',');
+        if (sig === this._stripKey) return;
+        this._stripKey = sig;
+        this._cells.clear();
+        const nodes = [];
+        for (const k of keys) {
+            const label = $el('span', { class: 'city-k', text: k.label });
+            const cell = { root: null, label };
+            const kids = [label];
+            if (face === 'analog') {
+                cell.dial = this._makeDial();
+                kids.push(cell.dial.svg);
+            } else {
+                cell.value = $el('span', { class: 'city-v' });
+                kids.push(cell.value);
+            }
+            cell.delta = $el('span', { class: 'city-d' });
+            kids.push(cell.delta);
+            cell.root = $el('div', { class: 'city' + (k.tz ? '' : ' city--local') }, kids);
+            nodes.push(cell.root);
+            this._cells.set(k.key, cell);
+        }
+        this._strip.replaceChildren(...nodes);
     }
 
     _renderCfg() {
@@ -334,12 +371,10 @@ class ClockWidget extends Widget {
         const chips = $el('div', { class: 'cfg-chips' });
         for (const z of zones) {
             chips.appendChild($el('button', {
-                class: 'chip', type: 'button', title: z,
-                text: _zoneLabel(z) + ' ✕',
+                class: 'chip', type: 'button', title: z, text: _zoneLabel(z) + ' ✕',
                 onclick: () => saveSettings({ clockZones: zones.filter(x => x !== z) }),
             }));
         }
-
         const picker = $el('select', { class: 'cfg-add' });
         picker.appendChild($el('option', { value: '', text: '+ add city' }));
         for (const z of ZONE_PRESETS) {
@@ -347,8 +382,7 @@ class ClockWidget extends Widget {
             picker.appendChild($el('option', { value: z, text: _zoneLabel(z) }));
         }
         picker.addEventListener('change', () => {
-            if (!picker.value) return;
-            saveSettings({ clockZones: [...zones, picker.value] });
+            if (picker.value) saveSettings({ clockZones: [...zones, picker.value] });
         });
 
         this._cfg.replaceChildren(
@@ -363,54 +397,40 @@ class ClockWidget extends Widget {
     tick() {
         const now = new Date();
         const s = getSettings();
+        const analog = s.clockFace === 'analog';
         const hours12 = s.clockHours === 12;
 
-        if (s.clockFace === 'analog') {
-            if (this._face.firstElementChild !== this._dial) this._face.replaceChildren(this._dial);
-            const ms = now.getMilliseconds();
-            const sec = now.getSeconds() + ms / 1000;
-            const min = now.getMinutes() + sec / 60;
-            const hr = (now.getHours() % 12) + min / 60;
-            this._sHand.setAttribute('transform', `rotate(${sec * 6} 50 50)`);
-            this._mHand.setAttribute('transform', `rotate(${min * 6} 50 50)`);
-            this._hHand.setAttribute('transform', `rotate(${hr * 30} 50 50)`);
-        } else {
-            const time = hours12
-                ? now.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' })
-                : now.toTimeString().slice(0, 8);
-            if (!this._digital || this._face.firstElementChild !== this._digital) {
-                this._digital = $el('div', { class: 'clock-digital' }, [
-                    this._dTime = $el('div', { class: 'clock-now' }),
-                    this._dDate = $el('div', { class: 'clock-date' }),
-                ]);
-                this._face.replaceChildren(this._digital);
-            }
-            this._dTime.textContent = time;
-            this._dDate.textContent = now.toISOString().slice(0, 10);
-        }
+        const keys = [{ key: '@local', label: 'LOCAL', tz: null }];
+        for (const tz of (s.clockZones || [])) keys.push({ key: tz, label: _zoneLabel(tz), tz });
+        this._ensureCells(keys, analog ? 'analog' : 'digital');
 
-        // The city list is the same in both faces. Each carries the day it is
-        // on relative to here, and nothing when the two agree — the hour alone
-        // does not tell you whether you can call.
         const hereYmd = _ymdIn(now, undefined) || now.toISOString().slice(0, 10);
-        const rows = [];
-        for (const tz of (s.clockZones || [])) {
-            let t;
-            try {
-                t = now.toLocaleTimeString('en-US', { timeZone: tz, hour12: hours12, hour: '2-digit', minute: '2-digit' });
-            } catch (_) { continue; }
-            const thereYmd = _ymdIn(now, tz);
-            let delta = 0;
-            if (thereYmd && hereYmd) {
-                delta = Math.round((Date.parse(thereYmd + 'T00:00:00Z') - Date.parse(hereYmd + 'T00:00:00Z')) / 86400000);
+        for (const k of keys) {
+            const cell = this._cells.get(k.key);
+            if (!cell) continue;
+            const hms = k.tz ? _hmsIn(now, k.tz) : { h: now.getHours(), m: now.getMinutes(), s: now.getSeconds() };
+            if (!hms) continue;
+
+            if (cell.dial) {
+                const sec = hms.s, min = hms.m + sec / 60, hr = (hms.h % 12) + min / 60;
+                cell.dial.s.setAttribute('transform', `rotate(${sec * 6} 50 50)`);
+                cell.dial.m.setAttribute('transform', `rotate(${min * 6} 50 50)`);
+                cell.dial.h.setAttribute('transform', `rotate(${hr * 30} 50 50)`);
+            } else if (cell.value) {
+                let h = hms.h, suffix = '';
+                if (hours12) { suffix = h >= 12 ? 'p' : 'a'; h = h % 12 || 12; }
+                cell.value.textContent =
+                    `${hours12 ? h : String(h).padStart(2, '0')}:${String(hms.m).padStart(2, '0')}${suffix}`;
             }
-            rows.push($el('div', { class: 'city' + (delta ? ' shifted' : '') }, [
-                $el('span', { class: 'city-k', text: _zoneLabel(tz) }),
-                $el('span', { class: 'city-v', text: t }),
-                $el('span', { class: 'city-d', text: delta > 0 ? `+${delta}d` : delta < 0 ? `${delta}d` : '' }),
-            ]));
+
+            // The day offset only appears when it changes the answer.
+            let delta = 0;
+            if (k.tz) {
+                const thereYmd = _ymdIn(now, k.tz);
+                if (thereYmd) delta = Math.round((Date.parse(thereYmd + 'T00:00:00Z') - Date.parse(hereYmd + 'T00:00:00Z')) / 86400000);
+            }
+            cell.delta.textContent = delta > 0 ? `+${delta}d` : delta < 0 ? `${delta}d` : '';
         }
-        this._cities.replaceChildren(...rows);
     }
 }
 
