@@ -501,3 +501,58 @@
 [data-ui="minimal"] .dial-ring { stroke: rgba(34, 37, 43, 0.22); }
 [data-ui="minimal"] .dial-tick { stroke: rgba(34, 37, 43, 0.3); }
 [data-ui="minimal"] .clock-cfg { border-bottom: 1px solid var(--soa-line); }
+
+/* ── Context canvas, recovery panel, transcript bands ────────────────────
+   The last Tron-only surfaces. Two of these are not merely unstyled here —
+   they are WRONG here, and only in this skin, because both were written
+   against a phosphor accent on black:
+
+   the transcript band tints with the accent, and MINIMAL's accent is ink, so
+   screen-blending it over the dark slate produced nothing at all — the bands
+   were invisible; and the band overlay is positioned to TRON's terminal
+   padding, while MINIMAL insets its terminal as a slate card with its own,
+   so every band sat a few pixels off the text it belonged to. */
+
+/* Canvas: a sheet of paper beside the slate, not a lit panel. */
+[data-ui="minimal"] :is(.ctx-brand, .ctx-band-h) {
+  font-family: var(--font-display); text-transform: lowercase;
+  letter-spacing: 0; font-weight: 500; color: rgba(34, 37, 43, 0.45);
+  text-shadow: none;
+}
+[data-ui="minimal"] .ctx-head { border-bottom: 1px solid var(--soa-line); }
+[data-ui="minimal"] :is(.ctx-turns, .ctx-sub, .ctx-muted, .ctx-fact-k, .ctx-turn-n, .ctx-turn-t) {
+  color: rgba(34, 37, 43, 0.45);
+}
+[data-ui="minimal"] .ctx-turn-x { font-family: var(--font-display); color: rgba(34, 37, 43, 0.82); }
+[data-ui="minimal"] .ctx-fact-v { color: var(--soa-fg); }
+[data-ui="minimal"] .ctx-turn.latest { background: rgba(34, 37, 43, 0.045); }
+[data-ui="minimal"] :is(.ctx-art-t, .ctx-step-x) { font-family: var(--font-display); color: var(--soa-fg); }
+[data-ui="minimal"] .ctx-step-add { font-family: var(--font-display); text-transform: lowercase; }
+/* The pull tab is furniture on paper: a hairline grip, no glow. */
+[data-ui="minimal"] .ctx-pull::before { background: rgba(34, 37, 43, 0.28); }
+[data-ui="minimal"] .ctx-pull:hover { box-shadow: none; background-color: #fff; }
+
+/* Recovery: a notice card, which is what porcelain does instead of an alarm. */
+[data-ui="minimal"] .recovery {
+  background: #fff; border: 1px solid var(--soa-line);
+  border-radius: 12px; box-shadow: var(--m-shadow-deep);
+}
+[data-ui="minimal"] .recovery-head h2 {
+  font-family: var(--font-display); text-transform: lowercase; letter-spacing: 0;
+  font-weight: 600; color: #a8621b;
+}
+[data-ui="minimal"] :is(.recovery-lead, .recovery-body p, .recovery-body h3) { font-family: var(--font-display); }
+[data-ui="minimal"] .recovery-pulse {
+  background: rgba(34, 37, 43, 0.05); border-left-color: rgba(34, 37, 43, 0.3);
+  color: rgba(34, 37, 43, 0.7);
+}
+[data-ui="minimal"] .recovery-cmd code { background: rgba(34, 37, 43, 0.05); color: var(--soa-fg); }
+
+/* Bands: aligned to THIS skin's terminal padding, and tinted with light rather
+   than ink so screen-blending over the dark slate actually shows. */
+[data-ui="minimal"] .term-bands { inset: 12px 14px 14px; }
+[data-ui="minimal"] .term-band[data-kind="user"] {
+  background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.09) 55%, rgba(255, 255, 255, 0.03) 100%);
+  box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.55);
+}
