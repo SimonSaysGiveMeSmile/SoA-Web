@@ -3201,9 +3201,8 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
    washed over the top and dulled every character it covered. */
 .term-bands {
   position: absolute; inset: 4px 0 4px 6px;   /* match .terms .term padding */
-  pointer-events: none; overflow: hidden; z-index: 0;
+  pointer-events: none; overflow: hidden; z-index: 2;
 }
-.terms .term .xterm { position: relative; z-index: 1; }
 
 .term-band {
   position: absolute; left: 0; right: 0; top: 0;
@@ -3213,16 +3212,25 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
    emphasis is spent. A rail marks where it starts, the tint carries it down. */
 .term-band[data-kind="user"] {
   background: linear-gradient(90deg,
-      rgba(var(--soa-accent-rgb), 0.20) 0%,
-      rgba(var(--soa-accent-rgb), 0.12) 55%,
+      rgba(var(--soa-accent-rgb), 0.22) 0%,
+      rgba(var(--soa-accent-rgb), 0.13) 55%,
       rgba(var(--soa-accent-rgb), 0.04) 100%);
+  /* Sitting on top of an opaque grid, a plain alpha wash would dull every glyph
+     it covers. Screen blending only ever lightens: the dark background between
+     the letters lifts, the bright letters are already near the ceiling and stay
+     where they are. The band is a background tint again, without the frame-rate
+     cost of making the whole terminal transparent. */
+  mix-blend-mode: screen;
   /* The rail is what makes a one-line message still read as a block, so it
      carries full accent rather than the wash's fraction of it. */
   box-shadow: inset 3px 0 0 var(--soa-accent);
 }
 /* On a near-white ground the accent glow disappears; the ink has to carry it. */
+/* On a light ground the same trick runs the other way: multiply only darkens,
+   so the paper tints and the ink stays ink. */
 :root[data-theme="light"] .term-band[data-kind="user"],
 :root[data-theme="dim"] .term-band[data-kind="user"] {
   background: linear-gradient(90deg,
       rgba(0, 0, 0, 0.10) 0%, rgba(0, 0, 0, 0.06) 55%, rgba(0, 0, 0, 0.02) 100%);
+  mix-blend-mode: multiply;
 }
