@@ -836,6 +836,14 @@ class Shell {
         // stay live too; paused while the page is hidden. (Requirement: status
         // loaded on startup, not tab-by-tab.)
         this._serverStatusTimer = setInterval(() => { if (!document.hidden) this._pullServerStatus(); }, 4000);
+        // Context % from the transcripts, not from the screen. Claude Code no
+        // longer prints a context reading in its footer, so the scrape that fed
+        // every ctx badge — tabs, fleet bar, manager — finds nothing and the
+        // whole chain reports null. The daemon can measure it exactly instead:
+        // the newest usage record in a session IS its live context. Polled
+        // slowly because it moves once per turn, not once per frame.
+        this._ctxUsageTimer = setInterval(() => { if (!document.hidden) this._pullCtxFromUsage(); }, 15000);
+        setTimeout(() => this._pullCtxFromUsage(), 1500);
         // Self-heal a grid that has fallen behind its container. Refitting is
         // only done when the two actually disagree, so the steady state is two
         // measurements every two seconds and nothing else.
@@ -2059,6 +2067,35 @@ class Shell {
     // slow. A budget turns that into a round-robin: the tab you are looking at
     // is always current, the rest refresh within a few seconds.
     static POLL_BUDGET = 4;
+
+    async _pullCtxFromUsage() {
+        let sessions;
+        try {
+            const r = await fetch('/api/claude-usage', FETCH_INIT);
+            const j = await r.json();
+            sessions = j && j.data && j.data.sessions;
+        } catch (_) { return; }
+        if (!Array.isArray(sessions)) return;
+        // Newest session wins per directory. Tabs that share a cwd cannot be
+        // told apart from here — that is the same binding gap the context canvas
+        // has — so the most recently active one is the honest answer.
+        const byCwd = new Map();
+        for (const s of sessions) {
+            if (!s || !s.cwd || s.ctxPct == null) continue;
+            const prev = byCwd.get(s.cwd);
+            if (!prev || (s.lastTs || 0) > (prev.lastTs || 0)) byCwd.set(s.cwd, s);
+        }
+        if (!byCwd.size) return;   // daemon predates the field; keep scraping
+        for (const [id] of this.tabs) {
+            const cwd = this._tabCwd && this._tabCwd.get(id);
+            const hit = cwd && byCwd.get(cwd);
+            if (!hit) continue;
+            if (this._ctxPct.get(id) === hit.ctxPct) continue;
+            this._ctxPct.set(id, hit.ctxPct);
+            this._updateCtxBar(id, hit.ctxPct);
+            this.bridge.input(INPUT_KIND.CTX_REPORT, { id, pct: hit.ctxPct });
+        }
+    }
 
     _pollCtxLines() {
         const _p0 = PERF.on ? performance.now() : 0;
