@@ -522,6 +522,36 @@ class TabRuntime {
         } catch (_) { return false; }
     }
 
+    // Jump the viewport to the previous / next thing YOU said.
+    //
+    // The classifier that draws the conversation bands already knows where every
+    // turn starts, so navigating between them costs a scan of the first eight
+    // columns of the buffer and nothing else. This is the part of "page through
+    // the conversation" that is worth having: the terminal stays a live
+    // terminal, and you still get to step through the thread.
+    jumpToTurn(dir) {
+        if (!this._opened) return false;
+        try {
+            const buf = this.term.buffer.active;
+            const from = buf.viewportY;
+            if (dir < 0) {
+                for (let i = from - 1; i >= 0; i--) {
+                    if (this._bandFor(buf, i) === 'user') { this.term.scrollToLine(i); return true; }
+                }
+                // Nothing above: stay where you are. Snapping to the top of the
+                // buffer because a scan came up empty is a worse answer than
+                // not moving.
+            } else {
+                const last = buf.length - 1;
+                for (let i = from + 1; i <= last; i++) {
+                    if (this._bandFor(buf, i) === 'user') { this.term.scrollToLine(i); return true; }
+                }
+                this.scrollToBottom();          // past the last turn: back to live output
+            }
+        } catch (_) {}
+        return false;
+    }
+
     setBands(on) {
         this._bandsOn = !!on;
         this.paintBands();
@@ -3442,6 +3472,18 @@ class Shell {
     }
 
     _hotkey(e) {
+        // Ctrl/Cmd+Shift+Up / Down — step to the previous or next turn in the
+        // conversation. Works while the terminal has focus, which is where you
+        // are when you want it, and does not collide with xterm's own
+        // Shift+PageUp scrolling.
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+            const rt = this.tabs.get(this.activeId);
+            if (rt) {
+                e.preventDefault();
+                rt.jumpToTurn(e.key === 'ArrowUp' ? -1 : 1);
+                return;
+            }
+        }
         // Escape in tiles overlay → back to grid
         if (e.key === 'Escape' && this.viewMode === 'tiles' && this._tileOverlayId != null) {
             e.preventDefault();
