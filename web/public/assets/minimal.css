@@ -445,3 +445,59 @@
 
 /* ── Mobile-sim modal frame ── */
 [data-ui="minimal"] .msim-frame { border-radius: 18px; overflow: hidden; box-shadow: var(--m-shadow-deep); }
+
+/* ── Settings, segmented controls, clock ─────────────────────────────────
+   The components added for the settings list, the ON/OFF switch and the clock
+   were built in TRON's idiom: mono type, uppercase micro-labels, phosphor. The
+   tokens carry the palette across on their own, but the IDIOM does not — an
+   uppercase mono label on porcelain reads as a machine label on a printed page.
+   Here they take this skin's voice: Familjen Grotesk, lowercase structure, ink
+   instead of glow, and a segmented control that is a white card lifting off the
+   porcelain rather than a filled cell. */
+
+[data-ui="minimal"] .set-label {
+  font-family: var(--font-display); font-weight: 500; font-size: 13px;
+  letter-spacing: -0.01em; color: var(--soa-fg);
+}
+[data-ui="minimal"] .set-key { color: rgba(34, 37, 43, 0.34); }
+[data-ui="minimal"] .set-desc {
+  font-family: var(--font-display); font-size: 11.5px; line-height: 1.5;
+  color: rgba(34, 37, 43, 0.6);
+}
+/* Porcelain is a crisper ground than phosphor: a solid hairline, not a dash. */
+[data-ui="minimal"] .set-row { border-bottom: 1px solid var(--soa-line); }
+[data-ui="minimal"] .set-row:last-child { border-bottom: none; }
+
+/* The segmented control, light-mode: a recessed track with the chosen option
+   riding above it as a white card. Shadow does the work colour does in TRON. */
+[data-ui="minimal"] .seg {
+  background: rgba(34, 37, 43, 0.06);
+  border: 1px solid var(--soa-line); border-radius: 8px; padding: 2px;
+}
+[data-ui="minimal"] .seg-o {
+  font-family: var(--font-display); font-weight: 500; font-size: 11px;
+  letter-spacing: 0; text-transform: lowercase; border-radius: 6px;
+  color: rgba(34, 37, 43, 0.55);
+}
+[data-ui="minimal"] .seg-o + .seg-o { border-left: none; }
+[data-ui="minimal"] .seg-o.on {
+  background: #ffffff; color: var(--soa-fg); text-shadow: none;
+  box-shadow: 0 1px 2px rgba(34, 37, 43, 0.12), 0 0 0 1px rgba(34, 37, 43, 0.05);
+}
+
+[data-ui="minimal"] :is(.cfg-k, .city-k) {
+  font-family: var(--font-display); text-transform: lowercase;
+  letter-spacing: 0; font-size: 10px; color: rgba(34, 37, 43, 0.5);
+}
+[data-ui="minimal"] .city-v { font-family: var(--font-display); font-weight: 500; color: var(--soa-fg); }
+[data-ui="minimal"] .city--local .city-v { color: var(--soa-accent); text-shadow: none; }
+[data-ui="minimal"] :is(.chip, .cfg-add) {
+  font-family: var(--font-display); text-transform: lowercase; letter-spacing: 0;
+  background: #ffffff; border: 1px solid var(--soa-line); color: rgba(34, 37, 43, 0.7);
+}
+/* Ink hands on a paper dial — the glow that reads as "lit" on black reads as
+   smudged printing on porcelain. */
+[data-ui="minimal"] :is(.dial-h, .dial-m) { stroke: var(--soa-fg); }
+[data-ui="minimal"] .dial-ring { stroke: rgba(34, 37, 43, 0.22); }
+[data-ui="minimal"] .dial-tick { stroke: rgba(34, 37, 43, 0.3); }
+[data-ui="minimal"] .clock-cfg { border-bottom: 1px solid var(--soa-line); }
