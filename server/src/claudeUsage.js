@@ -375,7 +375,16 @@ function compute() {
                 if (meta.slug && (!ss.slug || !meta.side)) ss.slug = meta.slug;
                 if (meta.cwd && (!ss.cwd || !meta.side)) ss.cwd = meta.cwd;
             }
-            if (r.ts > ss.lastTs) ss.lastTs = r.ts;
+            if (r.ts > ss.lastTs) {
+                ss.lastTs = r.ts;
+                // The live CONTEXT size, which is a different quantity from the
+                // token totals beside it: those accumulate over every request,
+                // this is what the model was holding on the most recent one.
+                // input + cache read + cache writes + output IS the context that
+                // request carried, so the newest record is the current context.
+                ss.ctxTokens = (r.input || 0) + (r.cacheRead || 0)
+                    + (r.cw5m || 0) + (r.cw1h || 0) + (r.output || 0);
+            }
             const tok = tokensOf(r);
             for (const [on, scope] of [[inBlock, ss.block], [inToday, ss.today]]) {
                 if (!on) continue;
@@ -472,6 +481,13 @@ function compute() {
             slug: s.slug,
             cwd: s.cwd,
             lastTs: s.lastTs,
+            ctxTokens: s.ctxTokens || 0,
+            // The window is inferred rather than configured: a context that has
+            // already exceeded 200k proves the session is on a 1M model, and
+            // guessing low would report an impossible percentage.
+            ctxPct: s.ctxTokens
+                ? Math.min(100, Math.round((s.ctxTokens / (s.ctxTokens > 200000 ? 1000000 : 200000)) * 100))
+                : null,
             block: s.block,
             today: s.today,
         }))
