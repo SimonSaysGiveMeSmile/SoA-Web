@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# soa-version-nag — tell the user, on their phone, when the SoA they are running
+# is not the SoA that exists.
+#
+# There are TWO ways to be out of date, and only one of them is the obvious one:
+#
+#   BEHIND   the checkout is older than the newest published v* release. This is
+#            what "a new version is available" normally means.
+#
+#   STALE    the checkout is current but the RUNNING DAEMON never loaded it. Node
+#            reads its source once, at startup, so a daemon that has been up for
+#            days is executing whatever was on disk when it booted. Every file
+#            merged since is inert. This is the dangerous one, because nothing
+#            about the machine looks wrong: git is clean, the version is right,
+#            and the fix is sitting on disk doing nothing. It is exactly how a
+#            fixed event-loop stall kept stalling for two days.
+#
+# Both end in the same instruction — save your work first — because loading new
+# server code means restarting the daemon, and that respawns every tab's shell.
+#
+# Read-only: it inspects git and the process table and sends a push. It never
+# updates, never restarts, never touches a tab.
+#
+# Usage:
+#   soa-version-nag              # check, notify if out of date (respects cooldown)
+#   soa-version-nag --check      # report only, never notify, never write state
+#   soa-version-nag --force      # notify even if the cooldown has not expired
+#
+# Exit: 0 quiet or notified · 1 could not determine (no git, no daemon)
+#
+# Env: SOA_VERSION_NAG_ENABLE=0 disables · SOA_VERSION_NAG_COOLDOWN (seconds,
+#      default 86400) · SOA_WEB_STATE_DIR · SOA_WEB_LABEL
+
+set -u
+
+LABEL="${SOA_WEB_LABEL:-app.s0a.web.local}"
+COOLDOWN="${SOA_VERSION_NAG_COOLDOWN:-86400}"
+CHECK=0; FORCE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) CHECK=1; shift;;
+        --force) FORCE=1; shift;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0;;
+        *) echo "soa-version-nag: unknown arg '$1'" >&2; exit 2;;
+    esac
+done
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') soa-version-nag: $*"; }
+
+[ "${SOA_VERSION_NAG_ENABLE:-1}" = "1" ] || { log "disabled (SOA_VERSION_NAG_ENABLE=0)"; exit 0; }
+
+# The state dir moved between installs, so try the documented one and then the
+# one this machine actually uses rather than assuming either.
+STATE_DIR="${SOA_WEB_STATE_DIR:-}"
+if [ -z "$STATE_DIR" ]; then
+    for d in "$HOME/.soa-web-local" "$HOME/.s0a-local/state"; do
+        [ -d "$d" ] && { STATE_DIR="$d"; break; }
+    done
+fi
+[ -n "$STATE_DIR" ] || STATE_DIR="$HOME/.soa-web-local"
+SEEN="$STATE_DIR/version-nag.json"
+
+# ── which checkout is the LIVE daemon running from? ───────────────────────────
+# Ask the process, exactly as soa-selfupdate does: the path on its command line
+# is the only checkout whose state can matter.
+DPID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null \
+        | awk -F'= ' '/^[[:space:]]*pid =/{print $2; exit}')"
+[ -n "${DPID:-}" ] || DPID="$(ps -axo pid=,command= | awk '/[s]erver\/src\/index\.js/{print $1; exit}')"
+[ -n "${DPID:-}" ] || { log "no running daemon found — nothing to compare"; exit 1; }
+
+ENTRY="$(ps -o command= -p "$DPID" 2>/dev/null | tr ' ' '\n' | grep -m1 'server/src/index\.js')"
+[ -n "${ENTRY:-}" ] || { log "daemon $DPID does not look like a SoA server"; exit 1; }
+ROOT="$(cd "$(dirname "$ENTRY")/../.." && pwd -P)"
+[ -d "$ROOT/.git" ] || { log "install root is not a git checkout: $ROOT"; exit 1; }
+
+cd "$ROOT" || exit 1
+
+# ── BEHIND: is a newer release published than the one we have? ────────────────
+git fetch --quiet --tags --prune origin 2>/dev/null
+LATEST="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)"
+HAVE="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+BEHIND=0
+if [ -n "$LATEST" ] && ! git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null; then
+    BEHIND=1
+fi
+
+# ── STALE: has the daemon loaded the code that is on disk? ────────────────────
+# Compare the newest mtime under server/src against the daemon's start time. A
+# source file written after the process booted is a file that process has never
+# read. `ps -o lstart` is the only start time that survives a clock change.
+STARTED_EPOCH="$(ps -o lstart= -p "$DPID" 2>/dev/null | xargs -0 date -j -f '%a %b %e %T %Y' '+%s' 2>/dev/null || echo '')"
+NEWEST_SRC=0
+if [ -d "$ROOT/server/src" ]; then
+    NEWEST_SRC="$(find "$ROOT/server/src" -type f -name '*.js' -exec stat -f '%m' {} + 2>/dev/null \
+                  | sort -n | tail -1)"
+    [ -n "$NEWEST_SRC" ] || NEWEST_SRC=0
+fi
+STALE=0
+if [ -n "$STARTED_EPOCH" ] && [ "$NEWEST_SRC" -gt "$STARTED_EPOCH" ] 2>/dev/null; then
+    STALE=1
+    STALE_AGE_H=$(( (NEWEST_SRC - STARTED_EPOCH) / 3600 ))
+fi
+
+# ── report ────────────────────────────────────────────────────────────────────
+if [ "$BEHIND" = "0" ] && [ "$STALE" = "0" ]; then
+    log "up to date (${HAVE:-untagged}) and the daemon is running it"
+    exit 0
+fi
+
+if [ "$STALE" = "1" ]; then
+    KIND="stale"
+    TITLE="SoA update not loaded"
+    BODY="Server code merged ~${STALE_AGE_H}h after the daemon started, so it is still running the old build. Save your work, then restart: launchctl kickstart -k gui/$(id -u)/${LABEL} — it respawns every tab's shell."
+else
+    KIND="behind"
+    TITLE="SoA ${LATEST} available"
+    BODY="You are on ${HAVE:-an untagged build}. Save your work, then run soa-selfupdate --now. It restarts the daemon, which respawns every tab's shell."
+fi
+STAMP="${KIND}:${LATEST:-none}:${HAVE:-none}"
+
+if [ "$CHECK" = "1" ]; then
+    log "$KIND — $TITLE: $BODY"
+    exit 0
+fi
+
+# ── cooldown ──────────────────────────────────────────────────────────────────
+# One push per condition per day. A nag you cannot act on immediately — and this
+# one asks you to stop and save first — becomes noise the moment it repeats.
+NOW="$(date '+%s')"
+if [ "$FORCE" != "1" ] && [ -f "$SEEN" ]; then
+    LAST_STAMP="$(sed -n 's/.*"stamp"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SEEN" | head -1)"
+    LAST_AT="$(sed -n 's/.*"at"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$SEEN" | head -1)"
+    if [ "$LAST_STAMP" = "$STAMP" ] && [ -n "${LAST_AT:-}" ] \
+       && [ $(( NOW - LAST_AT )) -lt "$COOLDOWN" ]; then
+        log "$KIND — already notified $(( (NOW - LAST_AT) / 3600 ))h ago, holding"
+        exit 0
+    fi
+fi
+
+NOTIFY="$ROOT/scripts/soa-notify"
+if [ -x "$NOTIFY" ]; then
+    "$NOTIFY" -t "$TITLE" -p high -T warning "$BODY" >/dev/null 2>&1 \
+        && log "pushed: $TITLE" \
+        || log "soa-notify failed (is a topic configured in $STATE_DIR/notify.json?)"
+else
+    log "soa-notify not found at $NOTIFY — cannot push"
+fi
+
+mkdir -p "$STATE_DIR" 2>/dev/null
+printf '{"stamp":"%s","at":%s,"title":"%s"}\n' "$STAMP" "$NOW" "$TITLE" > "$SEEN" 2>/dev/null
+exit 0
