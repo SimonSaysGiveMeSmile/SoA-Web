@@ -334,8 +334,14 @@ class TabRuntime {
         let kind = '';
         const line = buf.getLine(abs);
         if (line) {
-            const head = line.translateToString(true, 0, TabRuntime.BAND_COLS).trimStart();
-            const c = head.charAt(0);
+            // Column matters. A turn you SENT has its caret in column 0; the
+            // carets Claude Code draws inside its own boxes — the queued-message
+            // list it shows while working, the composer — are indented into
+            // those boxes, and it already gives them a grey block of their own.
+            // Banding them again was redundant on top of redundant. Allow one
+            // leading space and no more.
+            const head = line.translateToString(true, 0, TabRuntime.BAND_COLS);
+            const c = head.charAt(0) === ' ' ? head.charAt(1) : head.charAt(0);
             // Claude Code marks your turn with a prompt caret and its own work
             // with a bullet; the box-drawing continuations belong to whatever
             // opened them, which the run-grouping below handles.
