@@ -431,6 +431,35 @@ class TabRuntime {
         }
     }
 
+    // Is the painted grid leaving more than a cell of dead space in its own
+    // container? The fit runs on events — activate, window resize, a
+    // ResizeObserver on .terms, fonts.ready — and if the container grows in a
+    // way none of those catch (a panel closing that does not change .terms, a
+    // fit that ran while the shell was still hidden), the grid simply stays
+    // narrow forever. Measured on a live dashboard: a 1220px container holding
+    // a 734px grid, the terminal wrapping at 102 columns with room for 168.
+    // Cheap enough to ask every couple of seconds; two rects and a divide.
+    gridDivergesFromContainer() {
+        try {
+            const el = this.container;
+            if (!el || !this.term.element) return false;
+            const cs = getComputedStyle(el);
+            const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+            if (!(availW > 40)) return false;
+            let painted = 0;
+            for (const c of this.term.element.querySelectorAll('.xterm-screen canvas')) {
+                painted = Math.max(painted, c.getBoundingClientRect().width);
+            }
+            if (!painted) {
+                const rowsEl = this.term.element.querySelector('.xterm-rows');
+                painted = rowsEl ? rowsEl.getBoundingClientRect().width : 0;
+            }
+            if (!(painted > 0)) return false;
+            const cell = painted / Math.max(1, this.term.cols);
+            return cell > 0.5 && (availW - painted) >= cell * 1.5;
+        } catch (_) { return false; }
+    }
+
     setBands(on) {
         this._bandsOn = !!on;
         this.paintBands();
@@ -730,6 +759,14 @@ class Shell {
         // stay live too; paused while the page is hidden. (Requirement: status
         // loaded on startup, not tab-by-tab.)
         this._serverStatusTimer = setInterval(() => { if (!document.hidden) this._pullServerStatus(); }, 4000);
+        // Self-heal a grid that has fallen behind its container. Refitting is
+        // only done when the two actually disagree, so the steady state is two
+        // measurements every two seconds and nothing else.
+        this._fitGuard = setInterval(() => {
+            if (document.hidden) return;
+            const rt = this.tabs.get(this.activeId);
+            if (rt && rt._opened && rt.gridDivergesFromContainer()) this._fitActive();
+        }, 2000);
         this._statusSeeded = false;
         // Request OS notification permission on the user's first interaction
         // (some browsers require a gesture). Until granted, in-app toasts only.
