@@ -12,6 +12,7 @@
 
 import { t as tr } from '/assets/i18n.js?v=28';
 import { getSettings } from '/assets/settings.js?v=26';
+import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=1';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -1695,6 +1696,66 @@ class ContributeWidget extends Widget {
 // ── Sidebar composition: registry + persisted layout ─────────────────────
 // Stable ids → constructors, in default order. Users hide/show and reorder
 // these via the CUSTOMIZE panel; the chosen layout persists in localStorage.
+
+// ── PERF ─────────────────────────────────────────────────────────────────
+// "Which part is making this slow?" — measured, not guessed.
+//
+// Frame rate alone cannot answer it: script blocking the main thread and the
+// GPU failing to paint look identical from outside, and they need opposite
+// fixes. BLOCKED is the discriminator — main-thread time past the 50ms mark
+// that the page could not have painted in. High blocked time means JavaScript,
+// and the breakdown below names which subsystem spent it; low blocked time
+// with low fps means paint, and no amount of script tuning will help.
+//
+// The probes are inert until this widget is on screen, so the tool cannot be
+// the thing it is measuring.
+const _ms = n => (n >= 100 ? Math.round(n) : n >= 10 ? n.toFixed(0) : n.toFixed(1)) + 'ms';
+
+class PerfWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.perf', parent, intervalMs: 1000 });
+        this._fpsHist = [];
+        perfStart();
+    }
+
+    destroy() { perfStop(); super.destroy(); }
+    _suspend() { perfStop(); super._suspend(); }
+    _resume() { perfStart(); super._resume(); }
+
+    tick() {
+        const s = perfSnapshot();
+        const v = perfVerdict(s);
+        const fps = Math.round(s.fps);
+        this._fpsHist.push(fps);
+        if (this._fpsHist.length > 24) this._fpsHist.shift();
+
+        // Frame rate is the headline, and it is judged against the display, not
+        // against 60: a 120Hz panel that manages 60 is dropping every other
+        // frame and should not read as green.
+        const target = (window.__soaHz && window.__soaHz > 70) ? 120 : 60;
+        const fpsCls = fps >= target * 0.85 ? 'ok' : fps >= target * 0.5 ? 'warn' : 'err';
+
+        const rows = [
+            ['VERDICT', v.text, v.level === 'bad' ? 'err' : v.level === 'warn' ? 'warn' : 'ok'],
+            ['FPS', `${fps} / ${target}`, fpsCls],
+            ['BLOCKED', _ms(s.blockedMsPerSec) + '/s',
+                s.blockedMsPerSec >= 80 ? 'err' : s.blockedMsPerSec >= 30 ? 'warn' : 'ok'],
+            ['STREAM', `${s.kbPerSec.toFixed(0)} KB/s · ${Math.round(s.chunksPerSec)}/s`],
+        ];
+        if (s.heapMb) rows.push(['HEAP', Math.round(s.heapMb) + ' MB']);
+        if (!s.parts.length) {
+            rows.push(['—', 'no measurable js cost']);
+        } else {
+            // Only the spenders, biggest first. A subsystem costing under a
+            // tenth of a millisecond a second is not the reason for anything.
+            for (const p of s.parts.slice(0, 6)) {
+                rows.push([p.name, _ms(p.msPerSec) + '/s', p.msPerSec >= 50 ? 'warn' : null]);
+            }
+        }
+        this.setRows(rows);
+    }
+}
+
 function _widgetRegistry() {
     return [
         { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
@@ -1714,6 +1775,7 @@ function _widgetRegistry() {
         { id: 'netchart',  titleKey: 'widget.net_chart',   make: p => new NetChartWidget({ parent: p }) },
         { id: 'commits',   titleKey: 'widget.commits',     make: p => new GitCommitsWidget({ parent: p }) },
         { id: 'contribute', titleKey: 'widget.contribute', make: p => new ContributeWidget({ parent: p }) },
+        { id: 'perf',      titleKey: 'widget.perf',        make: p => new PerfWidget({ parent: p }) },
     ];
 }
 

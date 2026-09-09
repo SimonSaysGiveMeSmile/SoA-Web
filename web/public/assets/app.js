@@ -21,6 +21,7 @@ import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=26';
+import { PERF, ptime, pstream } from '/assets/perf.js?v=1';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=5';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
@@ -382,8 +383,9 @@ class TabRuntime {
     // until the next marker, and lay one absolutely-positioned band over each
     // run. Cheap enough to run per render and per scroll.
     paintBands() {
+        const _t0 = PERF.on ? performance.now() : 0;
         const host = this.bandsEl;
-        if (!host || !this._opened) return;
+        if (!host || !this._opened) { if (PERF.on) ptime('bands', _t0); return; }
         if (!this._bandsOn) { if (host.childElementCount) host.replaceChildren(); return; }
         let buf, cellH, rows;
         try {
@@ -442,6 +444,7 @@ class TabRuntime {
             const hp = `${h}px`;
             if (node.style.height !== hp) node.style.height = hp;
         }
+        if (PERF.on) ptime('bands', _t0);
     }
 
     // Is the painted grid leaving more than a cell of dead space in its own
@@ -1409,6 +1412,8 @@ class Shell {
     }
 
     _onTermData({ id, data }) {
+        const _s0 = PERF.on ? performance.now() : 0;
+        if (PERF.on) pstream(data ? data.length : 0);
         const t = this.tabs.get(id);
         if (t) {
             // Virtualization: only the on-screen terminal parses live into xterm;
@@ -1416,8 +1421,15 @@ class Shell {
             // on switch — so many sessions run ~1 live ANSI parser, not N. Status
             // and ctx% still update from the raw stream (below), so background tab
             // colours/preview stay live without parsing the full grid.
-            if (this._isLiveTab(id)) t.write(data);
-            else t.queueReplay(data);
+            if (this._isLiveTab(id)) {
+                const w0 = PERF.on ? performance.now() : 0;
+                t.write(data);
+                if (PERF.on) ptime('xterm write', w0);
+            } else {
+                const q0 = PERF.on ? performance.now() : 0;
+                t.queueReplay(data);
+                if (PERF.on) ptime('buffer bg', q0);
+            }
         }
         // Extract OSC 0/2 title sequences from the raw stream. xterm.js's
         // onTitleChange can miss titles when data arrives in chunks that split
@@ -1437,8 +1449,10 @@ class Shell {
             const partial = buf.match(/\x1b\](?:0|2);[^\x07\x1b]*$/);
             this._oscBuf.set(id, partial ? partial[0] : '');
         }
+        const _d0 = PERF.on ? performance.now() : 0;
         this._detectAgentFromStream(id, data);
         this._detectDevServer(id, data);
+        if (PERF.on) ptime('detectors', _d0);
         this._pollDirty.add(id);   // new output → re-scan status/context next tick
         // Throttle stdout cue per-tab so heavy output from one shell doesn't
         // gun-machine the speakers, but two tabs streaming in parallel can
@@ -1452,6 +1466,7 @@ class Shell {
             this._lastStdoutCue.set(id, now);
             this.audio.play('stdout', 'tab' + id);
         }
+        if (PERF.on) ptime('stream total', _s0);
     }
 
     _onTermExit({ id, code }) {
@@ -1981,6 +1996,11 @@ class Shell {
     static POLL_BUDGET = 4;
 
     _pollCtxLines() {
+        const _p0 = PERF.on ? performance.now() : 0;
+        try { this._pollCtxLinesInner(); } finally { if (PERF.on) ptime('ctx poll', _p0); }
+    }
+
+    _pollCtxLinesInner() {
         // Don't burn the main thread scanning 16 terminals while the page is in
         // a background tab — resume with a full sweep once it's foregrounded.
         if (document.hidden) { this._pollWasHidden = true; return; }

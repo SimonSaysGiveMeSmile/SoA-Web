@@ -156,6 +156,7 @@ const DICTS = {
         'widget.net.empty': 'no interfaces',
         'widget.git.empty': 'no commits',
         'widget.git.unavailable': 'unavailable',
+        'widget.perf': 'PERF',
         'widget.globe': 'WORLD VIEW',
         'widget.globe.online': 'online',
         'widget.globe.unavailable': 'globe unavailable',
