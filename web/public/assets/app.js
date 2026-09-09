@@ -302,9 +302,21 @@ class TabRuntime {
         if (!data) return;
         this._wq.push(data);
         if (this._wRaf || this._wTimer) return;
-        const busy = performance.now() - (window.__soaLastInteract || 0) < 250;
-        if (busy) this._wTimer = setTimeout(() => this._flushWrites(), TabRuntime.WRITE_BUSY_MS);
-        else this._wRaf = requestAnimationFrame(() => this._flushWrites());
+        // SCROLLING defers a write; typing must not. The two used to share one
+        // interaction stamp, so every keystroke armed the 50ms path and echo
+        // came back a beat late — the batching meant to protect a gesture was
+        // taxing the thing you notice most.
+        const scrolling = performance.now() - (window.__soaLastScroll || 0) < 250;
+        if (scrolling) this._wTimer = setTimeout(() => this._flushWrites(), TabRuntime.WRITE_BUSY_MS);
+        // Always arm a timer alongside the frame callback. requestAnimationFrame
+        // does not fire in a hidden or fully occluded window, and without this a
+        // background dashboard queues output indefinitely and dumps it in one
+        // burst when you come back — which looks exactly like the lag it was
+        // supposed to remove.
+        else {
+            this._wRaf = requestAnimationFrame(() => this._flushWrites());
+            this._wTimer = setTimeout(() => this._flushWrites(), 100);
+        }
     }
 
     _flushWrites() {
@@ -1137,9 +1149,13 @@ class Shell {
         // get out of the way while you are scrolling. A one-word global beats
         // wiring an event bus through a decorative widget.
         const bump = () => { this._lastInteract = window.__soaLastInteract = performance.now(); };
-        window.addEventListener('wheel', bump, { passive: true, capture: true });
+        // A second, scroll-only stamp. Deferring output during a flick is right;
+        // deferring the echo of what you are typing is not, and one stamp for
+        // both could not tell them apart.
+        const bumpScroll = () => { bump(); window.__soaLastScroll = performance.now(); };
+        window.addEventListener('wheel', bumpScroll, { passive: true, capture: true });
+        window.addEventListener('touchmove', bumpScroll, { passive: true, capture: true });
         window.addEventListener('keydown', bump, { capture: true });
-        window.addEventListener('touchmove', bump, { passive: true, capture: true });
 
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
