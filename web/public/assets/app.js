@@ -352,6 +352,12 @@ class TabRuntime {
             // still matters here: it is what CLOSES your turn.
             if (c === '>' || c === '\u276f' || c === '\u203a') kind = 'user';
             else if (c === '\u25cf' || c === '\u23fa' || c === '\u2022') kind = 'end';
+            // A wrapped row is the same logical line continuing, which is the
+            // only thing that should extend a message's band. Everything else
+            // after your turn — task output, status lines, the spinner — is the
+            // agent's work, and running the band down over it marked most of
+            // the screen instead of marking your message.
+            else if (line.isWrapped) kind = 'wrap';
         }
         // Only history is safe to remember; the live screen is still being
         // repainted underneath us.
@@ -386,13 +392,14 @@ class TabRuntime {
         let cur = null;
         for (let i = 0; i < rows; i++) {
             const kind = this._bandFor(buf, top + i);
-            if (kind === 'end') {
-                if (cur) { runs.push(cur); cur = null; }
-            } else if (kind) {
+            if (kind === 'wrap') {
+                if (cur) cur.to = i;   // the message keeps going onto this row
+            } else if (kind === 'user') {
                 if (cur) runs.push(cur);
                 cur = { kind, from: i, to: i };
             } else if (cur) {
-                cur.to = i;            // continuation of the open block
+                runs.push(cur);        // anything else ends the message
+                cur = null;
             }
         }
         if (cur) runs.push(cur);
