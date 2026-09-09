@@ -199,22 +199,69 @@ function resolvedModeLabel() {
     return tr('settings.conn.mode_sandbox');
 }
 
-function kvRow(labelKey, descKey, control) {
-    return el('tr', {}, [
-        el('td', { class: 'k' }, [el('code', { text: labelKey })]),
-        el('td', { class: 'd', text: tr(descKey) }),
-        el('td', { class: 'v' }, [control]),
+// A settings row is a thing you are choosing, not a field in a config file.
+// The human name leads, the key that used to lead is demoted to a monogram
+// under it (this product's users do want it — it is what the docs and the JSON
+// call the setting — it just should not be the first thing read), the
+// explanation sits underneath in the quiet tone, and the control is pinned
+// right where the eye can run down a column of them.
+const SET_LABELS = {
+    uiLang: 'Interface skin',
+    theme: 'Colour theme',
+    termFontSize: 'Terminal text size',
+    cursorBlink: 'Blinking cursor',
+    nocursor: 'Hide the cursor',
+    nointro: 'Skip the intro',
+    viewButtons: 'View switcher',
+    version: 'Build',
+    audio: 'Sound effects',
+    audioVolume: 'Volume',
+    disableFeedbackAudio: 'Mute interface clicks',
+    agentDoneSound: 'Chime when an agent finishes',
+    clockHours: 'Clock format',
+    clockZones: 'Clock cities',
+    clockFace: 'Clock face',
+};
+
+// A few controls are lists, not single inputs — a row of view checkboxes, a
+// bag of city chips — and squeezing those into the control column collides them
+// with their own label. They get the full width, under the description.
+const WIDE_CONTROLS = new Set(['viewButtons', 'clockZones']);
+
+function setRow(key, desc, control) {
+    return el('div', { class: 'set-row' + (WIDE_CONTROLS.has(key) ? ' set-row--wide' : '') }, [
+        el('div', { class: 'set-meta' }, [
+            el('div', { class: 'set-name' }, [
+                el('span', { class: 'set-label', text: SET_LABELS[key] || key }),
+                el('code', { class: 'set-key', text: key }),
+            ]),
+            el('p', { class: 'set-desc', text: desc }),
+        ]),
+        el('div', { class: 'set-ctl' }, [control]),
     ]);
 }
 
+function kvRow(labelKey, descKey, control) {
+    return setRow(labelKey, tr(descKey), control);
+}
+
+// ON/OFF as a segmented switch rather than a <select> of the words "true" and
+// "false". Both states are visible, it is one click instead of three, and it
+// matches the control the clock widget uses. The hidden input keeps the value
+// where the save handler already looks for it.
 function boolSelect(id, value) {
-    const s = el('select', { id });
-    for (const v of [true, false]) {
-        const o = el('option', { value: String(v), text: String(v) });
-        if (v === value) o.selected = true;
-        s.appendChild(o);
-    }
-    return s;
+    const inp = el('input', { id, type: 'hidden', value: String(!!value) });
+    const seg = el('div', { class: 'seg' });
+    const opts = [[true, 'ON'], [false, 'OFF']];
+    const btns = opts.map(([v, label]) => el('button', {
+        class: 'seg-o' + (v === !!value ? ' on' : ''), type: 'button', text: label,
+        onclick: () => {
+            inp.value = String(v);
+            btns.forEach((b, i) => b.classList.toggle('on', opts[i][0] === v));
+        },
+    }));
+    btns.forEach(b => seg.appendChild(b));
+    return el('div', { class: 'ctl-wrap' }, [inp, seg]);
 }
 
 function numInput(id, value, min, max, step) {
@@ -296,79 +343,38 @@ function viewButtonsControl(s) {
 
 // A read-only settings row (label / description / static value).
 function staticRow(label, desc, valueText) {
-    return el('tr', {}, [
-        el('td', { class: 'k' }, [el('code', { text: label })]),
-        el('td', { class: 'd', text: desc }),
-        el('td', { class: 'v' }, [el('span', { text: valueText })]),
-    ]);
+    return setRow(label, desc, el('span', { class: 'set-static', text: valueText }));
 }
 
 function buildAppearancePane(s) {
-    return el('table', { class: 'settings-table' }, [
-        el('thead', {}, [el('tr', {}, [
-            el('th', { text: tr('settings.col.key') }),
-            el('th', { text: tr('settings.col.desc') }),
-            el('th', { text: tr('settings.col.value') }),
-        ])]),
-        el('tbody', {}, [
-            el('tr', {}, [
-                el('td', { class: 'k' }, [el('code', { text: 'uiLang' })]),
-                el('td', { class: 'd', text: 'UI language — TRON is the classic terminal look; MINIMAL is a warm porcelain skin; LIQUID is a black & white iOS-style liquid-glass skin (frosted panels, rounded corners). MINIMAL and LIQUID bring their own palettes, so the theme below only affects TRON. Applies instantly.' }),
-                el('td', { class: 'v' }, [uiLangSelect('set-uiLang', s.uiLang)]),
-            ]),
-            el('tr', {}, [
-                el('td', { class: 'k' }, [el('code', { text: 'theme' })]),
-                el('td', { class: 'd', text: 'Color theme — Auto follows your system; Light/Dim are bright variants. Applies instantly.' }),
-                el('td', { class: 'v' }, [themeSelect('set-theme', s.theme)]),
-            ]),
+    return el('div', { class: 'settings-list' }, [
+            setRow('uiLang', 'UI language — TRON is the classic terminal look; MINIMAL is a warm porcelain skin; LIQUID is a black & white iOS-style liquid-glass skin (frosted panels, rounded corners). MINIMAL and LIQUID bring their own palettes, so the theme below only affects TRON. Applies instantly.', uiLangSelect('set-uiLang', s.uiLang)),
+            setRow('theme', 'Color theme — Auto follows your system; Light/Dim are bright variants. Applies instantly.', themeSelect('set-theme', s.theme)),
             kvRow('termFontSize', 'settings.desc.termFontSize', numInput('set-termFontSize', s.termFontSize, 8, 28, 1)),
             kvRow('cursorBlink',  'settings.desc.cursorBlink',  boolSelect('set-cursorBlink', s.cursorBlink)),
             kvRow('nocursor',     'settings.desc.nocursor',     boolSelect('set-nocursor', s.nocursor)),
             kvRow('nointro',      'settings.desc.nointro',      boolSelect('set-nointro', s.nointro)),
-            el('tr', {}, [
-                el('td', { class: 'k' }, [el('code', { text: 'viewButtons' })]),
-                el('td', { class: 'd', text: 'View switcher — choose which view buttons appear in the toolbar switcher (Terminal is always shown; Manager also needs the fleet entitlement). Applies instantly.' }),
-                el('td', { class: 'v' }, [viewButtonsControl(s)]),
-            ]),
+            setRow('viewButtons', 'View switcher — choose which view buttons appear in the toolbar switcher (Terminal is always shown; Manager also needs the fleet entitlement). Applies instantly.', viewButtonsControl(s)),
             staticRow('version', 'SoA-Web build', 'v' + ((window.__SOA_WEB__ || {}).version || 'dev')),
-        ]),
     ]);
 }
 
 function buildAudioPane(s) {
-    return el('table', { class: 'settings-table' }, [
-        el('thead', {}, [el('tr', {}, [
-            el('th', { text: tr('settings.col.key') }),
-            el('th', { text: tr('settings.col.desc') }),
-            el('th', { text: tr('settings.col.value') }),
-        ])]),
-        el('tbody', {}, [
+    return el('div', { class: 'settings-list' }, [
             kvRow('audio',               'settings.desc.audio',               boolSelect('set-audio', s.audio)),
             kvRow('audioVolume',         'settings.desc.audioVolume',         numInput('set-audioVolume', s.audioVolume, 0, 1, 0.05)),
             kvRow('disableFeedbackAudio','settings.desc.disableFeedbackAudio',boolSelect('set-disableFeedbackAudio', s.disableFeedbackAudio)),
-            el('tr', {}, [
-                el('td', { class: 'k' }, [el('code', { text: 'agentDoneSound' })]),
-                el('td', { class: 'd', text: 'Play a chime when a fleet agent finishes a turn (working → done).' }),
-                el('td', { class: 'v' }, [boolSelect('set-agentDoneSound', s.agentDoneSound)]),
-            ]),
-        ]),
+            setRow('agentDoneSound', 'Play a chime when a fleet agent finishes a turn (working → done).', boolSelect('set-agentDoneSound', s.agentDoneSound)),
     ]);
 }
 
 function buildMiscPane(s) {
-    return el('table', { class: 'settings-table' }, [
-        el('thead', {}, [el('tr', {}, [
-            el('th', { text: tr('settings.col.key') }),
-            el('th', { text: tr('settings.col.desc') }),
-            el('th', { text: tr('settings.col.value') }),
-        ])]),
-        el('tbody', {}, [
+    return el('div', { class: 'settings-list' }, [
             kvRow('clockHours', 'settings.desc.clockHours', hoursSelect('set-clockHours', s.clockHours)),
             kvRow('clockZones', 'settings.desc.clockZones',
                 el('input', { id: 'set-clockZones', type: 'text', value: s.clockZones.join(', '),
                               placeholder: 'America/New_York, Europe/London' })),
             kvRow('lang',       'settings.desc.lang',       langSelect('set-lang')),
-        ]),
     ]);
 }
 

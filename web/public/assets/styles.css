@@ -1060,6 +1060,69 @@ body.nocursor, body.nocursor * { cursor: none !important; }
 .settings-content { min-width: 0; }
 .settings-pane { display: none; }
 .settings-pane--active { display: block; }
+/* ── Settings rows ──────────────────────────────────────────────────────
+   These used to be a three-column table headed KEY / DESCRIPTION / VALUE —
+   which is a config file rendered in HTML, not a settings screen. You read a
+   camelCase identifier first and the thing it does third, and every control sat
+   at a different x depending on how long the prose above it ran.
+
+   Now each row is one decision: the human name leads, the key it is still
+   called in the docs and the JSON is demoted beneath it, the explanation sits
+   in the quiet tone, and every control is pinned to the same right-hand column
+   so a pane can be scanned by running down it. Apple's settings list, in this
+   product's mono and hairlines. */
+.settings-list { display: flex; flex-direction: column; }
+.set-row {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 18px;
+    padding: 11px 4px;
+    border-bottom: 1px dashed rgba(var(--soa-accent-rgb), 0.10);
+}
+.set-row:last-child { border-bottom: none; }
+.set-meta { min-width: 0; flex: 1 1 auto; }
+.set-name { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.set-label { font-size: 12.5px; color: var(--soa-accent-bright); }
+.set-key {
+    font-family: 'Fira Mono', ui-monospace, monospace; font-size: 9.5px;
+    letter-spacing: 0.06em; color: rgba(var(--soa-accent-rgb), 0.45);
+}
+.set-desc {
+    margin: 3px 0 0; font-size: 11px; line-height: 1.45;
+    color: rgba(var(--soa-accent-rgb), 0.62); max-width: 46ch;
+}
+/* One column for every control, so the eye runs straight down it. */
+.set-ctl { flex: 0 0 auto; display: flex; justify-content: flex-end; min-width: 132px; }
+.set-ctl input:not([type="hidden"]),
+.set-ctl select {
+    background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.22);
+    color: var(--soa-accent-bright);
+    font-family: 'Fira Mono', ui-monospace, monospace;
+    font-size: 11px; padding: 4px 8px; border-radius: 4px; min-width: 120px;
+}
+/* A list-shaped control takes the whole row rather than colliding with its
+   own label in a 104px column. */
+.set-row--wide { flex-direction: column; gap: 8px; }
+.set-row--wide .set-ctl { justify-content: flex-start; min-width: 0; width: 100%; }
+.set-static { font-family: 'Fira Mono', ui-monospace, monospace; font-size: 11px; color: var(--soa-accent-dim); }
+.ctl-wrap { display: inline-flex; }
+
+/* The anchored dropdown is ~460px, too narrow for a wide control column but not
+   so narrow that the column has to be abandoned — losing it would cost the one
+   thing this layout buys, which is being able to run your eye down the
+   controls. Tighten the column instead of stacking. */
+.soa-settings-drop .set-row { gap: 12px; padding: 10px 2px; }
+.soa-settings-drop .set-ctl { min-width: 104px; }
+.soa-settings-drop .set-desc { max-width: none; }
+.soa-settings-drop .set-ctl input:not([type="hidden"]),
+.soa-settings-drop .set-ctl select { min-width: 0; max-width: 150px; width: 100%; }
+
+@media (max-width: 640px) {
+    /* Below this there is no column to save: stack, control under its own
+       label, never squeezed to a sliver because the sentence above ran long. */
+    .set-row, .soa-settings-drop .set-row { flex-direction: column; gap: 8px; }
+    .set-ctl, .soa-settings-drop .set-ctl { justify-content: flex-start; min-width: 0; }
+}
+
 .settings-table {
     width: 100%; border-collapse: collapse; font-size: 12px;
 }
