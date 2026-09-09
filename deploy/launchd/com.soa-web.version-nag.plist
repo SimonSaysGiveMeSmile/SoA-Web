@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  VERSION NAG — runs scripts/soa-version-nag every 6 hours. Pushes the user
+  (soa-notify OS push) when the SoA they are RUNNING is not the SoA that exists,
+  which happens two ways:
+
+    BEHIND  the checkout is older than the newest published v* release.
+    STALE   the checkout is current but the running daemon never loaded it —
+            node reads its source once, at startup, so a long-lived daemon is
+            executing whatever was on disk when it booted and everything merged
+            since is inert. Nothing looks wrong: git is clean and the version is
+            right. This is how a fixed event-loop stall kept stalling for days.
+
+  Both messages tell the user to SAVE THEIR WORK first, because loading new
+  server code means restarting the daemon and that respawns every tab's shell.
+
+  Read-only: inspects git and the process table and sends a push. It never
+  updates, never restarts, never touches a tab — soa-selfupdate owns applying.
+
+  Six hours, not minutes: a nag asking you to stop and save is noise the moment
+  it repeats. The script also holds a 24h per-condition cooldown of its own
+  (SOA_VERSION_NAG_COOLDOWN), so a machine left behind is reminded daily rather
+  than four times a day.
+
+  Kill switch: SOA_VERSION_NAG_ENABLE=0.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.version-nag.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.version-nag</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/test/.soa-web/scripts/soa-version-nag</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/version-nag.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/version-nag.log</string>
+</dict>
+</plist>
