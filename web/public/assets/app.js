@@ -625,6 +625,30 @@ class TabRuntime {
             const core = this.term._core;
             const dims = core && core._renderService && core._renderService.dimensions;
             let cellW = dims && dims.css && dims.css.cell && dims.css.cell.width;
+            // Cross-check xterm's own number against what it actually PAINTED.
+            // The painted grid is exactly cols x cellW, so dividing it gives the
+            // true cell width — and when the two disagree, the paint is the one
+            // that is on screen. This is the case the earlier fallbacks never
+            // caught: they only ran when the lookup returned nothing, and a
+            // lookup that returns a WRONG number (a stale metric from before the
+            // web font landed, a device-pixel value on a 2x display) sails
+            // through, undercounts the columns, and strands the right-hand
+            // third of the terminal as black.
+            let painted = 0;
+            if (this.term.element && this.term.cols > 0) {
+                for (const c of this.term.element.querySelectorAll('.xterm-screen canvas')) {
+                    const w = c.getBoundingClientRect().width;
+                    if (w > painted) painted = w;
+                }
+                if (!painted) {
+                    const rowsEl = this.term.element.querySelector('.xterm-rows');
+                    if (rowsEl) painted = rowsEl.getBoundingClientRect().width;
+                }
+                painted = painted / this.term.cols;
+            }
+            if (painted > 0.5 && (!(cellW > 0.5) || Math.abs(cellW - painted) / painted > 0.05)) {
+                cellW = painted;
+            }
             // xterm moves its dimension bookkeeping between versions, and when
             // this lookup misses, FitAddon's own proposeDimensions misses with
             // it — fit() silently becomes a no-op and the grid stays frozen at
@@ -643,14 +667,6 @@ class TabRuntime {
             // how the right-hand strip came back the moment a GPU renderer was
             // switched on. The painted canvas is exactly cols x cellW, so divide
             // it: renderer-derived, no font guessing, no rounding drift.
-            if (!(cellW > 0.5) && this.term.element && this.term.cols > 0) {
-                let widest = 0;
-                for (const c of this.term.element.querySelectorAll('.xterm-screen canvas')) {
-                    const w = c.getBoundingClientRect().width;
-                    if (w > widest) widest = w;
-                }
-                if (widest > 0) cellW = widest / this.term.cols;
-            }
             // Last resort: measure the font itself. Uses the Terminal's own
             // options rather than computed style, which can report the stylesheet
             // default instead of the face xterm is actually rendering with.
