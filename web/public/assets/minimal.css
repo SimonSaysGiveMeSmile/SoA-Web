@@ -55,11 +55,13 @@
   --soa-red:       #c04f4b;
   --soa-yellow:    #9c7a08;
   --soa-blue:      #5a6c94;
-  --soa-line:      rgba(34, 37, 43, 0.14);
-  --soa-line-soft: rgba(34, 37, 43, 0.07);
+  --soa-line:      rgba(var(--m-ink-rgb), 0.14);
+  --soa-line-soft: rgba(var(--m-ink-rgb), 0.07);
   --font-display:  'Familjen Grotesk', ui-sans-serif, system-ui, sans-serif;
 
   /* MINIMAL-only tokens */
+  --m-ink-rgb:     34, 37, 43;    /* the ink every hairline and wash derives from */
+  --m-card:        #ffffff;       /* a sheet lifted off the ground: chips, switches, notices */
   --m-accent:      #0c7d72;
   --m-accent-rgb:  12, 125, 114;
   --m-slate:       #14171d;      /* the dark terminal card */
@@ -91,11 +93,11 @@
 /* Scrollbars: quiet ink. */
 [data-ui="minimal"] ::-webkit-scrollbar { width: 10px; height: 10px; }
 [data-ui="minimal"] ::-webkit-scrollbar-thumb {
-  background: rgba(34, 37, 43, 0.18);
+  background: rgba(var(--m-ink-rgb), 0.18);
   border: 3px solid var(--soa-bg);
   border-radius: 99px;
 }
-[data-ui="minimal"] ::-webkit-scrollbar-thumb:hover { background: rgba(34, 37, 43, 0.32); }
+[data-ui="minimal"] ::-webkit-scrollbar-thumb:hover { background: rgba(var(--m-ink-rgb), 0.32); }
 [data-ui="minimal"] ::-webkit-scrollbar-track { background: transparent; }
 
 /* ── Boot ── */
@@ -132,7 +134,7 @@
   transition: border-color var(--m-ease), background var(--m-ease), transform var(--m-ease);
   box-shadow: none;
 }
-[data-ui="minimal"] .tab:hover { border-color: rgba(34, 37, 43, 0.35); transform: translateY(-1px); }
+[data-ui="minimal"] .tab:hover { border-color: rgba(var(--m-ink-rgb), 0.35); transform: translateY(-1px); }
 [data-ui="minimal"] .tab.active {
   background: var(--m-slate);
   border-color: var(--m-slate);
@@ -159,7 +161,7 @@
   color: var(--soa-fg);
   transition: background var(--m-ease), border-color var(--m-ease);
 }
-[data-ui="minimal"] .topbar button:hover { background: var(--soa-line-soft); border-color: rgba(34, 37, 43, 0.3); }
+[data-ui="minimal"] .topbar button:hover { background: var(--soa-line-soft); border-color: rgba(var(--m-ink-rgb), 0.3); }
 [data-ui="minimal"] .user-chip { border-radius: 99px; border: 1px solid var(--soa-line); background: var(--soa-bg-panel); }
 
 /* ── The stage: dark slate terminal cards on porcelain ── */
@@ -230,7 +232,7 @@
 [data-ui="minimal"] .netchart-canvas,
 [data-ui="minimal"] .claude-spark,
 [data-ui="minimal"] .globe-canvas {
-  background: rgba(34, 37, 43, 0.035);
+  background: rgba(var(--m-ink-rgb), 0.035);
   border: 1px solid var(--soa-line-soft);
   border-radius: var(--m-r-sm);
 }
@@ -260,7 +262,7 @@
 }
 [data-ui="minimal"] :is(.mqr-toggle, .widget-btn, .port-btn, .mqr-copy, .globe-meta-btn):hover {
   background: var(--soa-line-soft);
-  border-color: rgba(34, 37, 43, 0.32);
+  border-color: rgba(var(--m-ink-rgb), 0.32);
 }
 [data-ui="minimal"] .mqr-toggle.mqr-start {
   background: var(--m-accent); border-color: var(--m-accent); color: #fff;
@@ -351,7 +353,7 @@
 [data-ui="minimal"] .mgru-sess-cost { font-weight: 600; text-shadow: none; font-variant-numeric: tabular-nums; }
 [data-ui="minimal"] .mgru-sess.top .mgru-sess-cost { color: var(--m-accent); text-shadow: none; }
 [data-ui="minimal"] .mgru-spark {
-  background: rgba(34, 37, 43, 0.035);
+  background: rgba(var(--m-ink-rgb), 0.035);
   border: 1px solid var(--soa-line-soft);
   border-radius: var(--m-r-sm);
 }
@@ -385,7 +387,7 @@
   font-family: var(--font-display);
 }
 [data-ui="minimal"] .soa-modal-backdrop:not(.soa-settings-drop) {
-  background: rgba(34, 37, 43, 0.35);
+  background: rgba(var(--m-ink-rgb), 0.35);
   backdrop-filter: blur(4px);
 }
 [data-ui="minimal"] .soa-modal-title {
@@ -399,7 +401,7 @@
   color: var(--soa-fg);
 }
 [data-ui="minimal"] :is(.soa-modal-copy, .soa-modal-close, .soa-modal-link):hover {
-  background: var(--soa-line-soft); border-color: rgba(34, 37, 43, 0.32); color: var(--soa-fg);
+  background: var(--soa-line-soft); border-color: rgba(var(--m-ink-rgb), 0.32); color: var(--soa-fg);
 }
 [data-ui="minimal"] .settings-tab {
   font-family: var(--font-display); font-weight: 500; text-transform: lowercase;
@@ -409,7 +411,7 @@
   background: var(--m-slate); color: #e8e6e1; border-color: var(--m-slate);
 }
 [data-ui="minimal"] .settings-table td.v :is(input, select) {
-  background: #fff; color: var(--soa-fg);
+  background: var(--m-card); color: var(--soa-fg);
   border: 1px solid var(--soa-line); border-radius: var(--m-r-sm);
 }
 [data-ui="minimal"] .settings-table td.k code { color: var(--m-accent); background: rgba(var(--m-accent-rgb), 0.07); border-radius: 4px; padding: 1px 5px; }
@@ -459,10 +461,10 @@
   font-family: var(--font-display); font-weight: 500; font-size: 13px;
   letter-spacing: -0.01em; color: var(--soa-fg);
 }
-[data-ui="minimal"] .set-key { color: rgba(34, 37, 43, 0.34); }
+[data-ui="minimal"] .set-key { color: rgba(var(--m-ink-rgb), 0.34); }
 [data-ui="minimal"] .set-desc {
   font-family: var(--font-display); font-size: 11.5px; line-height: 1.5;
-  color: rgba(34, 37, 43, 0.6);
+  color: rgba(var(--m-ink-rgb), 0.6);
 }
 /* Porcelain is a crisper ground than phosphor: a solid hairline, not a dash. */
 [data-ui="minimal"] .set-row { border-bottom: 1px solid var(--soa-line); }
@@ -471,35 +473,35 @@
 /* The segmented control, light-mode: a recessed track with the chosen option
    riding above it as a white card. Shadow does the work colour does in TRON. */
 [data-ui="minimal"] .seg {
-  background: rgba(34, 37, 43, 0.06);
+  background: rgba(var(--m-ink-rgb), 0.06);
   border: 1px solid var(--soa-line); border-radius: 8px; padding: 2px;
 }
 [data-ui="minimal"] .seg-o {
   font-family: var(--font-display); font-weight: 500; font-size: 11px;
   letter-spacing: 0; text-transform: lowercase; border-radius: 6px;
-  color: rgba(34, 37, 43, 0.55);
+  color: rgba(var(--m-ink-rgb), 0.55);
 }
 [data-ui="minimal"] .seg-o + .seg-o { border-left: none; }
 [data-ui="minimal"] .seg-o.on {
-  background: #ffffff; color: var(--soa-fg); text-shadow: none;
-  box-shadow: 0 1px 2px rgba(34, 37, 43, 0.12), 0 0 0 1px rgba(34, 37, 43, 0.05);
+  background: var(--m-card); color: var(--soa-fg); text-shadow: none;
+  box-shadow: 0 1px 2px rgba(var(--m-ink-rgb), 0.12), 0 0 0 1px rgba(var(--m-ink-rgb), 0.05);
 }
 
 [data-ui="minimal"] :is(.cfg-k, .city-k) {
   font-family: var(--font-display); text-transform: lowercase;
-  letter-spacing: 0; font-size: 10px; color: rgba(34, 37, 43, 0.5);
+  letter-spacing: 0; font-size: 10px; color: rgba(var(--m-ink-rgb), 0.5);
 }
 [data-ui="minimal"] .city-v { font-family: var(--font-display); font-weight: 500; color: var(--soa-fg); }
 [data-ui="minimal"] .city--local .city-v { color: var(--soa-accent); text-shadow: none; }
 [data-ui="minimal"] :is(.chip, .cfg-add) {
   font-family: var(--font-display); text-transform: lowercase; letter-spacing: 0;
-  background: #ffffff; border: 1px solid var(--soa-line); color: rgba(34, 37, 43, 0.7);
+  background: var(--m-card); border: 1px solid var(--soa-line); color: rgba(var(--m-ink-rgb), 0.7);
 }
 /* Ink hands on a paper dial — the glow that reads as "lit" on black reads as
    smudged printing on porcelain. */
 [data-ui="minimal"] :is(.dial-h, .dial-m) { stroke: var(--soa-fg); }
-[data-ui="minimal"] .dial-ring { stroke: rgba(34, 37, 43, 0.22); }
-[data-ui="minimal"] .dial-tick { stroke: rgba(34, 37, 43, 0.3); }
+[data-ui="minimal"] .dial-ring { stroke: rgba(var(--m-ink-rgb), 0.22); }
+[data-ui="minimal"] .dial-tick { stroke: rgba(var(--m-ink-rgb), 0.3); }
 [data-ui="minimal"] .clock-cfg { border-bottom: 1px solid var(--soa-line); }
 
 /* ── Context canvas, recovery panel, transcript bands ────────────────────
@@ -516,25 +518,25 @@
 /* Canvas: a sheet of paper beside the slate, not a lit panel. */
 [data-ui="minimal"] :is(.ctx-brand, .ctx-band-h) {
   font-family: var(--font-display); text-transform: lowercase;
-  letter-spacing: 0; font-weight: 500; color: rgba(34, 37, 43, 0.45);
+  letter-spacing: 0; font-weight: 500; color: rgba(var(--m-ink-rgb), 0.45);
   text-shadow: none;
 }
 [data-ui="minimal"] .ctx-head { border-bottom: 1px solid var(--soa-line); }
 [data-ui="minimal"] :is(.ctx-turns, .ctx-sub, .ctx-muted, .ctx-fact-k, .ctx-turn-n, .ctx-turn-t) {
-  color: rgba(34, 37, 43, 0.45);
+  color: rgba(var(--m-ink-rgb), 0.45);
 }
-[data-ui="minimal"] .ctx-turn-x { font-family: var(--font-display); color: rgba(34, 37, 43, 0.82); }
+[data-ui="minimal"] .ctx-turn-x { font-family: var(--font-display); color: rgba(var(--m-ink-rgb), 0.82); }
 [data-ui="minimal"] .ctx-fact-v { color: var(--soa-fg); }
-[data-ui="minimal"] .ctx-turn.latest { background: rgba(34, 37, 43, 0.045); }
+[data-ui="minimal"] .ctx-turn.latest { background: rgba(var(--m-ink-rgb), 0.045); }
 [data-ui="minimal"] :is(.ctx-art-t, .ctx-step-x) { font-family: var(--font-display); color: var(--soa-fg); }
 [data-ui="minimal"] .ctx-step-add { font-family: var(--font-display); text-transform: lowercase; }
 /* The pull tab is furniture on paper: a hairline grip, no glow. */
-[data-ui="minimal"] .ctx-pull::before { background: rgba(34, 37, 43, 0.28); }
-[data-ui="minimal"] .ctx-pull:hover { box-shadow: none; background-color: #fff; }
+[data-ui="minimal"] .ctx-pull::before { background: rgba(var(--m-ink-rgb), 0.28); }
+[data-ui="minimal"] .ctx-pull:hover { box-shadow: none; background-color: var(--m-card); }
 
 /* Recovery: a notice card, which is what porcelain does instead of an alarm. */
 [data-ui="minimal"] .recovery {
-  background: #fff; border: 1px solid var(--soa-line);
+  background: var(--m-card); border: 1px solid var(--soa-line);
   border-radius: 12px; box-shadow: var(--m-shadow-deep);
 }
 [data-ui="minimal"] .recovery-head h2 {
@@ -543,10 +545,10 @@
 }
 [data-ui="minimal"] :is(.recovery-lead, .recovery-body p, .recovery-body h3) { font-family: var(--font-display); }
 [data-ui="minimal"] .recovery-pulse {
-  background: rgba(34, 37, 43, 0.05); border-left-color: rgba(34, 37, 43, 0.3);
-  color: rgba(34, 37, 43, 0.7);
+  background: rgba(var(--m-ink-rgb), 0.05); border-left-color: rgba(var(--m-ink-rgb), 0.3);
+  color: rgba(var(--m-ink-rgb), 0.7);
 }
-[data-ui="minimal"] .recovery-cmd code { background: rgba(34, 37, 43, 0.05); color: var(--soa-fg); }
+[data-ui="minimal"] .recovery-cmd code { background: rgba(var(--m-ink-rgb), 0.05); color: var(--soa-fg); }
 
 /* Bands: aligned to THIS skin's terminal padding, and tinted with light rather
    than ink so screen-blending over the dark slate actually shows. */
@@ -556,3 +558,50 @@
       rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.09) 55%, rgba(255, 255, 255, 0.03) 100%);
   box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.55);
 }
+
+
+/* ── MINIMAL · dark ──────────────────────────────────────────────────────
+   MINIMAL was a daylight skin only: pick dark and you got porcelain anyway,
+   because this file overrode the palette unconditionally. It has one now.
+
+   Not TRON with different type — TRON is a phosphor terminal, this is the same
+   PAPER product after dark. Warm graphite rather than blue-black, ink that has
+   become chalk, and the structure untouched: hairlines, lifted cards, one teal
+   reserved for interaction. The one inversion that has to give: on porcelain
+   the terminal was the darkest thing on screen, and it cannot be here, so the
+   slate lifts just clear of the ground and the ground goes under it.
+
+   Because every wash and hairline was rewritten to derive from --m-ink-rgb and
+   --m-card, this is a palette swap and nothing else — no rule is duplicated. */
+:root[data-ui="minimal"][data-theme="dark"] {
+  color-scheme: dark;
+  --soa-bg:        #17191d;
+  --soa-bg-deep:   #101216;
+  --soa-bg-panel:  #1d2026;
+  --soa-bg-panel-rgb: 29, 32, 38;
+  --soa-fg:        #e9e7e2;
+  --soa-accent:    #e9e7e2;
+  --soa-accent-rgb: 233, 231, 226;
+  --soa-accent-dim:#8b909a;
+  --soa-accent-bright: #ffffff;
+  --soa-orange:    #e0913c;
+  --soa-green:     #4cbf90;
+  --soa-red:       #e4756f;
+  --soa-yellow:    #d7b13f;
+  --soa-blue:      #8ba0cc;
+  --soa-line:      rgba(var(--m-ink-rgb), 0.16);
+  --soa-line-soft: rgba(var(--m-ink-rgb), 0.08);
+
+  --m-ink-rgb:     233, 231, 226;   /* the ink is chalk now; every wash follows */
+  --m-card:        #262a31;         /* the lifted sheet, no longer white */
+  --m-accent:      #3fbfae;         /* teal lifted so it still reads on graphite */
+  --m-accent-rgb:  63, 191, 174;
+  --m-slate:       #0d0f13;         /* the terminal: still the deepest surface */
+  --m-slate-edge:  #2a2f37;
+  --m-shadow:      0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 28px rgba(0, 0, 0, 0.34);
+  --m-shadow-deep: 0 2px 8px rgba(0, 0, 0, 0.5), 0 24px 64px rgba(0, 0, 0, 0.46);
+}
+/* Chalk on graphite does not want the same weight as ink on paper. */
+:root[data-ui="minimal"][data-theme="dark"] .set-label { font-weight: 450; }
+/* The recovery notice keeps its warning colour, warmed for the darker ground. */
+:root[data-ui="minimal"][data-theme="dark"] .recovery-head h2 { color: #e0a355; }

@@ -283,7 +283,9 @@
 .globe-canvas {
     position: relative;
     width: 100%;
-    height: 200px;
+    /* 15% shorter than it was: the globe is ambience, and it was taking more
+       vertical budget in the rail than the instruments below it. */
+    height: 170px;
     background: rgba(var(--soa-accent-rgb), 0.03);
     border: 1px solid rgba(var(--soa-accent-rgb), 0.14);
     overflow: hidden;
@@ -783,8 +785,11 @@ body.ctx-resizing * { cursor: inherit !important; }
    kept: two cities in a wide rail became two balloons adrift in empty space.
    A strip of instruments is the same size whatever is around it. */
 .city {
-    display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
     flex: 0 0 auto; width: 46px; font-family: var(--font-mono);
+    /* Centred: the dial is a disc, so a left-aligned label above it reads as
+       misaligned even when it is not. Everything in the cell shares one axis. */
+    text-align: center;
 }
 .city-k {
     font-size: 7.5px; letter-spacing: 0.06em; color: var(--soa-accent-dim);
