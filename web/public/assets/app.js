@@ -390,6 +390,15 @@ class TabRuntime {
             }
         }
         if (cur) runs.push(cur);
+        // Never band the composer. It opens with the same caret as a submitted
+        // turn, so nothing in the first eight columns tells them apart — but a
+        // turn you have SENT is always closed by a bullet, and the line you are
+        // still typing is not: it runs to the bottom of the live screen, taking
+        // the footer hints with it. Drop that block, and only while the
+        // viewport is actually at the bottom; scrolled back, a real turn is
+        // free to continue past the last visible row.
+        const atBottom = buf.viewportY >= buf.baseY;
+        if (atBottom && runs.length && runs[runs.length - 1].to === rows - 1) runs.pop();
 
         // Reuse the divs: a scroll re-lays the same handful of bands, and
         // rebuilding the subtree every frame would undo the point of this.
