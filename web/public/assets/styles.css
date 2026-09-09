@@ -3213,14 +3213,16 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
    emphasis is spent. A rail marks where it starts, the tint carries it down. */
 .term-band[data-kind="user"] {
   background: linear-gradient(90deg,
-      rgba(var(--soa-accent-rgb), 0.13) 0%,
-      rgba(var(--soa-accent-rgb), 0.05) 42%,
-      rgba(var(--soa-accent-rgb), 0) 100%);
-  box-shadow: inset 2px 0 0 var(--soa-accent);
+      rgba(var(--soa-accent-rgb), 0.20) 0%,
+      rgba(var(--soa-accent-rgb), 0.12) 55%,
+      rgba(var(--soa-accent-rgb), 0.04) 100%);
+  /* The rail is what makes a one-line message still read as a block, so it
+     carries full accent rather than the wash's fraction of it. */
+  box-shadow: inset 3px 0 0 var(--soa-accent);
 }
 /* On a near-white ground the accent glow disappears; the ink has to carry it. */
 :root[data-theme="light"] .term-band[data-kind="user"],
 :root[data-theme="dim"] .term-band[data-kind="user"] {
   background: linear-gradient(90deg,
-      rgba(0, 0, 0, 0.075) 0%, rgba(0, 0, 0, 0.03) 42%, rgba(0, 0, 0, 0) 100%);
+      rgba(0, 0, 0, 0.10) 0%, rgba(0, 0, 0, 0.06) 55%, rgba(0, 0, 0, 0.02) 100%);
 }
