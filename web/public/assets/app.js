@@ -548,14 +548,29 @@ class TabRuntime {
                 if (r && r.width > 0 && this.term.cols > 0) cellW = r.width / this.term.cols;
             }
             // .xterm-rows only exists under the DOM renderer — canvas and WebGL
-            // paint into a <canvas> and drop the rows layer entirely. Measure the
-            // font directly as the last resort so this works under every renderer.
+            // paint into a <canvas> and drop the rows layer entirely, which is
+            // how the right-hand strip came back the moment a GPU renderer was
+            // switched on. The painted canvas is exactly cols x cellW, so divide
+            // it: renderer-derived, no font guessing, no rounding drift.
+            if (!(cellW > 0.5) && this.term.element && this.term.cols > 0) {
+                let widest = 0;
+                for (const c of this.term.element.querySelectorAll('.xterm-screen canvas')) {
+                    const w = c.getBoundingClientRect().width;
+                    if (w > widest) widest = w;
+                }
+                if (widest > 0) cellW = widest / this.term.cols;
+            }
+            // Last resort: measure the font itself. Uses the Terminal's own
+            // options rather than computed style, which can report the stylesheet
+            // default instead of the face xterm is actually rendering with.
             if (!(cellW > 0.5) && this.term.element) {
+                const o = this.term.options || {};
                 const cs2 = getComputedStyle(this.term.element);
                 const ctx = TabRuntime._measureCtx
                     || (TabRuntime._measureCtx = document.createElement('canvas').getContext('2d'));
                 if (ctx) {
-                    ctx.font = `${cs2.fontSize} ${cs2.fontFamily}`;
+                    const fs = o.fontSize ? `${o.fontSize}px` : cs2.fontSize;
+                    ctx.font = `${fs} ${o.fontFamily || cs2.fontFamily}`;
                     const w = ctx.measureText('W'.repeat(100)).width / 100;
                     if (w > 0.5) cellW = w;
                 }
