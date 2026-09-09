@@ -188,12 +188,13 @@ class TabRuntime {
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
             fontSize,
-            // The terminal paints no ground of its own: .terms supplies it, in
-            // the same token, and the gap is where the conversation bands live.
-            // Washing text from ABOVE was the first attempt and it dulled every
-            // glyph it covered; from behind, the tint costs the text nothing.
-            allowTransparency: true,
-            theme: { ...xtermTheme(resolveTheme(s.theme)), background: 'rgba(0,0,0,0)' },
+            // NOT transparent. A transparent background forces xterm to
+            // composite every cell against whatever is behind it, which is a
+            // documented and significant rendering cost — and the target here
+            // is 60fps while scrolling, not a slightly purer band. The bands
+            // go back on top and pay for it in a little contrast on your own
+            // message, which is short, instead of in frame rate everywhere.
+            theme: xtermTheme(resolveTheme(s.theme)),
             cursorBlink: s.cursorBlink,
             // Minimal per-tab browser memory: each xterm buffer is the dominant
             // client-side cost, and with ~20 tabs a 5000-line buffer per tab was
@@ -216,7 +217,8 @@ class TabRuntime {
         // default 80×24, so any absolute cursor positioning in the stream
         // lands at the wrong column and lines wrap wrong. We hold it here
         // and flush it on the first successful fit — see flushPendingReplay.
-        this._pendingReplay = '';
+        this._replayChunks = [];
+        this._replayLen = 0;
         this._everFit = false;
         this._renderer = null;
         // absolute buffer line -> 'user' | 'tool' | '' (classified once; a line
@@ -283,23 +285,26 @@ class TabRuntime {
     // Queue replay bytes for later. If the container is already visible
     // and sized, we can flush immediately; otherwise the caller will call
     // flushPendingReplay() once the tab becomes active.
+    // Hidden tabs buffer their live output here instead of parsing it, so this
+    // runs for every chunk of every background agent — twenty-odd of them on a
+    // busy fleet. It used to concatenate into one string and, once past the
+    // cap, rebuild a 128 KB string on EVERY subsequent chunk: megabytes of
+    // copying and garbage per second, on the same thread that has to scroll.
+    // Keep the chunks in an array and drop whole ones off the front instead;
+    // nothing retained is ever copied, and the join happens once, on switch.
+    static REPLAY_CAP = 1 << 17;   // 128 KB of buffered history per hidden tab
+
     queueReplay(data) {
         if (!data) return;
-        this._pendingReplay += data;
-        // With virtualization this buffers a hidden tab's LIVE output (not just
-        // bounded scrollback), so cap it. Keep the tail and align to a newline so
-        // the replay never starts mid-escape-sequence; a full-screen TUI repaints
-        // itself shortly after, so a dropped prefix self-corrects on switch.
-        const CAP = 1 << 17; // 128 KB — minimal buffered streaming history per hidden tab
-        if (this._pendingReplay.length > CAP) {
-            const tail = this._pendingReplay.slice(-CAP);
-            const nl = tail.indexOf('\n');
-            this._pendingReplay = nl >= 0 ? tail.slice(nl + 1) : tail;
+        this._replayChunks.push(data);
+        this._replayLen += data.length;
+        while (this._replayLen > TabRuntime.REPLAY_CAP && this._replayChunks.length > 1) {
+            this._replayLen -= this._replayChunks.shift().length;
         }
     }
 
     flushPendingReplay() {
-        if (!this._pendingReplay) return false;
+        if (!this._replayChunks.length) return false;
         // Only flush once xterm has actually been fit against a real-sized
         // container — otherwise absolute-column escapes in the scrollback
         // land at the wrong column.
@@ -308,8 +313,16 @@ class TabRuntime {
             if (rect.width < 2 || rect.height < 2) return false;
             this.fitNow();
         }
-        const data = this._pendingReplay;
-        this._pendingReplay = '';
+        let data = this._replayChunks.join('');
+        this._replayChunks = [];
+        this._replayLen = 0;
+        // A dropped chunk can leave the buffer starting mid-escape-sequence, so
+        // align to the first newline; a full-screen TUI repaints itself moments
+        // later and the lost prefix self-corrects.
+        if (data.length >= TabRuntime.REPLAY_CAP) {
+            const nl = data.indexOf('\n');
+            if (nl >= 0) data = data.slice(nl + 1);
+        }
         this.term.write(data);
         return true;
     }
@@ -2080,7 +2093,6 @@ class Shell {
 
         sb.recent += data;
         if (sb.recent.length > 2048) sb.recent = sb.recent.slice(-1500);
-        this._detectEffort(id, sb.recent);   // effort badge — parsed from the /effort footer in the stream
 
         // Throttle: at most one detection per 200ms for the tab you're looking
         // at; back-tabs run far less often (~700ms) since their status only
@@ -2090,6 +2102,9 @@ class Shell {
         const minGap = (id === this.activeId) ? 200 : 700;
         if (!forceNow && now - sb.lastDetect < minGap) return;
         sb.lastDetect = now;
+        // Moved below the throttle: a badge showing the effort level does not
+        // need to be re-derived from a 2 KB window on every chunk of every tab.
+        this._detectEffort(id, sb.recent);
 
         // Strip ANSI escape sequences for pattern matching
         const clean = sb.recent.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
@@ -2946,6 +2961,14 @@ class Shell {
         // be closed. The "most recent" strategy could be added later if needed.
         if (this._previewUrls.has(id)) return;
         if (!data) return;
+        // Cheap gate before the expensive part. Everything below is four full
+        // regex passes that each allocate a new copy of the chunk, and it ran on
+        // every chunk of every tab — twenty-odd busy agents' entire output,
+        // scanned four times over, on the thread that has to scroll. A dev
+        // server announcement always contains a URL, and a substring test costs
+        // effectively nothing, so the ~99% of chunks that cannot match now stop
+        // here.
+        if (data.indexOf('http') === -1) return;
 
         // Strip ANSI escape sequences before matching.
         const clean = data
