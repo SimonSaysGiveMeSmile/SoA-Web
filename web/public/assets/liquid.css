@@ -517,3 +517,50 @@
 @media (prefers-reduced-motion: reduce) {
   [data-ui="liquid"] .tab.active::after { animation: none; }
 }
+
+/* ── Settings, segmented controls, clock ─────────────────────────────────
+   Same components, this skin's material. Nothing here is decoration for its
+   own sake: the frost separates a control from the terminal light behind it,
+   and the specular rim is what tells you a segment is raised rather than
+   printed. Radii come from the squircle scale so these sit with everything
+   else, and the type is SF Pro like the rest of the chrome. */
+
+[data-ui="liquid"] .set-label { font-family: var(--font-display); font-weight: 500; font-size: 13px; letter-spacing: -0.01em; }
+[data-ui="liquid"] .set-key { color: rgba(255, 255, 255, 0.32); }
+[data-ui="liquid"] .set-desc { font-family: var(--font-display); font-size: 11.5px; line-height: 1.5; color: rgba(255, 255, 255, 0.55); }
+[data-ui="liquid"] .set-row { border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+[data-ui="liquid"] .set-row:last-child { border-bottom: none; }
+
+/* Glass track, brighter glass on the chosen segment, specular rim on top. */
+[data-ui="liquid"] .seg {
+  background: var(--lq-glass); border: 1px solid var(--lq-edge);
+  border-radius: var(--lq-r-sm); padding: 2px;
+  backdrop-filter: var(--lq-blur); -webkit-backdrop-filter: var(--lq-blur);
+}
+[data-ui="liquid"] .seg-o {
+  font-family: var(--font-display); font-weight: 500; font-size: 11px;
+  letter-spacing: 0; border-radius: var(--lq-r-xs); color: var(--soa-accent-dim);
+}
+[data-ui="liquid"] .seg-o + .seg-o { border-left: none; }
+[data-ui="liquid"] .seg-o.on {
+  background: var(--lq-fill-2); color: var(--soa-fg); text-shadow: none;
+  box-shadow: var(--lq-rim);
+}
+
+[data-ui="liquid"] :is(.cfg-k, .city-k) {
+  font-family: var(--font-display); letter-spacing: 0.02em; font-size: 10px;
+  color: var(--soa-accent-dim);
+}
+[data-ui="liquid"] .city-v { font-family: var(--font-display); font-weight: 500; }
+[data-ui="liquid"] .city--local .city-v { color: #fff; text-shadow: 0 0 14px rgba(255, 255, 255, 0.35); }
+[data-ui="liquid"] :is(.chip, .cfg-add) {
+  font-family: var(--font-display); letter-spacing: 0;
+  background: var(--lq-glass); border: 1px solid var(--lq-edge); color: var(--soa-fg);
+  border-radius: 999px;
+  backdrop-filter: var(--lq-blur); -webkit-backdrop-filter: var(--lq-blur);
+}
+[data-ui="liquid"] .cfg-add { border-radius: var(--lq-r-xs); }
+[data-ui="liquid"] :is(.dial-h, .dial-m) { stroke: #fff; }
+[data-ui="liquid"] .dial-ring { stroke: rgba(255, 255, 255, 0.18); }
+[data-ui="liquid"] .dial-tick { stroke: rgba(255, 255, 255, 0.3); }
+[data-ui="liquid"] .clock-cfg { border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
