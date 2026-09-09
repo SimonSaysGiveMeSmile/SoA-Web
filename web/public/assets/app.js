@@ -188,7 +188,12 @@ class TabRuntime {
         this.term = new Terminal({
             fontFamily: 'Fira Mono, ui-monospace, Menlo, Consolas, monospace',
             fontSize,
-            theme: xtermTheme(resolveTheme(s.theme)),
+            // The terminal paints no ground of its own: .terms supplies it, in
+            // the same token, and the gap is where the conversation bands live.
+            // Washing text from ABOVE was the first attempt and it dulled every
+            // glyph it covered; from behind, the tint costs the text nothing.
+            allowTransparency: true,
+            theme: { ...xtermTheme(resolveTheme(s.theme)), background: 'rgba(0,0,0,0)' },
             cursorBlink: s.cursorBlink,
             // Minimal per-tab browser memory: each xterm buffer is the dominant
             // client-side cost, and with ~20 tabs a 5000-line buffer per tab was
@@ -334,8 +339,13 @@ class TabRuntime {
             // Claude Code marks your turn with a prompt caret and its own work
             // with a bullet; the box-drawing continuations belong to whatever
             // opened them, which the run-grouping below handles.
+            // Only the conversation is banded. Tool calls, shell output and
+            // diffs are the machinery around it, and marking those too turned
+            // the transcript into stripes — the noise the banding was meant to
+            // cut through. A marker line ends the block before it, so a bullet
+            // still matters here: it is what CLOSES your turn.
             if (c === '>' || c === '\u276f' || c === '\u203a') kind = 'user';
-            else if (c === '\u25cf' || c === '\u23fa' || c === '\u2022') kind = 'tool';
+            else if (c === '\u25cf' || c === '\u23fa' || c === '\u2022') kind = 'end';
         }
         // Only history is safe to remember; the live screen is still being
         // repainted underneath us.
@@ -370,7 +380,9 @@ class TabRuntime {
         let cur = null;
         for (let i = 0; i < rows; i++) {
             const kind = this._bandFor(buf, top + i);
-            if (kind) {
+            if (kind === 'end') {
+                if (cur) { runs.push(cur); cur = null; }
+            } else if (kind) {
                 if (cur) runs.push(cur);
                 cur = { kind, from: i, to: i };
             } else if (cur) {
