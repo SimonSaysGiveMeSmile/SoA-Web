@@ -796,22 +796,46 @@ body.ctx-resizing * { cursor: inherit !important; }
 }
 .dial-pin { fill: var(--soa-accent); }
 
-/* World clock rows. The day offset is the only coloured thing, because it is
-   the only part that changes the answer. */
-.clock-cities { display: flex; flex-direction: column; gap: 2px; }
-.city {
-    display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: baseline;
-    font-family: var(--font-mono); font-size: 10.5px;
+/* World clock, laid out across rather than down. A stack of four rows reads as
+   a list you have to work through; four columns reads as one glance, which is
+   all anyone wants from a row of city times. Columns are auto-fit, so the same
+   markup gives four across a wide sidebar and two across a narrow one instead
+   of squeezing to illegibility. */
+.clock-cities {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
+    gap: 4px 6px; padding-top: 2px;
+    border-top: 1px dashed var(--soa-line-soft);
 }
-.city-k { color: var(--soa-accent-dim); letter-spacing: 0.12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.city-v { color: var(--soa-fg); font-variant-numeric: tabular-nums; }
-.city-d { min-width: 20px; text-align: right; color: var(--soa-yellow); font-size: 9px; }
+.city {
+    display: flex; flex-direction: column; gap: 1px; min-width: 0;
+    font-family: var(--font-mono);
+}
+.city-k {
+    font-size: 8px; letter-spacing: 0.14em; color: var(--soa-accent-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The time is the value; everything around it is a caption. */
+.city-v {
+    font-size: 12px; color: var(--soa-fg); font-variant-numeric: tabular-nums;
+    line-height: 1.15;
+}
+/* Riding the baseline of the time rather than owning a column of its own: it
+   only appears when the day differs, and an empty column would still cost
+   width on every city that agrees with you. */
+.city-d {
+    font-size: 8.5px; color: var(--soa-yellow); line-height: 1;
+    margin-top: 1px; min-height: 8px;
+}
 
 /* ── The secondary menu ─────────────────────────────────────────────── */
 .clock-cfg {
     padding: 8px 10px 10px; border-bottom: 1px solid var(--soa-line-soft);
     display: flex; flex-direction: column; gap: 8px;
 }
+/* An author `display` beats the UA stylesheet's [hidden] rule, so the panel was
+   permanently open no matter what the attribute said — the menu was never
+   secondary at all. It is closed until the ⚙ is pressed. */
+.clock-cfg[hidden] { display: none !important; }
 .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cfg-k {
     font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.2em;
