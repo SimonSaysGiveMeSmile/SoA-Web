@@ -34,6 +34,8 @@ export const DEFAULTS = Object.freeze({
     disableFeedbackAudio: false,
     agentDoneSound: true,
     clockHours: 24,
+    // Cities the CLOCK widget tracks alongside local time. IANA zone names.
+    clockZones: ['America/New_York', 'Europe/London', 'Asia/Tokyo', 'UTC'],
     // Which cells the unified view switcher shows. Terminal (tabs) is the
     // always-available escape hatch; the rest are user-customizable.
     viewButtons: { tabs: true, tiles: true, manager: true, chat: true, meeting: true, monitor: true },
@@ -49,6 +51,22 @@ function asViewButtons(v) {
     const out = {};
     for (const k of VIEW_KEYS) out[k] = src[k] !== false;   // default: shown
     out.tabs = true;                                        // terminal always on
+    return out;
+}
+
+// A zone is kept only if the platform can actually format with it, so a typo
+// degrades to "that city disappears" rather than throwing inside a 1s tick.
+const MAX_ZONES = 6;
+function asZones(v) {
+    const src = Array.isArray(v) ? v : DEFAULTS.clockZones;
+    const out = [];
+    for (const raw of src) {
+        const z = String(raw || '').trim();
+        if (!z || out.includes(z)) continue;
+        try { new Intl.DateTimeFormat('en-US', { timeZone: z }); } catch (_) { continue; }
+        out.push(z);
+        if (out.length >= MAX_ZONES) break;
+    }
     return out;
 }
 
@@ -87,6 +105,7 @@ function normalize(raw) {
         disableFeedbackAudio: asBool(s.disableFeedbackAudio, DEFAULTS.disableFeedbackAudio),
         agentDoneSound: asBool(s.agentDoneSound, DEFAULTS.agentDoneSound),
         clockHours: asHours(s.clockHours ?? DEFAULTS.clockHours),
+        clockZones: asZones(s.clockZones),
         viewButtons: asViewButtons(s.viewButtons),
     };
 }
@@ -343,6 +362,9 @@ function buildMiscPane(s) {
         ])]),
         el('tbody', {}, [
             kvRow('clockHours', 'settings.desc.clockHours', hoursSelect('set-clockHours', s.clockHours)),
+            kvRow('clockZones', 'settings.desc.clockZones',
+                el('input', { id: 'set-clockZones', type: 'text', value: s.clockZones.join(', '),
+                              placeholder: 'America/New_York, Europe/London' })),
             kvRow('lang',       'settings.desc.lang',       langSelect('set-lang')),
         ]),
     ]);
@@ -812,6 +834,7 @@ function collectFromDOM(prev) {
         disableFeedbackAudio: get('set-disableFeedbackAudio').value === 'true',
         agentDoneSound:       get('set-agentDoneSound') ? get('set-agentDoneSound').value === 'true' : (prev && prev.agentDoneSound),
         clockHours:           Number(get('set-clockHours').value),
+        clockZones:           get('set-clockZones').value.split(',').map(z => z.trim()).filter(Boolean),
         _lang:                get('set-lang').value,
     };
 }
