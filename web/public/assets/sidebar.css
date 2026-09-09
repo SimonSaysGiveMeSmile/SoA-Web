@@ -778,9 +778,13 @@ body.ctx-resizing * { cursor: inherit !important; }
 }
 .clock-strip::-webkit-scrollbar { height: 0; }
 
+/* Fixed width, and deliberately NOT flex:1. Stretching the cells tied the
+   layout to how wide the sidebar happens to be dragged and how many cities are
+   kept: two cities in a wide rail became two balloons adrift in empty space.
+   A strip of instruments is the same size whatever is around it. */
 .city {
     display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
-    flex: 1 1 0; min-width: 0; font-family: var(--font-mono);
+    flex: 0 0 auto; width: 46px; font-family: var(--font-mono);
 }
 .city-k {
     font-size: 7.5px; letter-spacing: 0.06em; color: var(--soa-accent-dim);
@@ -802,12 +806,17 @@ body.ctx-resizing * { cursor: inherit !important; }
 }
 /* Riding under the time rather than owning a column: it only appears when the
    day differs, and an empty column would cost width on every city that agrees. */
-.city-d { font-size: 8px; color: var(--soa-yellow); line-height: 1; min-height: 8px; }
+/* No reserved height. Cells are top-aligned, so an absent offset costs nothing
+   and the widget does not carry a band of empty space under every clock that
+   happens to share your day. */
+.city-d { font-size: 8px; color: var(--soa-yellow); line-height: 1.3; }
 
 /* A dial small enough to stand in a column beside four others. Four quarter
    ticks, not twelve — at 40px twelve is a smudge — and the second hand is the
    only saturated thing on the face. */
-.clock-dial { width: 100%; max-width: 38px; height: auto; aspect-ratio: 1; display: block; margin: 1px 0; }
+/* Fixed px, not a percentage of a cell that can grow. A dial is an instrument
+   at a legible size, not a shape that fills its container. */
+.clock-dial { width: 38px; height: 38px; display: block; margin: 1px 0; }
 .dial-ring { fill: none; stroke: var(--soa-line); stroke-width: 1.5; }
 .dial-tick { stroke: var(--soa-accent-dim); stroke-width: 2; opacity: 0.5; }
 .dial-tick.major { stroke: var(--soa-accent-dim); stroke-width: 2.5; opacity: 0.75; }
