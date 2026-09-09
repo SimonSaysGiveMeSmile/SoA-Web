@@ -34,6 +34,7 @@ export const DEFAULTS = Object.freeze({
     disableFeedbackAudio: false,
     agentDoneSound: true,
     clockHours: 24,
+    clockFace: 'digital',      // 'digital' | 'analog'
     // Cities the CLOCK widget tracks alongside local time. IANA zone names.
     clockZones: ['America/New_York', 'Europe/London', 'Asia/Tokyo', 'UTC'],
     // Which cells the unified view switcher shows. Terminal (tabs) is the
@@ -105,6 +106,7 @@ function normalize(raw) {
         disableFeedbackAudio: asBool(s.disableFeedbackAudio, DEFAULTS.disableFeedbackAudio),
         agentDoneSound: asBool(s.agentDoneSound, DEFAULTS.agentDoneSound),
         clockHours: asHours(s.clockHours ?? DEFAULTS.clockHours),
+        clockFace: s.clockFace === 'analog' ? 'analog' : DEFAULTS.clockFace,
         clockZones: asZones(s.clockZones),
         viewButtons: asViewButtons(s.viewButtons),
     };

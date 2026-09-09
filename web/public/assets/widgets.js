@@ -11,7 +11,7 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=28';
-import { getSettings } from '/assets/settings.js?v=26';
+import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=26';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=1';
 
 const $el = (tag, props = {}, children = []) => {
@@ -235,44 +235,182 @@ function _ymdIn(now, tz) {
     try { return now.toLocaleDateString('en-CA', { timeZone: tz }); } catch (_) { return null; }
 }
 
+// Offered in the city picker. Not a closed list — the field takes any IANA
+// name — just the ones worth one tap.
+const ZONE_PRESETS = [
+    'UTC', 'America/Los_Angeles', 'America/Denver', 'America/Chicago',
+    'America/New_York', 'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin',
+    'Europe/Moscow', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Singapore',
+    'Asia/Shanghai', 'Asia/Tokyo', 'Australia/Sydney',
+];
+
+// A segmented control, the one Apple idiom this panel borrows outright: the
+// options are all visible, the current one is filled rather than ticked, and
+// choosing is a single tap with nothing to open. Rendered in the terminal's own
+// mono and hairlines so it reads as part of this product, not pasted in.
+function _segmented(value, options, onPick) {
+    const wrap = $el('div', { class: 'seg', role: 'radiogroup' });
+    for (const [val, label] of options) {
+        const b = $el('button', {
+            class: 'seg-o' + (val === value ? ' on' : ''), type: 'button',
+            role: 'radio', 'aria-checked': String(val === value), text: label,
+            onclick: () => onPick(val),
+        });
+        wrap.appendChild(b);
+    }
+    return wrap;
+}
+
 class ClockWidget extends Widget {
     constructor({ parent }) {
         super({ titleKey: 'widget.clock', parent, intervalMs: 1000 });
+
+        // ⚙ — the secondary menu. Same affordance as the ⓘ the other widgets
+        // carry, so the header keeps one grammar.
+        this._cfgBtn = $el('button', {
+            class: 'widget-info-btn', type: 'button', title: tr('widget.clock.configure'),
+            'aria-label': tr('widget.clock.configure'), text: '⚙',
+            onclick: () => this._toggleCfg(),
+        });
+        this._headCtl.insertBefore(this._cfgBtn, this._pulseEl);
+
+        this._cfg = $el('div', { class: 'clock-cfg' });
+        this._cfg.hidden = true;
+        this.root.querySelector('.widget-h').after(this._cfg);
+
+        this._face = $el('div', { class: 'clock-face' });
+        this._cities = $el('div', { class: 'clock-cities' });
+        this.body.replaceChildren(this._face, this._cities);
+        this._buildAnalog();
+        this._renderCfg();
+        // The panel writes settings and settings redraw the panel: a change made
+        // here, in the Settings modal, or on another device all land the same way.
+        this._offSettings = onSettings(() => { if (!this._cfg.hidden) this._renderCfg(); });
     }
+
+    destroy() {
+        if (this._offSettings) { this._offSettings(); this._offSettings = null; }
+        super.destroy();
+    }
+
+    _toggleCfg() {
+        this._cfg.hidden = !this._cfg.hidden;
+        this._cfgBtn.classList.toggle('open', !this._cfg.hidden);
+        if (!this._cfg.hidden) this._renderCfg();
+    }
+
+    // ── The dial ─────────────────────────────────────────────────────────
+    // SVG, not canvas: it is three attribute writes a second to move the hands
+    // and it stays crisp at any DPR without a redraw. The face is a hairline
+    // ring and twelve ticks — no numerals, because at this size numerals are
+    // noise and the glow is what makes it legible anyway.
+    _buildAnalog() {
+        const NS = 'http://www.w3.org/2000/svg';
+        const el = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+        const svg = el('svg', { class: 'clock-dial', viewBox: '0 0 100 100', 'aria-hidden': 'true' });
+        svg.appendChild(el('circle', { class: 'dial-ring', cx: 50, cy: 50, r: 46 }));
+        for (let i = 0; i < 12; i++) {
+            const major = i % 3 === 0;
+            const t = el('line', {
+                class: 'dial-tick' + (major ? ' major' : ''),
+                x1: 50, y1: major ? 8 : 10, x2: 50, y2: major ? 16 : 14,
+                transform: `rotate(${i * 30} 50 50)`,
+            });
+            svg.appendChild(t);
+        }
+        this._hHand = el('line', { class: 'dial-h', x1: 50, y1: 50, x2: 50, y2: 28 });
+        this._mHand = el('line', { class: 'dial-m', x1: 50, y1: 50, x2: 50, y2: 18 });
+        this._sHand = el('line', { class: 'dial-s', x1: 50, y1: 56, x2: 50, y2: 14 });
+        svg.append(this._hHand, this._mHand, this._sHand);
+        svg.appendChild(el('circle', { class: 'dial-pin', cx: 50, cy: 50, r: 1.6 }));
+        this._dial = svg;
+    }
+
+    _renderCfg() {
+        const s = getSettings();
+        const row = (label, ctl) => $el('div', { class: 'cfg-row' }, [$el('span', { class: 'cfg-k', text: label }), ctl]);
+
+        const zones = s.clockZones.slice();
+        const chips = $el('div', { class: 'cfg-chips' });
+        for (const z of zones) {
+            chips.appendChild($el('button', {
+                class: 'chip', type: 'button', title: z,
+                text: _zoneLabel(z) + ' ✕',
+                onclick: () => saveSettings({ clockZones: zones.filter(x => x !== z) }),
+            }));
+        }
+
+        const picker = $el('select', { class: 'cfg-add' });
+        picker.appendChild($el('option', { value: '', text: '+ add city' }));
+        for (const z of ZONE_PRESETS) {
+            if (zones.includes(z)) continue;
+            picker.appendChild($el('option', { value: z, text: _zoneLabel(z) }));
+        }
+        picker.addEventListener('change', () => {
+            if (!picker.value) return;
+            saveSettings({ clockZones: [...zones, picker.value] });
+        });
+
+        this._cfg.replaceChildren(
+            row(tr('widget.clock.face'), _segmented(s.clockFace, [['digital', 'DIGITAL'], ['analog', 'ANALOG']],
+                v => saveSettings({ clockFace: v }))),
+            row(tr('widget.clock.hours'), _segmented(s.clockHours, [[24, '24H'], [12, '12H']],
+                v => saveSettings({ clockHours: v }))),
+            row(tr('widget.clock.cities'), $el('div', { class: 'cfg-cities' }, [chips, picker])),
+        );
+    }
+
     tick() {
         const now = new Date();
         const s = getSettings();
         const hours12 = s.clockHours === 12;
-        const time = hours12
-            ? now.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' })
-            : now.toTimeString().slice(0, 8);
-        const rows = [
-            ['LOCAL', time],
-            ['DATE', now.toISOString().slice(0, 10)],
-        ];
 
-        // The reason to put another city on a clock is to know whether you can
-        // call it, and the hour alone does not answer that — 07:04 is a
-        // different proposition depending on whose tomorrow it is. So each zone
-        // carries the day it is on there relative to here, and nothing when the
-        // two agree.
+        if (s.clockFace === 'analog') {
+            if (this._face.firstElementChild !== this._dial) this._face.replaceChildren(this._dial);
+            const ms = now.getMilliseconds();
+            const sec = now.getSeconds() + ms / 1000;
+            const min = now.getMinutes() + sec / 60;
+            const hr = (now.getHours() % 12) + min / 60;
+            this._sHand.setAttribute('transform', `rotate(${sec * 6} 50 50)`);
+            this._mHand.setAttribute('transform', `rotate(${min * 6} 50 50)`);
+            this._hHand.setAttribute('transform', `rotate(${hr * 30} 50 50)`);
+        } else {
+            const time = hours12
+                ? now.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' })
+                : now.toTimeString().slice(0, 8);
+            if (!this._digital || this._face.firstElementChild !== this._digital) {
+                this._digital = $el('div', { class: 'clock-digital' }, [
+                    this._dTime = $el('div', { class: 'clock-now' }),
+                    this._dDate = $el('div', { class: 'clock-date' }),
+                ]);
+                this._face.replaceChildren(this._digital);
+            }
+            this._dTime.textContent = time;
+            this._dDate.textContent = now.toISOString().slice(0, 10);
+        }
+
+        // The city list is the same in both faces. Each carries the day it is
+        // on relative to here, and nothing when the two agree — the hour alone
+        // does not tell you whether you can call.
         const hereYmd = _ymdIn(now, undefined) || now.toISOString().slice(0, 10);
+        const rows = [];
         for (const tz of (s.clockZones || [])) {
             let t;
             try {
-                t = now.toLocaleTimeString('en-US', {
-                    timeZone: tz, hour12: hours12, hour: '2-digit', minute: '2-digit',
-                });
+                t = now.toLocaleTimeString('en-US', { timeZone: tz, hour12: hours12, hour: '2-digit', minute: '2-digit' });
             } catch (_) { continue; }
             const thereYmd = _ymdIn(now, tz);
             let delta = 0;
             if (thereYmd && hereYmd) {
                 delta = Math.round((Date.parse(thereYmd + 'T00:00:00Z') - Date.parse(hereYmd + 'T00:00:00Z')) / 86400000);
             }
-            const day = delta > 0 ? `  +${delta}d` : delta < 0 ? `  ${delta}d` : '';
-            rows.push([_zoneLabel(tz), t + day]);
+            rows.push($el('div', { class: 'city' + (delta ? ' shifted' : '') }, [
+                $el('span', { class: 'city-k', text: _zoneLabel(tz) }),
+                $el('span', { class: 'city-v', text: t }),
+                $el('span', { class: 'city-d', text: delta > 0 ? `+${delta}d` : delta < 0 ? `${delta}d` : '' }),
+            ]));
         }
-        this.setRows(rows);
+        this._cities.replaceChildren(...rows);
     }
 }
 
