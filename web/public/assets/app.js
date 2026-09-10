@@ -656,6 +656,16 @@ class TabRuntime {
                     const cols = Math.max(2, Math.floor(availW / cell.w));
                     const rows = Math.max(2, Math.floor(availH / cell.h));
                     if (cols !== this.term.cols || rows !== this.term.rows) this.term.resize(cols, rows);
+                    // Publish what the fit actually decided. Half a day went
+                    // into inferring these four numbers from screenshots; the
+                    // terminal can simply say them, and the PERF widget shows
+                    // them without anyone opening DevTools.
+                    window.__soaGrid = {
+                        cols: this.term.cols, rows: this.term.rows,
+                        cellW: Math.round(cell.w * 100) / 100,
+                        availW: Math.round(availW),
+                        gap: Math.round(availW - this.term.cols * cell.w),
+                    };
                 }
             }
             this._everFit = true;
@@ -673,32 +683,35 @@ class TabRuntime {
             const css = dims && dims.css && dims.css.cell;
             let w = css && css.width, h = css && css.height;
 
-            let pw = 0, ph = 0;
-            if (this.term.element && this.term.cols > 0 && this.term.rows > 0) {
-                for (const c of this.term.element.querySelectorAll('.xterm-screen canvas')) {
-                    const r = c.getBoundingClientRect();
-                    if (r.width > pw) { pw = r.width; ph = r.height; }
-                }
-                if (!pw) {
-                    const rowsEl = this.term.element.querySelector('.xterm-rows');
-                    if (rowsEl) { const r = rowsEl.getBoundingClientRect(); pw = r.width; ph = r.height; }
-                }
-                pw = pw / this.term.cols;
-                ph = ph / this.term.rows;
-            }
-            if (pw > 0.5 && (!(w > 0.5) || Math.abs(w - pw) / pw > 0.05)) w = pw;
-            if (ph > 0.5 && (!(h > 0.5) || Math.abs(h - ph) / ph > 0.05)) h = ph;
-
-            if (!(w > 0.5) && this.term.element) {
-                const o = this.term.options || {};
-                const cs2 = getComputedStyle(this.term.element);
+            // Cross-check the width against the FONT — never against the
+            // painted canvas. Dividing the canvas by the column count is a
+            // feedback loop: the canvas is sized from the grid, so whatever
+            // column count the fit last chose is always "confirmed" by it.
+            // Measured live, the same 756px canvas reported a 7.2px cell at 105
+            // columns and a 9px cell at 84 — two stable, wrong answers.
+            //
+            // The font is measured from term.options, which is what xterm was
+            // constructed with. NOT from getComputedStyle: .xterm inherits the
+            // page's display face, so that route measured 16px United Sans and
+            // returned 15.17px per character.
+            const o = this.term.options || {};
+            if (o.fontSize && o.fontFamily) {
                 const ctx = TabRuntime._measureCtx
                     || (TabRuntime._measureCtx = document.createElement('canvas').getContext('2d'));
                 if (ctx) {
-                    ctx.font = `${o.fontSize ? o.fontSize + 'px' : cs2.fontSize} ${o.fontFamily || cs2.fontFamily}`;
+                    ctx.font = `${o.fontSize}px ${o.fontFamily}`;
                     const m = ctx.measureText('W'.repeat(100)).width / 100;
-                    if (m > 0.5) w = m;
+                    // Believe xterm only when it agrees with the font it is
+                    // supposed to be rendering in; otherwise it is running on a
+                    // metric cached before the web font arrived.
+                    if (m > 0.5 && (!(w > 0.5) || Math.abs(w - m) / m > 0.08)) w = m;
                 }
+            }
+            // Height has never been the failure and has no equivalent source,
+            // so fall back to the painted rows only if xterm offers nothing.
+            if (!(h > 0.5) && this.term.element && this.term.rows > 0) {
+                const c = this.term.element.querySelector('.xterm-screen canvas');
+                if (c) h = c.getBoundingClientRect().height / this.term.rows;
             }
             if (!(w > 0.5) || !(h > 0.5)) return null;
             return { w, h };
@@ -1199,7 +1212,23 @@ class Shell {
             this._ro.observe(this.termsEl);
         }
         if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(() => this._fitActive()).catch(() => {});
+            document.fonts.ready.then(() => {
+                // THE root cause of the dead strip. xterm measures its cell
+                // ONCE, when the terminal is opened, and caches it — and at
+                // that moment Fira Mono has usually not loaded, so it measures
+                // the fallback and keeps that number forever. Every later fit
+                // then divides the container by a cell width the renderer is
+                // not drawing with, and the grid stops short.
+                //
+                // xterm has no public "re-measure" call, but assigning a font
+                // option invalidates the cached metrics, so a no-op assignment
+                // makes it measure again — now with the real face.
+                for (const rt of this.tabs.values()) {
+                    if (!rt._opened) continue;
+                    try { rt.term.options.fontFamily = rt.term.options.fontFamily; } catch (_) {}
+                }
+                this._fitActive();
+            }).catch(() => {});
         }
 
         this._initRecovery();
