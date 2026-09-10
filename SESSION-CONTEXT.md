@@ -52,7 +52,42 @@ first eight are client-side and none of them was the dominant cost.
 | #47 | Time Machine read **every tab's whole buffer synchronously** every 5 min | 22 tabs × ~1000 `translateToString` + JSON + IDB write |
 | #52 | **`_broadcastSize` sent every size change to every tab** — one resize became 22 SIGWINCHes and 22 full TUI repaints | scales with tab count, which matched the reported "getting worse" |
 
-### The cell-width bug, which took four attempts
+### The cell-width bug — SOLVED at #54, after five wrong attempts
+
+**Root cause: xterm measures its cell ONCE, when the terminal opens, and caches
+it.** At that moment the web font (Fira Mono) has usually not loaded, so it
+measures the fallback and keeps that number for the life of the page. Every
+later fit then divides the container by a cell width the renderer is not
+drawing with, and the grid stops short. There is no public re-measure call, but
+**assigning a font option invalidates the cached metrics**, so a no-op
+`term.options.fontFamily = term.options.fontFamily` after `document.fonts.ready`
+makes it measure again with the real face.
+
+The reason this took five attempts is that **every source of truth I reached for
+was also lying**, each in a different way:
+
+| Source | Said | Why it lied |
+|---|---|---|
+| xterm internals (`dims.css.cell.width`) | ~11.9px | the stale pre-webfont metric |
+| canvas ÷ cols | 7.2px, then 9px | **a feedback loop** — the canvas is sized *from* the grid, so whatever column count the fit last chose is always "confirmed". The same 756px canvas gave 7.2px at 105 cols and 9px at 84: two stable, wrong fixed points |
+| `getComputedStyle(.xterm)` font | 15.17px | measures the **page** font — `.xterm` inherits the display face (16px United Sans), not the terminal's |
+| `term.options` font | **7.83px** | what xterm was actually constructed with — the truth |
+
+Measured after the fix: `cols 97, cell 7.83px, gap 3px` (sub-cell), from
+`84 cols, cell 9px, gap 6px`.
+
+**Two rules worth keeping.** Never derive a measurement from something that is
+itself derived from the value you are computing — check for the loop first. And
+`getComputedStyle` on an xterm element tells you about the page, not the
+terminal; `term.options` is the only honest source for what it is rendering in.
+
+The PERF widget now reports `GRID` and `GAP` so the terminal states its own
+geometry (`97x46 · cell 7.83px` / `3px`, GAP red past two cells) instead of it
+being inferred from screenshots — which is how half a day was spent.
+
+### The earlier, superseded attempts at the same bug
+
+#### (kept for the reasoning, not the conclusion)
 
 The right-hand black strip and the layout tearing share one root: **xterm
 reports a cell width it does not paint with.** Measured on the live dashboard:
@@ -177,6 +212,14 @@ near-zero with low FPS means paint. It named `xterm write` correctly.
    most recently active session per cwd.
 5. **#44 (LIQUID canvas/recovery/bands) was never visually verified** — the
    agent browser would not boot at the time.
+7. The terminal now sits **flush** in both skins (#54): MINIMAL was spending
+   12–14px of gutter plus the same again in padding, LIQUID ~10px per axis, to
+   frame a surface already distinct by tone. Tone and a hairline radius stay.
+   Band overlays were realigned to the new padding — if a skin's `.term`
+   padding changes again, `.term-bands` inset must follow it.
+8. `index.html` asset versions (`?v=`) were static across ~15 JS changes, so
+   neither side could tell what a page was running. All bumped at #54; bump
+   them when editing assets.
 6. `scripts/soa-version-nag` is loaded on this machine as
    `gui/503/com.soa-web.version-nag`; the repo copy of the plist still uses the
    canonical `/Users/test/.soa-web` paths.
