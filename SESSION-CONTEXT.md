@@ -7,6 +7,192 @@ time; treat them as a starting point to re-check, not gospel.
 
 ---
 
+## 2026-09-07 → 2026-09-09 · tab #1 `app` · session `6321e8b7`
+
+Continuation of the session below. Two threads: a long hunt for terminal lag
+and layout corruption, and a run of UI work (clock, settings, skins). 20 PRs
+merged, #33–#52.
+
+### The thing to read first
+
+**The daemon reads its source once, at startup.** It has been up since
+`Sep 7 15:03:45`, and the ReDoS fix in #16 landed on disk at `16:17:15` — 74
+minutes later. So for two days the running daemon executed the *buggy*
+quadratic launch-marker regex while the fix sat on disk, git clean, version
+correct, doing nothing. Measured effect: `/api/ping` over loopback at **p50
+2441ms, p90 6726ms, max 10283ms**, against 1–2ms when healthy. Everything
+downstream — bursty output, shredded layout, "the page freezes" — follows from
+an event loop that stalls for seconds.
+
+This trap is now automated: `scripts/soa-version-nag` (#51) compares the newest
+mtime under `server/src` against the daemon's own start time from
+`ps -o lstart` and pushes a phone notification when they disagree. A source file
+written after the process booted is a file that process has never read.
+
+**Still outstanding at the end of this session:** the restart. It loads #16
+(ReDoS), #21 (UTF-8 locale), #50 (measured context %). Nothing else is blocked
+on anything.
+
+### Terminal performance — the whole chain, in the order found
+
+Each of these was real and each was measured, but note the ordering lesson: the
+first eight are client-side and none of them was the dominant cost.
+
+| # | Cause | Evidence |
+|---|---|---|
+| #18 | xterm was using its **DOM renderer** — no renderer addon was loaded | `canvases: 0` |
+| #19 | `.xterm-viewport` pinned to `overflow: hidden`, so no compositor scrolling and no trackpad momentum | wheel became whole-line main-thread jumps |
+| #19 | ctx poll scanned every dirty tab at 2Hz (~66 row→string translations each) | every tab is dirty when every agent is producing |
+| #22 | the globe ran a full-rate three.js loop whenever the sidebar was visible | its own comment calls it "pure decoration" |
+| #32 | `queueReplay` rebuilt a 128 KB string on **every chunk** once past its cap | ~21 background tabs × every chunk |
+| #32 | `_detectDevServer` ran four regex passes, each allocating a copy, on all output from all tabs | gated now by `indexOf('http')` |
+| #32 | `_detectEffort` re-derived a badge from a 2 KB window per chunk, unthrottled | moved below the existing throttle |
+| #32 | `allowTransparency` forced per-cell compositing | reverted; bands use `mix-blend-mode: screen` instead |
+| #34/#36 | one xterm write per WebSocket chunk → batched per frame; then two bugs in that batching (typing was batched like scrolling; rAF never fires in an occluded window) | |
+| #47 | Time Machine read **every tab's whole buffer synchronously** every 5 min | 22 tabs × ~1000 `translateToString` + JSON + IDB write |
+| #52 | **`_broadcastSize` sent every size change to every tab** — one resize became 22 SIGWINCHes and 22 full TUI repaints | scales with tab count, which matched the reported "getting worse" |
+
+### The cell-width bug, which took four attempts
+
+The right-hand black strip and the layout tearing share one root: **xterm
+reports a cell width it does not paint with.** Measured on the live dashboard:
+container 1214px ÷ 102 cols = **11.9px per cell**, against a painted cell of
+**7.2px** (probably a stale metric from before the web font, or a device-pixel
+value at 2× DPR).
+
+Three fixes failed because they were all *fallbacks* — they only ran when
+xterm's lookup returned **nothing**, and a lookup that returns a **wrong**
+number sails through. The fix that worked (#46) makes the **paint
+authoritative**: the painted grid is exactly `cols × cellW`, so dividing it
+gives the truth, and xterm's number is believed only when it agrees within 5%.
+
+Then #48 removed FitAddon from the path entirely. It was sizing the grid from
+that same wrong metric, so every fit did **two** resizes — wrong, then
+corrected — and each is a SIGWINCH that repaints Claude's whole TUI. With the
+2-second fit guard re-firing on divergence it never stopped. `fitNow` now
+measures the container, derives the cell from paint (`_cellSize`), and resizes
+once.
+
+**Rule for the future: measure what is on screen, not what the library says is
+on screen.**
+
+### Context %, status and token accuracy (#50)
+
+Every context reading in the product came from the **client scraping a
+percentage out of Claude Code's footer** and reporting it up via `CTX_REPORT` —
+tab badges, the FLEET bar, `sessionManager`'s high-context checks, the usage
+throttler. Claude Code no longer prints that line, so the whole chain reports
+`null`.
+
+Replaced with a measurement: every transcript record carries that request's
+usage, and `input + cache_read + cache_creation + output` **is** the context it
+was holding, so the newest record in a session is its live context size
+(verified: `2 + 703,438 + 280 + 744 ≈ 704k`). The window is inferred — a context
+past 200k proves a 1M model. Client polls `/api/claude-usage` every 15s and maps
+by cwd; when the field is absent it no-ops and the old scrape still runs, so the
+rollout is safe in either order.
+
+**Do not confuse the two token quantities.** `sessions[].block.tok` is
+cumulative spend across every request (hundreds of millions); `ctxTokens` is
+what the model is currently holding. They were being read as if they meant the
+same thing. The cost model itself is fine — cache reads have their own rate and
+scale factor, not charged as fresh input.
+
+### The machine, not the code
+
+At the end of this session the Mac itself was the binding constraint:
+
+```
+load average 25.95 on 18 cores
+git pack-objects  92%   (a repack of ~/Desktop/whop-dev)
+git index-pack    90%   (a fetch --recurse-submodules)
+  parent: git log --oneline -S "…"   ← a pickaxe search over the monorepo
+OrbStack Helper   65%
+WindowServer      46%
+```
+
+The SoA daemon was **2.5%** and each Claude agent 3–4%. No frontend change is
+visible under a load average of 26. Check `uptime` before believing a
+performance report.
+
+### UI work shipped
+
+Clock (#37–#42): two faces, digital and an SVG dial; a ⚙ secondary menu for
+face, hour format and cities; local plus every city as identical fixed-width
+cells in **one row** that never wraps; the day offset shown only when it changes
+the answer. Cells are fixed at 46px — `flex: 1` tied their size to sidebar width
+and tab count, which is how two cities became two balloons.
+
+Settings (#39): the panes were a three-column table headed KEY / DESCRIPTION /
+VALUE — a config file in HTML. Now one row per decision: human name leading, key
+demoted, description in the quiet tone, every control in one right-hand column.
+Booleans became segmented ON/OFF switches writing through a hidden input, so
+every existing `get('set-x').value === 'true'` save path is untouched. **All
+seven tabs audited functional**, including a save round-trip.
+
+Skins (#43–#45): MINIMAL and LIQUID had none of the session's new components.
+The tokens carried the palette across automatically — which is why nothing
+*looked* broken — but anything encoding an assumption about the palette or
+geometry failed silently. Two real breakages: the transcript band tinted with
+the accent and screen-blended it, and MINIMAL's accent is ink, so it was
+invisible there; and the band overlay was positioned to TRON's terminal padding
+in every skin. **MINIMAL also had no dark mode** — it overrode the palette
+unconditionally. Added one, after first rewriting thirty hard-coded
+`rgba(34,37,43,…)` values into `--m-ink-rgb`/`--m-card` so the dark block is a
+palette swap and duplicates no rules.
+
+Also: a recovery panel for when the daemon disappears (#15, holds back 8s, live
+retry countdown, escalates at 45s); conversation bands in the terminal (#23–#29,
+history only, never the composer or the queued-message box — the discriminator
+is that a sent turn's caret is in column 0 while Claude's own chrome indents
+it); turn navigation with Ctrl/Cmd+Shift+Up/Down (#49); and the **PERF widget**
+(#33), which reports FPS, blocked main-thread ms/s, stream rate and a
+per-subsystem breakdown. `BLOCKED` is the discriminator: high means JavaScript,
+near-zero with low FPS means paint. It named `xterm write` correctly.
+
+### Techniques that paid off
+
+- **`stty -f /dev/ttysNNN size`** on the daemon's child shells is ground truth
+  for what the client told each PTY. `ps -axo ppid=,tty=` maps them.
+- **Timing loopback `/api/ping` in a loop** measures the daemon's event loop
+  directly. p50 in milliseconds is healthy; seconds is a blocked loop.
+- **CPU tells you which kind of stall**: pegged means computing (a regex),
+  ~2% while stalling means blocked (I/O, or a long synchronous read).
+- The agent browser participates in the fleet: **PTY size is the MAX across
+  live clients**, so a headless client at a different size is a real
+  participant. Detach it (`soa-browser open …/api/tabs`) when not measuring.
+- The agent browser runs `--disable-gpu` and pins rAF near 24fps, so **no frame
+  rate measured there means anything**. That is why the PERF widget exists.
+
+### Still open
+
+1. **Restart the daemon** — loads #16, #21, #50. Everything else waits on it.
+2. **Tag `v0.3.0`** after the restart has proven the server half. 41+ commits
+   since `v0.2.0`, and `soa-selfupdate` tracks release tags, so every other
+   install is still on `v0.2.0` including the ReDoS fix.
+3. **Kill the git pickaxe/repack** and consider pausing OrbStack.
+4. **Bind tab → Claude session via the Stop hook** — the canvas still resolves
+   by cwd, so tabs sharing a directory get a neighbour's transcript (wrong
+   prompts, missing artifacts). Same gap makes the new ctx% mapping pick the
+   most recently active session per cwd.
+5. **#44 (LIQUID canvas/recovery/bands) was never visually verified** — the
+   agent browser would not boot at the time.
+6. `scripts/soa-version-nag` is loaded on this machine as
+   `gui/503/com.soa-web.version-nag`; the repo copy of the plist still uses the
+   canonical `/Users/test/.soa-web` paths.
+
+### Machine facts added this session
+
+- **uid 503**; launchd label `app.s0a.web.local`; logs `~/.s0a-local/logs`.
+- **`notify.json` did not exist** — no push on this machine could reach the user,
+  including the usage alerts. Created at `~/.s0a-local/state/notify.json`
+  (chmod 600) with an ntfy topic; delivery verified end to end.
+- CSS/JS are served with `?v=` plus `max-age=0` and an ETag, so edits reach the
+  browser on reload — a stale asset is not a plausible explanation for "nothing
+  changed"; an unreloaded page is.
+
+---
+
 ## 2026-08-31 → 2026-09-07 · tab #1 `app` · session `6321e8b7`
 
 Working directory `~/.s0a-local/app`, branch `main`. One continuous thread:
