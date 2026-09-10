@@ -1406,7 +1406,7 @@ function mount(app, requireAuthed, sessions) {
     // /api/tts). The global express.json({limit:'16kb'}) in index.js runs first
     // and short-circuits any per-route parser, so 16kb is the real (ample) limit —
     // no misleading per-route override here.
-    app.post('/api/sessions', (req, res) => {
+    app.post('/api/sessions', requireAuthed, (req, res) => {
         if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'loopback only' });
         // Premium gate: even a loopback CLI caller (soa-sessions) needs the
         // manager entitlement. Keeps the paid surface off on free installs.
