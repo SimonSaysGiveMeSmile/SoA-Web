@@ -3380,7 +3380,20 @@ class Shell {
         if (!this._sentSize) this._sentSize = new Map();
         const key = cols + 'x' + rows;
         for (const id of this.order) {
-            if (this._sentSize.get(id) === key) continue;
+            const known = this._sentSize.get(id);
+            if (known === key) continue;
+            // A background tab is told a size EXACTLY ONCE — enough to lift it
+            // off the 120x32 spawn default so its agent wraps sensibly before
+            // you ever look at it. After that it is left alone until you switch
+            // to it, where _activate fits it properly.
+            //
+            // Sending every size change to every tab turned one resize of the
+            // visible terminal into twenty-two SIGWINCHes, and a SIGWINCH makes
+            // Claude repaint its entire screen. Twenty-two full repaints at once,
+            // arriving through a daemon whose event loop is already stalling, is
+            // how the layout ends up shredded — and it got worse with every tab
+            // added, which is exactly the reported shape.
+            if (known && id !== this.activeId) continue;
             this._sentSize.set(id, key);
             this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows });
         }
