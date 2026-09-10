@@ -1934,6 +1934,14 @@ class PerfWidget extends Widget {
             ['STREAM', `${s.kbPerSec.toFixed(0)} KB/s · ${Math.round(s.chunksPerSec)}/s`],
         ];
         if (s.heapMb) rows.push(['HEAP', Math.round(s.heapMb) + ' MB']);
+        // The terminal's own measurement of itself. A GAP much larger than one
+        // cell means the grid is not filling its container — the dead strip on
+        // the right — and cellW says whether the fit believed a sane cell size.
+        const g = window.__soaGrid;
+        if (g) {
+            rows.push(['GRID', `${g.cols}x${g.rows} · cell ${g.cellW}px`]);
+            rows.push(['GAP', g.gap + 'px', g.gap > g.cellW * 2 ? 'err' : null]);
+        }
         if (!s.parts.length) {
             rows.push(['—', 'no measurable js cost']);
         } else {

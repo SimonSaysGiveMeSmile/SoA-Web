@@ -167,13 +167,16 @@
 /* ── The stage: dark slate terminal cards on porcelain ── */
 [data-ui="minimal"] .terms { background: var(--soa-bg); }
 [data-ui="minimal"] .terms .term {
-  inset: 12px 14px 14px;
-  padding: 12px 14px;
+  /* The slate card used to float with a 12–14px gutter on every side and the
+     same again as padding — nearly 30px of ground per axis spent on framing a
+     terminal whose whole job is to hold characters. The card reads perfectly
+     well flush: keep the tone and a hairline radius, spend the rest on columns. */
+  inset: 0;
+  padding: 4px 0 4px 6px;
   background: var(--m-slate);
-  border: 1px solid var(--m-slate-edge);
-  border-radius: 14px;
+  border: none;
+  border-radius: 6px;
   overflow: hidden;
-  box-shadow: var(--m-shadow-deep);
 }
 
 /* ── Status bar ── */
@@ -552,7 +555,7 @@
 
 /* Bands: aligned to THIS skin's terminal padding, and tinted with light rather
    than ink so screen-blending over the dark slate actually shows. */
-[data-ui="minimal"] .term-bands { inset: 12px 14px 14px; }
+[data-ui="minimal"] .term-bands { inset: 4px 0 4px 6px; }   /* follows .term padding */
 [data-ui="minimal"] .term-band[data-kind="user"] {
   background: linear-gradient(90deg,
       rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.09) 55%, rgba(255, 255, 255, 0.03) 100%);
