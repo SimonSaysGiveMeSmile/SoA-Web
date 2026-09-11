@@ -30,6 +30,13 @@
  * Set either to 0 to flush on the next tick instead, which still merges
  * everything node delivered in the same poll phase.
  *
+ * ECHO is the exception to all of it. For 300ms after a key reaches a tab
+ * (SOA_TERM_ECHO_MS), that tab's output is the characters appearing under
+ * somebody's cursor, and a 12ms hold on a keystroke is felt in a way that a
+ * 12ms hold on a stream never is — so during that window the active tab flushes
+ * on the next tick. Typing is bounded by how fast a person types, so this costs
+ * a handful of extra frames per second and nothing else.
+ *
  * Compatibility is per socket, never global: a client opts in by sending
  * INPUT_KIND.CLIENT_CAPS with `{termBatch:true}`. Anything that has not opted
  * in — a tab still running the previous bundle, the read-only share viewers —
@@ -44,6 +51,9 @@ const envMs = (name, fallback) => {
 };
 const BATCH_MS = envMs('SOA_TERM_BATCH_MS', 12);
 const BATCH_BG_MS = envMs('SOA_TERM_BATCH_BG_MS', 100);
+// How long after a keystroke a tab's output is treated as echo and flushed on
+// the next tick instead of waiting out the batching window.
+const ECHO_WINDOW_MS = envMs('SOA_TERM_ECHO_MS', 300);
 
 class TermBatcher {
     /**
@@ -66,6 +76,29 @@ class TermBatcher {
         this._timer = null;
         this._immediate = null;
         this._lastBgFlush = 0;
+        this._typedAt = new Map();   // tabId -> when that tab last received input
+    }
+
+    /**
+     * Somebody typed into this tab. For a short window after that, its output is
+     * ECHO — the characters appearing under the cursor of whoever is watching —
+     * and holding echo for a batching window is the one delay in this file that
+     * is felt directly. 12ms is nothing against a stream and everything against
+     * a keystroke, so during the window the tab flushes on the next tick.
+     */
+    noteInput(tabId) {
+        if (tabId != null) this._typedAt.set(tabId, this._now());
+        // The map only ever holds tabs someone is typing in; still, don't let a
+        // long-lived session accumulate an entry per tab that ever saw a key.
+        if (this._typedAt.size > 64) {
+            const cutoff = this._now() - ECHO_WINDOW_MS;
+            for (const [id, at] of this._typedAt) if (at < cutoff) this._typedAt.delete(id);
+        }
+    }
+
+    _isEcho(tabId) {
+        const at = this._typedAt.get(tabId);
+        return at != null && (this._now() - at) < ECHO_WINDOW_MS;
     }
 
     /** Queue one tab's output. Ordering within a tab is preserved. */
@@ -74,7 +107,8 @@ class TermBatcher {
         const q = this._pending.get(tabId);
         if (q) q.push(data);
         else this._pending.set(tabId, [data]);
-        this._arm(tabId === this._activeTab() ? this._delayMs : this._bgDelayMs);
+        if (tabId === this._activeTab()) this._arm(this._isEcho(tabId) ? 0 : this._delayMs);
+        else this._arm(this._bgDelayMs);
     }
 
     // Wake no later than the soonest thing waiting needs. A background chunk

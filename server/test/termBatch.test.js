@@ -184,3 +184,40 @@ test('destroy flushes background tabs too', () => {
     assert.equal(ws.frames.length, 1);
     assert.equal(ws.frames[0].d.items[0].data, 'would have waited five seconds');
 });
+
+test('a tab someone is typing into flushes on the next tick, not after the window', async () => {
+    // The batching window is what makes twenty-two streaming agents affordable,
+    // and it is also the one delay a person feels directly — it sits between the
+    // key they pressed and the character appearing. Echo opts out of it.
+    let clock = 0;
+    const ws = batching();
+    const b = new TermBatcher({
+        sockets: () => [ws], activeTab: () => 1,
+        delayMs: 25, bgDelayMs: 100, now: () => clock,
+    });
+
+    b.noteInput(1);
+    b.push(1, 'x');
+    await tick();
+    assert.equal(ws.frames.length, 1, 'echo went out without waiting for the window');
+
+    // Once the window since the keystroke has passed, the same tab is an
+    // ordinary stream again and pays the ordinary batching delay.
+    clock += 5000;
+    b.push(1, 'more output');
+    await tick();
+    assert.equal(ws.frames.length, 1, 'a stream still waits its turn');
+});
+
+test('typing in one tab does not un-batch the other twenty-one', async () => {
+    let clock = 0;
+    const ws = batching();
+    const b = new TermBatcher({
+        sockets: () => [ws], activeTab: () => 1,
+        delayMs: 25, bgDelayMs: 100, now: () => clock,
+    });
+    b.noteInput(1);
+    b.push(2, 'background chatter');
+    await tick();
+    assert.equal(ws.frames.length, 0, 'a background tab keeps its long window');
+});

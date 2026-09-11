@@ -333,6 +333,14 @@ app.get('/api/devices', requireAuthed, (req, res) => {
         devices.push({
             connectedAt: ws._connectedAt || null,
             userAgent: ws._userAgent || '',
+            // The grid this viewer has declared it can render, and whether it is
+            // on screen. The PTY is sized to the smallest VISIBLE viewer, so
+            // when a terminal is leaving a black strip down its right this is
+            // the answer to "which window is holding it narrow" — without it,
+            // the only way to find out was to close windows one at a time.
+            viewport: ws._viewport
+                ? { cols: ws._viewport.cols, rows: ws._viewport.rows, hidden: ws._viewport.hidden === true }
+                : null,
         });
     }
     res.json({ ok: true, count: devices.length, devices });
@@ -1157,6 +1165,10 @@ function handleInput(session, d, ws) {
                 // instead of the text impersonating local typing.
                 if (typeof d.via === 'string' && d.via) automations.announce(mgr, d.id, d.via.slice(0, 40));
                 const text = d.text || '';
+                // What comes back from this write is ECHO. Tell the batcher, so
+                // it stops holding this tab's output for the batching window
+                // while somebody is typing into it.
+                try { if (session._termBatcher) session._termBatcher.noteInput(d.id); } catch (_) {}
                 tab.write(text);
                 // Enter (CR/LF) is the only keystroke that plausibly ends
                 // a `cd` command — poll the shell's cwd on a short delay
@@ -1173,7 +1185,10 @@ function handleInput(session, d, ws) {
             // describes all of them — including tabs this client has never
             // opened, which is how a background agent used to sit at the 120x32
             // spawn size until you happened to visit it.
-            const vp = termGeometry.normalizeViewport(d.cols, d.rows);
+            // `hidden` is the client telling us it is not on screen. A viewer
+            // nobody is looking at must not be the one that decides the grid —
+            // see termGeometry.js. Absent from an older client = visible.
+            const vp = termGeometry.normalizeViewport(d.cols, d.rows, d.hidden === true);
             if (ws && vp) ws._viewport = vp;
             syncTabGeometry(session, d.id);
             break;
