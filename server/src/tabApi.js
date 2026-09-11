@@ -82,6 +82,39 @@ function mount(app, requireAuthed, sessions) {
         res.json({ ok: true, tabs });
     });
 
+    // Every tab's scrollback, in one call, straight from the daemon's ring.
+    //
+    // This exists for the Time Machine, whose capture used to read the BROWSER's
+    // xterm buffers. That is the wrong source three ways over: a tab you have
+    // never opened in this window has no xterm buffer at all (its bytes are
+    // still queued as pending replay), the buffers that do exist are capped at
+    // 1000 lines to keep twenty-odd tabs inside the page's memory budget, and
+    // reading them back through translateToString throws away every colour and
+    // every escape. The daemon holds 256 KB of RAW bytes per tab for ALL tabs,
+    // live or backgrounded, and persists them across its own restarts — so a
+    // snapshot taken from here captures the fleet, not the window.
+    //
+    // `?bytes=` trims each tab to its last N bytes (from a line boundary, so a
+    // trimmed dump never opens mid-escape-sequence and paints the rest of the
+    // replay the wrong colour).
+    router.get('/api/scrollback', requireAuthed, (req, res) => {
+        const s = resolveSession(req);
+        if (!s) return res.json({ ok: true, tabs: [] });
+        const cap = Math.max(0, Math.min(1024 * 1024, parseInt(req.query.bytes, 10) || 0));
+        const tabs = s.tabMgr.list().map(t => {
+            const tab = s.tabMgr.get(t.id);
+            let data = '';
+            try { data = s.tabMgr.scrollback(t.id) || ''; } catch (_) { data = ''; }
+            if (cap && data.length > cap) {
+                const cut = data.length - cap;
+                const nl = data.indexOf('\n', cut);
+                data = data.slice(nl >= 0 && nl - cut < 4096 ? nl + 1 : cut);
+            }
+            return { id: t.id, title: t.title, cwd: tab ? tab.cwd : null, exited: t.exited, data };
+        });
+        res.json({ ok: true, tabs });
+    });
+
     router.post('/api/tabs', requireAuthed, (req, res) => {
         const s = resolveSession(req);
         if (!s) return res.status(503).json({ ok: false, error: 'no active session' });

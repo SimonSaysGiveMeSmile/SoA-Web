@@ -26,27 +26,68 @@
  *
  * What we capture per snapshot:
  *   - viewMode, activeId, tab order
- *   - per tab: id, title, cwd, scrollback rendered from xterm's active buffer
+ *   - per tab: id, title, cwd, and its scrollback
  *   - settings JSON, language, per-tab ctx % and agent status
  *
+ * WHERE THE SCROLLBACK COMES FROM (v3) — this is what "it doesn't capture all
+ * the context" was. Capture used to read the browser's own xterm buffers, and
+ * that source is incomplete three separate ways:
+ *
+ *   - a tab this window has never ACTIVATED has no xterm buffer to read. Its
+ *     output is still sitting in TabRuntime._replayChunks waiting for a first
+ *     valid fit, so it dumped as an empty string and the snapshot recorded the
+ *     tab as having no history at all. On a 22-tab fleet where you work in
+ *     three of them, that is most of the fleet.
+ *   - the buffers that DO exist hold 1000 lines (deliberately: twenty-odd
+ *     5000-line buffers was crashing the page), so even a tab you live in was
+ *     captured up to its last thousand lines and no further.
+ *   - translateToString returns plain text, so every colour, every cursor move
+ *     and every escape was thrown away before it was ever written down. A
+ *     restore repainted a grey transcript of something that had been coloured.
+ *
+ * The daemon holds the real thing: a 256 KB ring of RAW bytes per tab, for
+ * EVERY tab, live or backgrounded or never once looked at, persisted across its
+ * own restarts. So capture asks it (GET /api/scrollback) and stores those bytes
+ * verbatim; the xterm dump survives only as the fallback for when the daemon
+ * cannot be reached, which is also the only case where it is all we have.
+ *
+ * HOW IT STAYS SMALL. Raw bytes for a whole fleet are ~20× what the old text
+ * dump was, and 60 snapshots of it would be hundreds of megabytes. But between
+ * two snapshots five minutes apart most tabs have emitted nothing, so the same
+ * bytes were being written 60 times over. Scrollback now lives in its own
+ * content-addressed store: a tab entry carries `sb`, the hash of its bytes, and
+ * the bytes are written once under that key. An unchanged tab costs a 16-byte
+ * string per snapshot. Blobs nothing references any more are collected when
+ * snapshots are pruned.
+ *
  * Why IndexedDB, not localStorage:
- *   60 snapshots × ~200 KB of scrollback each = ~12 MB. localStorage caps at
- *   5–10 MB and serializes synchronously on the main thread; IDB handles the
- *   size and stays off the render path.
+ *   localStorage caps at 5–10 MB and serializes synchronously on the main
+ *   thread; IDB handles the size and stays off the render path.
  *
  * Retention: hardcoded MAX_SNAPSHOTS = 60. Older entries are pruned on each
  * write so quota pressure can't build up over a long-lived session.
  */
 
 const DB_NAME = 'soa-web-tm';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'snapshots';
+// Content-addressed scrollback. Keyed by hash, so a tab that has not emitted
+// anything since the last snapshot is stored once and referenced sixty times.
+const BLOBS = 'blobs';
 const MAX_SNAPSHOTS = 60;
 const INTERVAL_MS = 5 * 60 * 1000;
 const MAX_LINES_PER_TAB = 4096;
-// v2 adds per-tab cwd — the field that makes REBUILD possible. v1 snapshots stay
-// readable and restore in replay-only mode.
-const SCHEMA_VERSION = 2;
+// What we keep per tab when the daemon gives us its raw ring. Its own cap is
+// 256 KB; this is the same number, so we take everything it has.
+const MAX_BYTES_PER_TAB = 256 * 1024;
+// The daemon is on loopback. If it cannot answer in this long it is wedged, and
+// a snapshot must degrade to the local buffers rather than block the page.
+const FETCH_TIMEOUT_MS = 4000;
+// v2 adds per-tab cwd — the field that makes REBUILD possible. v3 moves the
+// scrollback into the blob store and keeps RAW bytes instead of stripped text.
+// v1 and v2 snapshots stay readable: their scrollback is inline, and restore
+// takes it from wherever it finds it.
+const SCHEMA_VERSION = 3;
 // A snapshot is worthless if writing it wedges the tab, so IDB work is bounded.
 const IDB_TIMEOUT_MS = 4000;
 // How long to wait for the daemon's reopened tabs to arrive over the WS snapshot.
@@ -77,6 +118,12 @@ function _open() {
             const db = req.result;
             if (!db.objectStoreNames.contains(STORE)) {
                 db.createObjectStore(STORE, { keyPath: 'ts' });
+            }
+            // Added in DB_VERSION 2. Existing snapshots keep their inline
+            // scrollback and are never rewritten — an upgrade must not be able
+            // to lose the history it is upgrading.
+            if (!db.objectStoreNames.contains(BLOBS)) {
+                db.createObjectStore(BLOBS, { keyPath: 'h' });
             }
         };
         req.onsuccess = () => { clearTimeout(timer); _db = req.result; resolve(_db); };
@@ -145,6 +192,92 @@ async function _prune() {
     all.sort((a, b) => a.ts - b.ts);
     const drop = all.length - MAX_SNAPSHOTS;
     for (let i = 0; i < drop; i++) await _delete(all[i].ts);
+    // Pruning is the only thing that can orphan a blob, so it is the only place
+    // that needs to collect them.
+    try { await _gcBlobs(); } catch (_) {}
+}
+
+// ── Content-addressed scrollback ────────────────────────────────────────────
+// FNV-1a over the string. Not a cryptographic hash and does not need to be:
+// the only question it answers is "are these the same bytes I already stored",
+// and the length is folded in so a collision has to match on both.
+function _hash(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return h.toString(36) + '-' + str.length.toString(36);
+}
+
+function _blobTx(mode) {
+    return _open().then(db => db.transaction(BLOBS, mode).objectStore(BLOBS));
+}
+
+// Write the bytes only if this hash is not already on disk. The read costs one
+// index lookup; the write it avoids is a quarter of a megabyte.
+async function _putBlob(h, data) {
+    const store = await _blobTx('readwrite');
+    return new Promise((res, rej) => {
+        const get = store.get(h);
+        get.onsuccess = () => {
+            if (get.result) { res(false); return; }
+            const put = store.put({ h, data });
+            put.onsuccess = () => res(true);
+            put.onerror = () => rej(put.error);
+        };
+        get.onerror = () => rej(get.error);
+    });
+}
+
+async function _getBlob(h) {
+    const store = await _blobTx('readonly');
+    return new Promise((res) => {
+        const r = store.get(h);
+        r.onsuccess = () => res(r.result ? r.result.data : '');
+        r.onerror = () => res('');
+    });
+}
+
+// Drop every blob no surviving snapshot points at. Called after pruning, which
+// is the only moment a reference can disappear.
+async function _gcBlobs() {
+    const live = new Set();
+    for (const snap of await _all()) {
+        for (const t of snap.tabs || []) if (t && t.sb) live.add(t.sb);
+    }
+    const store = await _blobTx('readwrite');
+    await new Promise((res) => {
+        const r = store.getAllKeys();
+        r.onsuccess = () => {
+            for (const key of r.result || []) if (!live.has(key)) store.delete(key);
+            res();
+        };
+        r.onerror = () => res();
+    });
+}
+
+// ── The authoritative scrollback ────────────────────────────────────────────
+// Every tab's raw bytes from the daemon in one call. Returns null — not an
+// empty map — when it cannot be reached, so the caller can tell "the daemon
+// says these tabs are empty" apart from "there was no daemon to ask".
+async function _fetchFleetScrollback(shell) {
+    try {
+        const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctl ? setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS) : null;
+        let r;
+        try {
+            r = await fetch(_api(shell, `/api/scrollback?bytes=${MAX_BYTES_PER_TAB}`), {
+                credentials: 'include', signal: ctl ? ctl.signal : undefined,
+            });
+        } finally { if (timer) clearTimeout(timer); }
+        if (!r || !r.ok) return null;
+        const j = await r.json();
+        if (!j || !j.ok || !Array.isArray(j.tabs)) return null;
+        const map = new Map();
+        for (const t of j.tabs) if (t && t.id != null) map.set(t.id, typeof t.data === 'string' ? t.data : '');
+        return map;
+    } catch (_) { return null; }
 }
 
 // Per-tab dump cache. A snapshot re-reads every tab's whole buffer, and on a
@@ -188,24 +321,39 @@ export async function snapshotNow(shell) {
     if (!shell) return null;
     const ts = Date.now();
     const tabs = [];
-    // Yield between tabs. Reading a buffer is ~1000 translateToString calls, and
-    // doing twenty-odd of those back to back is a single task long enough to
-    // freeze the page — which is what a snapshot every five minutes felt like.
-    // Broken up, no individual task is long enough to drop a frame.
+    // The fleet's real scrollback, asked for ONCE. null means the daemon could
+    // not be reached, and only then do we fall back to this window's buffers.
+    const fleet = await _fetchFleetScrollback(shell);
+    // Yield between tabs. Hashing and storing a quarter-megabyte per tab back to
+    // back is a single task long enough to freeze the page — which is what a
+    // snapshot every five minutes felt like. Broken up, no individual task is
+    // long enough to drop a frame.
     const breathe = () => new Promise(r => setTimeout(r, 0));
     let n = 0;
+    let fromDaemon = 0;
     for (const id of shell.order) {
         const rt = shell.tabs.get(id);
         if (!rt) continue;
         if (n++ > 0) await breathe();
-        tabs.push({
+        // The daemon's bytes win whenever it has them, INCLUDING when it says a
+        // tab is empty — it is the one that saw the output. The local buffer is
+        // for when there is nobody to ask.
+        let text = fleet && fleet.has(id) ? fleet.get(id) : null;
+        if (text == null) text = _dumpScrollback(rt);
+        else fromDaemon++;
+        const entry = {
             id,
             title: rt.title || `tab #${id}`,
             // The field that makes a rebuild possible. Without it a snapshot can
             // only ever repaint tabs that still exist.
             cwd: (shell._tabCwd && shell._tabCwd.get(id)) || null,
-            scrollback: _dumpScrollback(rt),
-        });
+        };
+        if (text) {
+            const h = _hash(text);
+            try { await _putBlob(h, text); entry.sb = h; }
+            catch (_) { entry.scrollback = text; }   // blob store unavailable: inline it
+        }
+        tabs.push(entry);
     }
     const ctxPct = {};
     for (const [id, p] of shell._ctxPct || []) ctxPct[id] = p;
@@ -230,7 +378,9 @@ export async function snapshotNow(shell) {
     try {
         await _putTolerant(snap);
         await _prune();
-        console.log(`[timemachine] saved snapshot at ${new Date(ts).toLocaleTimeString()} (${tabs.length} tabs, ${tabs.filter(t => t.cwd).length} with cwd)`);
+        console.log(`[timemachine] saved snapshot at ${new Date(ts).toLocaleTimeString()} `
+            + `(${tabs.length} tabs, ${tabs.filter(t => t.cwd).length} with cwd, `
+            + `${fromDaemon} from the daemon, ${tabs.filter(t => t.sb || t.scrollback).length} with scrollback)`);
     } catch (err) {
         console.warn('[timemachine] save failed', err);
         return null;
@@ -246,6 +396,10 @@ export async function listSnapshots() {
         tabCount: (s.tabs || []).length,
         // A snapshot can rebuild only the tabs whose cwd it recorded.
         cwdCount: (s.tabs || []).filter(t => t && t.cwd).length,
+        // ...and it can only REPLAY the tabs whose scrollback it actually got.
+        // Surfacing this is the point: a snapshot that captured three tabs out
+        // of twenty-two should say so on the row, not at restore time.
+        sbCount: (s.tabs || []).filter(t => t && (t.sb || t.scrollback)).length,
         v: s.v || 1,
         avgCtx: _avgCtx(s),
         viewMode: s.viewMode,
@@ -401,7 +555,13 @@ export async function restoreSnapshot(ts, shell) {
         if (id == null) continue;
         const rt = shell.tabs.get(id);
         if (!rt) continue;
-        const replay = (sav.scrollback || '').replace(/\n/g, '\r\n');
+        // v3 keeps the bytes in the blob store and the hash here; v1/v2 kept
+        // the text inline. Read from wherever this snapshot put it.
+        let saved = sav.sb ? await _getBlob(sav.sb) : (sav.scrollback || '');
+        // v3 bytes are raw PTY output and already carry their own CRLF; the old
+        // inline dumps were line-joined text that needs them added. Rewriting
+        // CRLF-terminated output would double every newline.
+        const replay = /\r\n/.test(saved) ? saved : saved.replace(/\n/g, '\r\n');
         rt.write(SANE + divider);
         if (replay) rt.write(replay + '\r\n');
         rt.write(SANE);
@@ -522,10 +682,15 @@ export async function openTimemachineModal(shell) {
             // Say up front what this row can actually do: a v1 snapshot has no
             // cwds, so it can only repaint tabs that still exist.
             const kind = r.cwdCount ? `${r.cwdCount} restorable` : 'view only';
+            // How much history this row actually holds. A snapshot that caught
+            // 3 of 22 tabs looked identical to one that caught all 22 until you
+            // restored it and found the other nineteen blank.
+            const hist = r.sbCount == null ? ''
+                : ` · ${r.sbCount}/${r.tabCount} with history`;
             row.innerHTML = `
                 <div class="soa-tm-when">
                     <strong>${_fmt(r.ts)}</strong>
-                    <span class="soa-tm-meta">${_ago(r.ts)} · ${r.tabCount} tab${r.tabCount === 1 ? '' : 's'} · ${kind} · ${r.viewMode || 'tabs'}${ctx}</span>
+                    <span class="soa-tm-meta">${_ago(r.ts)} · ${r.tabCount} tab${r.tabCount === 1 ? '' : 's'} · ${kind}${hist} · ${r.viewMode || 'tabs'}${ctx}</span>
                 </div>
                 <div class="soa-tm-row-actions">
                     <button class="soa-tm-restore" type="button">Restore</button>

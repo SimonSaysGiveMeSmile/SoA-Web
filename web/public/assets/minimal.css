@@ -533,7 +533,9 @@
 [data-ui="minimal"] .ctx-turn.latest { background: rgba(var(--m-ink-rgb), 0.045); }
 [data-ui="minimal"] :is(.ctx-art-t, .ctx-step-x) { font-family: var(--font-display); color: var(--soa-fg); }
 [data-ui="minimal"] .ctx-step-add { font-family: var(--font-display); text-transform: lowercase; }
-/* The pull tab is furniture on paper: a hairline grip, no glow. */
+/* The pull tab is furniture on paper: a card-coloured tab, a hairline grip,
+   no glow. */
+[data-ui="minimal"] .ctx-pull { background-color: var(--m-card); }
 [data-ui="minimal"] .ctx-pull::before { background: rgba(var(--m-ink-rgb), 0.28); }
 [data-ui="minimal"] .ctx-pull:hover { box-shadow: none; background-color: var(--m-card); }
 
