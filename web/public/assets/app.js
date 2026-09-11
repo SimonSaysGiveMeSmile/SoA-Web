@@ -16,7 +16,7 @@
  * (scripts/vercel-build.js) rewrites it from env vars.
  */
 
-import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=18';
+import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
@@ -220,10 +220,26 @@ class TabRuntime {
         // and flush it on the first successful fit — see flushPendingReplay.
         this._replayChunks = [];
         this._replayLen = 0;
+        this._replayTruncated = false;
+        this._resetPending = false;
         this._wq = [];
         this._wRaf = null;
         this._wTimer = null;
         this._everFit = false;
+        this._fontMetricsDirty = false;
+        // Two different numbers that used to be one, which is why they could
+        // silently disagree:
+        //   _desired  what this window measured it has room for — reported UP
+        //             to the daemon as this viewer's request.
+        //   _authGrid what the daemon says the PTY actually is — the grid we
+        //             must RENDER at, since the agent is drawing for it.
+        // When one viewer is attached they are equal. When they are not, the
+        // emulator follows _authGrid and the spare columns simply go unused;
+        // drawing at _desired instead is what wrapped every line onto the left
+        // of the one below it.
+        this._desired = null;
+        this._authGrid = null;
+        this._suppressReport = false;
         this._renderer = null;
         // absolute buffer line -> 'user' | 'tool' | '' (classified once; a line
         // that has scrolled into history can never change again)
@@ -269,8 +285,16 @@ class TabRuntime {
         let pending = null;
         let lastSent = null;
         this._onResize = (cols, rows) => {
-            if (lastSent && lastSent.cols === cols && lastSent.rows === rows) return;
+            // A grid we adopted from the daemon is an answer, not a request.
+            // Echoing it back would ratchet: the reported size would become the
+            // minimum, which would become the next reported size.
+            if (this._suppressReport) return;
             if (pending) clearTimeout(pending);
+            pending = null;
+            // A drag can return A → B → A before the debounce fires. Cancel B
+            // even if A was already sent, or the PTY ends up at B while xterm
+            // stays at A and subsequent stable fits never correct it.
+            if (lastSent && lastSent.cols === cols && lastSent.rows === rows) return;
             pending = setTimeout(() => {
                 lastSent = { cols, rows };
                 pending = null;
@@ -300,6 +324,13 @@ class TabRuntime {
 
     write(data) {
         if (!data) return;
+        // A visible tab can still be waiting for its first valid measurement.
+        // Keep replay and live bytes in order until there is a real grid.
+        if (!this._everFit || this._resetPending || this._replayChunks.length) {
+            this.queueReplay(data);
+            this.flushPendingReplay();
+            return;
+        }
         this._wq.push(data);
         if (this._wRaf || this._wTimer) return;
         // SCROLLING defers a write; typing must not. The two used to share one
@@ -342,16 +373,36 @@ class TabRuntime {
 
     queueReplay(data) {
         if (!data) return;
+        if (data.length > TabRuntime.REPLAY_CAP) {
+            data = data.slice(-TabRuntime.REPLAY_CAP);
+            this._replayChunks = [];
+            this._replayLen = 0;
+            this._replayTruncated = true;
+        }
         this._replayChunks.push(data);
         this._replayLen += data.length;
         while (this._replayLen > TabRuntime.REPLAY_CAP && this._replayChunks.length > 1) {
             this._replayLen -= this._replayChunks.shift().length;
+            this._replayTruncated = true;
         }
+    }
+
+    resetReplay(data = '') {
+        if (this._wRaf) cancelAnimationFrame(this._wRaf);
+        if (this._wTimer) clearTimeout(this._wTimer);
+        this._wRaf = this._wTimer = null;
+        this._wq = [];
+        this._replayChunks = [];
+        this._replayLen = 0;
+        this._replayTruncated = false;
+        this._resetPending = true;
+        this._bandCache.clear();
+        this.queueReplay(data);
     }
 
     flushPendingReplay() {
         this._flushWrites();   // keep ordering: anything already queued goes first
-        if (!this._replayChunks.length) return false;
+        if (!this._replayChunks.length && !this._resetPending) return false;
         // Only flush once xterm has actually been fit against a real-sized
         // container — otherwise absolute-column escapes in the scrollback
         // land at the wrong column.
@@ -359,17 +410,25 @@ class TabRuntime {
             const rect = this.container.getBoundingClientRect();
             if (rect.width < 2 || rect.height < 2) return false;
             this.fitNow();
+            if (!this._everFit) return false;
         }
         let data = this._replayChunks.join('');
         this._replayChunks = [];
         this._replayLen = 0;
-        // A dropped chunk can leave the buffer starting mid-escape-sequence, so
-        // align to the first newline; a full-screen TUI repaints itself moments
-        // later and the lost prefix self-corrects.
-        if (data.length >= TabRuntime.REPLAY_CAP) {
-            const nl = data.indexOf('\n');
-            if (nl >= 0) data = data.slice(nl + 1);
+        // Chunk eviction is independent of the retained length; remember it
+        // explicitly so a partial command isn't mistaken for ordinary text.
+        if (this._replayTruncated) {
+            // Resume at a control boundary, never in the middle of a UTF-16
+            // character or an ANSI command. Cancel any parser state belonging
+            // to the discarded prefix before feeding the retained stream.
+            const boundary = data.search(/[\x1b\n]/);
+            data = boundary < 0 ? '' : data.slice(boundary + (data[boundary] === '\n' ? 1 : 0));
+            data = '\x18\x1b[0m' + data;
+            this._replayTruncated = false;
         }
+        // Queue RIS with the snapshot, rather than calling reset() while xterm
+        // still has asynchronous writes pending from the previous connection.
+        if (this._resetPending) { data = '\x18\x1bc' + data; this._resetPending = false; }
         this.term.write(data);
         return true;
     }
@@ -620,7 +679,6 @@ class TabRuntime {
     _repaint() {
         const go = () => { try { this.term.refresh(0, this.term.rows - 1); } catch (_) {} };
         go();
-        // fitNow, which measures the cell from the paint — see _cellSize.
         requestAnimationFrame(() => { this.fitNow(); go(); });
     }
 
@@ -630,19 +688,42 @@ class TabRuntime {
         this._renderer = null;
     }
 
-    // ONE resize, from one measurement.
-    //
-    // This used to call FitAddon and then correct it. FitAddon sizes the grid
-    // from xterm's reported cell metric — the metric that is wrong here — so
-    // every fit set the grid to ~102 columns and _fillWidth immediately grew it
-    // back to ~168. Two resizes, the first one wrong, and each one is an
-    // onResize that reaches the PTY as a SIGWINCH: Claude repaints its entire
-    // TUI at the wrong width, then repaints again at the right one. That is the
-    // layout tearing that "fixes itself after a few seconds", and with a
-    // two-second guard re-fitting whenever it sees divergence, it never stopped.
-    //
-    // So FitAddon is gone from this path. Measure the container, derive the cell
-    // from what is actually painted, resize once, and only when it changed.
+    // Invalidate hidden terminals too; their fonts can only be measured once
+    // they become visible. xterm 5.3 ignores same-value option assignments.
+    invalidateFontMetrics() { this._fontMetricsDirty = true; }
+
+    _refreshFontMetrics() {
+        if (!this._fontMetricsDirty) return;
+        const family = this.term.options.fontFamily;
+        // Whitespace changes the option value without selecting another face.
+        // The real option events refresh both character metrics and glyph caches.
+        try { this.term.options.fontFamily = family + ' '; }
+        finally { this.term.options.fontFamily = family; }
+        this._fontMetricsDirty = false;
+    }
+
+    // Take the daemon's authoritative PTY geometry and render at it. Reported
+    // back to nobody — see _suppressReport — and remembered, so the next fit
+    // measures the container for a REQUEST without overwriting the grid.
+    adoptGrid(cols, rows) {
+        this._authGrid = { cols, rows };
+        if (!this._opened) return false;
+        if (this.term.cols === cols && this.term.rows === rows) return false;
+        this._suppressReport = true;
+        try { this.term.resize(cols, rows); }
+        catch (_) { return false; }
+        finally { this._suppressReport = false; }
+        // The agent drew its last frame for the old grid, so what is on screen
+        // now is stale at every width. It repaints on the SIGWINCH the daemon
+        // just delivered; refresh so the reflowed rows are not left half-drawn
+        // in the meantime.
+        try { this.term.refresh(0, this.term.rows - 1); } catch (_) {}
+        return true;
+    }
+
+    // Fit once using the renderer's actual CSS cell size, including device-pixel
+    // rounding and letter spacing. A canvas text measurement is a glyph width,
+    // not a grid cell, and substituting it can make fitting disagree with paint.
     fitNow() {
         if (!this._ensureOpen()) return { cols: this.term.cols, rows: this.term.rows };
         try {
@@ -651,11 +732,24 @@ class TabRuntime {
             const availW = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
             const availH = el.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
             if (availW > 40 && availH > 20) {
+                this._refreshFontMetrics();
                 const cell = this._cellSize();
                 if (cell) {
                     const cols = Math.max(2, Math.floor(availW / cell.w));
                     const rows = Math.max(2, Math.floor(availH / cell.h));
-                    if (cols !== this.term.cols || rows !== this.term.rows) this.term.resize(cols, rows);
+                    this._desired = { cols, rows };
+                    // Render at the PTY's real grid when the daemon has told us
+                    // one; otherwise this window is the only viewer and its own
+                    // measurement is the answer. Either way the REQUEST that
+                    // goes up is what we measured, never what we adopted.
+                    const grid = this._authGrid || this._desired;
+                    if (grid.cols !== this.term.cols || grid.rows !== this.term.rows) {
+                        this._suppressReport = !!this._authGrid;
+                        try { this.term.resize(grid.cols, grid.rows); }
+                        finally { this._suppressReport = false; }
+                    }
+                    if (this._authGrid && this._onResize) this._onResize(cols, rows);
+                    this._everFit = true;
                     // Publish what the fit actually decided. Half a day went
                     // into inferring these four numbers from screenshots; the
                     // terminal can simply say them, and the PERF widget shows
@@ -668,52 +762,19 @@ class TabRuntime {
                     };
                 }
             }
-            this._everFit = true;
             return { cols: this.term.cols, rows: this.term.rows };
         } catch (_) { return { cols: this.term.cols, rows: this.term.rows }; }
     }
 
-    // The cell, measured from the paint wherever possible. xterm's own numbers
-    // are a hint: they are believed only when the painted grid agrees with them,
-    // because the paint is what is on the screen.
+    // xterm's pinned renderer contract is in CSS pixels (not device pixels).
+    // Missing metrics mean wait for layout, not invent a different grid width.
     _cellSize() {
         try {
             const core = this.term._core;
             const dims = core && core._renderService && core._renderService.dimensions;
             const css = dims && dims.css && dims.css.cell;
-            let w = css && css.width, h = css && css.height;
-
-            // Cross-check the width against the FONT — never against the
-            // painted canvas. Dividing the canvas by the column count is a
-            // feedback loop: the canvas is sized from the grid, so whatever
-            // column count the fit last chose is always "confirmed" by it.
-            // Measured live, the same 756px canvas reported a 7.2px cell at 105
-            // columns and a 9px cell at 84 — two stable, wrong answers.
-            //
-            // The font is measured from term.options, which is what xterm was
-            // constructed with. NOT from getComputedStyle: .xterm inherits the
-            // page's display face, so that route measured 16px United Sans and
-            // returned 15.17px per character.
-            const o = this.term.options || {};
-            if (o.fontSize && o.fontFamily) {
-                const ctx = TabRuntime._measureCtx
-                    || (TabRuntime._measureCtx = document.createElement('canvas').getContext('2d'));
-                if (ctx) {
-                    ctx.font = `${o.fontSize}px ${o.fontFamily}`;
-                    const m = ctx.measureText('W'.repeat(100)).width / 100;
-                    // Believe xterm only when it agrees with the font it is
-                    // supposed to be rendering in; otherwise it is running on a
-                    // metric cached before the web font arrived.
-                    if (m > 0.5 && (!(w > 0.5) || Math.abs(w - m) / m > 0.08)) w = m;
-                }
-            }
-            // Height has never been the failure and has no equivalent source,
-            // so fall back to the painted rows only if xterm offers nothing.
-            if (!(h > 0.5) && this.term.element && this.term.rows > 0) {
-                const c = this.term.element.querySelector('.xterm-screen canvas');
-                if (c) h = c.getBoundingClientRect().height / this.term.rows;
-            }
-            if (!(w > 0.5) || !(h > 0.5)) return null;
+            const w = css && css.width, h = css && css.height;
+            if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0.5 || h <= 0.5) return null;
             return { w, h };
         } catch (_) { return null; }
     }
@@ -1212,23 +1273,12 @@ class Shell {
             this._ro.observe(this.termsEl);
         }
         if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(() => {
-                // THE root cause of the dead strip. xterm measures its cell
-                // ONCE, when the terminal is opened, and caches it — and at
-                // that moment Fira Mono has usually not loaded, so it measures
-                // the fallback and keeps that number forever. Every later fit
-                // then divides the container by a cell width the renderer is
-                // not drawing with, and the grid stops short.
-                //
-                // xterm has no public "re-measure" call, but assigning a font
-                // option invalidates the cached metrics, so a no-op assignment
-                // makes it measure again — now with the real face.
-                for (const rt of this.tabs.values()) {
-                    if (!rt._opened) continue;
-                    try { rt.term.options.fontFamily = rt.term.options.fontFamily; } catch (_) {}
-                }
+            const fontsLoaded = () => {
+                for (const rt of this.tabs.values()) rt.invalidateFontMetrics();
                 this._fitActive();
-            }).catch(() => {});
+            };
+            document.fonts.ready.then(fontsLoaded).catch(() => {});
+            document.fonts.addEventListener('loadingdone', fontsLoaded);
         }
 
         this._initRecovery();
@@ -1237,6 +1287,8 @@ class Shell {
         bridge.addEventListener('replay',    e => this._onReplay(e.detail));
         bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
         bridge.addEventListener('term-data', e => this._onTermData(e.detail));
+        bridge.addEventListener('term-batch', e => this._onTermBatch(e.detail));
+        bridge.addEventListener('term-size', e => this._onTermSize(e.detail));
         bridge.addEventListener('term-exit', e => this._onTermExit(e.detail));
         bridge.addEventListener('status',    e => this._onStatus(e.detail));
         bridge.addEventListener('tts',       e => { this._onTTS(e.detail); this._onAgentMessage(e.detail); });
@@ -1359,6 +1411,7 @@ class Shell {
             // cwd never changed stayed unrecorded for the life of the page.
             for (const t of tabs) {
                 this._ensureTab(t.id, t.title);
+                this.tabs.get(t.id).resetReplay();
                 if (t.mem != null) this._tabMem.set(t.id, t.mem);
                 if (t.cwd) this._tabCwd.set(t.id, t.cwd);
             }
@@ -1372,7 +1425,7 @@ class Shell {
                 for (const r of replay) {
                     const rt = this.tabs.get(r.id);
                     if (rt && r.data) {
-                        rt.queueReplay(r.data);
+                        rt.resetReplay(r.data);
                         this._detectAgentFromStream(r.id, r.data);
                         this._pollDirty.add(r.id);
                     }
@@ -1397,7 +1450,13 @@ class Shell {
             // sizes per socket — so everything we told the old one is gone.
             this._sentSize = null;
             const rt = this.tabs.get(target);
-            if (rt && rt._opened) this._broadcastSize(rt.term.cols, rt.term.rows);
+            // The size we REQUEST is what this window measured, not the grid
+            // we adopted — reporting the adopted minimum back would ratchet it
+            // down a little further every time.
+            if (rt && rt._opened) {
+                const want = rt._desired || { cols: rt.term.cols, rows: rt.term.rows };
+                this._broadcastSize(want.cols, want.rows);
+            }
             this._syncTabsUI(tabs);
             // Run agent status detection after HELLO so colors are correct
             // on first load — force a detection pass on all stream buffers
@@ -1427,10 +1486,10 @@ class Shell {
     // path, so absolute-column escapes in the scrollback don't land at 80×24
     // before the tab is sized. Flush immediately if it's the tab on screen.
     _onReplay({ id, data }) {
-        if (id == null || !data) return;
+        if (id == null || typeof data !== 'string') return;
         const rt = this.tabs.get(id);
         if (!rt) return;
-        rt.queueReplay(data);
+        rt.resetReplay(data);
         this._detectAgentFromStream(id, data);
         this._pollDirty.add(id);
         if (id === this.activeId) rt.flushPendingReplay();
@@ -1569,6 +1628,30 @@ class Shell {
             this.audio.play('stdout', 'tab' + id);
         }
         if (PERF.on) ptime('stream total', _s0);
+    }
+
+    // Many tabs' output, coalesced by the daemon into one frame (see
+    // server/src/termBatch.js). Unrolled here rather than re-emitted as N
+    // separate DOM events, because the whole point of the batch is to stop
+    // paying a fixed per-message cost once per chunk per agent.
+    _onTermBatch({ items }) {
+        if (!Array.isArray(items)) return;
+        for (const it of items) {
+            if (it && it.id != null) this._onTermData(it);
+        }
+    }
+
+    // The daemon's answer to "how big is this tab's PTY really". It is the grid
+    // every attached viewer can render — the minimum across them — and it is
+    // the ONLY number the emulator may draw at. Rendering at our own measured
+    // width while the PTY believes it has more columns is the whole left-hand
+    // corruption bug: the agent's lines come back too long, xterm soft-wraps
+    // them, and the overflow lands on top of the next row's first columns.
+    _onTermSize({ id, cols, rows }) {
+        if (id == null || !(cols > 1) || !(rows > 1)) return;
+        const rt = this.tabs.get(id);
+        if (!rt) return;
+        rt.adoptGrid(cols, rows);
     }
 
     _onTermExit({ id, code }) {
@@ -3386,13 +3469,15 @@ class Shell {
         // intentionally do NOT send TERM_RESIZE here: a drag-grown window
         // would otherwise fire 3 redundant resizes per frame and shift any
         // in-flight output.
+        const fitAndReplay = () => { rt.fitNow(); rt.flushPendingReplay(); };
         rt.fitNow();
-        requestAnimationFrame(() => { rt.fitNow(); requestAnimationFrame(() => rt.fitNow()); });
+        requestAnimationFrame(() => { fitAndReplay(); requestAnimationFrame(fitAndReplay); });
         // Also the recovery point for the renderer: on a cold load _activate
         // runs while #shell is still hidden, so the terminal is not open yet and
         // attachRenderer() bails. This path runs again once the container has a
         // real size, which is exactly when the renderer can be created.
         rt.attachRenderer();
+        rt.flushPendingReplay();
         this._broadcastSizeSoon();
     }
 
@@ -3436,7 +3521,13 @@ class Shell {
         this._bcTimer = setTimeout(() => {
             this._bcTimer = null;
             const rt = this.tabs.get(this.activeId);
-            if (rt && rt._opened) this._broadcastSize(rt.term.cols, rt.term.rows);
+            // The size we REQUEST is what this window measured, not the grid
+            // we adopted — reporting the adopted minimum back would ratchet it
+            // down a little further every time.
+            if (rt && rt._opened) {
+                const want = rt._desired || { cols: rt.term.cols, rows: rt.term.rows };
+                this._broadcastSize(want.cols, want.rows);
+            }
         }, 250);
     }
 

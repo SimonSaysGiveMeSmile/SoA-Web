@@ -5,7 +5,7 @@
  * should survive laptop sleep and flaky wifi without the user having to refresh.
  */
 
-import { MSG, INPUT_KIND, frame, parse } from '/assets/protocol.js?v=18';
+import { MSG, INPUT_KIND, frame, parse } from '/assets/protocol.js?v=19';
 
 export class Bridge extends EventTarget {
     constructor({ url }) {
@@ -47,6 +47,10 @@ export class Bridge extends EventTarget {
             this.backoff = 500;
             this.attempts = 0;
             this._emit('status', { state: 'open' });
+            // Tell the daemon what this socket can decode, before anything else
+            // goes out. Without it we keep getting one frame per chunk per tab,
+            // which is correct but is the cost that scales with agent count.
+            this.input(INPUT_KIND.CLIENT_CAPS, { caps: { termBatch: true } });
             this._ping = setInterval(() => this.send(MSG.PING, { ts: Date.now() }), 20_000);
         });
 

@@ -43,6 +43,9 @@ const consoleLogs      = require('./consoleLogs');
 const { MSG, INPUT_KIND, frame, parse } = require('./protocol');
 const { SessionStore } = require('./sessionStore');
 const { TabManager }   = require('./tabManager');
+const { streamBackgroundReplay } = require('./terminalReplay');
+const { TermBatcher } = require('./termBatch');
+const termGeometry = require('./termGeometry');
 const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
 const claudeUsage      = require('./claudeUsage');
@@ -703,6 +706,32 @@ function _broadcastDeviceCount(session, excludeWs) {
     }
 }
 
+// Bring ONE tab's PTY to the grid every attached viewer can actually render,
+// and tell the clients what that grid is. See termGeometry.js for why the
+// smallest viewer wins: a PTY wider than the emulator showing it does not get
+// clipped, it gets soft-wrapped, and the wrapped tail lands on top of the next
+// row's left-hand columns.
+//
+// Called from the three places the answer can change: an inbound resize, a tab
+// becoming active (which is when a background tab's stale size finally
+// matters), and a socket closing (which is how a window that no longer exists
+// used to go on pinning every PTY to its width).
+function syncTabGeometry(session, tabId) {
+    const mgr = session && session.tabMgr;
+    const tab = mgr && mgr.get(tabId);
+    if (!tab) return null;
+    const size = termGeometry.agreedSize(termGeometry.liveViewports(session.sockets));
+    if (!size) return null;
+    if (tab.cols === size.cols && tab.rows === size.rows) return size;
+    dbg('geometry', 'tab=' + tabId, tab.cols + 'x' + tab.rows, '→', size.cols + 'x' + size.rows,
+        '(min across ' + session.sockets.size + ' socket(s))');
+    tab.resize(size.cols, size.rows);
+    const f = frame(MSG.TERM_SIZE, { id: tabId, cols: size.cols, rows: size.rows });
+    session.send(f);
+    if (SHARE_ENABLED && session.shareViewers.size) session.sendToShareViewers(tabId, f);
+    return size;
+}
+
 function onWsConnect(ws, session, req) {
     ws._connectedAt = Date.now();
     ws._userAgent = (req && req.headers && req.headers['user-agent']) || '';
@@ -718,15 +747,27 @@ function onWsConnect(ws, session, req) {
     ws.on('pong', () => { ws.isAlive = true; });
 
     if (!session.tabs) session.tabs = [];
+    if (!session._termBatcher) {
+        session._termBatcher = new TermBatcher({
+            sockets: () => session.sockets,
+            activeTab: () => session.activeTab,
+            onShare: SHARE_ENABLED
+                ? (tabId, f) => { if (session.shareViewers.size) session.sendToShareViewers(tabId, f); }
+                : null,
+        });
+    }
     if (!session.tabMgr) {
         session.tabMgr = new TabManager({
             onData: (tabId, data) => {
                 agg('term-out', 'session=' + session.id.slice(0, 8) + ' tab=' + tabId, data.length, '→ ' + session.sockets.size + ' socket(s)');
-                const _tf = frame(MSG.TERM_DATA, { id: tabId, data });
-                session.send(_tf);
-                if (SHARE_ENABLED && session.shareViewers.size) session.sendToShareViewers(tabId, _tf);
-                // Feed the always-on supervisor so it tracks status + context
-                // for every tab regardless of which client is watching.
+                // Queued, not sent: many tabs producing at once collapse into
+                // one frame per tick instead of one frame per chunk per tab.
+                // See termBatch.js — the client's cost stops scaling with the
+                // number of running agents.
+                session._termBatcher.push(tabId, data);
+                // The supervisor is in-process and cheap, so it still sees
+                // every chunk the instant it lands — batching is a wire
+                // concern, not a bookkeeping one.
                 try { sessionManager.ensure(session).feed(tabId, data); } catch (_) {}
             },
             onTabsChange: list => {
@@ -917,6 +958,10 @@ function onWsConnect(ws, session, req) {
     ws.on('close', () => {
         try { agentBrowser.unsubscribeAll(ws); } catch (_) {}
         session.detachSocket(ws);
+        // A window that has gone away must stop constraining the grid. Only the
+        // tab on screen is re-sized now; the rest pick the new size up when they
+        // are next activated, so closing a laptop lid is not 22 SIGWINCHes.
+        try { if (ws._viewport && session.activeTab) syncTabGeometry(session, session.activeTab); } catch (_) {}
         _broadcastDeviceCount(session);
     });
     ws.on('error', () => { /* close handler will fire too */ });
@@ -990,33 +1035,6 @@ if (SHARE_ENABLED) {
     if (_shareSweep.unref) _shareSweep.unref();
 }
 
-// Stream each background tab's scrollback as its own REPLAY frame, one at a
-// time, yielding to the event loop between sends so WebSocket control frames
-// (ping/pong) and the client's keepalive interleave instead of being stuck
-// behind one multi-MB HELLO. Honours backpressure: if the socket's send buffer
-// is already deep, wait for it to drain before queuing more. Best-effort —
-// bails the moment the socket is no longer OPEN (closed, or reconnected with a
-// fresh ws that will get its own stream).
-const REPLAY_HIGH_WATER = 512 * 1024; // bytes buffered before we pause to drain
-function streamBackgroundReplay(ws, session, tabList, activeId) {
-    const ids = tabList.map(t => t.id).filter(id => id !== activeId);
-    if (!ids.length) return;
-    let i = 0;
-    const sendNext = () => {
-        if (!ws || ws.readyState !== 1) return; // socket gone / reconnected
-        if (i >= ids.length) return;
-        if (ws.bufferedAmount > REPLAY_HIGH_WATER) { setTimeout(sendNext, 50); return; }
-        const id = ids[i++];
-        let data = '';
-        try { data = session.tabMgr.scrollback(id); } catch (_) {}
-        if (data && data.length) {
-            try { ws.send(frame(MSG.REPLAY, { id, data })); } catch (_) { return; }
-        }
-        setImmediate(sendNext);
-    };
-    setImmediate(sendNext);
-}
-
 // Auto-resume Claude in tabs restored after a daemon restart. The respawned
 // shells are fresh (dead), so each tab's conversation is lost unless we resume
 // it. For every restored tab whose cwd has a recent Claude transcript, type
@@ -1051,7 +1069,7 @@ function scheduleAutoResume(restoredTabs, tabMgr) {
 function handleInput(session, d, ws) {
     const mgr = session.tabMgr;
     if (d.kind === INPUT_KIND.TERM_RESIZE) {
-        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(shared pty resizes to MAX across live clients)');
+        dbg('input', 'TERM_RESIZE from device — tab=' + d.id, d.cols + 'x' + d.rows, '(shared pty takes the MIN across live viewers)');
     } else if (d.kind === INPUT_KIND.TERM_KEYS) {
         dbg('input', 'TERM_KEYS tab=' + d.id, JSON.stringify((d.text || '').slice(0, 16)));
     } else if (d.kind) {
@@ -1079,6 +1097,11 @@ function handleInput(session, d, ws) {
         case INPUT_KIND.SWITCH_TAB: {
             if (mgr.get(d.id) && session.activeTab !== d.id) {
                 session.activeTab = d.id;
+                // The moment a tab goes on screen is the moment its geometry
+                // has to be right. Doing it here rather than for all 22 tabs on
+                // every window resize is deliberate: a PTY resize is a SIGWINCH
+                // and a SIGWINCH makes the agent repaint its entire TUI.
+                syncTabGeometry(session, d.id);
                 session.send(frame(MSG.SNAPSHOT, { tabs: mgr.list(), activeId: d.id, connectedDevices: session.sockets.size }));
             }
             break;
@@ -1116,7 +1139,7 @@ function handleInput(session, d, ws) {
             const t = mgr.restore({ id: d.id != null ? +d.id : null, cols: d.cols, rows: d.rows });
             if (t) {
                 session.activeTab = t.id;
-                session.send(frame(MSG.TERM_DATA, { id: t.id, data: mgr.scrollback(t.id) }));
+                session.sendTerminalData(t.id, frame(MSG.TERM_DATA, { id: t.id, data: mgr.scrollback(t.id) }));
                 session.send(frame(MSG.SNAPSHOT, {
                     tabs: mgr.list(),
                     activeId: t.id,
@@ -1144,29 +1167,21 @@ function handleInput(session, d, ws) {
             break;
         }
         case INPUT_KIND.TERM_RESIZE: {
-            const tab = mgr.get(d.id);
-            if (!tab) break;
-            const cols = Math.max(2, d.cols | 0);
-            const rows = Math.max(2, d.rows | 0);
-            // Remember THIS client's desired size for this tab.
-            if (ws) {
-                if (!ws._tabSizes) ws._tabSizes = new Map();
-                ws._tabSizes.set(d.id, { cols, rows });
-            }
-            // Resize the SHARED pty to the LARGEST size any live client wants
-            // for this tab — a narrow phone can then never clip the wide
-            // desktop (the "black void on the right when a mobile is attached,
-            // and it stays while the desktop is idle" bug). Smaller clients
-            // just scroll/scale; the widest surface stays whole.
-            let maxCols = cols, maxRows = rows;
-            for (const sock of session.sockets) {
-                if (!sock || sock.readyState !== 1 || !sock._tabSizes) continue;
-                const sz = sock._tabSizes.get(d.id);
-                if (!sz) continue;
-                if (sz.cols > maxCols) maxCols = sz.cols;
-                if (sz.rows > maxRows) maxRows = sz.rows;
-            }
-            tab.resize(maxCols, maxRows);
+            if (!mgr.get(d.id)) break;
+            // The viewport belongs to the SOCKET, not the tab: every tab in a
+            // session shares one terminal area on screen, so one measurement
+            // describes all of them — including tabs this client has never
+            // opened, which is how a background agent used to sit at the 120x32
+            // spawn size until you happened to visit it.
+            const vp = termGeometry.normalizeViewport(d.cols, d.rows);
+            if (ws && vp) ws._viewport = vp;
+            syncTabGeometry(session, d.id);
+            break;
+        }
+        case INPUT_KIND.CLIENT_CAPS: {
+            // What this socket can decode. Absent = the original one-frame-per
+            // chunk wire, which every client understands.
+            if (ws) ws._caps = Object.assign({}, ws._caps, (d.caps && typeof d.caps === 'object') ? d.caps : {});
             break;
         }
         case INPUT_KIND.HOTKEY: {
