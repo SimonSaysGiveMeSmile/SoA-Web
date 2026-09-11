@@ -304,22 +304,64 @@ class ContextCanvas {
         this._renderSteps();
     }
 
+    // A turn is keyed by when it was sent, not by its position: the thread grows
+    // from the bottom, so an index would move every prompt's identity down one
+    // on the next poll and an expanded turn would collapse itself.
+    _turnKey(p, i) { return String(p.at || '') + ':' + i + ':' + (p.text || '').length; }
+
     _renderThread(prompts) {
         if (!prompts.length) {
             this._thread.replaceChildren(el('p', { class: 'ctx-muted', text: 'no prompts recorded for this workspace yet' }));
             return;
         }
+        if (!this._open) this._open = new Set();
         const last = prompts.length - 1;
-        this._thread.replaceChildren(...prompts.map((p, i) => el('article', {
-            class: 'ctx-turn' + (i === last ? ' latest' : ''),
-        }, [
-            el('div', { class: 'ctx-turn-m' }, [
-                el('span', { class: 'ctx-turn-n', text: String(i + 1) }),
-                el('span', { class: 'ctx-turn-t', text: ago(p.at) }),
-            ]),
-            el('p', { class: 'ctx-turn-x', text: p.text }),
-        ])));
+        this._thread.replaceChildren(...prompts.map((p, i) => {
+            const key = this._turnKey(p, i);
+            const more = el('button', {
+                class: 'ctx-turn-more', type: 'button', hidden: '',
+                title: 'Show the whole prompt', 'aria-label': 'Show the whole prompt',
+            });
+            const node = el('article', {
+                class: 'ctx-turn' + (i === last ? ' latest' : '') + (this._open.has(key) ? ' open' : ''),
+            }, [
+                el('div', { class: 'ctx-turn-m' }, [
+                    el('span', { class: 'ctx-turn-n', text: String(i + 1) }),
+                    el('span', { class: 'ctx-turn-t', text: ago(p.at) }),
+                    more,
+                ]),
+                el('p', { class: 'ctx-turn-x', text: p.text }),
+            ]);
+            node.dataset.key = key;
+            more.addEventListener('click', () => {
+                const open = node.classList.toggle('open');
+                if (open) this._open.add(key); else this._open.delete(key);
+                const label = open ? 'Collapse this prompt' : 'Show the whole prompt';
+                more.title = label;
+                more.setAttribute('aria-label', label);
+                if (!open) this._markClipped();
+            });
+            return node;
+        }));
+        // Which turns are actually CUT can only be known once they are laid out,
+        // and asking costs a forced layout — so ask once per render, after the
+        // subtree is in place, and only for turns that are not already open.
+        this._markClipped();
         if (this._pinned) this._thread.scrollTop = this._thread.scrollHeight;
+    }
+
+    // Show the toggle only where there is something behind the fade. A prompt
+    // that fits gets no affordance at all, which is why the column still reads
+    // as a thread and not as a list of controls.
+    _markClipped() {
+        for (const node of this._thread.querySelectorAll('.ctx-turn')) {
+            const x = node.querySelector('.ctx-turn-x');
+            const more = node.querySelector('.ctx-turn-more');
+            if (!x || !more) continue;
+            const cut = !node.classList.contains('open') && x.scrollHeight > x.clientHeight + 2;
+            node.classList.toggle('clipped', cut);
+            more.hidden = !(cut || node.classList.contains('open'));
+        }
     }
 
     _renderFacts(w, d) {

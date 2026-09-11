@@ -448,20 +448,21 @@
    handle rides the panel's outer border and slides to the viewport edge when
    the panel closes — it never disappears, only the chevron flips.
 
-   At REST the tab is only a grip mark on that border, never a filled slab:
-   the terminal deliberately runs edge-to-edge (`.terms .term` takes no right
-   padding so no column is wasted), so an opaque 15px block parked mid-height
-   reads as a black square dropped on the last two characters of every line it
-   crosses. Hover, focus or a finger promotes the same button to the full
-   labelled tab — the affordance is there when you reach for it and out of the
-   way while you are reading. */
+   At REST it is a small TAB, not an invisible grip: a 15px slab in the panel's
+   own colour, carrying the chevron, parked at mid-height. The earlier resting
+   state was a 3px hairline at half opacity, which kept the terminal pristine
+   and cost the control its discoverability — nothing on screen said the canvas
+   could come back. The slab is narrow, panel-coloured and it is the panel's
+   border it sits on, so it crosses the terminal only in the CLOSED state, which
+   is exactly when you need to find it. Hover, focus or a finger adds the CTX
+   label and lights the tab up. */
 .ctx-pull {
     position: absolute; top: 50%; right: var(--soa-ctx-w, 256px);
     transform: translateY(-50%);
     width: 15px; min-height: 88px; padding: 11px 0 13px;
     display: flex; flex-direction: column; align-items: center; gap: 8px;
-    background-color: transparent;
-    border: 1px solid transparent; border-right: none;
+    background-color: var(--soa-bg-panel);
+    border: 1px solid var(--soa-line); border-right: none;
     border-radius: 4px 0 0 4px;
     font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.2em;
     color: var(--soa-accent-dim); cursor: pointer; z-index: 7;
@@ -469,28 +470,32 @@
                 border-color 160ms ease, box-shadow 160ms ease;
 }
 .stage.no-context .ctx-pull { right: 0; }
-/* The resting mark: the panel's own hairline border, thickened where you grab it. */
+/* The grip: an accent rail down the seam, so the tab reads as something you
+   pull rather than a button that happens to be tall. */
 .ctx-pull::before {
     content: ''; position: absolute; right: 0; top: 12px; bottom: 12px;
     width: 3px; border-radius: 2px 0 0 2px;
-    background: var(--soa-accent-dim); opacity: 0.5;
+    background: var(--soa-accent-dim); opacity: 0.55;
     transition: opacity 160ms ease;
 }
-.ctx-pull > * { opacity: 0; transition: opacity 160ms ease; }
+/* The chevron is the tab's whole message at rest — it says which way the panel
+   will move. The CTX label is the second thing you need, and only once you have
+   reached for it, so it is the one that fades in. */
+.ctx-pull-chev { opacity: 0.85; transition: opacity 160ms ease; }
+.ctx-pull-label { opacity: 0; transition: opacity 160ms ease; }
 .ctx-pull:hover, .ctx-pull:focus-visible {
-    background-color: var(--soa-bg-panel);
     color: var(--soa-accent); border-color: var(--soa-accent-dim);
     box-shadow: -5px 0 16px rgba(var(--soa-accent-rgb), 0.14);
 }
-.ctx-pull:hover > *, .ctx-pull:focus-visible > * { opacity: 1; }
-.ctx-pull:hover::before, .ctx-pull:focus-visible::before { opacity: 0; }
-/* Nothing hovers on a touch dashboard, so the mark carries a little more
-   weight there and the tab fills in only while the finger is down. */
+.ctx-pull:hover .ctx-pull-chev, .ctx-pull:focus-visible .ctx-pull-chev,
+.ctx-pull:hover .ctx-pull-label, .ctx-pull:focus-visible .ctx-pull-label { opacity: 1; }
+.ctx-pull:hover::before, .ctx-pull:focus-visible::before { opacity: 1; }
+/* Nothing hovers on a touch dashboard, so the label comes in while the finger
+   is down instead. */
 @media (hover: none) {
-    .ctx-pull::before { width: 4px; opacity: 0.75; }
-    .ctx-pull:active { background-color: var(--soa-bg-panel); border-color: var(--soa-accent-dim); }
-    .ctx-pull:active > * { opacity: 1; }
-    .ctx-pull:active::before { opacity: 0; }
+    .ctx-pull::before { width: 4px; opacity: 0.8; }
+    .ctx-pull:active { border-color: var(--soa-accent-dim); }
+    .ctx-pull:active .ctx-pull-label { opacity: 1; }
 }
 .ctx-pull:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
 /* The glyph points the way the panel will travel, so it reads as a direction
@@ -559,6 +564,29 @@
     max-height: 7.2em; overflow: hidden;
 }
 .ctx-turn.latest .ctx-turn-x { max-height: none; }
+/* A clipped prompt used to end mid-word with nothing to say it had been cut and
+   no way to see the rest — the panel was showing a prompt you could not read.
+   Every turn now opens to its full text. The fade marks the cut as deliberate,
+   and the toggle in the gutter is the way through it; the text itself is left
+   alone so selecting a run of prompts still copies cleanly. */
+.ctx-turn.clipped .ctx-turn-x {
+    -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+            mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+}
+.ctx-turn.open .ctx-turn-x {
+    max-height: none;
+    -webkit-mask-image: none; mask-image: none;
+}
+.ctx-turn-more {
+    appearance: none; background: none; border: 0; padding: 2px 0 0;
+    font-family: var(--font-mono); font-size: 9px; line-height: 1;
+    color: var(--soa-accent-dim); opacity: 0.7; cursor: pointer;
+    transition: color 120ms ease, opacity 120ms ease;
+}
+.ctx-turn-more:hover { color: var(--soa-accent); opacity: 1; }
+.ctx-turn-more:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
+.ctx-turn-more::before { content: '\002B'; }          /* + more to read */
+.ctx-turn.open .ctx-turn-more::before { content: '\2212'; }   /* − collapse */
 
 /* Every band gets enough default height to show its content instead of
    collapsing to one scrolling line. WORKSPACE has four facts and was showing
