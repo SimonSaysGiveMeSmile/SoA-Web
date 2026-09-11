@@ -210,7 +210,7 @@ const SET_LABELS = {
     theme: 'Colour theme',
     termFontSize: 'Terminal text size',
     cursorBlink: 'Blinking cursor',
-    nocursor: 'Hide the cursor',
+    nocursor: 'Hide the mouse pointer',
     nointro: 'Skip the intro',
     viewButtons: 'View switcher',
     version: 'Build',
@@ -228,21 +228,35 @@ const SET_LABELS = {
 // with their own label. They get the full width, under the description.
 const WIDE_CONTROLS = new Set(['viewButtons', 'clockZones']);
 
+// Most rows don't get a description, and that is the point: a label labels, a
+// control demonstrates, and a sentence underneath that only restates the label
+// ("Blinking cursor" / "Blink the terminal cursor.") is a second name for the
+// same thing. A description now earns its place only when it says something
+// neither the label nor the control can — what a choice does NOT cover, or a
+// format the field cannot show. Empty means no element at all, so the rows that
+// do carry one stand out instead of drowning in a column of filler.
 function setRow(key, desc, control) {
-    return el('div', { class: 'set-row' + (WIDE_CONTROLS.has(key) ? ' set-row--wide' : '') }, [
-        el('div', { class: 'set-meta' }, [
-            el('div', { class: 'set-name' }, [
-                el('span', { class: 'set-label', text: SET_LABELS[key] || key }),
-                el('code', { class: 'set-key', text: key }),
-            ]),
-            el('p', { class: 'set-desc', text: desc }),
+    const meta = [
+        el('div', { class: 'set-name' }, [
+            el('span', { class: 'set-label', text: SET_LABELS[key] || key }),
+            el('code', { class: 'set-key', text: key }),
         ]),
+    ];
+    if (desc) meta.push(el('p', { class: 'set-desc', text: desc }));
+    return el('div', {
+        class: 'set-row'
+            + (WIDE_CONTROLS.has(key) ? ' set-row--wide' : '')
+            // A row that is one line long should have its control on that line,
+            // not pinned to the top of a box the description used to fill.
+            + (desc ? ' set-row--noted' : ''),
+    }, [
+        el('div', { class: 'set-meta' }, meta),
         el('div', { class: 'set-ctl' }, [control]),
     ]);
 }
 
 function kvRow(labelKey, descKey, control) {
-    return setRow(labelKey, tr(descKey), control);
+    return setRow(labelKey, descKey ? tr(descKey) : '', control);
 }
 
 // ON/OFF as a segmented switch rather than a <select> of the words "true" and
@@ -348,33 +362,40 @@ function staticRow(label, desc, valueText) {
 
 function buildAppearancePane(s) {
     return el('div', { class: 'settings-list' }, [
-            setRow('uiLang', 'UI language — TRON is the classic terminal look; MINIMAL is a warm porcelain skin; LIQUID is a black & white iOS-style liquid-glass skin (frosted panels, rounded corners). MINIMAL and LIQUID bring their own palettes, so the theme below only affects TRON. Applies instantly.', uiLangSelect('set-uiLang', s.uiLang)),
-            setRow('theme', 'Color theme — Auto follows your system; Light/Dim are bright variants. Applies instantly.', themeSelect('set-theme', s.theme)),
-            kvRow('termFontSize', 'settings.desc.termFontSize', numInput('set-termFontSize', s.termFontSize, 8, 28, 1)),
-            kvRow('cursorBlink',  'settings.desc.cursorBlink',  boolSelect('set-cursorBlink', s.cursorBlink)),
-            kvRow('nocursor',     'settings.desc.nocursor',     boolSelect('set-nocursor', s.nocursor)),
-            kvRow('nointro',      'settings.desc.nointro',      boolSelect('set-nointro', s.nointro)),
-            setRow('viewButtons', 'View switcher — choose which view buttons appear in the toolbar switcher (Terminal is always shown; Manager also needs the fleet entitlement). Applies instantly.', viewButtonsControl(s)),
-            staticRow('version', 'SoA-Web build', 'v' + ((window.__SOA_WEB__ || {}).version || 'dev')),
+            // The skin names carry their own one-word character in the select.
+            // The one thing they cannot say is what the NEXT row does, so that
+            // fact lives on the theme row, where it is about to matter.
+            setRow('uiLang', '', uiLangSelect('set-uiLang', s.uiLang)),
+            setRow('theme', 'TRON only — MINIMAL and LIQUID bring their own palettes.', themeSelect('set-theme', s.theme)),
+            kvRow('termFontSize', '', numInput('set-termFontSize', s.termFontSize, 8, 28, 1)),
+            kvRow('cursorBlink',  '', boolSelect('set-cursorBlink', s.cursorBlink)),
+            kvRow('nocursor',     '', boolSelect('set-nocursor', s.nocursor)),
+            kvRow('nointro',      '', boolSelect('set-nointro', s.nointro)),
+            setRow('viewButtons', 'Terminal is always shown.', viewButtonsControl(s)),
+            staticRow('version', '', 'v' + ((window.__SOA_WEB__ || {}).version || 'dev')),
     ]);
 }
 
 function buildAudioPane(s) {
     return el('div', { class: 'settings-list' }, [
-            kvRow('audio',               'settings.desc.audio',               boolSelect('set-audio', s.audio)),
-            kvRow('audioVolume',         'settings.desc.audioVolume',         numInput('set-audioVolume', s.audioVolume, 0, 1, 0.05)),
-            kvRow('disableFeedbackAudio','settings.desc.disableFeedbackAudio',boolSelect('set-disableFeedbackAudio', s.disableFeedbackAudio)),
-            setRow('agentDoneSound', 'Play a chime when a fleet agent finishes a turn (working → done).', boolSelect('set-agentDoneSound', s.agentDoneSound)),
+            kvRow('audio',               '', boolSelect('set-audio', s.audio)),
+            kvRow('audioVolume',         '', numInput('set-audioVolume', s.audioVolume, 0, 1, 0.05)),
+            // "Mute interface clicks" doesn't say which sounds survive, and that
+            // is the only question anyone has about this switch.
+            kvRow('disableFeedbackAudio','settings.desc.disableFeedbackAudio', boolSelect('set-disableFeedbackAudio', s.disableFeedbackAudio)),
+            setRow('agentDoneSound', '', boolSelect('set-agentDoneSound', s.agentDoneSound)),
     ]);
 }
 
 function buildMiscPane(s) {
     return el('div', { class: 'settings-list' }, [
-            kvRow('clockHours', 'settings.desc.clockHours', hoursSelect('set-clockHours', s.clockHours)),
+            kvRow('clockHours', '', hoursSelect('set-clockHours', s.clockHours)),
+            // The placeholder already demonstrates the format, so the
+            // description only has to carry the limit.
             kvRow('clockZones', 'settings.desc.clockZones',
                 el('input', { id: 'set-clockZones', type: 'text', value: s.clockZones.join(', '),
                               placeholder: 'America/New_York, Europe/London' })),
-            kvRow('lang',       'settings.desc.lang',       langSelect('set-lang')),
+            kvRow('lang',       '', langSelect('set-lang')),
     ]);
 }
 
@@ -640,7 +661,7 @@ function buildProfilePane() {
 
     pane.append(
         el('div', { class: 'profile-field' }, [
-            el('div', { class: 'profile-label', text: 'Live Account' }),
+            el('div', { class: 'profile-label', text: 'Live account' }),
             el('div', { class: 'profile-stats' }, [
                 el('div', { class: 'profile-stat-row' }, [
                     el('span', { class: 'profile-stat-key', text: 'Connected' }), statClients,
@@ -655,11 +676,11 @@ function buildProfilePane() {
             ]),
         ]),
         el('div', { class: 'profile-field' }, [
-            el('div', { class: 'profile-label', text: 'Display Name' }),
+            el('div', { class: 'profile-label', text: 'Display name' }),
             nameInput,
         ]),
         el('div', { class: 'profile-field' }, [
-            el('div', { class: 'profile-label', text: 'Avatar Color' }),
+            el('div', { class: 'profile-label', text: 'Avatar colour' }),
             swatches,
         ]),
         el('div', { class: 'profile-field' }, [
@@ -669,7 +690,9 @@ function buildProfilePane() {
         ]),
         el('div', { class: 'settings-row-actions' }, [saveBtn]),
         saveStatus,
-        el('p', { class: 'settings-hint', text: 'Browser GPS is shared only with this device\'s globe widget — never sent to any server. The IP location/flag above is the server\'s egress.' }),
+        // Two facts, and only the first is a promise worth making plainly:
+        // where the GPS goes, and where the flag came from.
+        el('p', { class: 'settings-hint', text: 'GPS stays on this device. The flag above comes from your IP.' }),
     );
     return pane;
 }
