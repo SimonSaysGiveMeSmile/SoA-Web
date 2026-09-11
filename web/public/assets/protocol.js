@@ -16,6 +16,8 @@ export const MSG = Object.freeze({
     REPLAY:    'replay',
     SNAPSHOT:  'snapshot',
     TERM_DATA: 'term-data',
+    TERM_BATCH:'term-batch',
+    TERM_SIZE: 'term-size',
     TERM_EXIT: 'term-exit',
     NOTICE:    'notice',
     PONG:      'pong',
@@ -50,6 +52,7 @@ export const INPUT_KIND = Object.freeze({
     BROWSER_UNSUBSCRIBE: 'browser-unsubscribe',
     BROWSER_CLICK:       'browser-click',
     WINDOW_CONTROL:      'window-control',
+    CLIENT_CAPS:         'client-caps',
 });
 
 export function frame(type, data, id) {

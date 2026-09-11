@@ -7,6 +7,169 @@ time; treat them as a starting point to re-check, not gospel.
 
 ---
 
+## 2026-09-11 · Claude · the left-hand corruption, and batching the fleet's output
+
+Two separate problems, one session. The first was the reported bug; the second
+was the open question next to it.
+
+### The corruption: the PTY and the emulator were different sizes
+
+Measured on the live machine, not inferred: `__soaGrid` said the desktop's xterm
+was **115x53**, and `stty -f /dev/ttys003 size` said the PTY behind that same tab
+was **134x61**. The agent draws 134-column lines, xterm has 115 columns, so every
+long line soft-wraps and the ~19-character tail lands in the LEFT-HAND columns of
+the row below — on top of the text already there. That is the "drifts to the left
+and obscures part of the left texts" the user reported, and the ragged left-edge
+fragments in their screenshot are those tails.
+
+**Root cause: the server resized the shared PTY to the MAX size any live client
+wanted.** Written to stop a narrow phone clipping a wide desktop. But a terminal
+emulator cannot show more columns than it has: the wide client is fine and every
+narrower client gets corruption instead of a gutter. Two things made it stick:
+
+- sizes were recorded **per socket per tab**, and recomputed only when a resize
+  came IN. A window that had since closed went on pinning every PTY to its width
+  forever — nothing ever recomputed on disconnect.
+- the client only reports on CHANGE (xterm's `onResize` fires on change, and
+  `_broadcastSize` tells a background tab its size exactly once), so switching to
+  a stale tab never re-asserted anything.
+
+The fix is the one every multiplexer already reached: **the smallest attached
+viewer defines the grid** (`server/src/termGeometry.js`), a viewport belongs to
+the SOCKET rather than to a tab (one terminal area on screen describes them all,
+including tabs never visited), and geometry is recomputed at the three moments
+the answer can change — an inbound resize, a tab becoming active, a socket
+closing. The daemon then ANNOUNCES the result as `MSG.TERM_SIZE`, and the client
+renders at that grid rather than at its own measurement.
+
+The desktop now separates two numbers that used to be one: `_desired` (what this
+window measured — reported up as a request) and `_authGrid` (what the PTY is —
+what we draw at). Echoing an adopted grid back would ratchet it down to the
+minimum a little further every round, so `_suppressReport` blocks that path. The
+mobile client already worked this way; it only needed the new frame wired in.
+
+Verified end-to-end against a scratch daemon on :7412 with real PTYs: two viewers
+at 134x61 and 115x53 -> the PTY takes 115x53, **`stty size` inside the shell
+agrees**, and when the narrow viewer disconnects the grid reopens to 134x61.
+
+Note the cost this trades away: a viewer wider than the grid now has unused
+columns on the right while a smaller one is attached. That is the "black void on
+the right" the MAX rule was written to avoid. It is the right trade — a gutter is
+cosmetic and self-explanatory, corruption is neither — and only the desktop
+client declares a viewport at all, so attaching a phone never narrows anything.
+
+### Responsiveness: the message count, not the bytes
+
+Every chunk from every tab was its own WebSocket frame: a `JSON.stringify` on the
+server, a `message` event and a `JSON.parse` in the browser, then the detector
+pass. That is a fixed per-message cost paid once per chunk per tab, and it scales
+with the number of running agents even though 21 of 22 terminals are not painted.
+
+`server/src/termBatch.js` coalesces output into ONE `TERM_BATCH` frame per tick.
+Latency is spent only where it shows: the tab on screen flushes on a 12ms window
+(less than the rAF the client already coalesces xterm writes to), everything else
+on 100ms, because nothing renders a background tab's bytes until you switch to
+it. Opt-in per socket via `INPUT_KIND.CLIENT_CAPS`, so share viewers and any tab
+still running the old bundle keep the original one-frame-per-chunk wire.
+
+Measured on the scratch daemon, same shells, same bytes:
+
+| tabs | frames/s before | after | |
+|---|---|---|---|
+| 12 | 51.1 | 10.1 | 5.0x fewer |
+| 22 | 66.8 | 7.3 | **9.2x fewer** |
+
+The ratio grows with tab count, which is the shape of the original complaint.
+
+### Still open
+
+- The desktop still runs its own `_detectAgentFromStream` per chunk per tab
+  (`sb.recent += data` on every chunk, ~2 KB of garbage per tab) while the
+  server's `sessionManager.feed` already derives the same status. One of the two
+  is redundant.
+- The per-chunk `audio.play('stdout', 'tab'+id)` fires for background tabs too.
+- `.terms .xterm-screen { width: 100% !important }` makes the screen element
+  wider than the canvas it contains (1052.93 vs 1045 measured). Harmless for
+  paint; left alone rather than risk a selection/hit-testing regression.
+
+---
+
+## 2026-09-10 · Codex · terminal streaming follow-up
+
+User confirmed the corruption happens **inside SoA only**, while output is
+streaming. Codex's braille sparkle animation overwrites prompt/status text in
+the supplied example. The working tree contains a tested follow-up patch;
+it has not been committed, published, or loaded by restarting the live daemon.
+
+### Corrections to the previous diagnosis
+
+- **The same-value font assignment in #54 does nothing.** The exact shipped
+  xterm 5.3.0 bundle emitted zero option events for `fontFamily = fontFamily`.
+  Its OptionsService explicitly deduplicates equal values. The patch changes
+  the family to an equivalent whitespace-suffixed value and restores it, which
+  emits real option events. Hidden terminals defer this until visible. Both
+  `document.fonts.ready` and later `loadingdone` events invalidate metrics.
+- Canvas `measureText` measures a glyph, not the renderer's cell (which includes
+  spacing and device-pixel rounding). Fit now uses the renderer's CSS cell size
+  after invalidation; missing metrics keep replay queued instead of declaring
+  a successful fit at the default grid.
+- **Resize A → B → A within the debounce window left the PTY at B.** The
+  equality shortcut returned before cancelling pending B. Cancellation now
+  happens before deduplication, so a settled browser at A cannot send stale B.
+
+### Streaming fixes in the working tree
+
+- Deferred background snapshots could arrive AFTER live output, and include
+  those same live bytes again. Reproduced `new → old → new`. New
+  `server/src/terminalReplay.js` gates live terminal data per joining socket/tab
+  until its snapshot is enqueued. Existing sockets and heartbeats keep flowing.
+- Desktop HELLO/replay now replace old queues and terminal state on reconnect.
+  The reset is queued as CAN + RIS with replay, preserving ordering with writes
+  already accepted by xterm's asynchronous parser.
+- Oversized single frames now respect the hidden replay cap; actual eviction
+  is tracked separately from retained length, and truncated prefixes are
+  cancelled and advanced to an ESC/newline boundary before parsing resumes.
+
+### Validation and deployment state
+
+- **187/187 `npm test` tests pass**, including 10 client regressions and six
+  server replay cases. Client tests extract the actual TabRuntime class.
+- Additional offline checks using the real xterm 5.3.0 bundle verified font
+  option events and reconnect reset ordering, including a pending partial ANSI
+  sequence. Syntax checks and `git diff --check` passed.
+- `scripts/smoke-ws.js` passed against a separate daemon on port 7411 with state
+  under `/private/tmp/soa-terminal-smoke-state`, using `/bin/sh` and no tunnel
+  or agent auto-resume. No live fleet was exercised by that check.
+- Live pid 94615 was still the daemon started **Sep 7 15:03:45**. A one-off
+  loopback ping was <1ms; that does not rule out its documented periodic stalls.
+  Server changes still require a deliberate restart that respawns live shells.
+- Desktop entry asset bumped to `app.js?v=154`. Chrome was viewing `s0a.app`
+  with a localhost backend, so publishing public static assets is distinct
+  from serving this checkout at `http://127.0.0.1:4010`.
+
+### Remaining limitations to check if corruption persists
+
+- Multiple desktop viewers can still disagree with the shared PTY dimensions.
+  Independent maxima combine 100×50 and 160×30 into 160×50; desktop xterm sizes
+  itself locally and does not implement the claimed larger-grid scroll/scale.
+  Disconnect also does not recompute the size. A full repair needs separate
+  requested viewport and authoritative PTY geometry, with replay dimensions.
+  The mobile client currently sends no TERM_RESIZE, so two devices alone is not
+  proof that this is the user's trigger.
+- Raw capped ANSI replay cannot reconstruct all cursor/mode state lost from
+  an earlier prefix, especially after resizing. A screen snapshot would be
+  needed for exact restoration. Mobile/share reconnect behavior is unchanged.
+- macOS cwd polling still uses synchronous per-tab `lsof`; its live stall cost
+  was not measured in this follow-up.
+- Codex 0.154.0 supports `--approve-for-me`, documented `tui.animations=false`,
+  and locally verified boolean `tui.whimsy=false`. The binary contains a
+  composer `sparkle.rs`; whimsy disabling those exact particles is an inference.
+  A scoped next-launch workaround is
+  `codex resume --last --approve-for-me -c tui.animations=false -c tui.whimsy=false`.
+  No Codex settings were changed.
+
+---
+
 ## 2026-09-07 → 2026-09-09 · tab #1 `app` · session `6321e8b7`
 
 Continuation of the session below. Two threads: a long hunt for terminal lag

@@ -17,6 +17,8 @@ const MSG = Object.freeze({
     REPLAY:     'replay',
     SNAPSHOT:   'snapshot',
     TERM_DATA:  'term-data',
+    TERM_BATCH: 'term-batch', // {items:[{id,data}]} — many tabs' output coalesced into ONE frame
+    TERM_SIZE:  'term-size',  // {id,cols,rows} — the AUTHORITATIVE pty geometry for a tab
     TERM_EXIT:  'term-exit',
     NOTICE:     'notice',
     PONG:       'pong',
@@ -51,6 +53,7 @@ const INPUT_KIND = Object.freeze({
     BROWSER_UNSUBSCRIBE: 'browser-unsubscribe',
     BROWSER_CLICK:       'browser-click',
     WINDOW_CONTROL:      'window-control',
+    CLIENT_CAPS:         'client-caps',   // {caps:{termBatch:true}} — what this socket can decode
 });
 
 function frame(type, data, id) {

@@ -1392,6 +1392,16 @@ class App {
                 case 'replay':    this._applyTerminalChunk(msg.d); break;
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
                 case 'term-exit': break;
+                // The daemon now announces a tab's real PTY geometry the moment
+                // it changes, instead of it only riding along on the next
+                // snapshot. This client never resizes the shared PTY — it fits
+                // its own font to whatever `cols` the desktop is drawing at — so
+                // acting on this promptly is what keeps the wrapping identical.
+                case 'term-size':
+                    if (msg.d && msg.d.id === this._activeTabId && msg.d.cols > 1) {
+                        this._fitTerminalFont(msg.d.cols);
+                    }
+                    break;
                 case 'notice':    this._showNotice(msg.d); break;
                 case 'tts':       this._onTTS(msg.d); this._onAgentMessage(msg.d); break;
                 case 'browser-frame': this._onBrowserFrame(msg.d); break;

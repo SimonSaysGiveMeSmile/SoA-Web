@@ -53,6 +53,19 @@ class Session {
         return delivered > 0;
     }
 
+    // A new socket gets each background tab's snapshot before its live bytes.
+    // Pending output is already in the tab's bounded scrollback, which replay
+    // reads when it sends; queuing those frames here would duplicate the tail.
+    sendTerminalData(tabId, frameStr) {
+        let delivered = 0;
+        for (const ws of this.sockets) {
+            if (!ws || ws.readyState !== 1 /* OPEN */) continue;
+            if (ws._pendingReplayTabs && ws._pendingReplayTabs.has(tabId)) continue;
+            try { ws.send(frameStr); delivered++; } catch (_) { /* drop */ }
+        }
+        return delivered > 0;
+    }
+
     addShareViewer(tabId, ws) {
         const key = Number(tabId);
         if (!this.shareViewers.has(key)) this.shareViewers.set(key, new Set());
@@ -110,6 +123,7 @@ class SessionStore {
         if (session._cwdInterval) clearInterval(session._cwdInterval);
         if (session._managerInterval) clearInterval(session._managerInterval);
         if (session._scrollbackInterval) clearInterval(session._scrollbackInterval);
+        if (session._termBatcher) { try { session._termBatcher.destroy(); } catch (_) {} }
         // The SessionManager owns its own 15s schedule timer (and parked watch
         // waiters) — tear it down too, else it fires forever and pins this session.
         if (session._manager && typeof session._manager.destroy === 'function') {
