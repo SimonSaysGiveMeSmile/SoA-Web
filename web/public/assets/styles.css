@@ -301,9 +301,16 @@ html, body {
   animation: soa-breathe-bright 2.4s ease-in-out infinite;
 }
 .tab[data-agent="attention"].active { animation: soa-breathe-bright 1.1s ease-in-out infinite; }
+/* The breathing states animate OPACITY and nothing else. The glow used to be
+   part of the keyframe (`text-shadow` at 50%), which meant every pulsing tab
+   repainted its text on every frame, forever — main-thread work competing with
+   the terminal for the whole time any agent was waiting on you. The shadow is
+   now a constant on the element, so the same look costs one composited layer
+   per tab instead of a repaint. */
+.tab[data-agent="attention"], .tab[data-agent="delegating"] { text-shadow: 0 0 8px currentColor; }
 @keyframes soa-breathe {
   0%, 100% { opacity: 0.55; }
-  50%      { opacity: 1; text-shadow: 0 0 8px currentColor; }
+  50%      { opacity: 1; }
 }
 @keyframes soa-breathe-bright {
   0%, 100% { filter: brightness(0.8); }
@@ -312,6 +319,12 @@ html, body {
 @keyframes soa-agent-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.55; }
+}
+/* Twenty-two tabs breathing at four different rates is a lot of motion to sit
+   in front of all day. Anyone who has asked the OS for less of it gets the
+   colour and the state, held steady. */
+@media (prefers-reduced-motion: reduce) {
+  .tab[data-agent], .tab[data-agent] .ctx-bar { animation: none !important; }
 }
 .tab[data-agent="attention"] .ctx-bar { animation: soa-agent-pulse 1.1s ease-in-out infinite; }
 .tab[data-agent="delegating"] .ctx-bar { animation: soa-agent-pulse 2.4s ease-in-out infinite; }

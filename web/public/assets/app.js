@@ -147,6 +147,16 @@ function wireVersion() {
 }
 
 const $  = sel => document.querySelector(sel);
+// Is this page actually on screen? A dashboard in a background browser tab or
+// on another desktop is still a live socket with a declared viewport, and the
+// daemon sizes each PTY to the SMALLEST attached viewer — so a narrow window
+// left open somewhere else was deciding the grid for the window you are reading
+// and leaving a black strip down its right. We report the state with every
+// measurement; the daemon skips viewers that are not looking.
+const docHidden = () => {
+    try { return document.visibilityState === 'hidden'; } catch (_) { return false; }
+};
+
 const el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(props)) {
@@ -264,7 +274,9 @@ class TabRuntime {
         try { this.term.onRender(repaint); } catch (_) {}
         try { this.term.onScroll(repaint); } catch (_) {}
         const vp = this.term.element && this.term.element.querySelector('.xterm-viewport');
-        if (vp) vp.addEventListener('scroll', repaint, { passive: true });
+        this._vp = vp || null;
+        this._screenEl = this.term.element && this.term.element.querySelector('.xterm-screen');
+        if (vp) vp.addEventListener('scroll', () => { this._syncSubRow(); repaint(); }, { passive: true });
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
         if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
@@ -332,12 +344,29 @@ class TabRuntime {
             return;
         }
         this._wq.push(data);
+        const t = performance.now();
+        const scrolling = t - (window.__soaLastScroll || 0) < 250;
+        // ECHO GOES NOW. Everything else in this file is a good reason to wait a
+        // frame; the character you just typed is not. Waiting for rAF is only
+        // ~16ms when the page is idle, but rAF is exactly what a long task
+        // delays — a widget re-render, a tile sweep, a status poll — so the
+        // keystroke you are watching for inherits the worst frame on the page
+        // instead of the average one. When a key went down in the last 300ms we
+        // parse the chunk synchronously and let xterm schedule its own paint.
+        //
+        // The rate limit is what keeps this from undoing the batching it sits
+        // in front of: a burst of output arriving while you type still collapses
+        // into one write per ~8ms, which is under a frame either way.
+        if (!scrolling && t - (window.__soaLastKey || 0) < 300 && t - (this._lastSync || 0) > 8) {
+            this._lastSync = t;
+            this._flushWrites();
+            return;
+        }
         if (this._wRaf || this._wTimer) return;
         // SCROLLING defers a write; typing must not. The two used to share one
         // interaction stamp, so every keystroke armed the 50ms path and echo
         // came back a beat late — the batching meant to protect a gesture was
         // taxing the thing you notice most.
-        const scrolling = performance.now() - (window.__soaLastScroll || 0) < 250;
         if (scrolling) this._wTimer = setTimeout(() => this._flushWrites(), TabRuntime.WRITE_BUSY_MS);
         // Always arm a timer alongside the frame callback. requestAnimationFrame
         // does not fire in a hidden or fully occluded window, and without this a
@@ -431,6 +460,77 @@ class TabRuntime {
         if (this._resetPending) { data = '\x18\x1bc' + data; this._resetPending = false; }
         this.term.write(data);
         return true;
+    }
+
+    // ── Sub-row scrolling ───────────────────────────────────────────────
+    //
+    // xterm scrolls in whole ROWS. The viewport element scrolls natively (which
+    // is what buys the trackpad momentum), but the grid underneath is redrawn
+    // only at `Math.round(scrollTop / cellHeight)` — so a gesture that moves the
+    // scroll position smoothly moves the TEXT in ~18px jumps, each landing up to
+    // half a row away from where your fingers are. That mismatch is the whole of
+    // what reads as "steppy", and during a fast flick the row the renderer is
+    // still catching up to is the stale frame you see.
+    //
+    // The fix is not to fight the quantisation but to pay back the remainder:
+    // translate the painted screen by the sub-row offset the emulator threw
+    // away. It is one composited transform — no reflow, no repaint, no extra
+    // render — so the glyphs now track the gesture pixel for pixel while xterm
+    // goes on drawing whole rows at its own pace.
+    //
+    // The bands ride the same transform, or they would drift off the text they
+    // are marking by up to half a row.
+    _cellHeight() {
+        try {
+            const dims = this.term._core && this.term._core._renderService
+                && this.term._core._renderService.dimensions;
+            const h = dims && dims.css && dims.css.cell && dims.css.cell.height;
+            if (h > 1) return h;
+            const scr = this._screenEl;
+            const r = scr && scr.getBoundingClientRect().height;
+            return r && this.term.rows ? r / this.term.rows : 0;
+        } catch (_) { return 0; }
+    }
+
+    _setSubRow(px) {
+        const t = px ? `translate3d(0, ${px.toFixed(2)}px, 0)` : '';
+        if (this._screenEl && this._screenEl.style.transform !== t) this._screenEl.style.transform = t;
+        if (this.bandsEl && this.bandsEl.style.transform !== t) this.bandsEl.style.transform = t;
+    }
+
+    _syncSubRow() {
+        const vp = this._vp;
+        if (!vp) return;
+        const cellH = this._cellHeight();
+        if (!(cellH > 1)) return;
+        let off;
+        try { off = vp.scrollTop - this.term.buffer.active.viewportY * cellH; } catch (_) { return; }
+        // A remainder bigger than a row means the emulator has not caught up
+        // yet (a write moved the buffer under us). Don't drag the screen across
+        // the viewport chasing it; let the next render settle it.
+        if (!(Math.abs(off) <= cellH)) { this._setSubRow(0); return; }
+        this._setSubRow(Math.abs(off) < 0.5 ? 0 : -off);
+        // At REST the remainder must go away, or the grid sits permanently up to
+        // half a row out of its own frame and the bottom edge shows a sliver of
+        // background. Snapping the scroll position to the row it is already
+        // rendering is a 1-9px correction nobody can see mid-gesture, and it
+        // lands the terminal exactly on its grid once the flick stops.
+        if (this._snapTimer) clearTimeout(this._snapTimer);
+        this._snapTimer = setTimeout(() => { this._snapTimer = null; this._snapToRow(); }, 140);
+    }
+
+    _snapToRow() {
+        const vp = this._vp;
+        if (!vp) return;
+        const cellH = this._cellHeight();
+        if (!(cellH > 1)) { this._setSubRow(0); return; }
+        try {
+            const want = this.term.buffer.active.viewportY * cellH;
+            // Setting scrollTop re-enters this scroll handler; it computes a
+            // remainder of zero and stops there, so there is no loop.
+            if (Math.abs(vp.scrollTop - want) > 0.5) vp.scrollTop = want;
+        } catch (_) {}
+        this._setSubRow(0);
     }
 
     // ── Transcript banding ──────────────────────────────────────────────
@@ -1132,6 +1232,7 @@ class Shell {
             if (saved != null) ctxOff = saved === '1';
         } catch (_) {}
         stageEl.classList.toggle('no-context', ctxOff);
+        this._watchVisibility();
         const ctxPull = $('#ctx-pull');
         const setContextOff = (off) => {
             stageEl.classList.toggle('no-context', off);
@@ -1248,9 +1349,13 @@ class Shell {
         // deferring the echo of what you are typing is not, and one stamp for
         // both could not tell them apart.
         const bumpScroll = () => { bump(); window.__soaLastScroll = performance.now(); };
+        // A third stamp, keys only. TabRuntime.write reads it to flush echo
+        // synchronously instead of waiting for a frame that a long task
+        // elsewhere on the page may be sitting on.
+        const bumpKey = () => { bump(); window.__soaLastKey = performance.now(); };
         window.addEventListener('wheel', bumpScroll, { passive: true, capture: true });
         window.addEventListener('touchmove', bumpScroll, { passive: true, capture: true });
-        window.addEventListener('keydown', bump, { capture: true });
+        window.addEventListener('keydown', bumpKey, { capture: true });
 
         window.addEventListener('resize', () => this._fitActive());
         window.addEventListener('orientationchange', () => setTimeout(() => this._fitActive(), 150));
@@ -1674,7 +1779,7 @@ class Shell {
         this.termsEl.appendChild(rt.container);
         rt.attach(
             data => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: data }),
-            (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows }),
+            (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: docHidden() }),
             t => this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: t }),
         );
         this.tabs.set(id, rt);
@@ -3481,6 +3586,28 @@ class Shell {
         this._broadcastSizeSoon();
     }
 
+    // Coming back to the front is a real geometry event: while this window was
+    // hidden the daemon ignored its viewport, so the PTY may now be wider than
+    // this emulator can draw — which is the wrapping corruption, not a cosmetic
+    // gutter. Re-declare the moment we are visible again, and release the claim
+    // the moment we are not.
+    _watchVisibility() {
+        if (this._visWatched) return;
+        this._visWatched = true;
+        document.addEventListener('visibilitychange', () => {
+            const rt = this.tabs.get(this.activeId);
+            if (!rt || !rt.term) return;
+            const { cols, rows } = rt.term;
+            if (!(cols > 1 && rows > 1)) return;
+            // Force the send: the size has NOT changed, only who is looking, and
+            // _broadcastSize dedupes on the size alone.
+            if (this._sentSize) this._sentSize.delete(this.activeId);
+            this.bridge.input(INPUT_KIND.TERM_RESIZE,
+                { id: this.activeId, cols, rows, hidden: docHidden() });
+            if (!docHidden()) this._fitActive();
+        });
+    }
+
     // Every tab shares ONE terminal area, so the active tab's measurement is
     // the right size for all of them — but only the active tab has a painted
     // xterm to measure, so a tab you have not visited since it was spawned (or
@@ -3509,7 +3636,7 @@ class Shell {
             // added, which is exactly the reported shape.
             if (known && id !== this.activeId) continue;
             this._sentSize.set(id, key);
-            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows });
+            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: docHidden() });
         }
     }
 
