@@ -1086,10 +1086,13 @@ body.nocursor, body.nocursor * { cursor: none !important; }
    product's mono and hairlines. */
 .settings-list { display: flex; flex-direction: column; }
 .set-row {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 18px;
+    display: flex; align-items: center; justify-content: space-between; gap: 18px;
     padding: 11px 4px;
     border-bottom: 1px dashed rgba(var(--soa-accent-rgb), 0.10);
 }
+/* Only the handful of rows that still say something sit their control at the
+   top; the rest are one line and read straight across. */
+.set-row--noted { align-items: flex-start; }
 .set-row:last-child { border-bottom: none; }
 .set-meta { min-width: 0; flex: 1 1 auto; }
 .set-name { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
