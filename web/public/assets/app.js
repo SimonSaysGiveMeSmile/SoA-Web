@@ -3932,7 +3932,9 @@ class Shell {
     // Small same-origin JSON GET that carries the resolved backend + token.
     async _apiJson(path) {
         const cfg = window.__SOA_WEB__ || {};
-        const url = new URL((cfg._resolvedBackend || '') + path);
+        // Same reason as settings.js _apiFetch: an empty base must resolve
+        // against the page, not throw an Invalid URL at the caller.
+        const url = new URL((cfg._resolvedBackend || '') + path, location.href);
         if (cfg._resolvedToken) url.searchParams.set('t', cfg._resolvedToken);
         const res = await fetch(url.toString(), { credentials: 'include' });
         return res.json();
