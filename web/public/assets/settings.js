@@ -436,11 +436,31 @@ function _apiBase() {
     return cfg._resolvedBackend || '';
 }
 
+// Resolve against the page when no backend has been resolved yet. `new URL(path)`
+// on its own throws "Failed to construct 'URL': Invalid URL" the moment the base
+// is empty — which is every sandbox visitor, and it surfaced verbatim in the
+// Profile tab's save status, a browser internal shown to someone who had just
+// pressed Save. A relative resolve is also the right answer when the daemon is
+// serving this page itself: same origin, same cookies.
+// Read a JSON reply, or say the server did not give us one.
+//
+// Every save handler did `await res.json()` inside a try and printed
+// `e.message` — so when the daemon was unreachable, or a proxy answered with an
+// HTML error page, the status line under the Save button read "Unexpected token
+// '<', \"<!DOCTYPE \"... is not valid JSON". That is a parser talking to a
+// person who just pressed Save. This says what happened instead.
+async function _apiJson(res) {
+    let data = null;
+    try { data = await res.json(); } catch (_) { data = null; }
+    if (!data) return { ok: false, error: res && res.ok ? 'the server sent no answer' : 'could not reach the server' };
+    return data;
+}
+
 function _apiFetch(path, opts = {}) {
     const cfg = window.__SOA_WEB__ || {};
     const base = cfg._resolvedBackend || '';
     const token = cfg._resolvedToken || '';
-    const url = new URL(base + path);
+    const url = new URL(base + path, location.href);
     if (token) url.searchParams.set('t', token);
     return fetch(url.toString(), { credentials: 'include', ...opts });
 }
@@ -485,7 +505,7 @@ function buildEnvPane() {
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify(body),
             });
-            const data = await res.json();
+            const data = await _apiJson(res);
             if (data.ok) envStatus.textContent = tr('settings.status.saved', { t: new Date().toTimeString().slice(0, 8) });
             else envStatus.textContent = 'Error: ' + (data.error || 'unknown');
         } catch (e) { envStatus.textContent = 'Error: ' + e.message; }
@@ -494,7 +514,7 @@ function buildEnvPane() {
     (async () => {
         try {
             const res = await _apiFetch('/api/env');
-            const data = await res.json();
+            const data = await _apiJson(res);
             if (data.ok) {
                 baseUrlInput.value = data.claude.baseUrl || '';
                 apiKeyInput.placeholder = data.claude.hasKey ? '****' + data.claude.apiKey.slice(-4) : 'sk-ant-...';
@@ -592,7 +612,7 @@ function buildProfilePane() {
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify(body),
             });
-            const data = await res.json();
+            const data = await _apiJson(res);
             if (data.ok) {
                 saveStatus.textContent = 'Saved at ' + new Date().toTimeString().slice(0, 8);
                 window.dispatchEvent(new CustomEvent('soa:profile-updated', { detail: data.profile }));
@@ -616,8 +636,8 @@ function buildProfilePane() {
     async function refreshStats() {
         try {
             const res = await _apiFetch('/api/user/stats');
-            const d = await res.json();
-            if (!d || !d.ok) return;
+            const d = await _apiJson(res);
+            if (!d.ok) return;
             statClients.textContent = String(d.connectedClients ?? 0)
                 + (d.connectedClients === 1 ? ' client' : ' clients');
             statTokens.textContent = formatTokens(d.estTokens) + ' ctx'
@@ -639,8 +659,8 @@ function buildProfilePane() {
     (async () => {
         try {
             const res = await _apiFetch('/api/user/profile');
-            const { ok, profile } = await res.json();
-            if (!ok) return;
+            const { ok, profile } = await _apiJson(res);
+            if (!ok || !profile) return;
             nameInput.value = profile.displayName || '';
             selectedColor = profile.avatarColor || '#4a6566';
             swatches.querySelectorAll('.profile-avatar-swatch').forEach(s => {
