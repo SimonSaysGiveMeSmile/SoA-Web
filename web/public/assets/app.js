@@ -252,6 +252,21 @@ LoadGuard.start();
 // on whichever machine is actually slow.
 window.__soaLoadGuard = LoadGuard;
 
+// Is a keystroke or a click already queued behind us?
+//
+// Shedding work when the machine is busy (LoadGuard) is the coarse answer; this
+// is the fine one. Chrome will say directly whether an input event is waiting,
+// which lets a loop that is midway through twenty-two tabs stop and let the
+// keypress through instead of finishing first. Everywhere else the interaction
+// stamps are the next best thing.
+const inputPending = () => {
+    try {
+        const sch = navigator.scheduling;
+        if (sch && typeof sch.isInputPending === 'function') return sch.isInputPending();
+    } catch (_) {}
+    return performance.now() - (window.__soaLastInteract || 0) < 120;
+};
+
 const docHidden = () => {
     try { return document.visibilityState === 'hidden'; } catch (_) { return false; }
 };
@@ -2003,6 +2018,18 @@ class Shell {
         // bust the row cache.
         const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentModel.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
+        // Rebuilding the row is the biggest single task this page runs: every
+        // tab button torn down and rebuilt, twenty-two of them. That is fine
+        // when it follows your own click, and badly placed when it lands on top
+        // of a keystroke. If input is already waiting, let it through and come
+        // straight back — ONCE, so a machine that is never quiet still gets its
+        // tab row.
+        if (inputPending() && !this._tabsUIDeferred) {
+            this._tabsUIDeferred = true;
+            setTimeout(() => { this._tabsUIDeferred = false; this._syncTabsUI(list); }, 0);
+            return;
+        }
+        this._tabsUIDeferred = false;
         this._tabsUISig = signature;
         // replaceChildren destroys the old tab buttons, which resets the
         // tab row's scrollLeft to 0. Snapshot + restore so that a status
@@ -2482,6 +2509,10 @@ class Shell {
         }
 
         for (const id of slice) {
+            // Anything already queued gets in first. The tabs we have not
+            // reached stay dirty, so nothing is lost — they come round on the
+            // next tick, by which time the keystroke has been served.
+            if (inputPending()) break;
             const rt = this.tabs.get(id);
             if (!rt) continue;
             this._pollDirty.delete(id);
@@ -2743,13 +2774,37 @@ class Shell {
     // from each PTY stream server-side — and apply it locally. This is what
     // makes all tiles/tabs show correct status on startup instead of only the
     // tabs you've opened. One authed in-memory GET; cheap to repeat.
+    // Back off when the answer is "no".
+    //
+    // /api/manager is entitlement-gated, so on an unlicensed install this fetch
+    // has been returning 403 every four seconds, forever — 900 pointless
+    // round-trips an hour, each one a request, a rejection and a discarded
+    // promise on a page whose whole problem is that it is not getting enough
+    // main thread. A refusal is not a transient failure: it is an answer, and
+    // it will be the same answer next time. Back off to a minute, and reset the
+    // moment a pull succeeds so an install that gains the entitlement (or a
+    // daemon that was merely restarting) picks it straight back up.
     async _pullServerStatus() {
+        if (this._statusBackoffUntil && Date.now() < this._statusBackoffUntil) return;
         let j;
         try {
             const r = await fetch('/api/manager', { credentials: 'same-origin', cache: 'no-store' });
-            if (!r.ok) return;
+            if (!r.ok) {
+                // 4s → 8 → 16 … → 60s. A 403 settles at the cap immediately.
+                const step = r.status === 403 ? 60000
+                    : Math.min(60000, Math.max(8000, (this._statusBackoffMs || 4000) * 2));
+                this._statusBackoffMs = step;
+                this._statusBackoffUntil = Date.now() + step;
+                return;
+            }
             j = await r.json();
-        } catch (_) { return; }
+        } catch (_) {
+            this._statusBackoffMs = Math.min(60000, Math.max(8000, (this._statusBackoffMs || 4000) * 2));
+            this._statusBackoffUntil = Date.now() + this._statusBackoffMs;
+            return;
+        }
+        this._statusBackoffMs = 0;
+        this._statusBackoffUntil = 0;
         if (!j || !Array.isArray(j.sessions)) return;
         let tabsDirty = false;
         for (const sess of j.sessions) {
