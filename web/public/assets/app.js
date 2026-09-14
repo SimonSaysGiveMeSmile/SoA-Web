@@ -153,6 +153,105 @@ const $  = sel => document.querySelector(sel);
 // left open somewhere else was deciding the grid for the window you are reading
 // and leaving a black strip down its right. We report the state with every
 // measurement; the daemon skips viewers that are not looking.
+// ── Load guard ──────────────────────────────────────────────────────────────
+//
+// This dashboard runs on the same machine as the fleet it is watching, and that
+// fleet can take the machine. Measured on this install while the terminal "got
+// laggier over time": load average 41.5 against 18 cores, 87 GB resident, 2.1M
+// pageouts — the browser was being handed roughly one frame in three. Every
+// optimisation that assumes a 16ms budget is solving the wrong problem then,
+// and a reload does not help because nothing about the page was the problem.
+//
+// So stop assuming the budget and measure it. One rAF loop keeps the last 48
+// frame intervals; when the median says we are under ~30fps the page enters
+// CONSERVE and sheds what is decorative or deferrable — the globe stops, the
+// status animations hold, the context sweep narrows to the tab you are looking
+// at, and the bands stop repainting mid-gesture. The terminal itself is never
+// throttled: it is the thing the budget is being protected FOR.
+//
+// Hysteresis in both directions, because a UI that flickers between two modes
+// is worse than either one.
+const LoadGuard = {
+    N: 48,
+    ENTER_MS: 32,       // sustained median worse than ~30fps
+    EXIT_MS: 20,        // ...and clearly better than 50fps before coming back
+    _d: null, _i: 0, _last: 0, _n: 0, _bad: 0, _good: 0,
+    high: false,
+
+    start() {
+        if (this._d) return;
+        this._d = new Float32Array(this.N).fill(16);
+        const frame = (t) => {
+            if (this._last) {
+                this._d[this._i++ % this.N] = t - this._last;
+                if (++this._n >= this.N) { this._n = 0; this._evaluate(); }
+            }
+            this._last = t;
+            requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+        // The status bar may not exist yet when the first transition lands.
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => this._paint(), { once: true });
+        }
+        // A hidden page gets no frames by design; that is not load. Forget the
+        // history so the first second back does not read as a stall.
+        document.addEventListener('visibilitychange', () => {
+            this._last = 0; this._n = 0; this._bad = 0; this._good = 0;
+            if (document.hidden) this._set(false);
+        });
+    },
+
+    _median() {
+        const a = Array.from(this._d).sort((x, y) => x - y);
+        return a[a.length >> 1];
+    },
+
+    /** The frame time we are actually getting, for anything that wants to say so. */
+    frameMs() { return this._d ? this._median() : 16; },
+
+    _evaluate() {
+        const m = this._median();
+        if (m > this.ENTER_MS) { this._bad++; this._good = 0; } else { this._good++; this._bad = 0; }
+        if (!this.high && this._bad >= 2) this._set(true);
+        else if (this.high && m < this.EXIT_MS && this._good >= 3) this._set(false);
+    },
+
+    _set(on) {
+        if (this.high === on) return;
+        this.high = on;
+        window.__soaLoad = on ? 'high' : '';
+        try { document.documentElement.dataset.load = on ? 'high' : ''; } catch (_) {}
+        this._paint();
+        try {
+            window.dispatchEvent(new CustomEvent('soa:load', {
+                detail: { high: on, frameMs: Math.round(this.frameMs()) },
+            }));
+        } catch (_) {}
+    },
+
+    // The readout belongs to the guard, not to the shell. The first version
+    // wired it up during boot and it never appeared: on the machine this was
+    // built for, the page was already behind before boot finished, so the one
+    // transition had happened before anything was listening — and in sandbox
+    // mode the shell that owned the listener never runs at all. The guard is
+    // measuring from module load, so it is the only thing that can always say.
+    _paint() {
+        const el = document.getElementById('status-load');
+        if (!el) return;
+        el.hidden = !this.high;
+        if (!this.high) return;
+        el.textContent = `machine busy · ${Math.round(this.frameMs())}ms/frame · easing off`;
+        el.title = 'This machine is not giving the page frames, so decoration and background '
+            + 'scans are paused. The terminal itself is never throttled.';
+    },
+};
+LoadGuard.start();
+// Reachable for diagnosis. "The terminal feels laggy" is a claim; `__soaLoad`
+// and LoadGuard.frameMs() are the measurement that settles it, from the console
+// on whichever machine is actually slow.
+window.__soaLoadGuard = LoadGuard;
+
 const docHidden = () => {
     try { return document.visibilityState === 'hidden'; } catch (_) { return false; }
 };
@@ -211,7 +310,7 @@ class TabRuntime {
             // client-side cost, and with ~20 tabs a 5000-line buffer per tab was
             // bloating the page until it crashed. 1000 lines keeps useful
             // scrollback while cutting per-tab memory ~5×. Tunable knob.
-            scrollback: 1000,
+            scrollback: TabRuntime.SCROLLBACK,
             convertEol: false,
         });
         this.fit = new FitAddon.FitAddon();
@@ -276,7 +375,19 @@ class TabRuntime {
         const vp = this.term.element && this.term.element.querySelector('.xterm-viewport');
         this._vp = vp || null;
         this._screenEl = this.term.element && this.term.element.querySelector('.xterm-screen');
-        if (vp) vp.addEventListener('scroll', () => { this._syncSubRow(); repaint(); }, { passive: true });
+        if (vp) vp.addEventListener('scroll', () => {
+            this._syncSubRow();
+            // The sub-row transform above is a composited property and costs
+            // nothing; the bands are DOM work. When the page is not getting
+            // frames, that work is exactly what should not happen mid-flick —
+            // so hold it and paint once, after the gesture settles.
+            if (LoadGuard.high) {
+                if (this._bandIdle) clearTimeout(this._bandIdle);
+                this._bandIdle = setTimeout(() => { this._bandIdle = null; this.paintBands(); }, 120);
+                return;
+            }
+            repaint();
+        }, { passive: true });
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
         if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
@@ -546,6 +657,9 @@ class TabRuntime {
     // below baseY is immutable once it scrolls into history, so it is
     // classified once and cached forever.
     static BAND_COLS = 8;
+    // Must match the Terminal's `scrollback` option: it is also the point at
+    // which absolute line indices stop being stable — see _bandFor.
+    static SCROLLBACK = 1000;
 
     _bandFor(buf, abs) {
         const hit = this._bandCache.get(abs);
@@ -579,8 +693,15 @@ class TabRuntime {
             else if (line.isWrapped) kind = 'wrap';
         }
         // Only history is safe to remember; the live screen is still being
-        // repainted underneath us.
-        if (abs < buf.baseY) this._bandCache.set(abs, kind);
+        // repainted underneath us — AND only while the scrollback ring is still
+        // filling. Once it is full every new line evicts the oldest and shifts
+        // every index down by one, so absolute index N stops naming a fixed
+        // line: the cache would keep answering with some earlier line's
+        // classification and the bands would sit on the wrong text, for the
+        // rest of the session. A long-running tab is exactly where that lands,
+        // which is why banding looked right at first and drifted later.
+        if (abs < buf.baseY && buf.baseY < TabRuntime.SCROLLBACK) this._bandCache.set(abs, kind);
+        else if (buf.baseY >= TabRuntime.SCROLLBACK && this._bandCache.size) this._bandCache.clear();
         return kind;
     }
 
@@ -1233,6 +1354,8 @@ class Shell {
         } catch (_) {}
         stageEl.classList.toggle('no-context', ctxOff);
         this._watchVisibility();
+        // Say it out loud when the page starts doing less. Silence here is what
+        // makes a throttled UI read as a broken one.
         const ctxPull = $('#ctx-pull');
         const setContextOff = (off) => {
             stageEl.classList.toggle('no-context', off);
@@ -2337,7 +2460,13 @@ class Shell {
         // Pick this tick's slice: the visible tab first — it must never be
         // starved by the rotation — then as many others as the budget allows,
         // resuming where the last tick stopped so every tab comes round.
-        const ids = [...this.tabs.keys()];
+        // Under load the sweep stops being a fleet sweep. The tab on screen is
+        // the only one whose reading anybody is looking at; the rest are served
+        // by the daemon's own supervisor (_pullServerStatus), which classifies
+        // every tab server-side and costs this page one fetch.
+        const ids = LoadGuard.high && this.activeId != null
+            ? [this.activeId]
+            : [...this.tabs.keys()];
         const due = ids.filter(id => full || this._pollDirty.has(id));
         let slice;
         if (due.length <= Shell.POLL_BUDGET) {
