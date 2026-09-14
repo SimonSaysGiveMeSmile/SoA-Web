@@ -207,6 +207,10 @@
   animation: lq-sheen 5.5s ease-in-out infinite;
 }
 @keyframes lq-sheen { 0% { background-position: 140% 0; } 60%, 100% { background-position: -40% 0; } }
+/* An animated background-position repaints the tab every frame, forever. It is
+   the first thing to go when the page is not getting frames. */
+html[data-load="high"] [data-ui="liquid"] .tab.active::after,
+html[data-load="high"][data-ui="liquid"] .tab.active::after { animation: none; }
 [data-ui="liquid"] .tab.active .tab-sub { color: rgba(255,255,255,0.6); }
 /* Status becomes a coloured leading glow on the ctx-bar + tinted ink — calm,
    not a full border, keeping the chrome monochrome. */

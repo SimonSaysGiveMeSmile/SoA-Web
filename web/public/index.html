@@ -949,6 +949,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <span id="status-tabs" data-i18n="status.tabs_other" data-i18n-vars='{"n":0}'>0 tabs</span>
         <span id="status-devices" data-i18n="status.devices_one" data-i18n-vars='{"n":1}' style="display:none">1 device</span>
         <span id="status-conn" data-i18n="status.disconnected">disconnected</span>
+        <!-- Only present while the page is not getting frames. A UI that
+             quietly stops animating looks broken; one that says why does not,
+             and the measured frame time is the first thing worth knowing when
+             "the terminal feels laggy" turns out to be the machine. -->
+        <span id="status-load" class="status-load" hidden></span>
       </div>
     </main>
   </div>

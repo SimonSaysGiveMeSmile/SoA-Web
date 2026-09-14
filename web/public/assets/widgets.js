@@ -1249,6 +1249,10 @@ class LocationGlobeWidget extends Widget {
         // is backgrounded or the canvas is scrolled out of view. _kickAnim
         // restarts it when it becomes visible again.
         if (document.hidden || this._offscreen) return;
+        // A spinning globe is the clearest thing on the page to give up when the
+        // page is not getting frames. app.js's LoadGuard publishes that as a
+        // one-word global rather than wiring an event bus through a decoration.
+        if (window.__soaLoad === 'high') { this._rafId = requestAnimationFrame(() => this._tickAnim()); return; }
         const now = performance.now();
         const busy = now - (window.__soaLastInteract || 0) < LocationGlobeWidget.YIELD_MS;
         if (!busy && now - (this._lastFrame || 0) >= LocationGlobeWidget.ANIM_MS) {
