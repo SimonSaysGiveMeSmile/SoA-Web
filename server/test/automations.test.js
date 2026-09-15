@@ -82,12 +82,12 @@ test('parseSupervisors: finds installed launchd jobs by label column', () => {
     const out = [
         'PID\tStatus\tLabel',
         '10709\t0\tapp.s0a.web.local',
-        '-\t0\tcom.soa-web.effort-4010',
+        '-\t0\tcom.soa-web.nudge-stale-4010',
         '123\t0\tcom.apple.Finder',
         '-\t-9\tcom.soa-web.fleet-loop',
     ].join('\n');
     const rows = automations.parseSupervisors(out);
     const installed = rows.filter(r => r.installed).map(r => r.label);
-    assert.deepEqual(installed, ['com.soa-web.effort-4010', 'com.soa-web.fleet-loop']);
+    assert.deepEqual(installed, ['com.soa-web.nudge-stale-4010', 'com.soa-web.fleet-loop']);
     assert.equal(rows.length, automations.SUPERVISOR_LABELS.length);
 });

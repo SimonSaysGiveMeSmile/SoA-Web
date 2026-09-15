@@ -9,7 +9,8 @@
  * HIGH-CONTEXT tabs — which clears context so subsequent turns cost far less
  * while the agent keeps working. It NEVER stops, interrupts, or pauses an agent
  * (pausing is left to the manager/user via `soa-sessions throttle --pause`), and
- * NEVER touches effort (so it doesn't fight the soa-effort ultracode watchdog).
+ * NEVER touches effort — the agent's effort level is the user's setting, not a
+ * knob for a supervisor to turn.
  *
  * Runs headless from launchd (com.soa-web.usage-throttle) every ~180s. Read-only
  * except for the /compact it issues; conservative (few tabs/run, long per-tab

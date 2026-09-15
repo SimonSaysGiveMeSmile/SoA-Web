@@ -413,16 +413,7 @@ launchd jobs):
    non-blocked todos and defer that item. Skips manager tabs + caller; ~14m
    per-tab cooldown; a tab making NO progress backs off to hourly (never
    abandoned). Log: `~/.soa-web/logs/nudge-stale.log`.
-7. `com.soa-web.effort-4010` — every 900s runs `scripts/soa-effort`: keeps every
-   agent at `/effort ultracode` (xhigh effort + standing dynamic-workflow
-   orchestration). ultracode is **session-only** — it resets to the settings.json
-   default (`xhigh`) on restart/resume — so this re-asserts it. Requires
-   `enableWorkflows: true` in `~/.claude/settings.json` (else `/effort ultracode`
-   errors "needs dynamic workflows enabled"); the script warns if it's off. Only
-   touches PARKED tabs (never interrupts a working agent); detects current effort
-   from the footer (the word `ultracode`) and skips tabs already set; ~20m per-tab
-   cooldown. Log: `~/.soa-web/logs/effort.log`.
-8. `com.soa-web.usage-alert` — every 120s runs `scripts/soa-usage-alert`: polls
+7. `com.soa-web.usage-alert` — every 120s runs `scripts/soa-usage-alert`: polls
    `/api/claude-usage` (loopback, no auth) and pushes the user when a SINGLE
    session is "using too much token" — leaning hard on the model in the active
    5h usage-limit block (≥ $20 est.), heavy today (≥ $60), or suddenly burning
@@ -435,7 +426,7 @@ launchd jobs):
    Thresholds env-tunable (`SOA_USAGE_BLOCK_COST`/`_TODAY_COST`/`_BURN_COST`/
    `_COOLDOWN`). The dashboard TOP SESSIONS widget flags the same sessions with a
    ⚠ red row. Log: `~/.soa-web/logs/usage-alert.log`.
-9. `com.soa-web.fleet-loop` — a PERSISTENT daemon (KeepAlive, not a timer) running
+8. `com.soa-web.fleet-loop` — a PERSISTENT daemon (KeepAlive, not a timer) running
    `scripts/soa-fleet-loop`: blocks on `soa-sessions watch` (≈0 CPU between events)
    and reacts the INSTANT a session changes state — the always-on complement to the
    manager AGENT's event loop (works even with no manager alive) and to the timer

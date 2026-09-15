@@ -242,7 +242,7 @@ function fmtList(snap, costByTab) {
     const rows = snap.sessions.map(s => {
         const flags = [
             // Lifecycle flag first so non-active projects are obvious at a glance.
-            // The always-on supervisors (nudge-stale/effort/fleet-loop/heartbeat)
+            // The always-on supervisors (nudge-stale/fleet-loop/heartbeat)
             // grep these tokens to skip non-active tabs — keep them in sync.
             s.lifecycle === 'inactive' ? 'INACTIVE' : s.lifecycle === 'archive' ? 'ARCHIVED' : '',
             s.attention ? 'NEEDS-INPUT' : '',
