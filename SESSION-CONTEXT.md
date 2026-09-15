@@ -7,6 +7,136 @@ time; treat them as a starting point to re-check, not gospel.
 
 ---
 
+## 2026-09-15 · Claude · chasing "the frontend is laggy" to the machine, and what it turned up on the way
+
+A long session that started as a terminal-scrolling complaint and became a
+measurement exercise. The durable value here is the **numbers** and the ideas
+they killed — those were expensive to derive and cheap to re-break.
+
+### The lag: measured, not guessed
+
+The complaint was "scrolling gets worse over time and even reloading won't fix
+it". That is a description of a machine, not a page, and the machine agreed:
+
+| What | Measured |
+|---|---|
+| Load average | **41.5** (later 23) against **18 cores** — 2.3x oversubscribed |
+| Resident memory, all processes | 87 GB, **2.1M pageouts** |
+| Frame budget the page was getting | **83 ms/frame — one frame in five** |
+| SoA daemon | **2.2% of a core, 305–386 MB, ~10–25 KB/s out** |
+| Dashboard renderer (one Chrome tab) | **26% CPU, 736 MB** |
+| Claude agent processes | 39 processes, 23 tabs |
+
+Top consumers were **not** SoA: Xcode's `AssetCatalogSimulatorAgent` pegging a
+core at 97% for 7+ minutes, OrbStack at 16.4 GB / 35%, Spotlight (`mds` +
+`mds_stores`) ~74% combined, WindowServer 36–48%.
+
+**Three optimisations were rejected by measurement.** Record them so nobody
+re-proposes them:
+
+- **Move the agent detectors to a Web Worker** — benchmarked at **0.0088 ms per
+  pass**, ~0.3 ms/sec for the whole 22-tab fleet. Nothing to win.
+- **Stream only the focused tab instead of all 22** — the daemon sends
+  **25.5 KB/s total** (measured with `nettop -P -x`). The client is not drowning
+  in data; JSON.parse of that is microseconds.
+- **Evict idle terminals to reclaim memory** — ~1.3 MB per xterm buffer, ~30 MB
+  for the fleet, against a 736 MB renderer. Wrong target.
+
+Conclusion: **the client barely does any work — it is not being given main
+thread.** What is left to win is placement, not volume.
+
+### The PERF widget was lying, which was the breakthrough
+
+The user reported `FPS 120 / 120 · BLOCKED 0.0ms/s · smooth · no measurable js
+cost` while the screen moved about **once every ten seconds**. Not a
+contradiction — `fps` counted **requestAnimationFrame callbacks**, and a browser
+will hand a page 120 callbacks a second while presenting almost none of them.
+Every number was true; none were about the broken thing.
+
+Fixed by labelling it **RAF** (what it counts) and adding the rows that
+discriminate:
+
+- **TERM — draws/s**, counted from `term.onRender`. Bytes arriving with TERM near
+  zero and RAF at 120 is a complete diagnosis: the page is healthy, the emulator
+  is not.
+- **RENDERER — webgl / canvas / dom**, plus explicit `WEBGL: unavailable`.
+
+Deliberately did **not** invent a "frames on glass" number: Chrome does not
+expose presentation to a page, and an inferred metric here cannot be stood
+behind. `perfVerdict` now checks the terminal *before* the frame counter so it
+cannot print "smooth" over a stalled emulator.
+
+**Still unanswered and worth getting:** run `__soaDiag()` in the real dashboard
+tab. It returns `{frameMs, easingOff, renderer, webglAvailable, tabs,
+openTerminals}`. The automation Chrome reports `webglAvailable: false`; if the
+user's does too, the terminal silently fell back to the **DOM renderer**, which
+is the documented slow path this repo deliberately left in `b14f307` (#18).
+
+### On "render the terminal as React/JSX components"
+
+Asked for directly. The answer is no, and the repo already ran the experiment:
+xterm's DOM renderer — a `<span>` per style run per row — **was the default here**
+until `b14f307`, and was the original cause of the slow scrolling. #18 replaced it
+with WebGL (one textured quad batch). React on top would be that slow path plus a
+virtual-DOM diff over ~46x168 cells per frame. "Only update when it changed" is
+already what happens: xterm damage-tracks rows and coalesces renders to one per
+frame.
+
+### Shipped this session
+
+| PR | What |
+|---|---|
+| #57 | Echo flushes on the next tick both ends; sub-row scroll transform; **hidden viewers no longer size the PTY** |
+| #58 | Context pull tab visible again; prompts expand fully; **Time Machine captures from the daemon**, content-addressed |
+| #59 | Settings copy: descriptions that restated their label deleted (55 dead strings, 6 languages) |
+| #60 | `new URL(base+path)` threw on an empty base; `_apiJson()` so a failed request says so |
+| #61 | **LoadGuard** — the page measures its frame budget and sheds decoration below ~30fps |
+| #62 | `isInputPending()` interrupts the context sweep and the tab-row rebuild |
+| #63 | Renderer reported; a lost WebGL context is no longer permanent |
+| #64 | **Message queue** — type ahead, daemon delivers when the agent is ready |
+| #65 | Globe settles after 20s idle; submit tests wait on a condition |
+| #66 | Ports folded into NETWORK (37 chips → 11 rows); PERF honesty; **one widget can no longer kill the sidebar** |
+| #67 | **Effort enforcer removed** |
+| #68 | `/api/fleet/status` ungated |
+| #69 | Daemon reports its real version; boot screen shows it |
+
+### Gotchas that cost real time
+
+- **This checkout is SHALLOW** (`.git/shallow`, main = 5 commits locally). So
+  `git log v0.2.0..main` reports nonsense counts — it said "5 commits" for a
+  release spanning months. Do not size a release from this clone.
+- **The repo is shared with other agents.** A completed set of edits (the whole
+  version fix) was **reverted out of the working tree** between a killed command
+  and the next turn, and had to be redone from scratch. Claim scope with
+  `soa-work claim` and commit early.
+- **`scripts/soa-effort` was documented as an installed supervisor and was not
+  one** — no plist, no launchctl entry, no log. CLAUDE.md described a running job
+  that never ran here. Docs and machine can disagree; check `launchctl list`.
+- **`/api/manager` is entitlement-gated**, so on this unlicensed install the
+  dashboard asked for background-tab status every 4s and got **403 every 4s,
+  forever** (~900 wasted round-trips/hour). Now backs off, and the free
+  `/api/fleet/status` covers the per-tab reading.
+- **Timing tests flake under load.** `submitToTab`'s tests slept a fixed 40 ms for
+  5 ms-nominal timers and failed **two runs in three on clean main**. They wait on
+  a condition now.
+- **Test daemons leak.** Three throwaway daemons were left running across days,
+  one of which opened a **public Cloudflare tunnel** despite
+  `SOA_WEB_MANAGE_TUNNEL=0`. Always kill by port when finished.
+
+### Open
+
+1. **`__soaDiag()` from the real dashboard** — the one measurement still missing.
+2. **v0.3.0 misreports itself.** It was tagged while `package.json` said `0.2.0`,
+   so the published tarball says 0.2.0. Fixed on main (#69); a **v0.3.1** would
+   make the released artifact honest. The release guard now fails on mismatch.
+3. **Daemon restart** for `/api/fleet/status` and the version snippet (self-update
+   picks it up in the 03:00 window).
+4. **CPU-pressure throttle for the fleet** — offered, not built: drive the existing
+   `soa-sessions throttle` machinery off load average instead of dollars. 39 Claude
+   processes on 18 cores is the root cause no frontend change can fix.
+
+---
+
 ## 2026-09-11 · Claude · the left-hand corruption, and batching the fleet's output
 
 Two separate problems, one session. The first was the reported bug; the second
