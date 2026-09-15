@@ -784,7 +784,18 @@ html[data-load="high"] .set-row { transition: none !important; }
 .lang-select:hover { border-color: var(--soa-accent); }
 .lang-select option { background: var(--soa-bg); color: var(--soa-fg); }
 
-.stage { position: relative; overflow: hidden; display: grid; grid-template-rows: 1fr 24px; }
+/* The status bar no longer owns a grid row.
+ *
+ * It held 24px of every screen, permanently, to show four facts that change
+ * perhaps twice an hour — and the terminal is the thing that wanted the pixels.
+ * But collapsing a GRID row would change the terminal's height, and a height
+ * change is a fit, a TERM_RESIZE and a SIGWINCH that repaints the agent's whole
+ * screen. Auto-hiding chrome that resizes the PTY every time the mouse nears the
+ * bottom of the window would be far worse than the strip it reclaimed.
+ *
+ * So it floats over the bottom instead. The terminal is full height at all
+ * times and its geometry never depends on whether the bar is showing. */
+.stage { position: relative; overflow: hidden; display: grid; grid-template-rows: 1fr; }
 
 .terms { position: relative; background: var(--soa-bg); overflow: hidden; }
 .terms .term {
@@ -825,13 +836,34 @@ html[data-load="high"] .set-row { transition: none !important; }
 }
 
 .status-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 24px; z-index: 8;
   display: flex; align-items: center; gap: 18px;
   padding: 0 14px;
   border-top: 1px solid var(--soa-line);
   font-family: var(--font-mono); font-size: 11px;
   color: var(--soa-accent-dim);
   background: var(--soa-bg-deep);
+  /* Out of the way by default, and unclickable while it is out of the way. */
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 160ms ease, opacity 160ms ease;
 }
+/* Reach for it and it is there: a strip along the very bottom edge, the height
+   of a couple of pixels of intent. Hovering the bar itself keeps it up, so it
+   does not slide away from under the pointer. */
+.status-peek {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 10px; z-index: 8;
+}
+.status-peek:hover ~ .status-bar,
+.status-bar:hover,
+.stage.status-show .status-bar {
+  transform: none; opacity: 1; pointer-events: auto;
+}
+/* One state is never hidden: a connection that is not up. Everything else on
+   this bar is reference; that one is news. */
+.stage.status-pinned .status-bar { transform: none; opacity: 1; pointer-events: auto; }
+html[data-load="high"] .status-bar { transition: none; }
 .status-bar span { white-space: nowrap; }
 /* The one status that is about the MACHINE, not the connection. Amber because
    nothing is broken — the page is deliberately doing less. */

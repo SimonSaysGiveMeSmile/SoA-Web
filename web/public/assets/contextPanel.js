@@ -72,6 +72,9 @@ class ContextCanvas {
         this.root = root;
         this.backend = ctx.backend || '';
         this.getCwd = ctx.getCwd || (() => null);
+        this.getTabId = ctx.getTabId || (() => null);
+        this.queue = [];
+        this.queueGate = null;
         this.sessionId = null;
         this.steps = [];
         this._pinned = true;
@@ -127,6 +130,43 @@ class ContextCanvas {
             el('div', { class: 'ctx-band-h' }, [el('span', { text: 'ARTIFACTS' })]),
             this._arts,
         ]);
+        // QUEUE — what you have lined up for THIS agent's next turn.
+        //
+        // The terminal takes your typing immediately, which is the problem: mid
+        // turn it goes into Claude Code's own buffer, where a permission dialog
+        // can eat the Enter as an answer and a reload loses it. Written here it
+        // is held by the daemon and delivered when the agent is actually back at
+        // its input box.
+        this._queueList = el('div', { class: 'ctx-queue' });
+        this._queueInput = el('textarea', {
+            class: 'ctx-queue-add', rows: '1', placeholder: 'queue a message for the next turn',
+            onkeydown: (e) => {
+                // Enter sends, Shift+Enter makes a new line — the same contract
+                // as every composer, and these messages are often multi-line.
+                if (e.key !== 'Enter' || e.shiftKey) return;
+                e.preventDefault();
+                const text = e.target.value.trim();
+                if (!text) return;
+                e.target.value = '';
+                e.target.style.height = '';
+                this._queueAdd(text);
+            },
+            oninput: (e) => {
+                // Grow with the message rather than hiding it behind a scrollbar.
+                e.target.style.height = '';
+                e.target.style.height = Math.min(120, e.target.scrollHeight) + 'px';
+            },
+        });
+        this._queueBand = el('div', { class: 'ctx-band ctx-band-queue' }, [
+            this._bandGrip('queue', 'QUEUE'),
+            el('div', { class: 'ctx-band-h' }, [
+                el('span', { text: 'QUEUE' }),
+                this._queueWhy = el('span', { class: 'ctx-sub' }),
+            ]),
+            this._queueList,
+            this._queueInput,
+        ]);
+
         this._stepsBand = el('div', { class: 'ctx-band ctx-band-steps' }, [
             this._bandGrip('steps', 'NEXT STEPS'),
             el('div', { class: 'ctx-band-h' }, [el('span', { text: 'NEXT STEPS' })]),
@@ -142,6 +182,7 @@ class ContextCanvas {
             this._widthGrip(),
             head,
             this._threadBand,
+            this._queueBand,
             this._factsBand,
             this._artsBand,
             this._stepsBand,
@@ -302,6 +343,10 @@ class ContextCanvas {
         this._renderFacts(d.workspace || {}, d);
         this._renderArtifacts(d.artifacts || []);
         this._renderSteps();
+        // Rides the canvas poll rather than a timer of its own: the queue only
+        // changes when you add to it or the daemon delivers one, and both are
+        // visible within the same 2.5s the rest of this panel already costs.
+        this._queueFetch();
     }
 
     // A turn is keyed by when it was sent, not by its position: the thread grows
@@ -389,6 +434,92 @@ class ContextCanvas {
         }, [
             el('span', { class: 'ctx-art-x', text: a.title || a.id.slice(0, 8) }),
             el('span', { class: 'ctx-art-t', text: a.at ? ago(a.at) : '' }),
+        ])));
+    }
+
+    // ── Queue ───────────────────────────────────────────────────────────
+    // The daemon owns the queue: it is the thing that knows when the agent is
+    // ready, and the thing still running when this browser tab is closed. The
+    // panel is a view of it.
+    async _queueFetch() {
+        const id = this.getTabId();
+        if (id == null) { this.queue = []; this.queueGate = null; this._renderQueue(); return; }
+        try {
+            const r = await fetch(api(this.backend, `/api/queue?tab=${encodeURIComponent(id)}`), {
+                credentials: 'include', cache: 'no-store',
+            });
+            if (!r.ok) throw new Error(String(r.status));
+            const d = await r.json();
+            this.queue = Array.isArray(d.queue) ? d.queue : [];
+            this.queueGate = d.gate || null;
+        } catch (_) { /* leave the last view up rather than blanking it */ }
+        this._renderQueue();
+    }
+
+    async _queueAdd(text) {
+        const id = this.getTabId();
+        if (id == null) return;
+        // Show it at once. The round-trip is fast, but the feedback should not
+        // wait on it, and the next poll reconciles either way.
+        this.queue = this.queue.concat([{ id: 'pending-' + Date.now(), text, pending: true }]);
+        this._renderQueue();
+        try {
+            await fetch(api(this.backend, '/api/queue'), {
+                method: 'POST', credentials: 'include',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ id, text }),
+            });
+        } catch (_) {}
+        this._queueFetch();
+    }
+
+    async _queueRemove(qid) {
+        this.queue = this.queue.filter(e => e.id !== qid);
+        this._renderQueue();
+        try {
+            await fetch(api(this.backend, `/api/queue/${encodeURIComponent(qid)}`), {
+                method: 'DELETE', credentials: 'include',
+            });
+        } catch (_) {}
+        this._queueFetch();
+    }
+
+    // Why the queue is not moving is the only thing worth saying in the header.
+    // A queue that just sits there with no explanation reads as broken; "waiting
+    // on your answer" reads as the truth, and says where to look.
+    _gateNote() {
+        if (!this.queue.length) return '';
+        const stalled = this.queue.find(e => e.why);
+        const why = (this.queueGate && !this.queueGate.ok && this.queueGate.why)
+            || (stalled && stalled.why);
+        return {
+            busy: 'sending after this turn',
+            attention: 'waiting — the agent needs your answer',
+            limited: 'waiting — rate limited',
+            cooldown: 'sending…',
+            gone: 'tab is gone',
+        }[why] || 'sending after this turn';
+    }
+
+    _renderQueue() {
+        if (this._queueWhy) this._queueWhy.textContent = this._gateNote();
+        if (!this._queueList) return;
+        if (!this.queue.length) {
+            this._queueList.replaceChildren(el('p', { class: 'ctx-muted', text: 'nothing queued' }));
+            return;
+        }
+        this._queueList.replaceChildren(...this.queue.map((e, i) => el('div', {
+            class: 'ctx-qmsg' + (e.pending ? ' pending' : '') + (i === 0 ? ' next' : ''),
+        }, [
+            // Position is the useful ordinal: this is a line, and the only
+            // question anyone has is what goes in next.
+            el('span', { class: 'ctx-qmsg-n', text: String(i + 1) }),
+            el('span', { class: 'ctx-qmsg-x', text: e.text }),
+            el('button', {
+                class: 'ctx-qmsg-del', title: 'remove',
+                'aria-label': 'Remove this queued message',
+                text: '\u00d7', onclick: () => this._queueRemove(e.id),
+            }),
         ])));
     }
 

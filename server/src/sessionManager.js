@@ -37,6 +37,21 @@ const CLOSE_INACTIVE_ENV = process.env.SOA_MANAGER_CLOSE_INACTIVE == null
     ? null
     : /^(1|true|on|yes)$/i.test(String(process.env.SOA_MANAGER_CLOSE_INACTIVE));
 
+/**
+ * Queue entries that are still usable after a restart.
+ *
+ * An entry needs a body, and at least one way to find its tab again — tab ids
+ * are reassigned across a restart, which is exactly why cwd rides along. Pure
+ * and exported so the rule is testable without a daemon or a temp file.
+ */
+function normalizeQueues(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(q => q && typeof q.id === 'string'
+        && typeof q.text === 'string' && q.text.trim()
+        && (Number.isFinite(q.tabId) || (typeof q.cwd === 'string' && q.cwd))
+    ).slice(0, 500);
+}
+
 function loadManagerState() {
     try {
         const d = JSON.parse(fs.readFileSync(MANAGER_FILE, 'utf8'));
@@ -48,6 +63,14 @@ function loadManagerState() {
             // explicitly opts in. Env override wins for headless/prod pinning.
             closeInactive: CLOSE_INACTIVE_ENV != null ? CLOSE_INACTIVE_ENV : (d.closeInactive === true),
             schedules: Array.isArray(d.schedules) ? d.schedules.filter(s => s && Number(s.at) > 0) : [],
+            // Messages queued for a tab's next turn. Surviving a restart is half
+            // the point of keeping the queue server-side rather than in a
+            // browser tab — and this loader is a whitelist, so a field it does
+            // not name is written to disk and then silently dropped on the way
+            // back in. Entries need a body and at least one way to find their
+            // tab again; ids are reassigned across a restart, which is exactly
+            // why cwd is carried alongside.
+            queues: normalizeQueues(d.queues),
             todos: Array.isArray(d.todos) ? d.todos.filter(x => x && typeof x.id === 'string' && typeof x.text === 'string').slice(0, 500) : [],
             // User-defined agent groups: manual overrides keyed by cwd
             // ({ "<cwd>": "<groupName>" }). Absent a match, a session's group is
@@ -156,6 +179,22 @@ const WORK_LIVE = [/esc to interrupt/i, /\(esc\s+to\s+cancel\)/i, /[⠋⠙⠹⠸
 // simply idle at its prompt. CRITICAL: the box+footer coexist with the spinner during
 // active work, so the box ALONE is not "done" — requiring the absence of a live-work
 // marker keeps a genuinely hung agent (frozen spinner still in view) detectable as stuck.
+// A plain shell that has printed a prompt.
+//
+// Weaker than looksDone by necessity: shell prompts are user-configured and
+// there is no reliable "nothing is running" marker, so a prompt followed by an
+// echoed command still reads as ready and a queued line can be delivered while
+// a job is finishing. For a shell that is harmless — the line sits in stdin and
+// the shell runs it the moment the job ends, in order. It is called out here
+// because it is NOT true of an agent: for Claude Code the precise looksDone
+// check runs first, and it is the one that matters, since an early Enter there
+// can answer a permission dialog rather than start a turn.
+function shellReady(recent) {
+    const tail = strip(recent || '').slice(-200);
+    if (WORK_LIVE.some(p => p.test(tail))) return false;
+    return SHELL_PROMPT.test(tail);
+}
+
 function looksDone(recent) {
     const tail = strip(recent || '').slice(-600);
     return DONE.some(p => p.test(tail)) && !WORK_LIVE.some(p => p.test(tail));
@@ -975,6 +1014,162 @@ class SessionManager {
         }
     }
 
+    // ── Queued messages ────────────────────────────────────────────────
+    //
+    // Type your next instruction while the agent is still working, and have it
+    // delivered the moment the agent is back at its input box.
+    //
+    // Typing it into the terminal yourself is not the same thing. Claude Code's
+    // own buffer takes it, but a permission dialog mid-turn will eat the Enter
+    // as an ANSWER, a rate limit swallows it, and a message queued in a browser
+    // tab is gone the moment that tab reloads. The daemon already knows exactly
+    // when a tab is ready — the same `looksDone` + status gate the meeting relay
+    // uses to avoid typing into a dialog — and it is the thing that survives a
+    // reload, a phone, and its own restart.
+    //
+    // Entries carry BOTH ids, for the same reason schedules do: tab ids are
+    // reassigned across a daemon restart, so cwd is the only stable identity,
+    // but cwd alone is ambiguous when three tabs share a repo. Prefer the id
+    // while it still points at the same project; fall back to cwd; never guess.
+    static QUEUE_GAP_MS = parseInt(process.env.SOA_QUEUE_GAP_MS || '6000', 10);
+    static QUEUE_MAX_PER_TAB = 25;
+
+    _queues() {
+        if (!Array.isArray(this.state.queues)) this.state.queues = [];
+        return this.state.queues;
+    }
+
+    queueAdd(tabId, text) {
+        const body = String(text == null ? '' : text).trim();
+        if (!body) return null;
+        const tab = this.session.tabMgr && this.session.tabMgr.get(tabId);
+        if (!tab) return null;
+        const q = this._queues();
+        if (q.filter(e => e.tabId === tabId).length >= SessionManager.QUEUE_MAX_PER_TAB) return null;
+        const entry = {
+            id: Math.random().toString(36).slice(2, 10),
+            tabId, cwd: tab.cwd || null,
+            text: body.slice(0, 4000),
+            at: Date.now(),
+        };
+        q.push(entry);
+        this._saveState();
+        return entry;
+    }
+
+    queueList(tabId) {
+        const q = this._queues();
+        return (tabId == null ? q : q.filter(e => e.tabId === tabId)).map(e => ({ ...e }));
+    }
+
+    queueRemove(qid) {
+        const q = this._queues();
+        const before = q.length;
+        this.state.queues = q.filter(e => e.id !== qid);
+        if (this.state.queues.length === before) return false;
+        this._saveState();
+        return true;
+    }
+
+    queueEdit(qid, text) {
+        const body = String(text == null ? '' : text).trim();
+        if (!body) return null;
+        const e = this._queues().find(x => x.id === qid);
+        if (!e) return null;
+        e.text = body.slice(0, 4000);
+        this._saveState();
+        return { ...e };
+    }
+
+    queueClear(tabId) {
+        const q = this._queues();
+        const before = q.length;
+        this.state.queues = tabId == null ? [] : q.filter(e => e.tabId !== tabId);
+        if (this.state.queues.length === before) return 0;
+        this._saveState();
+        return before - this.state.queues.length;
+    }
+
+    /**
+     * May we type into this tab right now, and if not, why?
+     *
+     * Deliberately NOT shouldPoke(): that gate also refuses near the context
+     * ceiling and spends a relay budget, both of which are right for agents
+     * prompting each other and wrong for a message a person wrote and asked us
+     * to deliver. What carries over are the three that would MISFIRE:
+     *
+     *   attention — the agent is at a permission dialog, and the Enter that
+     *               submits a message would answer the dialog instead.
+     *   limited   — rate-limited; the text would sit in a dead terminal and
+     *               land whenever the limit lifts, out of context.
+     *   busy      — mid-turn. The whole point is to wait for the input box.
+     *
+     * The reason is returned rather than swallowed, so the UI can say "waiting:
+     * needs your input" instead of showing a queue that mysteriously does not
+     * move.
+     */
+    queueGate(tabId, now = Date.now()) {
+        const mgr = this.session.tabMgr;
+        const tab = mgr && mgr.get(tabId);
+        if (!tab || tab.exited) return { ok: false, why: 'gone' };
+        const st = this._state(tabId);
+        if (st.limit) return { ok: false, why: 'limited' };
+        if (st.status === 'attention') return { ok: false, why: 'attention' };
+        // Ready means "there is a prompt waiting for a line". For an agent that
+        // is Claude Code's input box; for a plain shell it is a shell prompt at
+        // the tail, which looksDone() does not know about because it exists to
+        // answer a different question (is this agent hung). Queuing a command
+        // for a shell tab is the same feature and must not silently never fire.
+        if (!looksDone(st.recent) && !shellReady(st.recent)) return { ok: false, why: 'busy' };
+        // One message per turn. Without this the next tick would still see the
+        // input box — the agent has not produced output yet — and fire the whole
+        // queue into one prompt.
+        const last = this._queueSentAt && this._queueSentAt.get(tabId);
+        if (last && (now - last) < SessionManager.QUEUE_GAP_MS) return { ok: false, why: 'cooldown' };
+        return { ok: true };
+    }
+
+    /** Deliver at most one queued message per ready tab. Called from the tick. */
+    tickQueues() {
+        const q = this._queues();
+        if (!q.length) return;
+        const mgr = this.session.tabMgr;
+        if (!mgr) return;
+        if (!this._queueSentAt) this._queueSentAt = new Map();
+        const now = Date.now();
+        const seen = new Set();
+        let sent = false;
+        for (const e of q.slice()) {
+            // One per tab per tick: the queue is a sequence of turns, not a
+            // paste buffer.
+            if (seen.has(e.tabId)) continue;
+            seen.add(e.tabId);
+            // Resolve exactly as schedules do — id first while it still points
+            // at the same project, cwd second, and skip rather than guess.
+            let tab = mgr.get(e.tabId);
+            if (e.cwd && (!tab || tab.cwd !== e.cwd)) {
+                tab = null;
+                for (const tid of mgr.order) {
+                    const t = mgr.get(tid);
+                    if (t && t.cwd === e.cwd) { tab = t; break; }
+                }
+            }
+            if (!tab) continue;
+            const gate = this.queueGate(tab.id, now);
+            if (!gate.ok) {
+                if (e.why !== gate.why) { e.why = gate.why; sent = true; }   // persist for the UI
+                continue;
+            }
+            this.state.queues = this._queues().filter(x => x.id !== e.id);
+            this._queueSentAt.set(tab.id, now);
+            automations.announce(mgr, tab.id, 'queued message');
+            submitToTab(tab, e.text);
+            this._emit('queue-sent', tab.id, { detail: e.text.slice(0, 60) });
+            sent = true;
+        }
+        if (sent) this._saveState();
+    }
+
     // ── One-shot "send text to tab at time" schedules ──
     schedule(tabId, at, text) {
         const id = Math.random().toString(36).slice(2, 10);
@@ -1341,6 +1536,56 @@ function mount(app, requireAuthed, sessions) {
     // below is entitlement-gated so a free install can't reach it (403). See
     // entitlements.js — today per-install, per-user once accounts land.
     const gateManager = entitlements.requireEntitled('manager');
+
+    // ── Queued messages: NOT entitlement-gated ─────────────────────────
+    // Writing your own next instruction to your own terminal is not fleet
+    // oversight, the same way recovering your own tabs is not (see
+    // /api/fleet/restore). The manager surface below stays paid.
+    const qsession = (req) => (req.session && req.session.tabMgr) ? req.session : primary();
+
+    app.get('/api/queue', requireAuthed, (req, res) => {
+        const s = qsession(req);
+        if (!s) return res.json({ ok: true, queue: [] });
+        const m = module.exports.ensure(s);
+        const tab = req.query.tab != null ? parseInt(req.query.tab, 10) : null;
+        const queue = m.queueList(Number.isFinite(tab) ? tab : null);
+        // The reason a queue is not moving is the most useful thing the UI can
+        // show, so it ships with the list rather than needing a second call.
+        const gate = Number.isFinite(tab) ? m.queueGate(tab) : null;
+        res.json({ ok: true, queue, gate });
+    });
+
+    app.post('/api/queue', requireAuthed, express.json({ limit: '32kb' }), (req, res) => {
+        const s = qsession(req);
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        const { id, text } = req.body || {};
+        const tabId = parseInt(id, 10);
+        if (!Number.isFinite(tabId)) return res.status(400).json({ ok: false, error: 'tab id required' });
+        const entry = module.exports.ensure(s).queueAdd(tabId, text);
+        if (!entry) return res.status(400).json({ ok: false, error: 'empty, unknown tab, or queue full' });
+        res.json({ ok: true, entry });
+    });
+
+    app.patch('/api/queue/:qid', requireAuthed, express.json({ limit: '32kb' }), (req, res) => {
+        const s = qsession(req);
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        const entry = module.exports.ensure(s).queueEdit(req.params.qid, (req.body || {}).text);
+        if (!entry) return res.status(404).json({ ok: false, error: 'not found or empty' });
+        res.json({ ok: true, entry });
+    });
+
+    app.delete('/api/queue/:qid', requireAuthed, (req, res) => {
+        const s = qsession(req);
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        res.json({ ok: module.exports.ensure(s).queueRemove(req.params.qid) });
+    });
+
+    app.delete('/api/queue', requireAuthed, (req, res) => {
+        const s = qsession(req);
+        if (!s) return res.status(503).json({ ok: false, error: 'no active session' });
+        const tab = req.query.tab != null ? parseInt(req.query.tab, 10) : null;
+        res.json({ ok: true, removed: module.exports.ensure(s).queueClear(Number.isFinite(tab) ? tab : null) });
+    });
 
     // Read-only fleet view (authed; powers the dashboard too).
     // Authed config (the mobile Settings sheet) — same knobs as the loopback
@@ -1795,6 +2040,6 @@ module.exports = {
     resolveCohort, activeOnlyIds, makeEventFilter, isLocalRequest, autoGroupFromCwd,
     // Meeting pure helpers — exported for the same reason resolveCohort is: the
     // rules that decide who gets prompted must be testable without a daemon.
-    meetRosterIds, shouldPoke, meetPokeLine, looksDone,
+    meetRosterIds, shouldPoke, meetPokeLine, looksDone, shellReady, normalizeQueues,
     MEET_RELAY_MAX, MEET_POKE_MS, MEET_MSG_BUDGET, MEET_MAX_MEMBERS,
 };

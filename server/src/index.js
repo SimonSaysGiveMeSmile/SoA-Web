@@ -813,6 +813,19 @@ function onWsConnect(ws, session, req) {
         }, 3000);
         if (session._cwdInterval.unref) session._cwdInterval.unref();
 
+        // Deliver queued messages the moment their agent is back at its input
+        // box. Deliberately NOT on the manager tick below: that one is
+        // entitlement-gated and never runs on a free install, and a message you
+        // queued for your own terminal must not silently never arrive. It polls
+        // readiness rather than waiting for a status event, for the same reason
+        // meetings do — an agent already at its input box can finish a turn
+        // without emitting anything to wake us. Costs one array-length check
+        // per tick while the queue is empty, which is nearly always.
+        session._queueInterval = setInterval(() => {
+            try { sessionManager.ensure(session).tickQueues(); } catch (_) {}
+        }, 2000);
+        if (session._queueInterval.unref) session._queueInterval.unref();
+
         // Supervisor tick: refresh stuck/idle derivations and push a MANAGER
         // snapshot to the dashboard. Always-on (independent of connected clients)
         // — but ONLY when the manager feature is entitled. On a free install this
