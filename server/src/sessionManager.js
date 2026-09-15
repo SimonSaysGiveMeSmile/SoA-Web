@@ -1537,6 +1537,39 @@ function mount(app, requireAuthed, sessions) {
     // entitlements.js — today per-install, per-user once accounts land.
     const gateManager = entitlements.requireEntitled('manager');
 
+    // ── Your own tabs' status: NOT entitlement-gated ───────────────────
+    //
+    // The dashboard colours each tab by what its agent is doing and shows a
+    // context percentage next to it. For the tab on screen that is measured in
+    // the browser from the live stream; for the other twenty-two it has to come
+    // from the daemon, which watches all of them.
+    //
+    // That only ever existed on /api/manager, which is the paid fleet-oversight
+    // surface — so on a free install the dashboard asked every four seconds and
+    // was told 403 every four seconds, forever, and every background tab's
+    // colour and context reading came from whatever happened to be buffered in
+    // the browser. Knowing whether YOUR OWN terminal needs input is not fleet
+    // oversight, by the same argument /api/fleet/restore already makes:
+    // recovering your own terminals is not premium fleet control.
+    //
+    // So the per-tab READING is free and the fleet CONTROL stays paid. This
+    // returns status, context, model and lifecycle — what a tab needs to draw
+    // itself. Groups, todos, meetings, the manager's own state and every action
+    // remain behind the gate on /api/manager.
+    app.get('/api/fleet/status', requireAuthed, (req, res) => {
+        const s = (req.session && req.session.tabMgr) ? req.session : primary();
+        if (!s) return res.json({ ok: true, sessions: [] });
+        const snap = ensure(s).snapshot();
+        res.json({
+            ok: true,
+            sessions: (snap.sessions || []).map(t => ({
+                id: t.id, status: t.status, ctxPct: t.ctxPct,
+                model: t.model, effort: t.effort, lifecycle: t.lifecycle,
+                attention: t.attention, stuck: t.stuck, limited: t.limited,
+            })),
+        });
+    });
+
     // ── Queued messages: NOT entitlement-gated ─────────────────────────
     // Writing your own next instruction to your own terminal is not fleet
     // oversight, the same way recovering your own tabs is not (see

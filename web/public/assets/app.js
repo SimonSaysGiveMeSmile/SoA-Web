@@ -2843,9 +2843,19 @@ class Shell {
         if (this._statusBackoffUntil && Date.now() < this._statusBackoffUntil) return;
         let j;
         try {
-            const r = await fetch('/api/manager', { credentials: 'same-origin', cache: 'no-store' });
+            // The free per-tab reading first; /api/manager only as the fallback
+            // for a daemon that predates it. Every field this function reads is
+            // in both payloads, so which one answered does not matter here.
+            const url = this._statusUrl || '/api/fleet/status';
+            const r = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+            if (r.status === 404 && url !== '/api/manager') {
+                this._statusUrl = '/api/manager';
+                return;   // the 4s tick retries immediately against the old route
+            }
             if (!r.ok) {
                 // 4s → 8 → 16 … → 60s. A 403 settles at the cap immediately.
+                // (Now only reachable on the /api/manager fallback: the free
+                // route does not refuse.)
                 const step = r.status === 403 ? 60000
                     : Math.min(60000, Math.max(8000, (this._statusBackoffMs || 4000) * 2));
                 this._statusBackoffMs = step;
@@ -2860,6 +2870,7 @@ class Shell {
         }
         this._statusBackoffMs = 0;
         this._statusBackoffUntil = 0;
+        this._statusUrl = this._statusUrl || '/api/fleet/status';
         if (!j || !Array.isArray(j.sessions)) return;
         let tabsDirty = false;
         for (const sess of j.sessions) {
