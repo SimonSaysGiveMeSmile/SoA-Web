@@ -1241,6 +1241,21 @@ class LocationGlobeWidget extends Widget {
     // And it stops entirely while the terminal is being scrolled or typed in.
     // Nothing decorative is worth a dropped frame in the thing you are reading.
     static YIELD_MS = 300;
+    // And it SETTLES. Measured on this install: the daemon at 2% of a core
+    // pushing 10 KB/s, and the dashboard's renderer at 26% and 736 MB — the page
+    // was spending a quarter of a core with almost nothing arriving. A three.js
+    // scene at 24fps is the largest standing cost in it, and it was running
+    // forever, by design: it yields to a gesture and then spins the entire time
+    // you are simply reading. Decoration is worth frames while you are here and
+    // nothing at all once you are not, so after this long with no interaction
+    // the loop STOPS — not a cheaper frame, no frame, and no rAF callback
+    // either. Any interaction brings it back.
+    static SETTLE_MS = 20_000;
+    // Escape hatch, matching the renderer's: localStorage.setItem('soa.globe',
+    // 'off') and reload, for anyone who would rather have the core back.
+    static disabled() {
+        try { return localStorage.getItem('soa.globe') === 'off'; } catch (_) { return false; }
+    }
 
     _tickAnim() {
         this._rafId = null;
@@ -1254,7 +1269,11 @@ class LocationGlobeWidget extends Widget {
         // one-word global rather than wiring an event bus through a decoration.
         if (window.__soaLoad === 'high') { this._rafId = requestAnimationFrame(() => this._tickAnim()); return; }
         const now = performance.now();
-        const busy = now - (window.__soaLastInteract || 0) < LocationGlobeWidget.YIELD_MS;
+        const idleFor = now - (window.__soaLastInteract || 0);
+        // Settled: stop the loop entirely and wait to be woken. _armWake costs
+        // one passive listener, against a WebGL draw every 42ms forever.
+        if (idleFor > LocationGlobeWidget.SETTLE_MS) { this._armWake(); return; }
+        const busy = idleFor < LocationGlobeWidget.YIELD_MS;
         if (!busy && now - (this._lastFrame || 0) >= LocationGlobeWidget.ANIM_MS) {
             this._lastFrame = now;
             try { this.globe.tick(); } catch (_) {}
@@ -1262,14 +1281,40 @@ class LocationGlobeWidget extends Widget {
         this._rafId = requestAnimationFrame(() => this._tickAnim());
     }
 
+    // One-shot listeners that restart the animation on the next sign of life.
+    // Registered only while settled, removed the moment they fire, so the page
+    // is not carrying input handlers for a decoration it is not drawing.
+    _armWake() {
+        if (this._wake || this._destroyed) return;
+        const wake = () => {
+            this._disarmWake();
+            this._kickAnim();
+        };
+        this._wake = wake;
+        for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
+            window.addEventListener(ev, wake, { passive: true, capture: true, once: true });
+        }
+    }
+
+    _disarmWake() {
+        if (!this._wake) return;
+        for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
+            window.removeEventListener(ev, this._wake, { capture: true });
+        }
+        this._wake = null;
+    }
+
     _kickAnim() {
         if (this._destroyed || this._rafId || !this.globe) return;
         if (document.hidden || this._offscreen) return;
+        if (LocationGlobeWidget.disabled()) return;
+        this._disarmWake();
         this._tickAnim();
     }
 
     _suspend() {
         super._suspend();
+        this._disarmWake();
         if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
     }
 
@@ -1426,6 +1471,9 @@ class LocationGlobeWidget extends Widget {
 
     destroy() {
         if (this._rafId) cancelAnimationFrame(this._rafId);
+        // A settled globe is holding wake listeners rather than a rAF loop, so
+        // cancelling the frame alone would leave them on window forever.
+        this._disarmWake();
         if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
         if (this._onResize) window.removeEventListener('resize', this._onResize);
         if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);

@@ -37,6 +37,22 @@ const {
 } = sm;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Wait for a condition instead of for a duration.
+//
+// submitToTab runs on real timers, and a fixed sleep asserts that the machine
+// was fast enough rather than that the code was correct — on a loaded box (this
+// one sits at a load average above 20) a 5ms timer routinely takes 40ms, and the
+// suite failed two runs in three for reasons that had nothing to do with the
+// code under test. Polling to a generous deadline still fails a genuine
+// ordering bug; it just stops failing for being busy.
+async function waitFor(fn, { timeout = 3000, step = 10 } = {}) {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+        if (fn()) return true;
+        if (Date.now() > deadline) return false;
+        await sleep(step);
+    }
+}
 
 function mkTab(id, opts = {}) {
     const _writes = [];
@@ -118,7 +134,7 @@ test('submitToTab: concurrent same-tab submits stay ordered as text,\\r,text,\\r
     const tab = mkTab(1);
     submitToTab(tab, 'A');
     submitToTab(tab, 'B');
-    await sleep(40);
+    await waitFor(() => tab._writes.length >= 4);
     assert.deepEqual(tab._writes, ['A', '\r', 'B', '\r']);
 });
 test('submitToTab: tolerates a throwing write without breaking the chain', async () => {
@@ -126,7 +142,7 @@ test('submitToTab: tolerates a throwing write without breaking the chain', async
     const tab = { write() { calls++; if (calls === 1) throw new Error('pty gone'); } };
     submitToTab(tab, 'X'); // first write throws → chain must still resolve
     submitToTab(tab, 'Y');
-    await sleep(40);
+    await waitFor(() => calls >= 2);
     assert.ok(calls >= 2, 'second submit still attempted after the first threw');
 });
 
