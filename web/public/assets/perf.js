@@ -27,6 +27,18 @@
 export const PERF = { on: false };
 
 let frames = 0;
+// Renders the terminal emulator actually performed.
+//
+// FPS counts rAF callbacks, which is NOT the same as frames on the glass — a
+// page can be handed 120 callbacks a second while you watch a slideshow, and
+// then the readout says "120 / 120 · smooth · no measurable js cost" while
+// nothing moves. Chrome does not expose presentation to a page, so rather than
+// infer a number that cannot be stood behind, measure the thing that can be:
+// how often the terminal actually redrew. A terminal streaming output at 0.1
+// renders a second while rAF runs at 120 is a complete diagnosis on its own —
+// the page is fine and the emulator is not — and it is a real count, not a
+// guess about the compositor.
+let termRenders = 0;
 let rafId = null;
 let blockedMs = 0;
 let observer = null;
@@ -34,6 +46,9 @@ let bytes = 0;
 let chunks = 0;
 let windowStart = 0;
 const parts = new Map();   // subsystem name -> ms accumulated this window
+
+/** One render performed by the terminal emulator. Called from its onRender. */
+export function prender() { if (PERF.on) termRenders++; }
 
 /** Record time spent in an instrumented block. `t0` comes from performance.now(). */
 export function ptime(name, t0) {
@@ -54,6 +69,7 @@ function reset(now) {
     blockedMs = 0;
     bytes = 0;
     chunks = 0;
+    termRenders = 0;
     parts.clear();
 }
 
@@ -67,6 +83,8 @@ export function perfStart() {
     const loop = () => {
         if (!PERF.on) return;
         frames++;
+        // An interval long enough to be a real display interval, and not so long
+        // that it is obviously a stall being counted as one frame.
         rafId = requestAnimationFrame(loop);
     };
     rafId = requestAnimationFrame(loop);
@@ -103,6 +121,9 @@ export function perfSnapshot() {
 
     const snap = {
         fps: frames / secs,
+        // How often the terminal redrew. Read against fps: high fps with a
+        // terminal at zero means the page is healthy and the emulator is not.
+        termFps: termRenders / secs,
         blockedMsPerSec: blockedMs / secs,
         kbPerSec: bytes / 1024 / secs,
         chunksPerSec: chunks / secs,
@@ -129,6 +150,14 @@ export function perfSnapshot() {
  */
 export function perfVerdict(s) {
     const target = (window.__soaHz && window.__soaHz > 70) ? 120 : 60;
+    // A terminal that is receiving bytes and not redrawing is broken, whatever
+    // the frame counter says. This case used to read "smooth · no measurable js
+    // cost" while the screen sat still for ten seconds at a time, because every
+    // number the widget looked at was about the PAGE and the thing that was
+    // stuck was the emulator. It is checked before fps for exactly that reason.
+    if (s.kbPerSec > 0.5 && s.termFps != null && s.termFps < 1) {
+        return { level: 'bad', text: 'terminal not redrawing' };
+    }
     if (s.fps >= target * 0.85) return { level: 'ok', text: 'smooth' };
     // Blocked time is the fork in the road.
     if (s.blockedMsPerSec >= 30) {

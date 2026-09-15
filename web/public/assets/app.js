@@ -21,7 +21,7 @@ import { AudioFX } from '/assets/audiofx.js?v=18';
 import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=26';
-import { PERF, ptime, pstream } from '/assets/perf.js?v=1';
+import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=5';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
@@ -385,7 +385,9 @@ class TabRuntime {
             if (this._bandRaf) return;
             this._bandRaf = requestAnimationFrame(() => { this._bandRaf = null; this.paintBands(); });
         };
-        try { this.term.onRender(repaint); } catch (_) {}
+        // Count every real emulator redraw, so the PERF widget can tell a page
+        // that is not getting frames apart from a terminal that is not drawing.
+        try { this.term.onRender(() => { prender(); repaint(); }); } catch (_) {}
         try { this.term.onScroll(repaint); } catch (_) {}
         const vp = this.term.element && this.term.element.querySelector('.xterm-viewport');
         this._vp = vp || null;
