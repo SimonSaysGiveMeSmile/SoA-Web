@@ -98,6 +98,40 @@
 .msim-status { font-size: 10px; opacity: 0.7; letter-spacing: 0.08em; white-space: nowrap; }
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
 
+/* ── Listening ports, inside the NETWORK widget ──────────────────────
+   The count used to be the headline, in display type, above a cloud of every
+   socket on the machine. The count is context, not news: it goes on one quiet
+   line beside the addresses it belongs to, and the rows below it are only the
+   dev servers you might actually open. */
+.net-sub {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin: 8px 0 5px; padding-top: 7px;
+  border-top: 1px solid var(--soa-line-soft);
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em;
+}
+.net-sub-k { color: rgba(var(--soa-accent-rgb), 0.7); }
+.net-sub-v { color: rgba(var(--soa-accent-rgb), 0.45); font-variant-numeric: tabular-nums; }
+/* The escape hatch to the full list. A link, not a button: it reveals rows, it
+   does not do anything to the machine. */
+.net-more {
+  appearance: none; background: none; border: 0; padding: 5px 0 2px;
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em;
+  color: rgba(var(--soa-accent-rgb), 0.55); cursor: pointer; text-align: left;
+}
+.net-more:hover { color: var(--soa-accent); }
+.net-more:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 2px; }
+/* The port this dashboard is served from: listed for completeness, never a
+   target — opening the dashboard inside its own preview is a hall of mirrors. */
+.port-scan-row.self {
+  opacity: 0.5; cursor: default;
+  border-style: dashed;
+}
+.port-scan-row.self::after { content: ''; }
+.port-scan-row.self:hover {
+  border-color: var(--soa-line-soft); color: var(--soa-fg);
+  background: rgba(var(--soa-accent-rgb), 0.04);
+}
+
 /* ── Port scanner widget ───────────────────────────────────────────── */
 .port-summary {
   display: flex;
