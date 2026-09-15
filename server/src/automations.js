@@ -65,7 +65,7 @@ function announce(tabMgr, tabId, label) {
 // daemon). Reported read-only so the panel can say what ELSE might be typing.
 const SUPERVISOR_LABELS = [
     'com.soa-web.watchdog-4010', 'com.soa-web.manager-watchdog-4010', 'com.soa-web.channels',
-    'com.soa-web.heartbeat', 'com.soa-web.nudge-stale-4010', 'com.soa-web.effort-4010',
+    'com.soa-web.heartbeat', 'com.soa-web.nudge-stale-4010',
     'com.soa-web.usage-alert', 'com.soa-web.usage-throttle', 'com.soa-web.fleet-loop',
 ];
 function parseSupervisors(listOutput, labels = SUPERVISOR_LABELS) {
