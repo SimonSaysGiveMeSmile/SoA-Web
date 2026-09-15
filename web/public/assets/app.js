@@ -866,6 +866,9 @@ class TabRuntime {
     // single re-render and cannot run out.
     attachRenderer() {
         if (this._renderer || !this._opened) return;
+        // Three GPU resets in a row is a driver saying no. Stop thrashing it and
+        // stay on canvas for the rest of the session.
+        if ((this._glLosses || 0) >= 3) { this._attachCanvasRenderer(); return; }
         // Escape hatch. A GPU renderer depends on the machine's driver stack, so
         // if one ever paints wrong there has to be a way back that does not need
         // a release: localStorage.setItem('soa.renderer', 'dom') and reload.
@@ -880,10 +883,19 @@ class TabRuntime {
                 if (addon.onContextLoss) addon.onContextLoss(() => {
                     try { addon.dispose(); } catch (_) {}
                     if (this._renderer === addon) this._renderer = null;
+                    // A lost context used to be permanent: we dropped to canvas
+                    // and never looked back, so one moment of GPU pressure cost
+                    // the terminal its fast renderer for the rest of the
+                    // session — and nothing anywhere said so. The context comes
+                    // back; try WebGL again on the next activation, and only
+                    // stop trying after it has failed repeatedly.
+                    this._glLosses = (this._glLosses || 0) + 1;
+                    this._rendererKind = 'canvas (webgl context lost)';
                     this._attachCanvasRenderer();
                 });
                 this.term.loadAddon(addon);
                 this._renderer = addon;
+                this._rendererKind = 'webgl';
                 this._repaint();
                 return;
             } catch (_) {
@@ -904,8 +916,27 @@ class TabRuntime {
             const addon = new C();
             this.term.loadAddon(addon);
             this._renderer = addon;
+            if (!this._rendererKind) this._rendererKind = 'canvas';
             this._repaint();
         } catch (_) {}
+    }
+
+    /**
+     * Which renderer this terminal actually ended up with.
+     *
+     * It has never been observable, and it is the difference between a terminal
+     * drawn as one textured quad batch and one rebuilt as a span per style run
+     * per row — the documented slow path, and the original reason scrolling
+     * dragged here (see the comment on attachRenderer). WebGL can fail quietly:
+     * a blocklisted driver, a machine already under GPU pressure, or simply too
+     * many live contexts across the browser. When that happens the terminal
+     * silently becomes slower and looks identical, which is exactly the shape of
+     * "it feels laggy and I can't tell why".
+     */
+    rendererKind() {
+        if (!this._opened) return 'none (not open)';
+        if (!this._renderer) return 'dom';
+        return this._rendererKind || 'unknown';
     }
 
     // A renderer swapped in AFTER the terminal is open inherits an empty canvas:
@@ -1369,6 +1400,27 @@ class Shell {
         } catch (_) {}
         stageEl.classList.toggle('no-context', ctxOff);
         this._watchVisibility();
+        // One call that answers "why does this feel slow", from the console of
+        // whichever browser is actually slow. Every number here has been the
+        // answer at least once: the frame budget the page is really getting, and
+        // which renderer the terminal ended up with — WebGL can fail quietly and
+        // the DOM fallback is the documented slow path.
+        window.__soaDiag = () => {
+            const rt = this.tabs.get(this.activeId);
+            let webgl = false;
+            try {
+                const c = document.createElement('canvas');
+                webgl = !!(c.getContext('webgl2') || c.getContext('webgl'));
+            } catch (_) {}
+            return {
+                frameMs: Math.round(LoadGuard.frameMs()),
+                easingOff: LoadGuard.high,
+                renderer: rt ? rt.rendererKind() : 'no active tab',
+                webglAvailable: webgl,
+                tabs: this.tabs.size,
+                openTerminals: [...this.tabs.values()].filter(t => t._opened).length,
+            };
+        };
         // Say it out loud when the page starts doing less. Silence here is what
         // makes a throttled UI read as a broken one.
         const ctxPull = $('#ctx-pull');
