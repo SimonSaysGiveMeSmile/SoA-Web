@@ -1400,6 +1400,7 @@ class Shell {
         } catch (_) {}
         stageEl.classList.toggle('no-context', ctxOff);
         this._watchVisibility();
+        this._watchStatusBar();
         // One call that answers "why does this feel slow", from the console of
         // whichever browser is actually slow. Every number here has been the
         // answer at least once: the frame budget the page is really getting, and
@@ -3820,6 +3821,38 @@ class Shell {
         rt.attachRenderer();
         rt.flushPendingReplay();
         this._broadcastSizeSoon();
+    }
+
+    // The status bar hides itself, but it still has news occasionally.
+    //
+    // Two rules, and they are the whole feature: anything that CHANGES down
+    // there shows the bar for a few seconds, and a connection that is not up
+    // pins it open until it is. A MutationObserver reads the changes rather than
+    // every writer calling in, so a line added to that bar later gets the
+    // behaviour for free instead of quietly not having it.
+    _watchStatusBar() {
+        const bar = document.querySelector('.status-bar');
+        const stage = document.querySelector('.stage');
+        if (!bar || !stage || typeof MutationObserver === 'undefined') return;
+        const conn = bar.querySelector('#status-conn');
+        const syncPinned = () => {
+            const bad = !!conn && !conn.classList.contains('ok');
+            stage.classList.toggle('status-pinned', bad);
+        };
+        const peek = () => {
+            syncPinned();
+            stage.classList.add('status-show');
+            if (this._statusPeekT) clearTimeout(this._statusPeekT);
+            this._statusPeekT = setTimeout(() => {
+                this._statusPeekT = null;
+                stage.classList.remove('status-show');
+            }, 2600);
+        };
+        new MutationObserver(peek).observe(bar, {
+            subtree: true, childList: true, characterData: true,
+            attributes: true, attributeFilter: ['class', 'style'],
+        });
+        syncPinned();
     }
 
     // Coming back to the front is a real geometry event: while this window was
@@ -7431,6 +7464,9 @@ async function bootServerMode({ backend, token }) {
     mountContextPanel($('#context'), {
         backend,
         getCwd: () => shell._tabCwd.get(shell.activeId) || null,
+        // The message queue is per TAB, not per workspace: three tabs on one
+        // repo are three agents, each with its own turn to wait for.
+        getTabId: () => (shell.activeId != null ? shell.activeId : null),
         // A width drag changes the terminal column, so re-fit the grid as it moves.
         onResize: () => shell._fitActive(),
     });

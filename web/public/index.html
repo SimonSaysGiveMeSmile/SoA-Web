@@ -944,6 +944,9 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           Full guide: <code>RECOVERY.md</code> in the repo.</p>
       </section>
 
+      <!-- Hover target for the auto-hidden status bar. Must stay immediately
+           before it: the reveal is a sibling selector, no JS on the hover path. -->
+      <div class="status-peek" aria-hidden="true"></div>
       <div class="status-bar">
         <span id="status-session">—</span>
         <span id="status-tabs" data-i18n="status.tabs_other" data-i18n-vars='{"n":0}'>0 tabs</span>
