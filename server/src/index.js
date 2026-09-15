@@ -243,7 +243,38 @@ const PUBLIC_DIR = path.resolve(__dirname, '../../web/public');
 // so that both this Node backend and the Vercel static deploy serve the same
 // client. (mobile/dist/ used to be a separate copy and drifted out of sync.)
 const MOBILE_DIR = path.resolve(__dirname, '../../web/public/m');
-const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({ protocol: 1, backend: '' })};`;
+// What this build IS, resolved once at startup.
+//
+// The client has always had a `version` field and it has always been 'dev' on a
+// self-hosted install, because the only thing that ever filled it in was the
+// Vercel build script — the daemon's own config snippet did not carry the field
+// at all, so every reader fell through to its fallback. The boot screen, the
+// settings BUILD row and the update check were therefore all reporting 'dev'
+// while running a tagged release.
+//
+// package.json is the source, with the short commit appended when the checkout
+// is a git working copy — the same `<version>+<sha>` shape
+// scripts/vercel-build.js produces, so the two builds report alike. Read from
+// .git directly rather than shelling out to git: this runs on every daemon
+// start, and a subprocess at boot to learn a string we can read from a file is
+// not a trade worth making.
+function _buildVersion() {
+    let version = '0.0.0';
+    try { version = require('../../package.json').version || version; } catch (_) {}
+    try {
+        const gitDir = path.join(__dirname, '..', '..', '.git');
+        const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+        const sha = head.startsWith('ref:')
+            ? fs.readFileSync(path.join(gitDir, head.slice(4).trim()), 'utf8').trim()
+            : head;
+        if (/^[0-9a-f]{7,40}$/.test(sha)) version += '+' + sha.slice(0, 7);
+    } catch (_) { /* not a git checkout (an installed copy) — the version alone */ }
+    return version;
+}
+const BUILD_VERSION = _buildVersion();
+const CONFIG_SNIPPET = `window.__SOA_WEB__ = ${JSON.stringify({
+    protocol: 1, backend: '', version: BUILD_VERSION,
+})};`;
 
 // ── Middleware: attach session ──────────────────────────────────────────
 function currentSession(req) {
