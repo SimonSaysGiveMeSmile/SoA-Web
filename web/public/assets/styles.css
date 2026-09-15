@@ -98,6 +98,15 @@ html, body {
 }
 .boot-sub { margin: 0 0 24px; font-size: 12px; opacity: 0.6; }
 .boot-status { margin: 0; font-family: var(--font-mono); font-size: 12px; opacity: 0.8; }
+/* The build, quieter than the status line above it — it is a fact about this
+   copy, not a step in the boot it is reporting on. Tabular figures so the
+   commit hash does not shimmer if it re-renders. */
+.boot-version {
+  margin: 10px 0 0; font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: 0.1em; opacity: 0.35;
+  font-variant-numeric: tabular-nums;
+}
+.boot-version[hidden] { display: none; }
 
 /* ── Login (removed — no auth) ──────────────────────────────────────────── */
 

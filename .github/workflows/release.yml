@@ -38,15 +38,21 @@ jobs:
       - name: Test
         run: npm test
 
-      # The package version is informational (the tag is the source of truth),
-      # but a mismatch usually means someone tagged the wrong commit — say so
-      # without failing the release.
+      # The package version is no longer informational: the daemon reads it at
+      # startup and puts it on the boot screen, so a mismatch here does not just
+      # look untidy in a manifest — it ships a build that tells every user the
+      # wrong version on every load. This was a warning until v0.3.0 was tagged
+      # against a package.json still saying 0.2.0 and nobody saw the warning, so
+      # it fails now. A tag with no release is a nuisance; a release that
+      # misreports itself is a bug in every copy of it.
       - name: Version check
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
           if [ "$tag" != "$pkg" ]; then
-            echo "::warning::tag v$tag does not match package.json version $pkg"
+            echo "::error::tag v$tag does not match package.json version $pkg."
+            echo "Bump package.json to $tag on main, then re-tag that commit."
+            exit 1
           fi
 
       # Source tarball for installs that don't clone: same tree, no git, no

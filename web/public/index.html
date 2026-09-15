@@ -820,6 +820,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
       <h1 class="boot-title"><a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a></h1>
       <p class="boot-sub" data-i18n="brand.sub">WEB TERMINAL · PROTOCOL v1</p>
       <p class="boot-status" id="boot-status" data-i18n="boot.negotiating">negotiating session…</p>
+      <!-- Filled from window.__SOA_WEB__.version the moment the config lands.
+           The boot screen is the one place every user looks on every load, and
+           it is where "which build am I actually running" belongs — not three
+           clicks into Settings. -->
+      <p class="boot-version" id="boot-version" hidden></p>
     </div>
   </div>
 
@@ -961,6 +966,18 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
     </main>
   </div>
 
+  <script>
+    // The build, on the screen everyone sees. Inline and synchronous: the boot
+    // screen can be gone in under a second, and a readout that arrives after it
+    // has faded is not a readout.
+    (function () {
+      var v = (window.__SOA_WEB__ && window.__SOA_WEB__.version) || '';
+      var el = document.getElementById('boot-version');
+      if (!el || !v) return;
+      el.textContent = 'v' + v;
+      el.hidden = false;
+    })();
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
