@@ -161,23 +161,73 @@ function candidateFiles(cutoff) {
     return files;
 }
 
+// ── byte-exact scanning ─────────────────────────────────────────────────
+//
+// Everything below works on Buffers and only decodes COMPLETE lines. The first
+// version decoded each chunk to a string and carried the trailing partial line
+// forward, which is the usual shape — and wrong here, because a chunk boundary
+// can land inside a multi-byte character. toString() turns the truncated half
+// into a replacement character, and from then on every offset computed from
+// that text is off by a byte or two. On a file where those offsets decide which
+// side of midnight a record falls, that is not a rounding error. Newlines are
+// ASCII, so finding them in the raw bytes is both exact and faster.
+function readBuf(fd, from, len) {
+    if (len <= 0) return Buffer.alloc(0);
+    const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, from);
+    return n === len ? buf : buf.subarray(0, n);
+}
+
+const NL = 0x0A;
+
+/**
+ * Call `fn(line, offset)` for every complete line in [from, to), and return the
+ * offset just past the last one consumed. Stops early when `fn` returns a
+ * value, handing it back through `out`.
+ */
+function eachLine(fd, from, to, limit, fn) {
+    let at = from;
+    while (at < to && (at - from) < limit) {
+        const buf = readBuf(fd, at, Math.min(CHUNK_BYTES, to - at));
+        if (!buf.length) break;
+        const lastNl = buf.lastIndexOf(NL);
+        if (lastNl < 0) {
+            // A record longer than a whole chunk. Step over it: what gets
+            // skipped is a giant tool result, never a usage record, and the
+            // next chunk resynchronises on its own newline.
+            at += buf.length;
+            continue;
+        }
+        let start = 0;
+        while (start <= lastNl) {
+            const nl = buf.indexOf(NL, start);
+            const stop = fn(buf.toString('utf8', start, nl), at + start);
+            if (stop !== undefined) return { consumed: at + start, stop };
+            start = nl + 1;
+        }
+        at += lastNl + 1;
+    }
+    return { consumed: Math.min(at, to), stop: undefined };
+}
+
 /** Offset of the first byte after the next newline at or after `from`. */
 function nextLineStart(fd, size, from) {
     let at = from;
     while (at < size) {
-        const chunk = readRange(fd, at, Math.min(PROBE_BYTES, size - at));
-        const nl = chunk.indexOf('\n');
-        if (nl >= 0) return at + Buffer.byteLength(chunk.slice(0, nl + 1), 'utf8');
-        at += Buffer.byteLength(chunk, 'utf8');
+        const buf = readBuf(fd, at, Math.min(PROBE_BYTES, size - at));
+        if (!buf.length) break;
+        const nl = buf.indexOf(NL);
+        if (nl >= 0) return at + nl + 1;
+        at += buf.length;
     }
     return size;
 }
 
-function readRange(fd, from, len) {
-    if (len <= 0) return '';
-    const buf = Buffer.alloc(len);
-    const n = fs.readSync(fd, buf, 0, len, from);
-    return buf.toString('utf8', 0, n);
+/** Timestamp of the record starting at `off`. */
+function firstTsAt(fd, size, off) {
+    const buf = readBuf(fd, off, Math.min(PROBE_BYTES, size - off));
+    const nl = buf.indexOf(NL);
+    return lineTs(buf.toString('utf8', 0, nl < 0 ? buf.length : nl));
 }
 
 /**
@@ -188,21 +238,19 @@ function readRange(fd, from, len) {
  *
  *   - an offset lands mid-line, so each probe resyncs forward to the next
  *     newline before reading a timestamp, and a probe that finds no boundary
- *     at all (a record longer than the probe) just moves `lo` past it;
+ *     at all says NOTHING about which side of the target it is on — advancing
+ *     on that non-answer is what used to walk the search straight past the
+ *     record it was looking for;
  *   - halving stops while the range is still up to one probe wide, and the
- *     rest is scanned linearly. The first version returned the last probe's
- *     guess instead, which is off by however much of the range was left —
- *     enough to put a midnight baseline on the wrong side of the first
- *     request of the day, and to hand most of that day to yesterday.
+ *     rest is scanned linearly. Returning the last probe's guess instead is
+ *     off by however much of the range was left — enough to put a midnight
+ *     baseline on the wrong side of the first request of the day, and hand
+ *     most of that day to yesterday.
  */
 function seekTs(fd, size, target) {
     let lo = 0, hi = size;
     for (let i = 0; i < 60 && (hi - lo) > PROBE_BYTES; i++) {
         const mid = (lo + hi) >> 1;
-        // Resync forward to a real boundary INSIDE the range. A probe that
-        // finds none says nothing about which side of the target it is on —
-        // moving `lo` past it on that non-answer is what used to walk the
-        // search straight past the record it was looking for.
         const lineStart = nextLineStart(fd, hi, mid);
         if (lineStart >= hi) break;              // the range is one huge record
         const ts = firstTsAt(fd, size, lineStart);
@@ -212,29 +260,14 @@ function seekTs(fd, size, target) {
     return scanForTs(fd, size, Math.min(lo, hi), target);
 }
 
-/** Timestamp of the record starting at `off`. */
-function firstTsAt(fd, size, off) {
-    const chunk = readRange(fd, off, Math.min(PROBE_BYTES, size - off));
-    const nl = chunk.indexOf('\n');
-    return lineTs(nl < 0 ? chunk : chunk.slice(0, nl));
-}
-
 /** Linear half of seekTs: `from` must already be a line boundary. */
 function scanForTs(fd, size, from, target) {
-    let at = from, carry = '', offset = from;
-    while (at < size && (at - from) < SEEK_SCAN_LIMIT) {
-        const len = Math.min(CHUNK_BYTES, size - at);
-        const text = carry + readRange(fd, at, len);
-        at += len;
-        const parts = text.split('\n');
-        carry = parts.pop();
-        for (const line of parts) {
-            const ts = lineTs(line);
-            if (ts && ts >= target) return offset;
-            offset += Buffer.byteLength(line, 'utf8') + 1;
-        }
-    }
-    return Math.min(offset, size);
+    const r = eachLine(fd, from, size, SEEK_SCAN_LIMIT, (line, off) => {
+        const ts = lineTs(line);
+        if (ts && ts >= target) return off;
+        return undefined;
+    });
+    return r.stop !== undefined ? r.stop : Math.min(r.consumed, size);
 }
 
 /**
@@ -256,38 +289,30 @@ function scanForTs(fd, size, from, target) {
  * the first request of the day away to yesterday.
  */
 function cumulativeAfter(fd, size, from) {
-    let at = from, carry = '';
     const out = { rec: null, info: null };
-    while (at < size && (at - from) < SCAN_LIMIT) {
-        const len = Math.min(1 << 20, size - at);
-        const text = carry + readRange(fd, at, len);
-        at += len;
-        const parts = text.split('\n');
-        carry = parts.pop();
-        for (const line of parts) {
-            const isRec = !out.rec && line.indexOf('"token_usage_record"') >= 0;
-            const isCnt = !out.info && line.indexOf('"token_count"') >= 0;
-            if (!isRec && !isCnt) continue;
+    eachLine(fd, from, size, SCAN_LIMIT, (line) => {
+        const isRec = !out.rec && line.indexOf('"token_usage_record"') >= 0;
+        const isCnt = !out.info && line.indexOf('"token_count"') >= 0;
+        if (isRec || isCnt) {
             try {
                 const p = JSON.parse(line).payload;
-                if (!p) continue;
-                if (isRec && p.thread_token_usage) {
+                if (p && isRec && p.thread_token_usage) {
                     out.rec = {
                         ts: lineTs(line),
                         tokens: bucketFrom(p.thread_token_usage),
                         delta: p.usage ? bucketFrom(p.usage) : tokenBucket(),
                     };
-                } else if (isCnt && p.type === 'token_count' && p.info && p.info.total_token_usage) {
+                } else if (p && isCnt && p.type === 'token_count' && p.info && p.info.total_token_usage) {
                     out.info = {
                         ts: lineTs(line),
                         tokens: bucketFrom(p.info.total_token_usage),
                         delta: p.info.last_token_usage ? bucketFrom(p.info.last_token_usage) : tokenBucket(),
                     };
                 }
-            } catch (_) { /* a truncated line; the next chunk carries it */ }
+            } catch (_) { /* a record we could not read is one we skip */ }
         }
-        if (out.rec && out.info) break;
-    }
+        return (out.rec && out.info) ? true : undefined;
+    });
     return out;
 }
 
@@ -347,32 +372,15 @@ function parseInto(line, c) {
 }
 
 /**
- * Parse [from, to) into `c`, one megabyte at a time, and return the offset of
- * the last byte actually consumed. A trailing partial line is never consumed,
- * so it is simply re-read on the next poll and parsed exactly once — the same
- * contract claudeUsage.tail() uses, and the reason a record split across two
- * polls cannot be double counted or lost.
+ * Parse [from, to) into `c` and return the offset of the last byte consumed.
+ *
+ * A trailing partial line is never consumed, so it is re-read on the next poll
+ * and parsed exactly once — the same contract claudeUsage.tail() uses, and the
+ * reason a record split across two polls can be neither double counted nor
+ * lost.
  */
 function chunkedParse(fd, from, to, c) {
-    let consumed = from;
-    while (consumed < to) {
-        const len = Math.min(CHUNK_BYTES, to - consumed);
-        const text = readRange(fd, consumed, len);
-        const lastNl = text.lastIndexOf('\n');
-        if (lastNl < 0) {
-            // One record longer than a whole chunk. Step over it rather than
-            // spin: the next chunk then opens mid-line, and parseInto rejects
-            // anything that does not start with '{'.
-            if (len < to - consumed) { consumed += len; continue; }
-            break;
-        }
-        for (const line of text.slice(0, lastNl).split('\n')) parseInto(line, c);
-        // Every chunk restarts on a line boundary, which is the whole point:
-        // reading forward by a fixed stride instead would hand the parser the
-        // tail of one record glued to the head of the next.
-        consumed += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8');
-    }
-    return consumed;
+    return eachLine(fd, from, to, Infinity, (line) => { parseInto(line, c); }).consumed;
 }
 
 /**
@@ -679,5 +687,5 @@ function _reset() { _cache.clear(); _lastComputed = null; _lastAt = 0; }
 
 module.exports = {
     mount, snapshot, windowLabel, seekTs, sessionsDir,
-    _internals: { lineTs, subBuckets, normalizeLimit, nextLineStart, readRange, scanForTs, firstTsAt, _reset },
+    _internals: { lineTs, subBuckets, normalizeLimit, nextLineStart, readBuf, scanForTs, firstTsAt, eachLine, _reset },
 };

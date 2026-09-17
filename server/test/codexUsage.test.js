@@ -365,3 +365,65 @@ test('codex usage: seekTs lands on the first record at or after a timestamp', ()
         assert.equal(codexUsage.seekTs(fd, size, base + 10_000 * 60000), size);
     } finally { fs.closeSync(fd); }
 });
+
+test('codex usage: a chunk boundary inside a multi-byte character does not shift offsets', () => {
+    clean();
+    const p = path.join(DAY_DIR, 'utf8.jsonl');
+    const base = Date.parse('2026-09-17T00:00:00.000Z');
+    const CHUNK = 4 << 20;                      // must match CHUNK_BYTES
+    const fd = fs.openSync(p, 'w');
+    const offsets = [];
+    let off = 0, i = 0;
+    const put = (payload) => {
+        const line = JSON.stringify({ timestamp: iso(base + i * 60000), ordinal: i, type: 'x', payload });
+        const buf = Buffer.from(line + '\n', 'utf8');
+        fs.writeSync(fd, buf);
+        offsets.push(off);
+        off += buf.length;
+        i++;
+    };
+    try {
+        while (off < CHUNK - 400000) put({ pad: 'a'.repeat(3000) });
+        // A run of three-byte characters positioned so the 4 MiB boundary lands
+        // one byte INTO one of them. Decoding such a chunk to a string turns
+        // the orphaned bytes into replacement characters, and any offset
+        // computed from that text is then wrong by a few bytes — the reason
+        // the scanners work on raw bytes and decode only complete lines. This
+        // pins the property; it is not a regression test for a shipped bug.
+        const sample = JSON.stringify({
+            timestamp: iso(base + i * 60000), ordinal: i, type: 'x', payload: { pad: '' },
+        });
+        // `pad` is the last field, so its value always starts here whatever it
+        // holds. An ASCII lead-in shifts the run off the boundary's alignment.
+        const padValueAt = off + sample.indexOf('"pad":"') + 7;
+        let lead = 0;
+        while ((CHUNK - (padValueAt + lead)) % 3 !== 1) lead++;
+        const runStart = padValueAt + lead;
+        assert.ok(CHUNK - runStart > 0, 'the run has to straddle the boundary');
+        assert.equal((CHUNK - runStart) % 3, 1, 'the boundary must fall INSIDE a character');
+        const chars = Math.ceil((CHUNK - runStart + 3000) / 3);
+        put({ pad: 'a'.repeat(lead) + '中'.repeat(chars) });
+        assert.ok(off > CHUNK, 'the file crosses at least one chunk boundary');
+        while (off < CHUNK + 200000) put({ pad: 'b'.repeat(3000) });
+    } finally { fs.closeSync(fd); }
+
+    const size = fs.statSync(p).size;
+    assert.equal(size, off);
+    const rd = fs.openSync(p, 'r');
+    try {
+        // Every record after the split boundary must still be found at its
+        // exact byte offset.
+        for (const n of [0, 1, i - 1, i - 2, Math.floor(i / 2)]) {
+            assert.equal(codexUsage.seekTs(rd, size, base + n * 60000), offsets[n], `record ${n}`);
+        }
+        // And a full walk must visit every line exactly once.
+        let seen = 0;
+        const r = codexUsage._internals.eachLine(rd, 0, size, Infinity, (line, at) => {
+            assert.equal(at, offsets[seen], `line ${seen} offset`);
+            assert.ok(line.startsWith('{"timestamp":"'), `line ${seen} is whole`);
+            seen++;
+        });
+        assert.equal(seen, i, 'every record, exactly once');
+        assert.equal(r.consumed, size);
+    } finally { fs.closeSync(rd); }
+});
