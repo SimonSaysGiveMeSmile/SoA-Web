@@ -837,6 +837,28 @@ html[data-load="high"] .set-row { transition: none !important; }
   overscroll-behavior: contain;
 }
 .terms .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
+
+/* "↓ live" — shown only while a terminal has stopped following its own output,
+   which is only ever because you scrolled away from the tail. It sits above the
+   status bar and inside the grid's own right edge, floats (so it can never
+   change the terminal's height, and therefore can never cause a SIGWINCH), and
+   is the single click back to the live screen. */
+.terms .term-live {
+  position: absolute; right: 14px; bottom: 34px; z-index: 6;
+  padding: 4px 10px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--soa-bg); background: var(--soa-accent);
+  border: 0; border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  opacity: 0.92;
+  animation: term-live-in 140ms ease-out;
+}
+.terms .term-live:hover { opacity: 1; }
+.terms .term-live[hidden] { display: none; }
+@keyframes term-live-in { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .terms .term-live { animation: none; } }
 .terms .xterm-screen { width: 100% !important; }
 .terms .term-empty {
   display: grid; place-items: center; height: 100%;

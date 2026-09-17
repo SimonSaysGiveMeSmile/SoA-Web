@@ -18,9 +18,9 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=47';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=29';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=26';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=48';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=30';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=27';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=5';
@@ -368,6 +368,10 @@ class TabRuntime {
         // absolute buffer line -> 'user' | 'tool' | '' (classified once; a line
         // that has scrolled into history can never change again)
         this._bandCache = new Map();
+        // Follow the tail unless you have deliberately scrolled away from it.
+        // See _followTail for why a terminal cannot be left to xterm on this.
+        this._follow = true;
+        this._carried = 0;
     }
 
     _ensureOpen() {
@@ -387,12 +391,13 @@ class TabRuntime {
         };
         // Count every real emulator redraw, so the PERF widget can tell a page
         // that is not getting frames apart from a terminal that is not drawing.
-        try { this.term.onRender(() => { prender(); repaint(); }); } catch (_) {}
+        try { this.term.onRender(() => { prender(); this._followTail(); repaint(); }); } catch (_) {}
         try { this.term.onScroll(repaint); } catch (_) {}
         const vp = this.term.element && this.term.element.querySelector('.xterm-viewport');
         this._vp = vp || null;
         this._screenEl = this.term.element && this.term.element.querySelector('.xterm-screen');
         if (vp) vp.addEventListener('scroll', () => {
+            this._noteFollow();
             this._syncSubRow();
             // The sub-row transform above is a composited property and costs
             // nothing; the bands are DOM work. When the page is not getting
@@ -405,10 +410,82 @@ class TabRuntime {
             }
             repaint();
         }, { passive: true });
+        // The way back. A terminal that has stopped following its own output
+        // needs to say so and needs one click to undo it — scrolling 40,000
+        // lines by hand to reach the live screen is not a way back.
+        this._liveBtn = el('button', {
+            class: 'term-live',
+            type: 'button',
+            hidden: 'hidden',
+            title: tr('term.live.hint'),
+            onclick: () => { this.scrollToBottom(); this.focus(); },
+        }, tr('term.live'));
+        this._liveBtn.hidden = true;
+        this.container.appendChild(this._liveBtn);
+        // A wheel or a drag upward is an intention, and it is knowable one event
+        // before the scroll position proves it. Under load the scroll event can
+        // arrive several frames late — long enough for a repaint to have yanked
+        // the viewport back down and fought the gesture. Read the intention.
+        this.container.addEventListener('wheel', (e) => {
+            if (e.deltaY < 0) this.setFollow(false);
+        }, { passive: true });
+        this.container.addEventListener('touchstart', () => { this._touchY = null; }, { passive: true });
+        this.container.addEventListener('touchmove', (e) => {
+            const y = e.touches && e.touches[0] && e.touches[0].clientY;
+            if (y != null && this._touchY != null && y > this._touchY) this.setFollow(false);
+            this._touchY = y;
+        }, { passive: true });
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
         if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
         return true;
+    }
+
+    // ── Following the tail ──────────────────────────────────────────────
+    //
+    // "Scrolled to the bottom" is not a thing xterm can be trusted to keep for
+    // you here. It follows new output only while its own `isUserScrolling` flag
+    // is clear, and that flag is set by ANY scroll that resolves to a row other
+    // than the newest — including the ones this file performs itself, since the
+    // viewport scrolls natively now and _snapToRow writes scrollTop directly. A
+    // single snap that lands one row short therefore latches "the user is
+    // reading history" and the terminal never follows its own output again.
+    //
+    // The agents make the two halves of that failure look completely different.
+    // Claude Code repaints its whole screen in place, so a stranded viewport
+    // still shows live text and nobody notices. Codex prints its transcript
+    // into the scrollback and keeps only its composer pinned to the last rows,
+    // so a stranded viewport shows a frozen screen while the session runs on
+    // underneath it — which is what "codex does not snap to the bottom" is.
+    //
+    // So own the decision. We follow unless YOU scrolled away, we notice the
+    // moment you come back, and every repaint re-asserts it.
+    setFollow(on) {
+        on = !!on;
+        if (this._follow === on) return;
+        this._follow = on;
+        if (this._liveBtn) this._liveBtn.hidden = on;
+        if (on) this._followTail(true);
+    }
+
+    // Anything within three quarters of a row of the end counts as the end.
+    // The sub-row transform, fractional cell heights and device-pixel rounding
+    // all mean a viewport at rest is routinely a fraction of a pixel short of
+    // its own scrollHeight, and an exact comparison reads that as "scrolled up".
+    _noteFollow() {
+        const vp = this._vp;
+        if (!vp) return;
+        const cellH = this._cellHeight() || 18;
+        const gap = vp.scrollHeight - vp.scrollTop - vp.clientHeight;
+        this.setFollow(gap <= cellH * 0.75);
+    }
+
+    _followTail(force) {
+        if (!this._opened || (!this._follow && !force)) return;
+        try {
+            const buf = this.term.buffer.active;
+            if (buf.viewportY !== buf.baseY) this.term.scrollToBottom();
+        } catch (_) {}
     }
 
     attach(onData, onResize, onTitle) {
@@ -487,7 +564,7 @@ class TabRuntime {
         // into one write per ~8ms, which is under a frame either way.
         if (!scrolling && t - (window.__soaLastKey || 0) < 300 && t - (this._lastSync || 0) > 8) {
             this._lastSync = t;
-            this._flushWrites();
+            this._flushWrites(true);
             return;
         }
         if (this._wRaf || this._wTimer) return;
@@ -507,12 +584,58 @@ class TabRuntime {
         }
     }
 
-    _flushWrites() {
+    // A repaint is atomic to the agent and should be atomic to the emulator.
+    //
+    // Both TUIs bracket one screen update: Claude Code hides the cursor for the
+    // duration (CSI ?25l … ?25h) and codex asks for a synchronized update
+    // (CSI ?2026h … ?2026l). A PTY read does not respect those brackets, so a
+    // flush can hand xterm the first half of a repaint — which renders, on
+    // screen, as a frame with half the old text and half the new. Measured on
+    // this install it is 2% of the active tab's messages and 6% of codex's;
+    // small, and exactly the "tearing / stale frames" that is complained about.
+    //
+    // So cut at the last COMPLETE bracket and carry the remainder into the next
+    // flush. The carry is bounded hard in both directions — never more than one
+    // deferral in a row, never more than a frame of delay, never more than
+    // CARRY_MAX bytes — because the one thing worse than a torn frame is output
+    // that does not arrive. Echo never takes this path at all.
+    static CARRY_MAX = 1 << 15;     // 32 KB
+    static CARRY_MS = 24;           // ...and at most one frame of patience
+
+    /** Index just past the last complete screen update, or -1 if it ends clean. */
+    _frameCut(s) {
+        const open = Math.max(s.lastIndexOf('\x1b[?25l'), s.lastIndexOf('\x1b[?2026h'));
+        if (open < 0) return -1;                       // no bracket at all
+        const hide = s.lastIndexOf('\x1b[?25h');
+        const sync = s.lastIndexOf('\x1b[?2026l');
+        const close = Math.max(hide, sync);
+        if (close > open) return -1;                   // ends on a complete frame
+        if (close < 0) return -1;                      // nothing complete to keep
+        return close === sync ? close + 8 : close + 6;
+    }
+
+    _flushWrites(force) {
         if (this._wRaf) { cancelAnimationFrame(this._wRaf); this._wRaf = null; }
         if (this._wTimer) { clearTimeout(this._wTimer); this._wTimer = null; }
         if (!this._wq.length) return;
-        const s = this._wq.length === 1 ? this._wq[0] : this._wq.join('');
+        let s = this._wq.length === 1 ? this._wq[0] : this._wq.join('');
         this._wq.length = 0;
+        if (!force && !this._carried && s.length <= TabRuntime.CARRY_MAX) {
+            const cut = this._frameCut(s);
+            if (cut > 0) {
+                this._wq.push(s.slice(cut));
+                s = s.slice(0, cut);
+                this._carried = 1;
+                // Next frame, unconditionally. The timer is only the backstop
+                // for a window that is not being given frames at all — without
+                // it, a carried remainder in a hidden or occluded tab would sit
+                // there until the page came back.
+                this._wRaf = requestAnimationFrame(() => this._flushWrites(true));
+                this._wTimer = setTimeout(() => this._flushWrites(true), TabRuntime.CARRY_MS);
+            }
+        } else {
+            this._carried = 0;
+        }
         this.term.write(s);
     }
 
@@ -586,7 +709,7 @@ class TabRuntime {
         // Queue RIS with the snapshot, rather than calling reset() while xterm
         // still has asynchronous writes pending from the previous connection.
         if (this._resetPending) { data = '\x18\x1bc' + data; this._resetPending = false; }
-        this.term.write(data);
+        this.term.write(data, () => this._followTail());
         return true;
     }
 
@@ -653,7 +776,14 @@ class TabRuntime {
         const cellH = this._cellHeight();
         if (!(cellH > 1)) { this._setSubRow(0); return; }
         try {
-            const want = this.term.buffer.active.viewportY * cellH;
+            const buf = this.term.buffer.active;
+            // At the tail, snap to the viewport's OWN bottom rather than to
+            // row * cellH. The two differ by the rounding in cellH, and landing
+            // a pixel short of the end is how xterm decides you are reading
+            // history — after which it stops following the output entirely.
+            const want = (this._follow && buf.viewportY >= buf.baseY)
+                ? Math.max(0, vp.scrollHeight - vp.clientHeight)
+                : buf.viewportY * cellH;
             // Setting scrollTop re-enters this scroll handler; it computes a
             // remainder of zero and stops there, so there is no loop.
             if (Math.abs(vp.scrollTop - want) > 0.5) vp.scrollTop = want;
@@ -987,6 +1117,7 @@ class TabRuntime {
         // just delivered; refresh so the reflowed rows are not left half-drawn
         // in the meantime.
         try { this.term.refresh(0, this.term.rows - 1); } catch (_) {}
+        this._followTail();
         return true;
     }
 
@@ -1062,6 +1193,8 @@ class TabRuntime {
     // when available to scroll exactly after the flush settles.
     scrollToBottom() {
         if (!this._opened) return;
+        this._follow = true;
+        if (this._liveBtn) this._liveBtn.hidden = true;
         try { this.term.scrollToBottom(); } catch (_) {}
         // xterm uses setTimeout(0) internally to flush the write buffer;
         // two rAFs is enough to let the reflow + any queued writes land.
@@ -2047,6 +2180,7 @@ class Shell {
             if (rt) {
                 rt.fitNow();
                 rt.attachRenderer();
+                this._paintRendererStatus();
                 rt.flushPendingReplay();
                 rt.scrollToBottom();
                 rt.focus();
@@ -3832,8 +3966,33 @@ class Shell {
         // attachRenderer() bails. This path runs again once the container has a
         // real size, which is exactly when the renderer can be created.
         rt.attachRenderer();
+        this._paintRendererStatus();
         rt.flushPendingReplay();
         this._broadcastSizeSoon();
+    }
+
+    // Say it when the terminal is not on the GPU.
+    //
+    // This is the single biggest lever on how a streamed terminal feels, and
+    // until now it has been invisible unless you opened a panel and knew what
+    // to look for. Everything else about the stream is already cheap: measured
+    // on this install the emulator parses an agent's output at ~20 MB/s against
+    // a live rate of 20 KB/s, and the transcript bands cost 0.02ms a repaint.
+    // What is left is the cost of drawing, and that is decided entirely by
+    // which renderer xterm ended up with. Checked on every activation, since a
+    // context can be lost at any time and the fallback is silent.
+    _paintRendererStatus() {
+        const el = document.getElementById('status-renderer');
+        if (!el) return;
+        const rt = this.tabs.get(this.activeId);
+        const kind = rt ? rt.rendererKind() : '';
+        const slow = kind === 'dom' || kind.startsWith('canvas');
+        el.hidden = !slow;
+        if (!slow) return;
+        el.textContent = `terminal on ${kind} · no GPU`;
+        el.title = 'This terminal is drawn on the CPU because WebGL was not available to it. '
+            + 'It will work, but a full-screen agent UI repaints many times a second and that '
+            + 'is the expensive case. Check chrome://gpu, or close some GPU-heavy tabs.';
     }
 
     // The status bar hides itself, but it still has news occasionally.
@@ -7533,7 +7692,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=31');
+        await import('/assets/app-wc.js?v=32');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -7607,7 +7766,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=31').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=32').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.
