@@ -49,6 +49,7 @@ const termGeometry = require('./termGeometry');
 const auth             = require('./auth');
 const sysinfo          = require('./sysinfo');
 const claudeUsage      = require('./claudeUsage');
+const codexUsage       = require('./codexUsage');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const procMem          = require('./procMem');
@@ -465,6 +466,7 @@ consoleLogs.mount(app, requireAuthed);
 sysinfo.mount(app, requireAuthed);
 contextCanvas.mount(app, requireAuthed);
 claudeUsage.mount(app, requireAuthed);
+codexUsage.mount(app, requireAuthed);
 
 // Manual daemon restart from the ⋯ MORE menu (authed — the paired user can fire
 // it from their phone over the tunnel). Graceful: launchd `kickstart -k` sends

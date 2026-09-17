@@ -27,6 +27,28 @@
 .bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--soa-accent); transition: width 0.5s ease; }
 
+/* ── TOKEN USAGE widget ─────────────────────────────────────────────── */
+/* Source pills. Present only when there is a second agent to switch to, so a
+   Claude-only install never sees them. They sit inside a body that is itself a
+   click target (it opens the usage dashboard), which is why the handlers stop
+   propagation — picking a source must not also open a panel. */
+.usage-src { display: flex; gap: 4px; margin-bottom: 8px; }
+.usage-src-btn {
+  flex: 1;
+  padding: 3px 0;
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.16em;
+  color: var(--soa-accent-dim);
+  background: transparent;
+  border: 1px solid var(--soa-line-soft);
+  cursor: pointer;
+}
+.usage-src-btn:hover { color: var(--soa-accent); border-color: rgba(var(--soa-accent-rgb), 0.4); }
+.usage-src-btn.on {
+  color: var(--soa-bg);
+  background: var(--soa-accent);
+  border-color: var(--soa-accent);
+}
+
 /* ── CLAUDE USAGE widget ────────────────────────────────────────────── */
 .claude-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.18em; }
 .claude-head-l { color: var(--soa-accent-dim); }

@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=30';
+import { t as tr } from '/assets/i18n.js?v=31';
 import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=27';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
 
@@ -435,11 +435,25 @@ class ClockWidget extends Widget {
 }
 
 // ── CLAUDE USAGE ─────────────────────────────────────────────────────────
-// Live Claude token usage, read from the local transcripts by /api/claude-usage.
-// Leads with the 5-hour rolling window (Claude's usage-limit block) + a reset
-// countdown, then today's totals, a live burn rate, top model, and a per-minute
-// sparkline. Cost is shown small and labelled "≈" — it's an API-equivalent
-// estimate, not a bill (a Max/Pro seat is flat-rate).
+// Live token usage for whichever agent is running here — read from the local
+// transcripts by /api/claude-usage and /api/codex-usage.
+//
+// The two agents can be shown in the same shape (two limit gauges, a per-minute
+// sparkline, burn / today / model, and the sessions doing the spending) but
+// they know different things about themselves, and the widget does not pretend
+// otherwise:
+//
+//   CLAUDE  leads with the 5-hour rolling usage-limit block and a reset
+//           countdown. The weekly ceiling is not in the transcripts, so it is
+//           estimated against WEEK_LIMIT_USD below. Cost is an API-equivalent
+//           estimate, labelled "≈" — a Max/Pro seat is flat-rate.
+//   CODEX   leads with the limit windows the API reports back to the client,
+//           so the percentages and the reset countdown are MEASURED, not
+//           estimated. There is no published rate for the model it runs, so
+//           there are no dollars at all rather than invented ones.
+//
+// The source pills only appear once there is something to switch to; an install
+// with no codex sessions looks exactly as it did before.
 const _fmtTok = n => {
     n = n || 0;
     if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
@@ -462,9 +476,12 @@ const HOT_COST = { block: 20, today: 60 };
 // $3660. Only affects the bar's fill %/label; the tok+cost figures are exact.
 // Tune if the ceiling drifts (or the plan changes).
 const WEEK_LIMIT_USD = 3660;
+// Claude's window is five hours, so hours+minutes was always enough. codex
+// reports a WEEKLY one, and "resets in 126h 6m" is not a thing anyone reads.
 const _fmtDur = ms => {
     const s = Math.max(0, Math.round(ms / 1000));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
     return h ? `${h}h ${m}m` : `${m}m`;
 };
 
@@ -473,7 +490,26 @@ class ClaudeUsageWidget extends Widget {
         // 2.5s poll: the server memoizes compute() for 1.2s and tails only
         // appended bytes, so the fast cadence is cheap — the remaining lag is
         // transcript flush timing (a record lands when its message completes).
-        super({ titleKey: 'widget.claude', title: 'CLAUDE', parent, intervalMs: 2500 });
+        super({ titleKey: 'widget.claude', title: 'TOKEN USAGE', parent, intervalMs: 2500 });
+        // Which agent is on screen. Remembered, because a fleet that is mostly
+        // one of them should not have to re-pick on every load.
+        this._source = 'claude';
+        try {
+            const saved = localStorage.getItem('soa_usage_source');
+            if (saved === 'codex' || saved === 'claude') this._source = saved;
+        } catch (_) {}
+        this._codexSeen = false;
+        this._srcBtns = {};
+        this._srcRow = $el('div', { class: 'usage-src' }, ['claude', 'codex'].map(k => {
+            const b = $el('button', {
+                class: 'usage-src-btn', type: 'button',
+                text: tr('widget.usage.src_' + k),
+                onclick: (e) => { e.stopPropagation(); this._setSource(k); },
+            });
+            this._srcBtns[k] = b;
+            return b;
+        }));
+        this._srcRow.style.display = 'none';
         // Persistent DOM — tick() only updates text/width/canvas so the
         // sparkline never flickers on refresh.
         this._reset = $el('span', { class: 'claude-reset', text: '—' });
@@ -501,6 +537,9 @@ class ClaudeUsageWidget extends Widget {
         this._sessHead.style.display = 'none';
         this._sessList.style.display = 'none';
         this._mountStructure();
+        // Kept so a source switch can relabel the gauges without rebuilding
+        // the subtree the sparkline lives in.
+        this._headL = this.body.querySelector('.claude-head .claude-head-l');
         // The widget is the teaser; the full usage dashboard lives in the
         // manager view's USAGE pane. app.js listens for this event.
         this.body.classList.add('claude-clickable');
@@ -512,18 +551,17 @@ class ClaudeUsageWidget extends Widget {
     // Assemble the persistent DOM. Re-callable: a 404/sandbox tick swaps in a
     // note (detaching these nodes), so _render re-mounts before updating them.
     _mountStructure() {
+        this._headL = $el('span', { class: 'claude-head-l', text: '5H WINDOW' });
+        this._weekHeadL = $el('span', { class: 'claude-head-l', text: 'WEEKLY' });
+        this._weekHead = $el('div', { class: 'claude-head claude-head-week' }, [this._weekHeadL, this._weekPct]);
+        this._weekBar = $el('div', { class: 'bar claude-bar' }, [this._weekFill]);
         this.body.replaceChildren(
-            $el('div', { class: 'claude-head' }, [
-                $el('span', { class: 'claude-head-l', text: '5H WINDOW' }),
-                this._reset,
-            ]),
+            this._srcRow,
+            $el('div', { class: 'claude-head' }, [this._headL, this._reset]),
             $el('div', { class: 'bar claude-bar' }, [this._fill]),
             this._sub,
-            $el('div', { class: 'claude-head claude-head-week' }, [
-                $el('span', { class: 'claude-head-l', text: 'WEEKLY' }),
-                this._weekPct,
-            ]),
-            $el('div', { class: 'bar claude-bar' }, [this._weekFill]),
+            this._weekHead,
+            this._weekBar,
             this._weekSub,
             this._spark,
             this._burn.row, this._today.row, this._model.row,
@@ -531,8 +569,49 @@ class ClaudeUsageWidget extends Widget {
         );
     }
 
+    /** Show or hide the second gauge — codex plans do not all have one. */
+    _setSecondGauge(on) {
+        for (const n of [this._weekHead, this._weekBar, this._weekSub]) {
+            if (n) n.style.display = on ? '' : 'none';
+        }
+    }
+
+    _setSource(src) {
+        if (this._source === src) return;
+        this._source = src;
+        try { localStorage.setItem('soa_usage_source', src); } catch (_) {}
+        this._paintSrc();
+        this._series = new Array(30).fill(0);
+        this.tick();
+    }
+
+    // The pills appear only once there is a second source to switch to, so an
+    // install that has never run codex is unchanged.
+    _paintSrc() {
+        this._srcRow.style.display = this._codexSeen ? '' : 'none';
+        for (const [k, b] of Object.entries(this._srcBtns)) b.classList.toggle('on', k === this._source);
+        if (!this._codexSeen && this._source === 'codex') this._source = 'claude';
+    }
+
     async tick() {
         if (isSandbox()) { this._note(tr('widget.claude.sandbox')); return; }
+        // Ask codex once a minute while CLAUDE is on screen: it is what decides
+        // whether the switch exists at all, and a 2.5s poll of a source nobody
+        // is looking at would be work for nothing. The minute applies to the
+        // FAILING case too — on a daemon old enough not to have the endpoint
+        // this would otherwise 404 every 2.5s forever, which is the shape of
+        // background noise that makes a real error impossible to spot.
+        const now = Date.now();
+        if (this._source === 'codex' || (now - (this._codexAt || 0)) > 60000) {
+            this._codexAt = now;
+            try {
+                const { data } = await jget('/api/codex-usage');
+                this._codex = data;
+                this._codexSeen = !!(data && data.available);
+            } catch (_) { /* older backend, or no codex on this machine */ }
+        }
+        this._paintSrc();
+        if (this._source === 'codex') { this._renderCodex(this._codex); return; }
         let data;
         try {
             ({ data } = await jget('/api/claude-usage'));
@@ -545,13 +624,19 @@ class ClaudeUsageWidget extends Widget {
         this._render(data);
     }
 
+    // A note replaces the gauges, but never the source pills: "no codex
+    // sessions yet" with no way back to CLAUDE is a dead end.
     _note(text) {
-        this.body.replaceChildren($el('div', { class: 'widget-note', text }));
+        this.body.replaceChildren(this._srcRow, $el('div', { class: 'widget-note', text }));
+        this._paintSrc();
     }
 
     _render(d) {
         // A prior note tick may have detached the structure — re-mount it.
         if (!this.body.contains(this._reset)) this._mountStructure();
+        this._headL.textContent = '5H WINDOW';
+        this._weekHeadL.textContent = 'WEEKLY';
+        this._setSecondGauge(true);
         const b = d.block || {};
         if (b.active) {
             this._reset.textContent = tr('widget.claude.resets', { t: _fmtDur(b.remainingMs) });
@@ -630,6 +715,91 @@ class ClaudeUsageWidget extends Widget {
             return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.join('\n') }, [
                 $el('span', { class: 'claude-sess-name', text: (hot ? '⚠ ' : '') + label }),
                 $el('span', { class: 'claude-sess-val', text: `${_fmtTok(sc.tok)} · ≈${_fmtUsd(sc.cost)}` }),
+            ]);
+        }));
+    }
+
+    // ── CODEX ───────────────────────────────────────────────────────────
+    //
+    // The shape is the CLAUDE view's, but almost nothing here is inferred. The
+    // gauges are the limit windows the API reports back to codex — used
+    // percent, window length and reset time — so they are the real ceiling
+    // rather than a calibration guess, and a plan with only one window simply
+    // shows one gauge. TODAY is exact too: the transcripts carry a running
+    // per-thread total, so a day is one subtraction rather than a sum over
+    // records nobody read. What is missing is money, deliberately: there is no
+    // published rate for the model this runs, and a made-up one in a column
+    // labelled "≈" would be worse than an empty column.
+    _renderCodex(d) {
+        if (!this.body.contains(this._reset)) this._mountStructure();
+        this._paintSrc();
+        if (!d || !d.available) { this._note(tr('widget.usage.codex_none')); return; }
+        const lim = d.limits || {};
+        const gauge = (headL, pctEl, fillEl, subEl, l, sub) => {
+            headL.textContent = l ? l.label : 'LIMIT';
+            pctEl.textContent = l && l.remainingMs
+                ? tr('widget.claude.resets', { t: _fmtDur(l.remainingMs) })
+                : (l ? `${Math.round(l.usedPercent)}%` : '—');
+            pctEl.classList.toggle('warn', !!l && l.usedPercent >= 80);
+            fillEl.style.width = `${l ? Math.min(100, l.usedPercent) : 0}%`;
+            fillEl.classList.toggle('hot', !!l && l.usedPercent >= 80);
+            subEl.textContent = sub;
+        };
+        const plan = (d.planType || '').replace(/_/g, ' ');
+        gauge(this._headL, this._reset, this._fill, this._sub, lim.primary,
+            lim.primary
+                ? `${Math.round(lim.primary.usedPercent)}% used · ${plan || tr('widget.usage.codex_limit')}`
+                : tr('widget.usage.codex_limit'));
+        this._setSecondGauge(!!lim.secondary);
+        if (lim.secondary) {
+            gauge(this._weekHeadL, this._weekPct, this._weekFill, this._weekSub, lim.secondary,
+                `${Math.round(lim.secondary.usedPercent)}% used`);
+        }
+        this._burn.v.textContent = `${_fmtTok(d.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
+        // Tokens in, tokens out — both exact, both from the cumulative
+        // counters. Not a request count: see requestsSeen in codexUsage.js for
+        // why there isn't an honest one to put here.
+        const today = (d.today && d.today.tokens) || { total: 0, output: 0 };
+        this._today.v.textContent = `${_fmtTok(today.total)} · ${_fmtTok(today.output)} out`;
+        const top = (d.models || [])[0];
+        this._model.v.textContent = top ? top.name : '—';
+        this._renderCodexSessions(d);
+        this._series = (d.series || []).slice(-30);
+        this._paintSpark();
+    }
+
+    _renderCodexSessions(d) {
+        // A day with nothing on it still has sessions worth naming, so the
+        // column follows whichever scope actually has numbers in it — and once
+        // it is TODAY, a row with nothing today is not a top session.
+        const all = (d.sessions || []).filter(s => s.today.tok > 0 || s.total.tok > 0);
+        const anyToday = all.some(s => s.today.tok > 0);
+        const rows = (anyToday ? all.filter(s => s.today.tok > 0) : all).slice(0, 6);
+        if (!rows.length) {
+            this._sessHead.style.display = 'none';
+            this._sessList.style.display = 'none';
+            this._sessList.replaceChildren();
+            return;
+        }
+        this._sessHead.style.display = '';
+        this._sessList.style.display = '';
+        this._sessHead.textContent = 'TOP SESSIONS · ' + (anyToday ? 'TODAY' : tr('widget.usage.total'));
+        this._sessList.replaceChildren(...rows.map(s => {
+            const label = (s.project || '?') + ' · ' + (s.shortId || '?');
+            const tok = anyToday ? s.today.tok : s.total.tok;
+            const tip = [
+                (s.project || '?') + ' — ' + (s.model || '?'),
+                `today: ${_fmtTok(s.today.tok)} tok · ${_fmtTok(s.today.out)} out · ${_fmtTok(s.today.cached)} cached`,
+                `thread total: ${_fmtTok(s.total.tok)} tok · ${_fmtTok(s.total.out)} out`,
+            ];
+            if (s.ctxPct != null) tip.push(`context: ${_fmtTok(s.ctxTokens)} (${s.ctxPct}% of the window)`);
+            if (d.partialHistory) tip.push(tr('widget.usage.codex_partial'));
+            return $el('div', { class: 'claude-sess-row' + (s.ctxPct >= 85 ? ' hot' : ''), title: tip.join('\n') }, [
+                $el('span', { class: 'claude-sess-name', text: label }),
+                $el('span', {
+                    class: 'claude-sess-val',
+                    text: _fmtTok(tok) + (s.ctxPct != null ? ` · ${s.ctxPct}% ${tr('widget.usage.ctx')}` : ''),
+                }),
             ]);
         }));
     }
