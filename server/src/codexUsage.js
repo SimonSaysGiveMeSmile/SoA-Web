@@ -85,6 +85,9 @@ const SCAN_LIMIT = 4 << 20;
 // a token_usage_record is ~900 bytes. What gets skipped is a giant tool result,
 // and the parser resynchronises on the next newline by itself.
 const CHUNK_BYTES = 4 << 20;
+// How far the linear half of seekTs will walk. Generous because it runs once
+// per file per day, and because the alternative to walking is being wrong.
+const SEEK_SCAN_LIMIT = 64 << 20;
 const MIN_RECOMPUTE_MS = 1200;
 const SERIES_MINUTES = 30;
 const MAX_SESSIONS = 12;
@@ -178,45 +181,83 @@ function readRange(fd, from, len) {
 }
 
 /**
- * Smallest byte offset at or after which every record is newer than `target`.
+ * Offset of the first record whose timestamp is at or after `target`.
  *
  * Timestamps are monotonic and every line carries its own, so this is an
- * ordinary binary search over the file — the only wrinkle is that an offset
- * usually lands mid-line, so each probe resyncs forward to the next newline
- * before reading a timestamp. A probe that finds no complete line (a record
- * longer than PROBE_BYTES) treats the region as "not yet past the target",
- * which can only ever make the answer earlier — never later, and never wrong
- * in the direction that would over-report.
+ * ordinary binary search over the file. Two wrinkles:
+ *
+ *   - an offset lands mid-line, so each probe resyncs forward to the next
+ *     newline before reading a timestamp, and a probe that finds no boundary
+ *     at all (a record longer than the probe) just moves `lo` past it;
+ *   - halving stops while the range is still up to one probe wide, and the
+ *     rest is scanned linearly. The first version returned the last probe's
+ *     guess instead, which is off by however much of the range was left —
+ *     enough to put a midnight baseline on the wrong side of the first
+ *     request of the day, and to hand most of that day to yesterday.
  */
 function seekTs(fd, size, target) {
-    let lo = 0, hi = size, best = size;
-    for (let i = 0; i < 40 && lo < hi; i++) {
+    let lo = 0, hi = size;
+    for (let i = 0; i < 60 && (hi - lo) > PROBE_BYTES; i++) {
         const mid = (lo + hi) >> 1;
-        const chunk = readRange(fd, mid, Math.min(PROBE_BYTES, size - mid));
-        const nl = mid === 0 ? -1 : chunk.indexOf('\n');
-        const lineStart = mid === 0 ? mid : (nl < 0 ? -1 : mid + Buffer.byteLength(chunk.slice(0, nl + 1), 'utf8'));
-        if (lineStart < 0) { lo = mid + Math.min(PROBE_BYTES, size - mid); continue; }
-        const rest = nl < 0 ? chunk : chunk.slice(nl + 1);
-        const end = rest.indexOf('\n');
-        const ts = lineTs(end < 0 ? rest : rest.slice(0, end));
-        if (!ts) { lo = mid + Math.min(PROBE_BYTES, size - mid); continue; }
-        if (ts >= target) { best = lineStart; hi = mid; } else { lo = lineStart; }
-        if (hi - lo <= PROBE_BYTES) break;
+        // Resync forward to a real boundary INSIDE the range. A probe that
+        // finds none says nothing about which side of the target it is on —
+        // moving `lo` past it on that non-answer is what used to walk the
+        // search straight past the record it was looking for.
+        const lineStart = nextLineStart(fd, hi, mid);
+        if (lineStart >= hi) break;              // the range is one huge record
+        const ts = firstTsAt(fd, size, lineStart);
+        if (!ts) break;
+        if (ts >= target) hi = lineStart; else lo = lineStart;
     }
-    return Math.min(best, size);
+    return scanForTs(fd, size, Math.min(lo, hi), target);
+}
+
+/** Timestamp of the record starting at `off`. */
+function firstTsAt(fd, size, off) {
+    const chunk = readRange(fd, off, Math.min(PROBE_BYTES, size - off));
+    const nl = chunk.indexOf('\n');
+    return lineTs(nl < 0 ? chunk : chunk.slice(0, nl));
+}
+
+/** Linear half of seekTs: `from` must already be a line boundary. */
+function scanForTs(fd, size, from, target) {
+    let at = from, carry = '', offset = from;
+    while (at < size && (at - from) < SEEK_SCAN_LIMIT) {
+        const len = Math.min(CHUNK_BYTES, size - at);
+        const text = carry + readRange(fd, at, len);
+        at += len;
+        const parts = text.split('\n');
+        carry = parts.pop();
+        for (const line of parts) {
+            const ts = lineTs(line);
+            if (ts && ts >= target) return offset;
+            offset += Buffer.byteLength(line, 'utf8') + 1;
+        }
+    }
+    return Math.min(offset, size);
 }
 
 /**
- * The first thread-cumulative total at or after `from`, with that record's own
- * delta alongside it.
+ * The first cumulative reading of EACH series at or after `from`, with that
+ * reading's own delta alongside it.
  *
- * The delta is what makes the caller's subtraction land on the right side of
- * the boundary: `thread_token_usage` INCLUDES the record it is attached to, so
- * using it directly as a baseline silently gives the first request after
- * midnight away to yesterday.
+ * Two series, and they do not agree. codex writes a running total twice — as
+ * `thread_token_usage` on every token_usage_record, and as
+ * `info.total_token_usage` on every token_count — and measured over one real
+ * transcript they diverge on 399 of 448 readings, the record series running
+ * a couple of percent ahead. They are different accountings, so a subtraction
+ * that takes its minuend from one and its subtrahend from the other produces
+ * a number belonging to neither. (It showed up as a day whose cached input
+ * exceeded its own total, which is impossible within either series.) Each is
+ * therefore carried separately and only ever subtracted from itself.
+ *
+ * The delta matters for the same reason: a cumulative reading INCLUDES the
+ * record it is attached to, so using it directly as a midnight baseline gives
+ * the first request of the day away to yesterday.
  */
 function cumulativeAfter(fd, size, from) {
     let at = from, carry = '';
+    const out = { rec: null, info: null };
     while (at < size && (at - from) < SCAN_LIMIT) {
         const len = Math.min(1 << 20, size - at);
         const text = carry + readRange(fd, at, len);
@@ -224,20 +265,30 @@ function cumulativeAfter(fd, size, from) {
         const parts = text.split('\n');
         carry = parts.pop();
         for (const line of parts) {
-            if (line.indexOf('"token_usage_record"') < 0) continue;
+            const isRec = !out.rec && line.indexOf('"token_usage_record"') >= 0;
+            const isCnt = !out.info && line.indexOf('"token_count"') >= 0;
+            if (!isRec && !isCnt) continue;
             try {
                 const p = JSON.parse(line).payload;
-                if (p && p.thread_token_usage) {
-                    return {
+                if (!p) continue;
+                if (isRec && p.thread_token_usage) {
+                    out.rec = {
                         ts: lineTs(line),
                         tokens: bucketFrom(p.thread_token_usage),
                         delta: p.usage ? bucketFrom(p.usage) : tokenBucket(),
                     };
+                } else if (isCnt && p.type === 'token_count' && p.info && p.info.total_token_usage) {
+                    out.info = {
+                        ts: lineTs(line),
+                        tokens: bucketFrom(p.info.total_token_usage),
+                        delta: p.info.last_token_usage ? bucketFrom(p.info.last_token_usage) : tokenBucket(),
+                    };
                 }
             } catch (_) { /* a truncated line; the next chunk carries it */ }
         }
+        if (out.rec && out.info) break;
     }
-    return null;
+    return out;
 }
 
 // ── parsing ─────────────────────────────────────────────────────────────
@@ -282,12 +333,12 @@ function parseInto(line, c) {
         if (p.type !== 'token_count') return;
         const info = p.info || {};
         if (info.model_context_window) c.meta.contextWindow = info.model_context_window;
-        if (info.total_token_usage) c.cum = { ts, tokens: bucketFrom(info.total_token_usage) };
+        if (info.total_token_usage) c.cumInfo = { ts, tokens: bucketFrom(info.total_token_usage) };
         if (p.rate_limits) c.limits = { ts, raw: p.rate_limits };
         return;
     }
     // token_usage_record: the per-response delta plus the running thread total.
-    if (p.thread_token_usage) c.cum = { ts, tokens: bucketFrom(p.thread_token_usage) };
+    if (p.thread_token_usage) c.cumRec = { ts, tokens: bucketFrom(p.thread_token_usage) };
     if (p.thread_id && !c.meta.id) c.meta.id = p.thread_id;
     if (p.usage && ts) {
         c.records.push({ ts, u: p.usage });
@@ -337,7 +388,7 @@ function tail(entry, now) {
     const fresh = !c;
     if (!c) {
         c = {
-            readOffset: 0, records: [], requests: 0, cum: null, limits: null,
+            readOffset: 0, records: [], requests: 0, cumRec: null, cumInfo: null, limits: null,
             meta: { id: '', cwd: '', model: '', cli: '', startTs: 0, contextWindow: 0 },
             dayKey: '', dayBase: null, partial: false,
         };
@@ -353,7 +404,7 @@ function tail(entry, now) {
             // Parsed into a throwaway whose `meta` IS c.meta, so the identity
             // lands without the head's records joining the recent stream.
             chunkedParse(fd, 0, Math.min(HEAD_BYTES, entry.size),
-                { meta: c.meta, records: [], requests: 0, cum: null, limits: null });
+                { meta: c.meta, records: [], requests: 0, cumRec: null, cumInfo: null, limits: null });
             const live = (now - entry.mtimeMs) < LIVE_MS;
             const want = live ? INITIAL_TAIL_LIVE : INITIAL_TAIL_COLD;
             let start = Math.max(0, entry.size - want);
@@ -384,18 +435,24 @@ function tail(entry, now) {
             // began after midnight IS today in full; one that has not been
             // written to since midnight contributes nothing to today; only a
             // session that straddles the boundary has to be looked up.
-            if (c.meta.startTs && c.meta.startTs >= midnight) c.dayBase = { ts: c.meta.startTs, tokens: tokenBucket() };
-            else if (entry.mtimeMs < midnight) c.dayBase = c.cum ? { ts: midnight, tokens: c.cum.tokens } : null;
-            else {
+            const zero = { rec: tokenBucket(), info: tokenBucket() };
+            if (c.meta.startTs && c.meta.startTs >= midnight) c.dayBase = zero;
+            else if (entry.mtimeMs < midnight) {
+                // Nothing of this thread is today: the baseline IS the total.
+                c.dayBase = { rec: c.cumRec && c.cumRec.tokens, info: c.cumInfo && c.cumInfo.tokens };
+            } else {
                 const off = seekTs(fd, entry.size, midnight);
                 const found = cumulativeAfter(fd, entry.size, off);
-                // The baseline is the total as it stood the instant BEFORE the
-                // first record of the day, which is that record's cumulative
-                // minus its own delta.
-                c.dayBase = found
-                    ? { ts: found.ts, tokens: subBuckets(found.tokens, found.delta) }
-                    // No record after midnight → nothing of this thread is today.
-                    : (c.cum ? { ts: midnight, tokens: c.cum.tokens } : null);
+                // The baseline is each series as it stood the instant BEFORE
+                // the first reading of the day — that reading minus its own
+                // delta. A series with no reading after midnight contributed
+                // nothing today, so its baseline is its own total.
+                c.dayBase = {
+                    rec: found.rec ? subBuckets(found.rec.tokens, found.rec.delta)
+                        : (c.cumRec && c.cumRec.tokens),
+                    info: found.info ? subBuckets(found.info.tokens, found.info.delta)
+                        : (c.cumInfo && c.cumInfo.tokens),
+                };
             }
         }
     } catch (_) {
@@ -441,7 +498,13 @@ function compute() {
     for (const f of candidateFiles(cutoff)) { anyFiles = true; tail(f, now); seen.add(f.full); }
     for (const key of _cache.keys()) if (!seen.has(key)) _cache.delete(key);
 
-    const today = { tokens: tokenBucket(), requests: 0 };
+    // `requestsSeen` is NOT today's request count and must never be shown as
+    // one. The token figures come from cumulative counters, so they are exact
+    // however little of a file we read; a request COUNT can only come from
+    // counting records, and we deliberately do not read a day of them. Naming
+    // it for what it is stops the widget from putting an honest number and a
+    // partial one side by side.
+    const today = { tokens: tokenBucket(), requestsSeen: 0 };
     const total = tokenBucket();
     const series = new Array(SERIES_MINUTES).fill(0);
     const seriesStart = now - SERIES_MINUTES * 60000;
@@ -479,11 +542,17 @@ function compute() {
         if (c.meta.cwd && !th.cwd) th.cwd = c.meta.cwd;
         if (c.meta.model) th.model = c.meta.model;
         if (c.meta.contextWindow) th.contextWindow = c.meta.contextWindow;
-        if (c.cum) {
-            if (c.cum.tokens.total > th.total.total) th.total = c.cum.tokens;
-            if (c.cum.ts > th.lastTs) th.lastTs = c.cum.ts;
-            const base = c.dayBase ? c.dayBase.tokens : c.cum.tokens;
-            const day = subBuckets(c.cum.tokens, base);
+        // Prefer the record series — it is the more complete accounting of the
+        // two, and it is the one the sparkline's per-record deltas come from —
+        // and fall back to the token_count series only when a file's tail held
+        // no usage record at all. Whichever is used, both ends of the
+        // subtraction come from it.
+        const cum = c.cumRec || c.cumInfo;
+        const base = c.cumRec ? (c.dayBase && c.dayBase.rec) : (c.dayBase && c.dayBase.info);
+        if (cum) {
+            if (cum.tokens.total > th.total.total) th.total = cum.tokens;
+            if (cum.ts > th.lastTs) th.lastTs = cum.ts;
+            const day = subBuckets(cum.tokens, base || cum.tokens);
             if (day.total > th.today.total) th.today = day;
         }
         th.requests += c.requests;
@@ -511,7 +580,7 @@ function compute() {
             total[k] += th.total[k] || 0;
             today.tokens[k] += th.today[k] || 0;
         }
-        today.requests += th.requests;
+        today.requestsSeen += th.requests;
         const name = th.model || 'unknown';
         let mm = models.get(name);
         if (!mm) { mm = { name, tokens: 0, requests: 0, lastTs: 0 }; models.set(name, mm); }
@@ -548,9 +617,9 @@ function compute() {
             cwd: t.cwd,
             model: t.model,
             lastTs: t.lastTs,
-            requests: t.requests,
-            total: { tok: t.total.total },
-            today: { tok: t.today.total },
+            requestsSeen: t.requests,
+            total: { tok: t.total.total, out: t.total.output },
+            today: { tok: t.today.total, out: t.today.output, cached: t.today.cached },
             ctxTokens: t.ctxTokens,
             ctxPct: t.ctxTokens && t.contextWindow
                 ? Math.min(100, Math.round((t.ctxTokens / t.contextWindow) * 100))
@@ -610,5 +679,5 @@ function _reset() { _cache.clear(); _lastComputed = null; _lastAt = 0; }
 
 module.exports = {
     mount, snapshot, windowLabel, seekTs, sessionsDir,
-    _internals: { lineTs, subBuckets, normalizeLimit, nextLineStart, readRange, _reset },
+    _internals: { lineTs, subBuckets, normalizeLimit, nextLineStart, readRange, scanForTs, firstTsAt, _reset },
 };

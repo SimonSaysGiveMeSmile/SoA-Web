@@ -756,8 +756,11 @@ class ClaudeUsageWidget extends Widget {
                 `${Math.round(lim.secondary.usedPercent)}% used`);
         }
         this._burn.v.textContent = `${_fmtTok(d.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
-        const today = (d.today && d.today.tokens) || { total: 0 };
-        this._today.v.textContent = `${_fmtTok(today.total)} · ${d.today.requests || 0} ${tr('widget.claude.req')}`;
+        // Tokens in, tokens out — both exact, both from the cumulative
+        // counters. Not a request count: see requestsSeen in codexUsage.js for
+        // why there isn't an honest one to put here.
+        const today = (d.today && d.today.tokens) || { total: 0, output: 0 };
+        this._today.v.textContent = `${_fmtTok(today.total)} · ${_fmtTok(today.output)} out`;
         const top = (d.models || [])[0];
         this._model.v.textContent = top ? top.name : '—';
         this._renderCodexSessions(d);
@@ -786,8 +789,8 @@ class ClaudeUsageWidget extends Widget {
             const tok = anyToday ? s.today.tok : s.total.tok;
             const tip = [
                 (s.project || '?') + ' — ' + (s.model || '?'),
-                `today: ${_fmtTok(s.today.tok)} tok`,
-                `7-day: ${_fmtTok(s.total.tok)} tok · ${s.requests || 0} req`,
+                `today: ${_fmtTok(s.today.tok)} tok · ${_fmtTok(s.today.out)} out · ${_fmtTok(s.today.cached)} cached`,
+                `thread total: ${_fmtTok(s.total.tok)} tok · ${_fmtTok(s.total.out)} out`,
             ];
             if (s.ctxPct != null) tip.push(`context: ${_fmtTok(s.ctxTokens)} (${s.ctxPct}% of the window)`);
             if (d.partialHistory) tip.push(tr('widget.usage.codex_partial'));

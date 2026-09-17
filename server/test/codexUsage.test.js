@@ -285,3 +285,83 @@ test('codex usage: nextLineStart walks past a record longer than a probe', () =>
 });
 
 test.after(() => { try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {} });
+
+test('codex usage: the two cumulative series are never mixed in one subtraction', () => {
+    clean();
+    const now = Date.now();
+    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+    const mid = midnight.getTime();
+    const id = '77777777-1111-2222-3333-444444444444';
+    // codex writes a running total twice and the two disagree — measured on a
+    // real transcript, on 399 of 448 readings. Here token_count deliberately
+    // trails token_usage_record, the way it does in the wild. Subtracting one
+    // series' baseline from the other's total produced a day whose cached
+    // input exceeded its own total, which is impossible within either.
+    const mk = (ts, recCum, infoCum, recDelta, infoDelta) => ([
+        JSON.stringify({
+            timestamp: iso(ts), ordinal: 1, type: 'token_usage_record',
+            payload: { thread_id: id, session_id: id, usage: usage(recDelta), thread_token_usage: usage(recCum) },
+        }),
+        JSON.stringify({
+            timestamp: iso(ts), ordinal: 2, type: 'event_msg',
+            payload: {
+                type: 'token_count',
+                info: {
+                    total_token_usage: usage(infoCum), last_token_usage: usage(infoDelta),
+                    model_context_window: 258400,
+                },
+                rate_limits: LIMITS,
+            },
+        }),
+    ]);
+    const lines = [JSON.stringify({
+        timestamp: iso(mid - 3600000), ordinal: 0, type: 'session_meta',
+        payload: {
+            session_id: id, id, cwd: '/Users/x/Desktop/split', cli_version: '0.154.0',
+            base_instructions: { provenance: { model: 'gpt-6-astra' } },
+        },
+    })];
+    lines.push(...mk(mid - 1800000, 10000, 9000, 10000, 9000));   // before midnight
+    lines.push(...mk(mid + 60000, 12000, 10500, 2000, 1500));     // first of today
+    lines.push(...mk(Math.min(now, mid + 120000), 13000, 11200, 1000, 700));
+    fs.writeFileSync(path.join(DAY_DIR, 'rollout-split.jsonl'), lines.join('\n') + '\n');
+
+    const s = codexUsage.snapshot().sessions[0];
+    // The record series is preferred, so today is 13000 - 10000 within it —
+    // never 13000 - 9000 (mixing) and never 11200 - 10000 (mixing the other way).
+    assert.equal(s.total.tok, usageTotal(13000));
+    assert.equal(s.today.tok, usageTotal(13000) - usageTotal(10000));
+    assert.ok(s.today.cached <= s.today.tok, 'cached input cannot exceed the total it is part of');
+});
+
+test('codex usage: seekTs lands on the first record at or after a timestamp', () => {
+    clean();
+    const p = path.join(DAY_DIR, 'seek.jsonl');
+    const base = Date.parse('2026-09-17T00:00:00.000Z');
+    const lines = [];
+    const offsets = [];
+    let off = 0;
+    for (let i = 0; i < 400; i++) {
+        // Every tenth record is a megabyte, so the binary search is forced
+        // through the case where a probe contains no line boundary at all.
+        const pad = i % 10 === 0 ? 'z'.repeat(1_100_000) : 'z'.repeat(200);
+        const line = JSON.stringify({ timestamp: iso(base + i * 60000), ordinal: i, type: 'x', payload: { pad } });
+        lines.push(line);
+        offsets.push(off);
+        off += Buffer.byteLength(line, 'utf8') + 1;
+    }
+    fs.writeFileSync(p, lines.join('\n') + '\n');
+    const size = fs.statSync(p).size;
+    assert.ok(size > 40_000_000, 'the fixture is far bigger than a probe');
+    const fd = fs.openSync(p, 'r');
+    try {
+        for (const i of [0, 1, 7, 10, 123, 250, 399]) {
+            assert.equal(codexUsage.seekTs(fd, size, base + i * 60000), offsets[i], `record ${i}`);
+        }
+        // A timestamp between two records resolves to the later one.
+        assert.equal(codexUsage.seekTs(fd, size, base + 123 * 60000 + 30000), offsets[124]);
+        // Before everything is the start; after everything is the end.
+        assert.equal(codexUsage.seekTs(fd, size, base - 60000), 0);
+        assert.equal(codexUsage.seekTs(fd, size, base + 10_000 * 60000), size);
+    } finally { fs.closeSync(fd); }
+});
