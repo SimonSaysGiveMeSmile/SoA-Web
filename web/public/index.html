@@ -154,7 +154,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=92">
+  <link rel="stylesheet" href="/assets/styles.css?v=93">
   <link rel="stylesheet" href="/assets/sidebar.css?v=48">
   <link rel="stylesheet" href="/assets/minimal.css?v=9">
   <link rel="stylesheet" href="/assets/liquid.css?v=14">
@@ -962,6 +962,14 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
              and the measured frame time is the first thing worth knowing when
              "the terminal feels laggy" turns out to be the machine. -->
         <span id="status-load" class="status-load" hidden></span>
+        <!-- Only present when the terminal is NOT on the GPU. WebGL draws the
+             grid as one textured quad batch; the fallbacks rebuild it, and a
+             full-colour agent TUI repainting thirty-odd times a second is the
+             worst case for them. It fails silently — a blocklisted driver, GPU
+             pressure, too many live contexts — and the terminal just becomes
+             slower while looking identical, which is the exact shape of "it
+             feels laggy and I can't tell why". So say it. -->
+        <span id="status-renderer" class="status-load" hidden></span>
       </div>
     </main>
   </div>
@@ -989,7 +997,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
        alive and moving it beats handing every tab its own and losing the lot. -->
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js"></script>
-  <script type="module" src="/assets/app.js?v=155"></script>
+  <script type="module" src="/assets/app.js?v=156"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

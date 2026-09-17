@@ -13,7 +13,7 @@ const end = source.indexOf('class Shell {', start);
 assert.ok(start >= 0 && end > start, 'locate the actual TabRuntime class');
 const classSource = source.slice(start, end);
 
-function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 } } = {}) {
+function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 }, scrollable = false } = {}) {
     const frames = new Map();
     const timers = new Map();
     let nextTask = 1;
@@ -27,11 +27,14 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 } 
             this.children = [];
             this.style = {};
             this.dataset = {};
+            this.listeners = {};
+            this.parts = null;
         }
         appendChild(child) { this.children.push(child); }
         getBoundingClientRect() { return { width: this.clientWidth, height: this.clientHeight }; }
-        querySelector() { return null; }
-        addEventListener() {}
+        querySelector(sel) { return (this.parts && this.parts[sel]) || null; }
+        addEventListener(type, fn) { (this.listeners[type] || (this.listeners[type] = [])).push(fn); }
+        emit(type, ev) { for (const fn of this.listeners[type] || []) fn(ev || {}); }
         remove() {}
     }
 
@@ -45,6 +48,8 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 } 
             this.openCount = 0;
             this.resetCount = 0;
             this._core = { _renderService: { dimensions: { css: { cell } } } };
+            this._buf = { viewportY: 0, baseY: 0, length: 24, getLine: () => null };
+            this.scrollToBottomCount = 0;
             this.options = new Proxy({ ...options }, {
                 set: (target, key, value) => {
                     // xterm 5.3 does not dispatch an event for a same-value set.
@@ -58,8 +63,13 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 } 
         }
         loadAddon() {}
         open(container) { this.element = container; this.openCount++; }
-        onRender() {}
+        onRender(fn) { this.renderListener = fn; }
+        render() { if (this.renderListener) this.renderListener(); }
         onScroll() {}
+        // xterm's own viewport bookkeeping, reduced to the two numbers this
+        // file reasons about: where the buffer ends and where you are looking.
+        get buffer() { return { active: this._buf }; }
+        scrollToBottom() { this._buf.viewportY = this._buf.baseY; this.scrollToBottomCount++; }
         onData() {}
         onResize(listener) { this.resizeListener = listener; }
         onTitleChange() {}
@@ -84,6 +94,9 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 } 
         xtermTheme: () => ({}),
         tr: () => 'terminal',
         PERF: { on: false },
+        LoadGuard: { high: false, frameMs: () => 16 },
+        prender: () => {},
+        ptime: () => {},
         window: {},
         performance: { now: () => 1000 },
         getComputedStyle: () => ({ paddingLeft: '0', paddingRight: '0', paddingTop: '0', paddingBottom: '0' }),
@@ -99,10 +112,19 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 } 
     };
     const Runtime = vm.runInNewContext(classSource + '\nTabRuntime;', context);
     const rt = new Runtime(1, 'test');
+    let viewport = null;
+    if (scrollable) {
+        viewport = new Element();
+        viewport.scrollTop = 0;
+        viewport.scrollHeight = 1000;
+        viewport.clientHeight = height;
+        rt.container.parts = { '.xterm-viewport': viewport, '.xterm-screen': new Element() };
+    }
     return {
         rt,
         Runtime,
         context,
+        viewport,
         get canvasMeasurements() { return canvasMeasurements; },
         get scheduledCount() { return frames.size + timers.size; },
         setFontCell: next => { fontCell = next; },
@@ -344,4 +366,143 @@ test('terminal client: adopting the grid already on screen changes nothing', () 
     const before = rt.term.resizes.length;
     assert.equal(rt.adoptGrid(100, 25), false);
     assert.equal(rt.term.resizes.length, before, 'no redundant SIGWINCH-inducing resize');
+});
+
+// ── One repaint in, one repaint out ─────────────────────────────────────
+// Claude Code brackets a screen update with CSI ?25l … ?25h and codex with the
+// synchronized-update pair CSI ?2026h … ?2026l. A PTY read does not respect
+// those brackets, so without this the emulator is periodically handed half a
+// repaint and paints it — half the old screen, half the new.
+
+test('terminal client: a write that ends mid-repaint is cut at the last complete one', () => {
+    const { rt } = harness();
+    rt.fitNow();
+    rt.write('\x1b[?25lFIRST\x1b[?25h\x1b[?25lhalf of the next');
+    rt._flushWrites();               // one flush, the way a frame callback would
+    assert.deepEqual(rt.term.writes, ['\x1b[?25lFIRST\x1b[?25h'], 'only the complete repaint goes');
+    assert.equal(rt._wq.join(''), '\x1b[?25lhalf of the next', 'the rest is carried, not dropped');
+});
+
+test('terminal client: a carried remainder is always written on the very next flush', () => {
+    const { rt, drain } = harness();
+    rt.fitNow();
+    rt.write('\x1b[?25lA\x1b[?25h\x1b[?25lB-partial');
+    drain();
+    rt.write('-more');
+    drain();
+    assert.deepEqual(rt.term.writes.join(''), '\x1b[?25lA\x1b[?25h\x1b[?25lB-partial-more',
+        'every byte arrives, in order, within two flushes');
+    assert.equal(rt._wq.length, 0);
+});
+
+test('terminal client: codex synchronized-update brackets are honoured too', () => {
+    const { rt } = harness();
+    rt.fitNow();
+    rt.write('\x1b[?2026hFRAME\x1b[?2026l\x1b[?2026hnext frame so far');
+    rt._flushWrites();
+    assert.deepEqual(rt.term.writes, ['\x1b[?2026hFRAME\x1b[?2026l']);
+    assert.equal(rt._wq.join(''), '\x1b[?2026hnext frame so far');
+});
+
+test('terminal client: output with no repaint brackets is never held back', () => {
+    const { rt, drain } = harness();
+    rt.fitNow();
+    rt.write('plain shell output with no brackets at all\r\n');
+    drain();
+    assert.deepEqual(rt.term.writes, ['plain shell output with no brackets at all\r\n']);
+    assert.equal(rt._wq.length, 0, 'a shell must never wait for a frame marker it will never send');
+});
+
+test('terminal client: a chunk that opens a repaint and never closes one is written whole', () => {
+    const { rt, drain } = harness();
+    rt.fitNow();
+    rt.write('\x1b[?25lonly ever the opening half');
+    drain();
+    assert.deepEqual(rt.term.writes, ['\x1b[?25lonly ever the opening half'],
+        'nothing complete to keep means nothing to hold');
+});
+
+test('terminal client: echo is never held for a frame boundary', () => {
+    const h = harness();
+    const { rt } = h;
+    rt.fitNow();
+    h.context.window.__soaLastKey = h.context.performance.now();
+    rt.write('\x1b[?25lx\x1b[?25h\x1b[?25lpartial');
+    assert.deepEqual(rt.term.writes, ['\x1b[?25lx\x1b[?25h\x1b[?25lpartial'],
+        'the character under your cursor goes now, torn or not');
+});
+
+// ── Following the tail ──────────────────────────────────────────────────
+
+test('terminal client: a repaint re-asserts the tail when the emulator has fallen behind', () => {
+    const { rt } = harness({ scrollable: true });
+    rt.fitNow();
+    rt.term._buf.baseY = 40;
+    rt.term._buf.viewportY = 39;     // one row short — xterm now believes you are reading history
+    rt.term.render();
+    assert.equal(rt.term._buf.viewportY, 40, 'snapped back to the live screen');
+    assert.ok(rt.term.scrollToBottomCount > 0);
+});
+
+test('terminal client: scrolling away stops the follow, and output no longer yanks the view', () => {
+    const h = harness({ scrollable: true });
+    const { rt, viewport } = h;
+    rt.fitNow();
+    viewport.scrollTop = 0;          // you scrolled to the top
+    viewport.emit('scroll');
+    assert.equal(rt._follow, false);
+    assert.equal(rt._liveBtn.hidden, false, 'the way back is offered');
+
+    rt.term._buf.baseY = 40;
+    rt.term._buf.viewportY = 5;
+    rt.term.render();
+    assert.equal(rt.term._buf.viewportY, 5, 'reading history is left alone');
+});
+
+test('terminal client: scrolling back to the end re-arms the follow', () => {
+    const h = harness({ scrollable: true });
+    const { rt, viewport } = h;
+    rt.fitNow();
+    viewport.scrollTop = 0;
+    viewport.emit('scroll');
+    assert.equal(rt._follow, false);
+
+    viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
+    viewport.emit('scroll');
+    assert.equal(rt._follow, true, 'back at the end means following again');
+    assert.equal(rt._liveBtn.hidden, true);
+});
+
+test('terminal client: a viewport a fraction of a pixel short of the end still counts as the end', () => {
+    const h = harness({ scrollable: true });
+    const { rt, viewport } = h;
+    rt.fitNow();
+    // cell height is 20 in the harness; rounding routinely leaves a few px.
+    viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight - 6;
+    viewport.emit('scroll');
+    assert.equal(rt._follow, true, 'rounding is not an intention to scroll away');
+});
+
+test('terminal client: a wheel upward stops the follow before the scroll event lands', () => {
+    const h = harness({ scrollable: true });
+    const { rt } = h;
+    rt.fitNow();
+    rt.container.emit('wheel', { deltaY: -120 });
+    assert.equal(rt._follow, false, 'under load the scroll event can be several frames late');
+});
+
+test('terminal client: a repaint that never closes still cannot defer output twice', () => {
+    const { rt } = harness();
+    rt.fitNow();
+    // An app that hides the cursor and then streams for a long time before
+    // showing it again — ?25l is not only a frame marker, and output must
+    // never wait on a bracket that is not coming.
+    rt.write('\x1b[?25lA\x1b[?25h\x1b[?25l' + 'streaming ');
+    rt._flushWrites();
+    assert.equal(rt._carried, 1);
+    rt.write('and streaming ');
+    rt._flushWrites();
+    assert.equal(rt._carried, 0, 'the second flush always goes out whole');
+    assert.equal(rt.term.writes.join(''), '\x1b[?25lA\x1b[?25h\x1b[?25lstreaming and streaming ');
+    assert.equal(rt._wq.length, 0);
 });
