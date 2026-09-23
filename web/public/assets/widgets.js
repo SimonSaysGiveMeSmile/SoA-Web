@@ -1213,6 +1213,682 @@ class AutoPilotWidget extends Widget {
     }
 }
 
+// ── DEVICE STATUS ────────────────────────────────────────────────────────
+class DeviceStatusWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.device', parent, intervalMs: 10_000 });
+    }
+    async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
+        try {
+            const { data } = await jget('/api/device');
+            const rows = [
+                ['ONLINE', data.online ? 'yes' : 'no', data.online ? '' : 'warn'],
+            ];
+            if (data.battery != null) {
+                const pct = `${data.battery}%`;
+                rows.push(['BATTERY', data.charging ? `${pct} ↑` : pct, data.battery < 20 ? 'warn' : '']);
+            }
+            if (data.batteryHealth != null) rows.push(['BAT HEALTH', `${data.batteryHealth}%`, data.batteryHealth < 80 ? 'warn' : '']);
+            if (data.batteryCycles != null) rows.push(['CYCLES', data.batteryCycles]);
+            if (data.cpuTemp != null) rows.push(['CPU TEMP', `${data.cpuTemp}°C`, data.cpuTemp > 90 ? 'warn' : '']);
+            this.setRows(rows);
+        } catch (e) { this.setRows([['ERR', e.message]]); }
+    }
+    _renderSandbox() {
+        const conn = navigator && (navigator.connection || navigator.mozConnection || navigator.webkitConnection);
+        const rows = [
+            ['ONLINE', navigator.onLine ? 'yes' : 'no', navigator.onLine ? '' : 'warn'],
+        ];
+        if (conn && conn.effectiveType) rows.push(['TYPE', conn.effectiveType.toUpperCase()]);
+        const bat = navigator.getBattery ? null : undefined;
+        if (bat === null) {
+            navigator.getBattery().then(b => {
+                this.setRows([
+                    ...rows,
+                    ['BATTERY', `${Math.round(b.level * 100)}%${b.charging ? ' ↑' : ''}`, b.level < 0.2 ? 'warn' : ''],
+                ]);
+            }).catch(() => this.setRows(rows));
+            return;
+        }
+        this.setRows(rows);
+    }
+}
+
+// ── GIT COMMITS ──────────────────────────────────────────────────────────
+class GitCommitsWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.commits', parent, intervalMs: 30_000 });
+    }
+    async tick() {
+        if (isSandbox()) { this.setRows([['GIT', tr('widget.sandbox.backend_needed')]]); return; }
+        try {
+            const { data } = await jget('/api/git?limit=6');
+            if (!data.ok) { this.setRows([['GIT', data.error || tr('widget.git.unavailable')]]); return; }
+            const rows = data.commits.map(c => [c.hash, c.subject.slice(0, 36)]);
+            if (!rows.length) rows.push(['GIT', tr('widget.git.empty')]);
+            this.setRows(rows);
+        } catch (e) { this.setRows([['ERR', e.message]]); }
+    }
+}
+
+// ── MOBILE QR ────────────────────────────────────────────────────────────
+class MobileQRWidget extends Widget {
+    constructor({ parent, audio }) {
+        // Poll every 6s so when the server brings up the Cloudflare tunnel
+        // automatically (SOA_WEB_AUTOPAIR), the QR fills in without any click.
+        super({ titleKey: 'widget.mobile_link', parent, intervalMs: 6000 });
+        this.audio = audio;
+        this._lastState = 'idle';
+        this._lastSnap = null;
+        this._render('idle', null);
+    }
+
+    onLangChange() { this._render(this._lastState, this._lastSnap); }
+
+    _render(state, snap) {
+        this._lastState = state;
+        this._lastSnap = snap;
+        const lanList = (snap && snap.lan) || [];
+        const pubUrl  = snap && snap.publicUrl;
+        // QR + URLs only appear while pairing is online. When off (idle/error/
+        // starting), render the empty placeholder so the user knows the
+        // tunnel isn't live.
+        const target  = state === 'online' ? (pubUrl || lanList[0] || null) : null;
+
+        function pairUrl(backendUrl) {
+            const token = (snap && snap.pairToken) || currentToken();
+            const u = new URL('/m/', backendUrl);
+            u.searchParams.set('backend', backendUrl);
+            if (token) u.searchParams.set('t', token);
+            return u.toString();
+        }
+
+        // "Simulate device" — opens the REAL mobile client (/m/) in a phone-sized
+        // popup window: a genuine browser context (WS, fetch, service worker, the
+        // lot) pointed at the same backend a phone would use, so the desktop↔mobile
+        // bridge can be tested live without a real phone or an Xcode simulator.
+        // Always available (the local bridge works even with the tunnel off); it
+        // only connects when the user clicks, so it never interferes on its own.
+        const simUrl = () => {
+            const backend = currentBackend();
+            const token = (snap && snap.pairToken) || currentToken();
+            const u = new URL('/m/', backend);
+            u.searchParams.set('backend', backend);
+            if (token) u.searchParams.set('t', token);
+            return u.toString();
+        };
+        const SIM_TAB = 'mobile-sim';
+        const SIM_VW = 1024, SIM_VH = 768; // the managed browser's CDP viewport
+        const callBrowser = (body) => fetch(api('/api/agent-browser'), {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }).then(r => r.json());
+
+        const openSim = () => {
+            const url = simUrl();
+            // Self-contained, always-visible modal. Clicking SIM ALWAYS shows
+            // this — it doesn't depend on the shell, the active view, the WS
+            // bridge, popups, or framing rules (the reasons earlier versions did
+            // "nothing"). It renders the AGENT's managed browser (a separate,
+            // independent Chromium the agent drives via soa-browser) by polling
+            // its screenshots over the SAME /api the dashboard already uses, and
+            // forwards taps as clicks — so it never touches the shared PTYs and
+            // it's the exact instance the agent controls.
+            document.getElementById('soa-mobile-sim-modal')?.remove();
+            let alive = true;
+            const shot = $el('img', { class: 'msim-shot', alt: 'mobile device' });
+            const statusEl = $el('span', { class: 'msim-status', text: 'launching…' });
+            const closeBtn = $el('button', { class: 'msim-x', text: '×', title: 'Close' });
+            const frame = $el('div', { class: 'msim-frame' }, [
+                $el('div', { class: 'msim-bar' }, [
+                    $el('span', { class: 'msim-title', text: '📱 MOBILE · agent-controlled' }),
+                    statusEl, closeBtn,
+                ]),
+                shot,
+            ]);
+            const backdrop = $el('div', { class: 'msim-backdrop', id: 'soa-mobile-sim-modal' }, [frame]);
+            const onEsc = (e) => { if (e.key === 'Escape') close(); };
+            function close() { alive = false; backdrop.remove(); document.removeEventListener('keydown', onEsc); }
+            closeBtn.onclick = close;
+            backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+            document.addEventListener('keydown', onEsc);
+            document.body.appendChild(backdrop);
+
+            // Tap → click in the managed browser, scaled from the rendered frame.
+            shot.addEventListener('click', (e) => {
+                const r = shot.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                const x = Math.round((e.clientX - r.left) / r.width * SIM_VW);
+                const y = Math.round((e.clientY - r.top) / r.height * SIM_VH);
+                callBrowser({ action: 'click', tab: SIM_TAB, x, y }).catch(() => {});
+            });
+
+            const poll = async () => {
+                if (!alive) return;
+                try {
+                    const j = await callBrowser({ action: 'screenshot', tab: SIM_TAB });
+                    if (alive && j && j.data) { shot.src = 'data:image/jpeg;base64,' + j.data; statusEl.textContent = 'live · tap to interact'; }
+                } catch (_) {}
+                if (alive) setTimeout(poll, 1200);
+            };
+            callBrowser({ action: 'navigate', tab: SIM_TAB, url })
+                .then(() => { statusEl.textContent = 'connecting…'; poll(); })
+                .catch((e) => { statusEl.textContent = 'launch failed — ' + (e && e.message || e); });
+        };
+        const simBtn = $el('button', {
+            class: 'mqr-toggle mqr-sim',
+            text: '📱 SIM',
+            title: 'Open the mobile client in a phone-sized window to test the bridge live',
+            onclick: openSim,
+        });
+
+        const actions = state === 'online'
+            ? [
+                simBtn,
+                $el('button', {
+                    class: 'mqr-toggle mqr-restart',
+                    text: tr('mqr.restart'),
+                    onclick: () => this._restart(),
+                }),
+                $el('button', {
+                    class: 'mqr-toggle mqr-off',
+                    text: tr('mqr.off'),
+                    onclick: () => this._stop(),
+                }),
+            ]
+            : [
+                simBtn,
+                $el('button', {
+                    class: 'mqr-toggle mqr-start',
+                    text: state === 'starting' ? '…' : tr('mqr.start'),
+                    onclick: () => this._start(),
+                    disabled: state === 'starting' ? true : null,
+                }),
+            ];
+
+        // First-time setup on a fresh machine: the server auto-downloads
+        // cloudflared during START and narrates progress via /api/pair/status
+        // — surface it so a ~20 MB one-time fetch doesn't look like a hang.
+        const prog = state === 'starting' && snap && snap.progress;
+        const progText = prog
+            ? `${tr('mqr.provisioning')} ${prog.pct}% (${prog.receivedMB}/${prog.totalMB} MB)`
+            : null;
+
+        this.body.replaceChildren(
+            $el('div', { class: `mqr-status mqr-${state}` }, [
+                $el('span', { class: 'mqr-dot' }),
+                $el('span', { text: tr(`mqr.state.${state}`) }),
+            ]),
+            progText ? $el('div', { class: 'mqr-note', text: progText }) : '',
+            $el('div', { class: 'mqr-qr' }, target
+                ? [$el('img', { class: 'mqr-img', src: api(`/api/pair/qr?text=${encodeURIComponent(pairUrl(target))}`), alt: 'pairing QR' })]
+                : [$el('div', { class: 'mqr-empty', text: state === 'starting' ? tr('mqr.empty_starting') : tr('mqr.empty') })]),
+            $el('div', { class: 'mqr-urls' },
+                state === 'online'
+                    ? lanList.slice(0, 1).concat(pubUrl ? [pubUrl] : []).map((u, i) =>
+                        $el('div', { class: 'mqr-url' }, [
+                            $el('span', { class: 'mqr-tag', text: i === 0 && lanList.length ? 'LAN' : 'PUB' }),
+                            $el('span', { class: 'mqr-u',   text: u }),
+                            $el('button', {
+                                class: 'mqr-copy', text: tr('mqr.copy'),
+                                onclick: (e) => {
+                                    const btn = e.currentTarget;
+                                    const url = pairUrl(u);
+                                    const done = () => { btn.textContent = '✓'; setTimeout(() => { btn.textContent = tr('mqr.copy'); }, 1400); };
+                                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                                        navigator.clipboard.writeText(url).then(done, () => { btn.textContent = tr('mqr.copy'); });
+                                    } else {
+                                        const ta = document.createElement('textarea');
+                                        ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                                        document.body.appendChild(ta); ta.select();
+                                        try { document.execCommand('copy'); done(); } catch (_) {}
+                                        document.body.removeChild(ta);
+                                    }
+                                },
+                            }),
+                        ]),
+                    )
+                    : [],
+            ),
+            $el('div', { class: 'mqr-actions' }, actions),
+            snap && snap.error ? $el('div', { class: 'mqr-err', text: snap.error }) : '',
+        );
+    }
+
+    async tick() {
+        if (isSandbox()) { this._renderBackendNeeded(); return; }
+        try {
+            const { data } = await jget('/api/pair/status');
+            this._render(data.state, data);
+        } catch (e) { /* ignore polling failures */ }
+    }
+
+    _renderBackendNeeded() {
+        this.body.replaceChildren(
+            $el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') }),
+        );
+    }
+
+    async _start() {
+        this._render('starting', null);
+        if (this.audio) this.audio.play('scan');
+        try {
+            const { data } = await jpost('/api/pair/start', {});
+            this._render(data.state, data);
+            if (data.state === 'online' && this.audio) this.audio.play('granted');
+            if (data.state === 'error' && this.audio) this.audio.play('denied');
+        } catch (e) {
+            this._render('error', { error: e.message });
+        }
+    }
+
+    async _stop() {
+        try {
+            const { data } = await jpost('/api/pair/stop', {});
+            this._render(data.state, data);
+            if (this.audio) this.audio.play('panels');
+        } catch (e) { /* ignore */ }
+    }
+
+    async _restart() {
+        // Stop, then start. Render the transient 'starting' state so the
+        // button doesn't flash a misleading 'OFF' between calls.
+        this._render('starting', this._lastSnap);
+        if (this.audio) this.audio.play('scan');
+        try { await jpost('/api/pair/stop', {}); } catch (_) {}
+        try {
+            const { data } = await jpost('/api/pair/start', {});
+            this._render(data.state, data);
+            if (data.state === 'online' && this.audio) this.audio.play('granted');
+            if (data.state === 'error' && this.audio) this.audio.play('denied');
+        } catch (e) {
+            this._render('error', { error: e.message });
+        }
+    }
+}
+
+// ── WORLD VIEW (globe) ───────────────────────────────────────────────────
+// Ports desktop/src/classes/locationGlobe.class.js to the browser. The
+// encom-globe bundle is ~1MB and needs THREE + a ~1MB grid.json tile mesh,
+// so we load all three lazily the first time this widget mounts and share
+// them across any future mounts. Polls /api/geo for the server's public
+// lat/lon and drops a single pin there.
+let _globeAssetsPromise = null;
+function _loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[data-src="${src}"]`);
+        if (existing) { existing.addEventListener('load', resolve); existing.addEventListener('error', reject); return; }
+        const s = document.createElement('script');
+        s.src = src; s.async = false;
+        s.dataset.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('failed to load ' + src));
+        document.head.appendChild(s);
+    });
+}
+async function _loadGlobeAssets() {
+    if (_globeAssetsPromise) return _globeAssetsPromise;
+    _globeAssetsPromise = (async () => {
+        // three.js first (encom expects window.THREE). Pinned to r77 — the
+        // last version whose API surface encom-globe targets (the fork predates
+        // three's ES-modules transition and expects the globals namespace).
+        // Hosted locally under /assets/vendor/ so COEP: credentialless doesn't
+        // need a CORP header from a CDN — one less failure mode in production.
+        if (!window.THREE) {
+            await _loadScript('/assets/vendor/three.min.js?v=12');
+        }
+        if (!window.ENCOM || !window.ENCOM.Globe) {
+            await _loadScript('/assets/vendor/encom-globe.js?v=12');
+        }
+        const gridResp = await fetch('/assets/vendor/grid.json?v=12', { credentials: 'same-origin' });
+        if (!gridResp.ok) throw new Error('grid.json ' + gridResp.status);
+        const grid = await gridResp.json();
+        return { grid };
+    })();
+    return _globeAssetsPromise;
+}
+
+class LocationGlobeWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.globe', parent, intervalMs: 30_000 });
+        this._canvasHost = $el('div', { class: 'globe-canvas' });
+        this._meta = $el('div', { class: 'globe-meta', text: '—' });
+        this.body.append(this._canvasHost, this._meta);
+        this._pin = null;
+        this._userPin = null;
+        this._lastLoc = null;
+        this._lastUserLoc = null;
+        this._offscreen = false;  // set by IntersectionObserver in _boot
+        this._geoFails = 0;       // consecutive /api/geo failures (backoff)
+        this._geoNextAt = 0;      // epoch ms before which tick() skips the fetch
+        this._peerPins = new Map(); // "lat,lon" -> globe pin for each connected client
+        this._peerCount = null;   // total connected clients (null until first poll)
+        this._onUserLocation = e => this.setUserLocation(e.detail.lat, e.detail.lon, e.detail.name || 'You');
+        window.addEventListener('soa:user-location', this._onUserLocation);
+        this._bootPromise = this._boot();
+    }
+
+    onLangChange() { this._refreshMeta(this._lastGeo || null); }
+
+    async _boot() {
+        try {
+            const { grid } = await _loadGlobeAssets();
+            if (this._destroyed) return;
+            // Encom measures the host by offsetWidth/Height synchronously, so
+            // it must be in the DOM and painted before we instantiate.
+            await new Promise(r => requestAnimationFrame(r));
+            // destroy() can land during the await above (tab-switch / WS
+            // reconnect re-mounts the sidebar); bail before wiring up the globe,
+            // resize listener and IntersectionObserver onto a dead widget.
+            if (this._destroyed) return;
+            const w = this._canvasHost.offsetWidth || 240;
+            const h = this._canvasHost.offsetHeight || 200;
+            const tron = `rgb(${accentRGB()})`;
+            this.globe = new window.ENCOM.Globe(w, h, {
+                font: 'Fira Mono, ui-monospace, Menlo, monospace',
+                data: [],
+                tiles: grid.tiles,
+                baseColor: tron,
+                markerColor: tron,
+                pinColor: tron,
+                satelliteColor: tron,
+                scale: 1.1,
+                viewAngle: 0.630,
+                dayLength: 1000 * 45,
+                introLinesDuration: 2000,
+                introLinesColor: tron,
+                maxPins: 32,
+                maxMarkers: 32,
+            });
+            this._canvasHost.appendChild(this.globe.domElement);
+            // Clear color follows the active UI language's surface token.
+            const clearBg = (getComputedStyle(document.documentElement).getPropertyValue('--soa-bg') || '#05080d').trim() || '#05080d';
+            this.globe.init(clearBg, () => { this._tickAnim(); });
+            this._onResize = () => {
+                if (!this.globe || !this.globe.camera || !this.globe.renderer) return;
+                const c = this._canvasHost;
+                this.globe.camera.aspect = c.offsetWidth / c.offsetHeight;
+                this.globe.camera.updateProjectionMatrix();
+                this.globe.renderer.setSize(c.offsetWidth, c.offsetHeight);
+            };
+            window.addEventListener('resize', this._onResize);
+            // Decorative satellites so the globe isn't empty before /api/geo
+            // answers. Mirrors the 6-satellite constellation from the desktop
+            // app, but deterministic — no RNG so every reload looks identical.
+            const sats = [];
+            for (let i = 0; i < 2; i++) {
+                for (let j = 0; j < 3; j++) {
+                    sats.push({ lat: 50 * i - 15, lon: 120 * j - 120, altitude: 1.5 });
+                }
+            }
+            this.globe.addConstellation(sats);
+            // Pause the render loop when the globe scrolls out of the sidebar
+            // viewport (the heaviest continuous cost shouldn't run unseen).
+            try {
+                this._io = new IntersectionObserver((entries) => {
+                    const e = entries[entries.length - 1];
+                    this._offscreen = !(e && e.isIntersecting);
+                    if (!this._offscreen) this._kickAnim();
+                }, { threshold: 0.01 });
+                this._io.observe(this._canvasHost);
+            } catch (_) { this._offscreen = false; }
+        } catch (e) {
+            this._canvasHost.replaceChildren($el('div', { class: 'globe-err', text: tr('widget.globe.unavailable') + ': ' + e.message }));
+        }
+    }
+
+    // Decoration runs at decoration's frame rate. A slowly turning globe is
+    // indistinguishable at 24fps and at 60, and the terminal shares both the
+    // main thread and the GPU with it.
+    static ANIM_MS = 42;          // ~24fps
+    // And it stops entirely while the terminal is being scrolled or typed in.
+    // Nothing decorative is worth a dropped frame in the thing you are reading.
+    static YIELD_MS = 300;
+    // And it SETTLES. Measured on this install: the daemon at 2% of a core
+    // pushing 10 KB/s, and the dashboard's renderer at 26% and 736 MB — the page
+    // was spending a quarter of a core with almost nothing arriving. A three.js
+    // scene at 24fps is the largest standing cost in it, and it was running
+    // forever, by design: it yields to a gesture and then spins the entire time
+    // you are simply reading. Decoration is worth frames while you are here and
+    // nothing at all once you are not, so after this long with no interaction
+    // the loop STOPS — not a cheaper frame, no frame, and no rAF callback
+    // either. Any interaction brings it back.
+    static SETTLE_MS = 20_000;
+    // Escape hatch, matching the renderer's: localStorage.setItem('soa.globe',
+    // 'off') and reload, for anyone who would rather have the core back.
+    static disabled() {
+        try { return localStorage.getItem('soa.globe') === 'off'; } catch (_) { return false; }
+    }
+
+    _tickAnim() {
+        this._rafId = null;
+        if (this._destroyed) return;
+        // The globe is pure decoration — don't spin a WebGL loop while the page
+        // is backgrounded or the canvas is scrolled out of view. _kickAnim
+        // restarts it when it becomes visible again.
+        if (document.hidden || this._offscreen) return;
+        // A spinning globe is the clearest thing on the page to give up when the
+        // page is not getting frames. app.js's LoadGuard publishes that as a
+        // one-word global rather than wiring an event bus through a decoration.
+        if (window.__soaLoad === 'high') { this._rafId = requestAnimationFrame(() => this._tickAnim()); return; }
+        const now = performance.now();
+        const idleFor = now - (window.__soaLastInteract || 0);
+        // Settled: stop the loop entirely and wait to be woken. _armWake costs
+        // one passive listener, against a WebGL draw every 42ms forever.
+        if (idleFor > LocationGlobeWidget.SETTLE_MS) { this._armWake(); return; }
+        const busy = idleFor < LocationGlobeWidget.YIELD_MS;
+        if (!busy && now - (this._lastFrame || 0) >= LocationGlobeWidget.ANIM_MS) {
+            this._lastFrame = now;
+            try { this.globe.tick(); } catch (_) {}
+        }
+        this._rafId = requestAnimationFrame(() => this._tickAnim());
+    }
+
+    // One-shot listeners that restart the animation on the next sign of life.
+    // Registered only while settled, removed the moment they fire, so the page
+    // is not carrying input handlers for a decoration it is not drawing.
+    _armWake() {
+        if (this._wake || this._destroyed) return;
+        const wake = () => {
+            this._disarmWake();
+            this._kickAnim();
+        };
+        this._wake = wake;
+        for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
+            window.addEventListener(ev, wake, { passive: true, capture: true, once: true });
+        }
+    }
+
+    _disarmWake() {
+        if (!this._wake) return;
+        for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
+            window.removeEventListener(ev, this._wake, { capture: true });
+        }
+        this._wake = null;
+    }
+
+    _kickAnim() {
+        if (this._destroyed || this._rafId || !this.globe) return;
+        if (document.hidden || this._offscreen) return;
+        if (LocationGlobeWidget.disabled()) return;
+        this._disarmWake();
+        this._tickAnim();
+    }
+
+    _suspend() {
+        super._suspend();
+        this._disarmWake();
+        if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+    }
+
+    _resume() {
+        super._resume();
+        this._kickAnim();
+    }
+
+    async tick() {
+        if (isSandbox()) { this._renderSandbox(); return; }
+        // Multiuser peer pins refresh every tick (~30s), independent of the geo
+        // throttle below — clients connect/disconnect far more often than the
+        // server's own egress location changes.
+        this._refreshPeers();
+        // /api/geo reports the server's public IP/location — effectively static.
+        // Once we have a fix, recheck only every ~10 min; on failure (e.g. the
+        // upstream 502s) back off exponentially instead of retrying every cycle.
+        const now = Date.now();
+        if (this._geoNextAt && now < this._geoNextAt) return;
+        try {
+            const { data } = await jget('/api/geo');
+            this._lastGeo = data;
+            this._placePin(data);
+            this._refreshMeta(data);
+            this._geoFails = 0;
+            this._geoNextAt = now + 10 * 60_000;
+        } catch (e) {
+            this._geoFails++;
+            // Keep the last good location on screen; only show "unavailable" if
+            // we never managed to get one.
+            if (!this._lastGeo) this._meta.textContent = tr('widget.globe.unavailable');
+            this._geoNextAt = now + Math.min(10 * 60_000, 30_000 * 2 ** this._geoFails);
+        }
+    }
+
+    _renderSandbox() {
+        // Browser geolocation is user-gated. Don't prompt silently — render
+        // a "show my location" button once, and on click request a single
+        // position, then pin it. The globe keeps spinning meanwhile so the
+        // widget looks alive even if the user never grants permission.
+        if (this._geoAttempted) return;
+        if (!navigator.geolocation) { this._meta.textContent = tr('widget.globe.geo_unsupported'); return; }
+        if (this._lastGeo) { this._refreshMeta(this._lastGeo); return; }
+        this._meta.replaceChildren(
+            $el('span', { class: 'globe-meta-note', text: tr('widget.globe.geo_hint') + ' ' }),
+            $el('button', {
+                class: 'globe-meta-btn', text: tr('widget.globe.geo_btn'),
+                onclick: () => this._requestBrowserGeo(),
+            }),
+        );
+    }
+
+    _requestBrowserGeo() {
+        if (this._geoAttempted) return;
+        this._geoAttempted = true;
+        this._meta.textContent = tr('widget.globe.geo_pending');
+        navigator.geolocation.getCurrentPosition(pos => {
+            const geo = {
+                ip: null, city: null, region: null, country: null, org: null,
+                lat: pos.coords.latitude, lon: pos.coords.longitude,
+            };
+            this._lastGeo = geo;
+            this._placePin(geo);
+            this._refreshMeta(geo);
+        }, err => {
+            this._meta.textContent = tr('widget.globe.geo_denied');
+        }, { timeout: 10_000, maximumAge: 10 * 60_000 });
+    }
+
+    _placePin(geo) {
+        if (!this.globe || !geo || geo.lat == null || geo.lon == null) return;
+        const key = `${geo.lat.toFixed(3)},${geo.lon.toFixed(3)}`;
+        if (this._lastLoc === key) return;
+        try {
+            if (this._pin && typeof this._pin.remove === 'function') this._pin.remove();
+            this._pin = this.globe.addPin(geo.lat, geo.lon, geo.city || '', 1.2);
+            this._lastLoc = key;
+        } catch (_) { /* globe not fully ready yet */ }
+    }
+
+    setUserLocation(lat, lon, name) {
+        if (lat == null || lon == null || !isFinite(lat) || !isFinite(lon)) return;
+        const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+        if (this._lastUserLoc === key) return;
+        this._lastUserLoc = key;
+        // Update meta text below the globe with user location
+        const coord = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+        const label = name ? `${name}  ·  ${coord}` : coord;
+        if (!this.globe) {
+            // Globe still booting — place the pin once boot resolves
+            this._bootPromise.then(() => this._placeUserPin(lat, lon, name)).catch(() => {});
+            return;
+        }
+        this._placeUserPin(lat, lon, name);
+    }
+
+    _placeUserPin(lat, lon, name) {
+        if (!this.globe) return;
+        try {
+            if (this._userPin && typeof this._userPin.remove === 'function') this._userPin.remove();
+            // Slightly larger pin than server location so it's visually distinct
+            this._userPin = this.globe.addPin(lat, lon, `▲ ${name || 'You'}`, 1.8);
+        } catch (_) {}
+    }
+
+    // Pin every connected client on the globe (multiuser). /api/geo/peers returns
+    // one city-level entry per distinct public IP (LAN/localhost clients arrive
+    // as a single "self" cluster at the server location, which the server pin
+    // already marks, so we skip drawing it here). Pins are diffed by rounded
+    // coord so unchanged peers aren't churned each poll.
+    async _refreshPeers() {
+        if (!this.globe || this._destroyed) return;
+        let data;
+        try { ({ data } = await jget('/api/geo/peers')); }
+        catch (_) { return; }
+        const peers = (data && data.peers) || [];
+        const want = new Map();
+        for (const p of peers) {
+            if (p.self || p.lat == null || p.lon == null) continue;
+            want.set(`${p.lat.toFixed(2)},${p.lon.toFixed(2)}`, p);
+        }
+        for (const [k, pin] of this._peerPins) {
+            if (want.has(k)) continue;
+            try { if (pin && pin.remove) pin.remove(); } catch (_) {}
+            this._peerPins.delete(k);
+        }
+        for (const [k, p] of want) {
+            if (this._peerPins.has(k)) continue;
+            try {
+                const label = (p.city || p.country || 'peer') + (p.count > 1 ? ` ×${p.count}` : '');
+                this._peerPins.set(k, this.globe.addPin(p.lat, p.lon, label, 1.0));
+            } catch (_) { /* globe not ready yet — retried next poll */ }
+        }
+        this._peerCount = (data && typeof data.total === 'number')
+            ? data.total
+            : peers.reduce((n, p) => n + (p.count || 1), 0);
+        this._refreshMeta(this._lastGeo || null);
+    }
+
+    _refreshMeta(geo) {
+        let base = '—';
+        if (geo) {
+            const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '—';
+            const coord = (geo.lat != null && geo.lon != null)
+                ? `${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)}`
+                : '—';
+            base = `${place}  ·  ${coord}`;
+        }
+        const online = (this._peerCount != null)
+            ? `  ·  ${this._peerCount} ${tr('widget.globe.online')}`
+            : '';
+        this._meta.textContent = base + online;
+    }
+
+    destroy() {
+        if (this._rafId) cancelAnimationFrame(this._rafId);
+        // A settled globe is holding wake listeners rather than a rAF loop, so
+        // cancelling the frame alone would leave them on window forever.
+        this._disarmWake();
+        if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
+        if (this._onResize) window.removeEventListener('resize', this._onResize);
+        if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);
+        for (const pin of this._peerPins.values()) { try { if (pin && pin.remove) pin.remove(); } catch (_) {} }
+        this._peerPins.clear();
+        try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
+        super.destroy();
+    }
+}
+
 // ── MANAGER (automation control panel) ───────────────────────────────────
 // One switchboard for everything that can type into a tab on its own: the
 // rehydrate auto-resume, boot-resume, the attribution dividers, autopilot,
