@@ -1,0 +1,133 @@
+/* Voice Control CSS */
+
+.widget-voice {
+    /* Standard widget styling handled by base widget classes */
+}
+
+.voice-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    font-size: 0.875rem;
+}
+
+.voice-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background-color 0.3s ease;
+}
+
+.voice-indicator--off {
+    background-color: var(--soa-dim, #666);
+}
+
+.voice-indicator--listening {
+    background-color: var(--soa-blue, #4a9eff);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.voice-indicator--speaking {
+    background-color: var(--soa-green, #5dbd5a);
+    animation: pulse 1s ease-in-out infinite;
+}
+
+.voice-indicator--ready {
+    background-color: var(--soa-accent, #aacfd1);
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.voice-status-text {
+    color: var(--soa-fg, #e0e0e0);
+    flex: 1;
+}
+
+.voice-controls {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+}
+
+.voice-btn--start,
+.voice-btn--stop {
+    flex: 1;
+    padding: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.voice-transcript {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    min-height: 2.5rem;
+    font-size: 0.75rem;
+    color: var(--soa-dim-fg, #999);
+    overflow-wrap: break-word;
+}
+
+.voice-transcript small {
+    display: block;
+    line-height: 1.4;
+}
+
+.voice-settings {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--soa-border, rgba(255, 255, 255, 0.1));
+}
+
+.voice-settings summary {
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: var(--soa-accent, #aacfd1);
+    user-select: none;
+    padding: 0.25rem 0;
+}
+
+.voice-settings summary:hover {
+    color: var(--soa-accent-bright, #c0e5e7);
+}
+
+.voice-settings-body {
+    padding-top: 0.5rem;
+}
+
+.voice-setting {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.75rem;
+}
+
+.voice-setting span {
+    color: var(--soa-dim-fg, #999);
+}
+
+.voice-setting select,
+.voice-setting input[type="range"] {
+    width: 100%;
+    padding: 0.25rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--soa-border, rgba(255, 255, 255, 0.1));
+    border-radius: 4px;
+    color: var(--soa-fg, #e0e0e0);
+    font-size: 0.75rem;
+}
+
+.voice-setting input[type="range"] {
+    padding: 0;
+}
+
+.voice-rate-value {
+    font-size: 0.75rem;
+    color: var(--soa-accent, #aacfd1);
+    text-align: right;
+}

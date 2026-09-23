@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=27';
+import { t as tr } from '/assets/i18n.js?v=28';
 import { getSettings } from '/assets/settings.js?v=25';
 
 const $el = (tag, props = {}, children = []) => {
@@ -1558,6 +1558,233 @@ class InstallerWidget extends Widget {
     }
 }
 
+// ── SKILLS ───────────────────────────────────────────────────────────────
+// Lists the Claude Code skills currently available on this machine (the user's
+// own ~/.claude/skills plus installed-plugin skills), read from /api/skills.
+// A glanceable "what can the agents reach for" panel — name, source, and the
+// skill's own one-line description (full text on hover).
+class SkillsWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.skills', helpKey: 'widget.skills.body', parent, intervalMs: 15000 });
+        this._count = $el('div', { class: 'skills-count', text: '…' });
+        this._list = $el('div', { class: 'skills-list' });
+        this.body.replaceChildren(this._count, this._list);
+    }
+    async tick() {
+        let data;
+        try { ({ data } = await jget('/api/skills')); }
+        catch (e) { if (!this._destroyed) this._count.textContent = tr('widget.skills.err'); return; }
+        if (this._destroyed || !data) return;
+        const skills = data.skills || [];
+        const c = data.counts || { total: skills.length };
+        this._count.textContent = tr('widget.skills.count')
+            .replace('{n}', c.total).replace('{u}', c.user || 0).replace('{p}', c.plugin || 0);
+        this._list.replaceChildren(...skills.map(s => {
+            const chip = $el('span', { class: 'skills-src skills-src-' + (s.source || 'user'), text: s.source === 'plugin' ? (s.plugin || 'plugin') : 'user' });
+            const name = $el('span', { class: 'skills-name', text: s.name });
+            const head = $el('div', { class: 'skills-head' }, [name, chip]);
+            const desc = $el('div', { class: 'skills-desc', text: s.description || '', title: s.description || '' });
+            return $el('div', { class: 'skills-row' }, [head, desc]);
+        }));
+        if (!skills.length) this._list.replaceChildren($el('div', { class: 'skills-desc', text: tr('widget.skills.none') }));
+    }
+}
+
+// ── VOICE CONTROL ───────────────────────────────────────────────────────
+class VoiceControlWidget extends Widget {
+    constructor({ parent, ctx }) {
+        super({ titleKey: 'widget.voice', parent, intervalMs: 0 });
+        this.ctx = ctx;
+        this.voice = null;
+        this._init();
+    }
+
+    _init() {
+        // Check if VoiceControl is available
+        if (typeof VoiceControl === 'undefined') {
+            this.setRows([['ERROR', 'Voice control not loaded']]);
+            return;
+        }
+
+        this.voice = new VoiceControl();
+        this._render();
+        this._attachHandlers();
+    }
+
+    _render() {
+        const status = $el('div', { class: 'voice-status' }, [
+            $el('div', { class: 'voice-indicator voice-indicator--off', id: 'voice-indicator' }),
+            $el('span', { class: 'voice-status-text', id: 'voice-status-text', text: 'Off' })
+        ]);
+
+        const controls = $el('div', { class: 'voice-controls' }, [
+            $el('button', {
+                class: 'widget-btn voice-btn--start',
+                id: 'voice-start',
+                type: 'button',
+                text: '🎤 Start'
+            }),
+            $el('button', {
+                class: 'widget-btn voice-btn--stop',
+                id: 'voice-stop',
+                type: 'button',
+                text: '⏹ Stop',
+                style: 'display: none;'
+            })
+        ]);
+
+        const transcript = $el('div', { class: 'voice-transcript', id: 'voice-transcript' }, [
+            $el('small', { text: 'Say "help" for commands' })
+        ]);
+
+        this.body.innerHTML = '';
+        this.body.appendChild(status);
+        this.body.appendChild(controls);
+        this.body.appendChild(transcript);
+    }
+
+    _attachHandlers() {
+        if (!this.voice) return;
+
+        const startBtn = document.getElementById('voice-start');
+        const stopBtn = document.getElementById('voice-stop');
+        const indicator = document.getElementById('voice-indicator');
+        const statusText = document.getElementById('voice-status-text');
+        const transcriptEl = document.getElementById('voice-transcript');
+
+        startBtn.addEventListener('click', () => {
+            if (this.voice.start()) {
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'block';
+                indicator.className = 'voice-indicator voice-indicator--listening';
+                statusText.textContent = 'Listening...';
+            }
+        });
+
+        stopBtn.addEventListener('click', () => {
+            this.voice.stop();
+            stopBtn.style.display = 'none';
+            startBtn.style.display = 'block';
+            indicator.className = 'voice-indicator voice-indicator--off';
+            statusText.textContent = 'Off';
+        });
+
+        this.voice.onStatusChange = (s) => {
+            if (s.speaking) {
+                indicator.className = 'voice-indicator voice-indicator--speaking';
+                statusText.textContent = 'Speaking...';
+            } else if (s.listening) {
+                indicator.className = 'voice-indicator voice-indicator--listening';
+                statusText.textContent = 'Listening...';
+            }
+        };
+
+        this.voice.onCommand = (intent, params) => {
+            transcriptEl.innerHTML = `<small>Command: ${intent}</small>`;
+            this._handleCommand(intent, params);
+        };
+
+        this.voice.onError = (err) => {
+            transcriptEl.innerHTML = `<small style="color: var(--soa-red, #ff4444);">Error: ${err.message || err.error}</small>`;
+        };
+    }
+
+    _handleCommand(intent, params) {
+        const bridge = this.ctx.bridge;
+        const getActiveTab = this.ctx.getActiveTab;
+
+        if (!bridge || !getActiveTab) {
+            this.voice.speak('Terminal not ready.');
+            return;
+        }
+
+        const activeTab = getActiveTab();
+
+        switch (intent) {
+            case 'read_output': {
+                if (!activeTab) {
+                    this.voice.speak('No active terminal.');
+                    return;
+                }
+                const output = this._getTerminalOutput(activeTab, params.lines);
+                const formatted = typeof SpeechUtils !== 'undefined'
+                    ? SpeechUtils.formatForSpeech(output, this.voice.verbosity)
+                    : output.slice(-200);
+                this.voice.speak(formatted);
+                break;
+            }
+
+            case 'check_status': {
+                if (!activeTab) {
+                    this.voice.speak('No active terminal.');
+                    return;
+                }
+                const output = this._getTerminalOutput(activeTab, 10);
+                if (/error|failed|fatal/i.test(output)) {
+                    this.voice.speak('There are errors.');
+                } else if (/working|processing|running/i.test(output)) {
+                    this.voice.speak('Working.');
+                } else {
+                    this.voice.speak('Idle.');
+                }
+                break;
+            }
+
+            case 'type_text':
+                if (activeTab && bridge) {
+                    bridge.send({ kind: 'TERM_INPUT', id: activeTab.id, data: params.text });
+                    this.voice.speak('Typed.');
+                }
+                break;
+
+            case 'run_command':
+                if (activeTab && bridge) {
+                    bridge.send({ kind: 'TERM_INPUT', id: activeTab.id, data: params.command + '\r' });
+                    this.voice.speak('Running.');
+                }
+                break;
+
+            case 'interrupt':
+                if (activeTab && bridge) {
+                    bridge.send({ kind: 'TERM_INPUT', id: activeTab.id, data: '\x03' });
+                    this.voice.speak('Interrupted.');
+                }
+                break;
+
+            case 'help':
+                this.voice.speak('Available commands: read output, check status, type text, run command, interrupt, help.');
+                break;
+
+            default:
+                this.voice.speak("I don't understand that.");
+        }
+    }
+
+    _getTerminalOutput(tab, lines = 20) {
+        if (!tab || !tab.term) return '';
+        try {
+            const buffer = tab.term.buffer.active;
+            const endLine = buffer.baseY + buffer.cursorY;
+            const startLine = Math.max(0, endLine - lines);
+            let text = '';
+            for (let i = startLine; i <= endLine; i++) {
+                const line = buffer.getLine(i);
+                if (line) text += line.translateToString(true) + '\n';
+            }
+            return text;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    destroy() {
+        if (this.voice) {
+            this.voice.stop();
+        }
+        super.destroy();
+    }
+}
+
 // ── Sidebar composition: registry + persisted layout ─────────────────────
 // Stable ids → constructors, in default order. Users hide/show and reorder
 // these via the CUSTOMIZE panel; the chosen layout persists in localStorage.
@@ -1565,6 +1792,8 @@ function _widgetRegistry() {
     return [
         { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
         { id: 'claude',    titleKey: 'widget.claude',      make: p => new ClaudeUsageWidget({ parent: p }) },
+        { id: 'voice',     titleKey: 'widget.voice',       make: (p, c) => new VoiceControlWidget({ parent: p, ctx: c }) },
+        { id: 'skills',    titleKey: 'widget.skills',      make: p => new SkillsWidget({ parent: p }) },
         { id: 'installer', titleKey: 'widget.installer',   make: p => new InstallerWidget({ parent: p }) },
         { id: 'globe',     titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
         { id: 'mobile',    titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
