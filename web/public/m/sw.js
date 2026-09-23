@@ -6,7 +6,7 @@
  * SW is purely about making the app installable and fast to launch.
  */
 
-const VERSION = 'soa-mobile-v82';
+const VERSION = 'soa-mobile-v83';
 const SHELL = [
     '/',
     '/index.html',
@@ -18,6 +18,11 @@ const SHELL = [
     '/agentDetect.js',
     '/keyboard.js',
     '/sounds.js',
+    '/qrscan.js',
+    // 130KB, precached deliberately: the scanner's whole job is recovering a
+    // phone whose session is dead, and a lazy fetch at that moment is one more
+    // thing that can fail. Only iOS (no BarcodeDetector) ever executes it.
+    '/vendor/jsQR.min.js',
     '/manifest.webmanifest',
     '/icon.svg',
     '/audio/granted.wav',

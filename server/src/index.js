@@ -66,6 +66,7 @@ const tunnelGate       = require('./tunnelGate');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
 const skillsApi        = require('./skillsApi');
+const voice            = require('./voice');
 const { dbg, agg }     = require('./debug');
 const { STATE_DIR, MODE } = require('./stateDir');
 const instanceLock     = require('./instanceLock');
@@ -465,6 +466,7 @@ agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
 skillsApi.mount(app, requireAuthed);
+voice.mount(app, requireAuthed, sessions);
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {

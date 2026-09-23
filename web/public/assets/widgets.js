@@ -1591,196 +1591,378 @@ class SkillsWidget extends Widget {
 }
 
 // ── VOICE CONTROL ───────────────────────────────────────────────────────
+// Hands-free terminal control. The widget is presentational: VoiceControl
+// (assets/voice-control.js) owns recognition + wake word, VoiceCommands owns
+// what an intent DOES, VoiceAudio owns device routing, VoiceVision owns the
+// camera. This file wires the four together and draws the panel.
 class VoiceControlWidget extends Widget {
     constructor({ parent, ctx }) {
-        super({ titleKey: 'widget.voice', parent, intervalMs: 0 });
-        this.ctx = ctx;
+        super({ titleKey: 'widget.voice', helpKey: 'widget.voice.body', parent, intervalMs: 0 });
+        this.ctx = ctx || {};
         this.voice = null;
+        this.cmd = null;
+        this.audioPanel = null;
+        this.vision = null;
         this._init();
     }
 
     _init() {
-        // Check if VoiceControl is available
         if (typeof VoiceControl === 'undefined') {
-            this.setRows([['ERROR', 'Voice control not loaded']]);
+            this.body.innerHTML = '<div class="voice-hint voice-hint--warn">voice-control.js did not load.</div>';
+            return;
+        }
+        this.voice = new VoiceControl();
+
+        if (!this.voice.supported) {
+            // Say which browsers work rather than a bare "unsupported" — iOS
+            // Safari is the common case and it genuinely has no SpeechRecognition.
+            this.body.innerHTML =
+                '<div class="voice-hint voice-hint--warn">This browser has no speech recognition. ' +
+                'Chrome, Edge or desktop Safari work; iOS Safari does not.</div>';
             return;
         }
 
-        this.voice = new VoiceControl();
+        if (typeof VoiceCommands !== 'undefined') {
+            this.cmd = new VoiceCommands({ voice: this.voice, api });
+            this.cmd.onLog = (line) => this._log(line);
+        }
+
+        // Route anything the local parser can't place through the daemon's
+        // headless model, with the open tabs as context so "the iPlan repo"
+        // resolves to a real tab id.
+        this.voice.interpretRemote = async (transcript) => {
+            const tabs = this.cmd ? await this.cmd.tabs() : [];
+            // The control registry rides along so the model picks a real
+            // actionId instead of inventing one — the client owns that list,
+            // so shipping it beats keeping a second copy on the server.
+            const controls = typeof voiceActionMenu === 'function' ? voiceActionMenu() : [];
+            const r = await fetch(api('/api/voice/interpret'), {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ transcript, tabs, controls }),
+            });
+            if (!r.ok) return null;
+            return r.json();
+        };
+
         this._render();
-        this._attachHandlers();
+        this._wire();
+        this._syncFromServer();
+    }
+
+    // Wake word + model toggle live on the daemon too, so the phone and the
+    // desktop agree and a restart keeps them.
+    async _syncFromServer() {
+        try {
+            const j = await jget('/api/voice/config');
+            if (!j || !j.config) return;
+            const c = j.config;
+            if (c.wakeWord) this.voice.set('wakeWord', c.wakeWord);
+            if (c.wakeMode) this.voice.set('wakeMode', c.wakeMode);
+            if (typeof c.interpret === 'boolean') this.voice.set('useModel', c.interpret);
+            this._reflectSettings();
+        } catch (_) { /* daemon predates the endpoint — local settings stand */ }
+    }
+
+    async _pushConfig(patch) {
+        try {
+            await fetch(api('/api/voice/config'), {
+                method: 'POST', credentials: 'include',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(patch),
+            });
+        } catch (_) {}
     }
 
     _render() {
-        const status = $el('div', { class: 'voice-status' }, [
-            $el('div', { class: 'voice-indicator voice-indicator--off', id: 'voice-indicator' }),
-            $el('span', { class: 'voice-status-text', id: 'voice-status-text', text: 'Off' })
-        ]);
-
-        const controls = $el('div', { class: 'voice-controls' }, [
-            $el('button', {
-                class: 'widget-btn voice-btn--start',
-                id: 'voice-start',
-                type: 'button',
-                text: '🎤 Start'
-            }),
-            $el('button', {
-                class: 'widget-btn voice-btn--stop',
-                id: 'voice-stop',
-                type: 'button',
-                text: '⏹ Stop',
-                style: 'display: none;'
-            })
-        ]);
-
-        const transcript = $el('div', { class: 'voice-transcript', id: 'voice-transcript' }, [
-            $el('small', { text: 'Say "help" for commands' })
-        ]);
-
+        const s = this.voice.settings;
         this.body.innerHTML = '';
+
+        this._indicator = $el('div', { class: 'voice-indicator voice-indicator--off' });
+        this._statusText = $el('span', { class: 'voice-status-text', text: 'Off' });
+        const status = $el('div', { class: 'voice-status' }, [this._indicator, this._statusText]);
+
+        this._startBtn = $el('button', { class: 'voice-btn voice-btn--start', type: 'button', text: '🎤 Listen' });
+        this._stopBtn = $el('button', { class: 'voice-btn voice-btn--stop', type: 'button', text: '⏹ Stop' });
+        this._stopBtn.style.display = 'none';
+        const controls = $el('div', { class: 'voice-controls' }, [this._startBtn, this._stopBtn]);
+
+        this._transcript = $el('div', { class: 'voice-transcript' }, [
+            $el('small', { text: 'Say "' + s.wakeWord + '", then a command.' }),
+        ]);
+
+        // ── settings ──
+        this._wakeInput = $el('input', { type: 'text', class: 'voice-input', value: s.wakeWord, spellcheck: 'false' });
+        this._modeSel = $el('select', { class: 'voice-select' }, [
+            $el('option', { value: 'wake', text: 'Wake word' }),
+            $el('option', { value: 'always', text: 'Always on' }),
+        ]);
+        this._modeSel.value = s.wakeMode;
+        this._verbSel = $el('select', { class: 'voice-select' }, [
+            $el('option', { value: 'brief', text: 'Brief' }),
+            $el('option', { value: 'detailed', text: 'Detailed' }),
+        ]);
+        this._verbSel.value = this.voice.verbosity;
+        this._rateInput = $el('input', { type: 'range', class: 'voice-range', min: '0.6', max: '2', step: '0.1', value: String(s.rate) });
+        this._rateVal = $el('span', { class: 'voice-rate-value', text: Number(s.rate).toFixed(1) + '×' });
+        this._modelChk = $el('input', { type: 'checkbox', class: 'voice-check' });
+        this._modelChk.checked = !!s.useModel;
+
+        const settings = $el('details', { class: 'voice-settings' }, [
+            $el('summary', { text: 'Voice settings' }),
+            $el('div', { class: 'voice-settings-body' }, [
+                row('Wake phrase', this._wakeInput),
+                row('Mode', this._modeSel),
+                row('Read back', this._verbSel),
+                row('Speed', $el('div', { class: 'voice-row' }, [this._rateInput, this._rateVal])),
+                row('Understand free speech', this._modelChk),
+                $el('div', { class: 'voice-hint' },
+                    'Free speech goes to a local Haiku for translation into a command. Turn it off to stay on the built-in phrase list.'),
+            ]),
+        ]);
+
+        // ── audio devices ──
+        this._audioBody = $el('div', { class: 'voice-audio-body' });
+        const audioSec = $el('details', { class: 'voice-settings' }, [
+            $el('summary', { text: 'Headset & audio' }),
+            this._audioBody,
+        ]);
+        audioSec.addEventListener('toggle', () => {
+            if (!audioSec.open || this.audioPanel || typeof VoiceAudio === 'undefined') return;
+            this.audioPanel = new VoiceAudio({ api, onStatus: (m) => this._log(m) });
+            this.audioPanel.grantMicPermission();
+            this.audioPanel.mount(this._audioBody);
+        });
+
+        // ── what can I say ──
+        // Voice is undiscoverable without this: nothing on screen tells you
+        // the phrases exist. Rendered from the same registry that executes
+        // them, so the list can never advertise a command that doesn't work.
+        this._phrasesBody = $el('div', { class: 'voice-phrases-body' });
+        const phrasesSec = $el('details', { class: 'voice-settings' }, [
+            $el('summary', { text: 'What can I say' }),
+            this._phrasesBody,
+        ]);
+        phrasesSec.addEventListener('toggle', () => {
+            if (phrasesSec.open && !this._phrasesReady) this._renderPhrases();
+        });
+
+        // ── vision ──
+        this._visionBody = $el('div', { class: 'voice-vision-body' });
+        const visionSec = $el('details', { class: 'voice-settings' }, [
+            $el('summary', { text: 'Camera & glasses' }),
+            this._visionBody,
+        ]);
+        visionSec.addEventListener('toggle', () => {
+            if (visionSec.open && !this._visionReady) this._renderVision();
+        });
+
         this.body.appendChild(status);
         this.body.appendChild(controls);
-        this.body.appendChild(transcript);
+        this.body.appendChild(this._transcript);
+        this.body.appendChild(settings);
+        this.body.appendChild(phrasesSec);
+        this.body.appendChild(audioSec);
+        this.body.appendChild(visionSec);
+
+        function row(label, control) {
+            return $el('label', { class: 'voice-setting' }, [$el('span', { text: label }), control]);
+        }
     }
 
-    _attachHandlers() {
-        if (!this.voice) return;
-
-        const startBtn = document.getElementById('voice-start');
-        const stopBtn = document.getElementById('voice-stop');
-        const indicator = document.getElementById('voice-indicator');
-        const statusText = document.getElementById('voice-status-text');
-        const transcriptEl = document.getElementById('voice-transcript');
-
-        startBtn.addEventListener('click', () => {
+    _wire() {
+        this._startBtn.addEventListener('click', () => {
             if (this.voice.start()) {
-                startBtn.style.display = 'none';
-                stopBtn.style.display = 'block';
-                indicator.className = 'voice-indicator voice-indicator--listening';
-                statusText.textContent = 'Listening...';
+                this._startBtn.style.display = 'none';
+                this._stopBtn.style.display = '';
             }
         });
-
-        stopBtn.addEventListener('click', () => {
+        this._stopBtn.addEventListener('click', () => {
             this.voice.stop();
-            stopBtn.style.display = 'none';
-            startBtn.style.display = 'block';
-            indicator.className = 'voice-indicator voice-indicator--off';
-            statusText.textContent = 'Off';
+            this._stopBtn.style.display = 'none';
+            this._startBtn.style.display = '';
         });
 
-        this.voice.onStatusChange = (s) => {
-            if (s.speaking) {
-                indicator.className = 'voice-indicator voice-indicator--speaking';
-                statusText.textContent = 'Speaking...';
-            } else if (s.listening) {
-                indicator.className = 'voice-indicator voice-indicator--listening';
-                statusText.textContent = 'Listening...';
-            }
-        };
+        this._wakeInput.addEventListener('change', () => {
+            const w = this._wakeInput.value.trim().toLowerCase() || 'hey anton';
+            this._wakeInput.value = w;
+            this.voice.setWakeWord(w);
+            this._pushConfig({ wakeWord: w });
+            this._log('Wake phrase: "' + w + '"');
+        });
+        this._modeSel.addEventListener('change', () => {
+            this.voice.set('wakeMode', this._modeSel.value);
+            this._pushConfig({ wakeMode: this._modeSel.value });
+        });
+        this._verbSel.addEventListener('change', () => this.voice.setVerbosity(this._verbSel.value));
+        this._rateInput.addEventListener('input', () => {
+            const r = Number(this._rateInput.value);
+            this.voice.setRate(r);
+            this._rateVal.textContent = r.toFixed(1) + '×';
+        });
+        this._modelChk.addEventListener('change', () => {
+            this.voice.set('useModel', this._modelChk.checked);
+            this._pushConfig({ interpret: this._modelChk.checked });
+        });
 
-        this.voice.onCommand = (intent, params) => {
-            transcriptEl.innerHTML = `<small>Command: ${intent}</small>`;
-            this._handleCommand(intent, params);
+        this.voice.onStatusChange = (st) => this._paintStatus(st);
+        this.voice.onTranscript = (text, m) => {
+            if (m.final) this._log('“' + text + '”');
+            else this._log('… ' + text, true);
         };
-
-        this.voice.onError = (err) => {
-            transcriptEl.innerHTML = `<small style="color: var(--soa-red, #ff4444);">Error: ${err.message || err.error}</small>`;
+        this.voice.onCommand = (intent, params, meta) => {
+            this._log('▸ ' + intent + (meta && meta.source === 'model' ? ' (model)' : ''));
+            if (this.cmd) this.cmd.handle(intent, params, meta);
+            else this.voice.speak('Terminal control is not loaded.');
         };
+        this.voice.onError = (err) => this._log('⚠ ' + (err.message || err.error), false, true);
     }
 
-    _handleCommand(intent, params) {
-        const bridge = this.ctx.bridge;
-        const getActiveTab = this.ctx.getActiveTab;
+    _reflectSettings() {
+        if (!this._wakeInput) return;
+        const s = this.voice.settings;
+        this._wakeInput.value = s.wakeWord;
+        this._modeSel.value = s.wakeMode;
+        this._modelChk.checked = !!s.useModel;
+    }
 
-        if (!bridge || !getActiveTab) {
-            this.voice.speak('Terminal not ready.');
+    _paintStatus(st) {
+        if (!this._indicator) return;
+        let cls = 'off', text = 'Off';
+        if (st.speaking) { cls = 'speaking'; text = 'Speaking'; }
+        else if (st.thinking) { cls = 'thinking'; text = 'Thinking…'; }
+        else if (st.enabled && st.awake) { cls = 'awake'; text = 'Listening — go ahead'; }
+        else if (st.enabled && st.listening) { cls = 'listening'; text = 'Waiting for "' + st.wakeWord + '"'; }
+        else if (st.enabled) { cls = 'ready'; text = 'Starting…'; }
+        this._indicator.className = 'voice-indicator voice-indicator--' + cls;
+        this._statusText.textContent = text;
+    }
+
+    _log(line, interim, warn) {
+        if (!this._transcript) return;
+        const small = $el('small', { text: line });
+        if (warn) small.style.color = 'var(--soa-red, #ff6b6b)';
+        if (interim) small.style.opacity = '0.55';
+        this._transcript.innerHTML = '';
+        this._transcript.appendChild(small);
+    }
+
+    // ── "what can I say" panel ────────────────────────────────────────────
+    _renderPhrases() {
+        this._phrasesReady = true;
+        const el = this._phrasesBody;
+        el.innerHTML = '';
+
+        // Terminal commands are hand-written because they take arguments the
+        // registry's fixed phrases can't express.
+        const terminal = [
+            ['Read output', 'read the output · what is happening · any errors'],
+            ['Work', 'run npm test · type <text> · press enter · continue · stop'],
+            ['Agent', 'change model to opus · how is my usage · how are the agents'],
+            ['Navigate', 'go to the <name> project · go to tab 3 · next tab'],
+            ['Free speech', 'help me finish the migration · take a look at the failing tests'],
+            ['Voice', 'be brief · be detailed · go to sleep'],
+        ];
+        el.appendChild($el('div', { class: 'voice-sec-title', text: 'Terminal' }));
+        for (const [name, phrases] of terminal) {
+            el.appendChild($el('div', { class: 'voice-phrase' }, [
+                $el('b', { text: name }), $el('span', { text: phrases }),
+            ]));
+        }
+
+        if (typeof voiceActionGroups !== 'function') return;
+        for (const [group, actions] of voiceActionGroups()) {
+            el.appendChild($el('div', { class: 'voice-sec-title', text: group }));
+            for (const a of actions) {
+                // Clicking a row runs it — the list doubles as a button panel,
+                // which is what you want when the room is too loud to talk.
+                const row = $el('div', { class: 'voice-phrase voice-phrase--run' }, [
+                    $el('b', { text: a.label }),
+                    $el('span', { text: a.phrases.slice(0, 3).join(' · ') }),
+                ]);
+                row.addEventListener('click', () => {
+                    if (this.cmd) this.cmd.handle('app_action', { actionId: a.id }, { source: 'click' });
+                });
+                el.appendChild(row);
+            }
+        }
+    }
+
+    // ── vision panel ──────────────────────────────────────────────────────
+    async _renderVision() {
+        this._visionReady = true;
+        const el = this._visionBody;
+        if (typeof VoiceVision === 'undefined') {
+            el.innerHTML = '<div class="voice-hint voice-hint--warn">voice-vision.js did not load.</div>';
             return;
         }
+        this.vision = new VoiceVision({ api });
 
-        const activeTab = getActiveTab();
+        let status = {};
+        try { status = await this.vision.watchStatus(); } catch (_) {}
+        const cams = await this.vision.cameras().catch(() => []);
 
-        switch (intent) {
-            case 'read_output': {
-                if (!activeTab) {
-                    this.voice.speak('No active terminal.');
-                    return;
-                }
-                const output = this._getTerminalOutput(activeTab, params.lines);
-                const formatted = typeof SpeechUtils !== 'undefined'
-                    ? SpeechUtils.formatForSpeech(output, this.voice.verbosity)
-                    : output.slice(-200);
-                this.voice.speak(formatted);
-                break;
-            }
+        el.innerHTML = '';
 
-            case 'check_status': {
-                if (!activeTab) {
-                    this.voice.speak('No active terminal.');
-                    return;
-                }
-                const output = this._getTerminalOutput(activeTab, 10);
-                if (/error|failed|fatal/i.test(output)) {
-                    this.voice.speak('There are errors.');
-                } else if (/working|processing|running/i.test(output)) {
-                    this.voice.speak('Working.');
-                } else {
-                    this.voice.speak('Idle.');
-                }
-                break;
-            }
+        // 1. Live camera / UVC glasses.
+        const camSel = $el('select', { class: 'voice-select' },
+            (cams.length ? cams : [{ deviceId: '', label: 'No camera detected' }]).map(c =>
+                $el('option', { value: c.deviceId, text: (c.glasses ? '👓 ' : '') + c.label })));
+        const shoot = $el('button', { class: 'voice-mini', type: 'button', text: '📷 Capture → agent' });
+        shoot.addEventListener('click', async () => {
+            this.vision.deviceId = camSel.value || null;
+            this._log('Capturing…');
+            try {
+                const shot = (await this.vision.capture({})) || (await this.vision.captureViaFilePicker());
+                if (!shot) return this._log('No image captured.', false, true);
+                const tabId = this.cmd ? this.cmd.activeId : null;
+                const j = await this.vision.sendToTab(shot.blob, tabId, 'Look at this image.');
+                this._log('Sent ' + (j.name || 'image') + ' to the agent.');
+            } catch (e) { this._log('Capture failed: ' + e.message, false, true); }
+        });
+        el.appendChild($el('div', { class: 'voice-sec-title', text: 'Camera' }));
+        el.appendChild(camSel);
+        el.appendChild($el('div', { class: 'voice-row' }, [shoot]));
 
-            case 'type_text':
-                if (activeTab && bridge) {
-                    bridge.send({ kind: 'TERM_INPUT', id: activeTab.id, data: params.text });
-                    this.voice.speak('Typed.');
-                }
-                break;
-
-            case 'run_command':
-                if (activeTab && bridge) {
-                    bridge.send({ kind: 'TERM_INPUT', id: activeTab.id, data: params.command + '\r' });
-                    this.voice.speak('Running.');
-                }
-                break;
-
-            case 'interrupt':
-                if (activeTab && bridge) {
-                    bridge.send({ kind: 'TERM_INPUT', id: activeTab.id, data: '\x03' });
-                    this.voice.speak('Interrupted.');
-                }
-                break;
-
-            case 'help':
-                this.voice.speak('Available commands: read output, check status, type text, run command, interrupt, help.');
-                break;
-
-            default:
-                this.voice.speak("I don't understand that.");
+        // 2. Watch folder — the Meta Ray-Ban route.
+        el.appendChild($el('div', { class: 'voice-sec-title', text: 'Glasses photo sync' }));
+        const dirInput = $el('input', {
+            type: 'text', class: 'voice-input', spellcheck: 'false',
+            placeholder: '~/Pictures/Meta View',
+            value: status.watching || '',
+        });
+        const enable = $el('input', { type: 'checkbox', class: 'voice-check' });
+        enable.checked = !!status.enabled;
+        const apply = async () => {
+            const r = await this.vision.setWatch({
+                enabled: enable.checked,
+                watchDir: dirInput.value.trim(),
+                targetTab: null,
+                prompt: 'Look at this image and tell me what you see.',
+            }).catch(e => ({ ok: false, error: e.message }));
+            if (r && r.watch && r.watch.ok === false) this._log('Watch failed: ' + r.watch.error, false, true);
+            else this._log(enable.checked ? 'Watching ' + dirInput.value : 'Watch off.');
+        };
+        enable.addEventListener('change', apply);
+        dirInput.addEventListener('change', apply);
+        el.appendChild($el('label', { class: 'voice-setting' }, [$el('span', { text: 'Auto-ingest new photos' }), enable]));
+        el.appendChild(dirInput);
+        for (const s of (status.suggestions || [])) {
+            const b = $el('button', { class: 'voice-mini', type: 'button', text: s.replace(/^.*\//, '') });
+            b.title = s;
+            b.addEventListener('click', () => { dirInput.value = s; apply(); });
+            el.appendChild(b);
         }
-    }
-
-    _getTerminalOutput(tab, lines = 20) {
-        if (!tab || !tab.term) return '';
-        try {
-            const buffer = tab.term.buffer.active;
-            const endLine = buffer.baseY + buffer.cursorY;
-            const startLine = Math.max(0, endLine - lines);
-            let text = '';
-            for (let i = startLine; i <= endLine; i++) {
-                const line = buffer.getLine(i);
-                if (line) text += line.translateToString(true) + '\n';
-            }
-            return text;
-        } catch (e) {
-            return '';
-        }
+        el.appendChild($el('div', { class: 'voice-hint' },
+            'Meta Ray-Bans have no camera API. Point this at the folder their photos sync into ' +
+            '(Meta AI app → iCloud Photos → a synced folder) and every new picture is handed to the ' +
+            'agent by path. Glasses that expose a plain USB camera appear in the Camera list above.'));
     }
 
     destroy() {
-        if (this.voice) {
-            this.voice.stop();
-        }
+        if (this.voice) this.voice.stop();
+        if (this.audioPanel) this.audioPanel.destroy();
         super.destroy();
     }
 }

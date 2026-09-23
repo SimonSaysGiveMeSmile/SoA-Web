@@ -1,225 +1,246 @@
-# Voice Control Feature Design
+# Voice control
 
-## Overview
-Enable hands-free terminal interaction via voice commands with Bluetooth headset support, allowing users to interact with Son of Anton terminals without a display.
+Hands-free control of Son of Anton: the terminal, the fleet, and the dashboard
+itself — plus an in-app camera for pairing and for showing an agent what you
+are looking at.
 
-## Use Cases
-1. **On the go**: User walking/driving, needs to check terminal status or give simple commands
-2. **Hands-free multitasking**: User doing other work, monitors terminal via audio
-3. **Accessibility**: Vision-impaired users or screen-free environments
-4. **Smart glasses**: Future integration with wearable displays
+The design question that shaped everything below was **what needs a key, and
+what can we do without one**. The answer: nothing here needs a new API key.
 
-## Core Components
+| Layer | Implementation | Key | Runs |
+|---|---|---|---|
+| Speech → text | Web Speech API (`SpeechRecognition`) | none | browser (Chrome routes audio via Google; Safari uses Apple dictation) |
+| Text → speech | `speechSynthesis`, system voices | none | fully on-device |
+| Phrase → intent | regex table in `voice-control.js` | none | on-device, zero latency |
+| Free speech → intent | `claude -p --model haiku` | **existing Claude Code login** | this machine |
+| QR decoding | `BarcodeDetector`, else vendored jsQR | none | on-device |
 
-### 1. Voice Input (Speech Recognition)
-- **Web Speech API** (`webkitSpeechRecognition` / `SpeechRecognition`)
-  - Continuous recognition mode
-  - Language: English (en-US)
-  - Interim results for responsiveness
-  - Auto-restart on silence/error
+Only the fourth row costs anything, and it costs Claude quota rather than a new
+credential. It is the **fallback**, not the first try: the regex table answers
+every common command with no model call at all, and the whole path is one
+checkbox away from off.
 
-- **Wake word detection** (optional future enhancement)
-  - "Hey Anton" or "Okay Anton" to activate
-  - Prevents accidental command triggers
+## The three layers, cheapest first
 
-### 2. Command Parser
-- **Lightweight NLU** (on-device, no network)
-  - Pattern matching for terminal commands
-  - Intent classification: status check, navigation, input, control
-  
-- **Command categories**:
-  ```
-  Status:     "read output", "what's happening", "any errors"
-  Navigation: "switch to tab 5", "go to terminal 2"
-  Input:      "type hello world", "send enter", "run ls"
-  Control:    "interrupt", "clear screen", "scroll up/down"
-  Session:    "continue", "start new task"
-  ```
+Latency is the product here. A voice command that takes two seconds to land is
+worse than reaching for the keyboard, so the pipeline is ordered by cost.
 
-### 3. Voice Output (Text-to-Speech)
-- **Web Speech API** (`speechSynthesis`)
-  - Summarize terminal output (not read raw dumps)
-  - Status updates: "Working on it", "Task complete", "Needs your input"
-  - Error notifications
-  - Configurable verbosity (brief/detailed)
+### 1. Wake word
 
-- **Output filtering**:
-  - Extract meaningful content (last command result, error messages, prompts)
-  - Skip ANSI codes, progress bars, repetitive logs
-  - Smart truncation for long output
+In wake mode nothing executes until the wake phrase lands. That is not polish —
+continuous recognition on a live mic in a room where the terminal is reading
+output aloud will otherwise hear a command in its own speech. (Echo suppression
+is belt and braces: anything arriving while speaking, or within 600 ms of
+finishing, is dropped.)
 
-### 4. Bluetooth Headset Integration
-- **Web Bluetooth API** (where supported)
-  - Connect to paired headsets
-  - Route audio I/O through connected device
-  - Handle connect/disconnect events
-  
-- **Fallback**: Use device's default audio routing
-  - iOS/Android automatically route to connected Bluetooth audio
-  - No explicit pairing needed in most cases
+The phrase is matched **fuzzily**, by edit distance over the first few words.
+Browser ASR renders "hey anton" as *hey antoine*, *hay anton*, *hey anthon*,
+*a anton* and a dozen other things; rejecting those makes the feature feel
+broken about a third of the time. The distance budget scales with the phrase
+length, so a custom wake word gets the same tolerance without matching
+unrelated speech.
 
-### 5. Background Mode
-- **Service Worker** enhancement
-  - Keep audio pipeline alive when app is backgrounded
-  - Wake lock for continuous listening
-  - Battery optimization (pause when idle)
+Both forms work:
 
-- **iOS limitations**:
-  - PWA backgrounding is restrictive
-  - May need audio playback trick (silent audio) to stay alive
-  - Alternative: Use wake word + manual activation
+- **"Hey Anton."** → a chime and "Yes?", then a 15-second window where
+  follow-ups need no phrase. Each command refreshes the window.
+- **"Hey Anton, go to the iPlan project."** → executed immediately, no "Yes?".
 
-## Architecture
+"Go to sleep", "never mind" and "stop listening" close the window at once.
+
+### 2. The local phrase table
+
+Regex, in `_parseCommand`. Zero latency, works offline, and — critically — it
+is the only path that can be relied on to **stop a runaway process**, which is
+why `stop` / `interrupt` / `cancel` are matched before anything else in the
+cascade.
+
+The cascade order is load-bearing and tested, because a regex cascade fails
+*silently* when it is wrong:
+
+1. sleep, interrupt
+2. read output / status / progress
+3. usage, fleet status
+4. model switching
+5. tab navigation
+6. **app controls** (the registry, below)
+7. project switching — greedy `open|go to <anything>`, so it must come after 6
+8. typing, keys, screen, capture, verbosity, help
+
+Two real bugs this ordering fixed: "open settings" was parsed as a project
+called *settings*, and "restore the fleet" was answered with a fleet status
+report instead of restoring anything.
+
+### 3. The model
+
+Anything the table can't place goes to `POST /api/voice/interpret`, where a
+headless `claude -p --model haiku` turns the sentence into one intent. The
+request carries the open tabs, the known projects, and the control registry, so
+"hop over to the iPlan repo and help me finish the migration" resolves to a
+real tab id and a real action id rather than something invented.
+
+Output is one line of JSON, extracted with a brace-balancing scanner rather
+than `JSON.parse` — the model answers with a fence or a trailing sentence often
+enough that a naive parse loses real commands. Anything unparseable, any
+timeout (9 s), any missing binary returns `{intent:'unknown'}` so the client
+falls back instead of hanging.
+
+## Controlling the whole app
+
+Voice originally reached the terminal only — read it, type into it, interrupt
+it. Everything the mouse could do was off limits. `voice-actions.js` closes
+that with a registry of every dashboard control, and it is a table rather than
+a switch statement because it has three jobs at once:
+
+- **The spoken vocabulary** for the zero-latency matcher.
+- **The list the user reads** — rendered as the widget's *What can I say* panel,
+  so the feature is discoverable instead of guessed at. Each row is also a
+  button, for when the room is too loud to talk.
+- **The model's menu** — ids and labels ride along with every interpret call.
+
+Actions prefer **clicking the real control** over calling a Shell method, so
+voice goes through the app's own handler: the sound cue, the persisted state
+and the aria attributes all stay correct, and voice can't drift from mouse.
+
+| Group | Controls |
+|---|---|
+| View | terminal, tiles, fleet, chat, monitor |
+| Layout | sidebar, toolbar, theme, settings, full screen |
+| Tabs | new, close, reopen, first, last |
+| Fleet | broadcast, time machine, restore the fleet |
+| Audio | sound FX, speak replies, "be quiet" |
+| Terminal | scroll top/bottom, bigger/smaller text |
+
+## Audio routing — why the headset switch is server-side
+
+**Neither Web Speech API takes a device.** `SpeechRecognition` has no
+`deviceId`; `speechSynthesis` has no `sinkId`. Both follow the macOS *default*
+input and output, and no web API changes their mind. A purely client-side
+headset picker would be a lie — it could list devices and change nothing.
+
+So the panel splits along the line of what is actually possible:
+
+- **Read** — `system_profiler SPAudioDataType` and `SPBluetoothDataType`, both
+  always present. Paired devices, connection state, battery, transport.
+- **Write** — `blueutil --connect` and `SwitchAudioSource -t output -s`, both
+  optional Homebrew tools. Missing, the panel is read-only and shows one
+  copyable `brew install blueutil switchaudio-osx`; it never claims a switch
+  that did not happen (`501 TOOL_MISSING` with the hint).
+- **Identify** — the one per-device thing a browser genuinely owns: a test tone
+  through a chosen sink via `setSinkId`, so you can tell which "Beats" in the
+  list is the one on your head.
+
+The panel also says the thing that surprises everyone: macOS drops a Bluetooth
+headset to call quality (HFP/SCO) whenever the mic is live.
+
+## Vision — glasses, cameras, phones
+
+**Meta Ray-Bans have no camera API.** No public SDK, no web-reachable channel;
+they pair as an audio device plus a proprietary companion-app link. Anyone
+offering "connect your Meta glasses" from a browser is describing something
+that does not exist.
+
+Three routes that do work, degrading in that order:
+
+1. **Watch folder** — works with Meta Ray-Bans *today*. Captures sync to the
+   phone's Meta AI app; with iCloud Photos or a Finder sync they land in a
+   folder on this Mac. The daemon watches it and types each new image's path
+   into the agent's tab — exactly how Claude Code loads an image, the same
+   trick `pasteImage.js` uses. Anything that drops a file in a folder works:
+   AirDrop, a Shortcut, a capture script. The watcher seeds on existing files
+   so enabling it doesn't replay your photo library into a terminal.
+2. **UVC camera** — plenty of non-Meta camera glasses enumerate as a plain USB
+   video device. Those appear in the camera list (flagged 👓) and capture
+   directly.
+3. **Phone camera** — a file input with `capture="environment"`, which works on
+   iOS where `getUserMedia` in a home-screen PWA does not.
+
+All three end the same way: bytes to `POST /api/voice/vision`, saved on the
+machine running the shell, path typed into a tab.
+
+## Mobile: pairing by camera, in-app
+
+The phone loses its session more than anything else here — the tunnel rotates,
+the token ages out, the PWA cold-starts with storage the browser evicted. The
+old answer was "re-scan the QR on the desktop", which meant leaving the app for
+the system camera. On iOS that hands the URL to **Safari** — a different
+storage context from the home-screen PWA — so the token landed where the app
+could never read it.
+
+Now the no-token screen is a welcome screen, not a dead end:
+
+- **Scan QR code** opens the camera *inside* the app.
+- **Open the camera automatically** is a one-time opt-in: land on the welcome
+  screen, camera already up. It deliberately does not re-arm after an error,
+  or the camera reopens in a loop with no way out.
+- **Paste a pairing link** for when the camera is denied.
+- A **Re-pair** tile in the overflow sheet does the same mid-session.
+
+On a successful scan the app **connects in place** — no navigation. Navigating
+would reload the document, and from a home-screen PWA a cross-origin URL opens
+the system browser, which is the exact jump-out this feature removes.
+`BridgeSocket` already accepts an arbitrary origin, so the token is persisted
+the way `readToken()` would and the socket is booted directly.
+
+The parser accepts every QR shape the app has ever produced: token in the query
+or hash, `#alt=` failover origin, separate `backend=`, a URL pointing at `/`
+rather than `/m/`, and a bare `host:port`. Losing `alt` or `backend` on a scan
+would strand the phone the next time the network flips, so both survive.
+
+Decoding takes the native path where it exists (`BarcodeDetector` — Chrome on
+Android) and falls back to **jsQR, vendored locally** rather than CDN-loaded.
+iOS Safari still has no `BarcodeDetector` and iOS is the main PWA target, so
+that fallback is the common path, not the exotic one. It is precached by the
+service worker: the scanner's whole job is recovering a phone whose session is
+dead, and a lazy fetch at that moment is one more thing that can fail.
+
+## Files
+
+| File | Role |
+|---|---|
+| `server/src/voice.js` | audio devices, Bluetooth, interpret, vision ingest, watch folder |
+| `web/public/assets/voice-control.js` | recognition, wake word, phrase table |
+| `web/public/assets/voice-actions.js` | the app control registry |
+| `web/public/assets/voice-commands.js` | intent → terminal/app action |
+| `web/public/assets/voice-audio.js` | headset & routing panel |
+| `web/public/assets/voice-vision.js` | camera capture, watch-folder config |
+| `web/public/assets/speech-utils.js` | terminal output → speakable text |
+| `web/public/m/qrscan.js` | in-app QR scanner + pairing payload parser |
+| `web/public/m/vendor/jsQR.min.js` | vendored decoder (Apache-2.0) |
+| `server/test/voice.test.js` | 30 tests over the parts that fail silently |
+
+## Endpoints
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     Voice Control UI                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Mic Status   │  │ BT Headset   │  │ Voice Mode   │  │
-│  │ 🎤 Listening │  │ 🎧 Connected │  │ [ Brief  ▼ ] │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────┐
-│              Speech Recognition (Web API)                 │
-│  • Continuous listening with auto-restart                 │
-│  • Transcript: "read the last output"                     │
-└─────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────┐
-│                   Command Parser                          │
-│  Intent: STATUS_CHECK                                     │
-│  Action: read_terminal_output                             │
-│  Params: { scope: "last", lines: 20 }                     │
-└─────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────┐
-│               Terminal State Manager                      │
-│  • Get active terminal's scrollback                       │
-│  • Extract meaningful content (filter ANSI, trim)         │
-│  • Format for speech: "Last command output: ..."          │
-└─────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────┐
-│             Text-to-Speech (Web API)                      │
-│  Speak: "The build completed successfully. 249 tests     │
-│         passed. The daemon is now serving version 156."   │
-└─────────────────────────────────────────────────────────┘
+GET  /api/voice/config          wake word, mode, model toggle, vision config
+POST /api/voice/config          update the above; applies the watch immediately
+GET  /api/voice/audio           CoreAudio devices + paired Bluetooth + tooling
+POST /api/voice/audio/default   set the macOS default input/output
+POST /api/voice/bluetooth       connect/disconnect a paired device
+POST /api/voice/interpret       free speech → intent (headless haiku)
+GET  /api/voice/projects        known project directories, for "go to X"
+POST /api/voice/vision          image bytes in, path out, optionally typed into a tab
+GET  /api/voice/vision/status   watch state + suggested sync folders
 ```
 
-## Implementation Plan
+## Browser support
 
-### Phase 1: Core Voice I/O
-1. Add voice control toggle to dashboard sidebar
-2. Implement continuous speech recognition
-3. Basic command parser (hardcoded patterns)
-4. TTS for status checks and output summaries
-5. Test with device microphone + speakers
+| | Recognition | Synthesis | QR scan |
+|---|---|---|---|
+| Chrome / Edge desktop | ✅ | ✅ | ✅ native |
+| Chrome Android | ✅ | ✅ | ✅ native |
+| Safari desktop | ✅ | ✅ | jsQR |
+| **iOS Safari / PWA** | ❌ | ✅ | jsQR |
 
-**Deliverable**: "Read output" command works, speaks last terminal lines
+iOS has no `SpeechRecognition`, so the phone gets speech *output*, the camera,
+and QR pairing — not voice commands. The widget says so rather than failing
+silently. Driving the fleet by voice from an iPhone would need on-device
+Whisper (`transformers.js`/`whisper.cpp` via wasm, a few hundred KB to a few
+MB) — no key either, but a real download, so it is a deliberate next step
+rather than a default.
 
-### Phase 2: Command Expansion
-1. Navigation commands (switch tabs, scroll)
-2. Input commands (type text, send keys)
-3. Control commands (interrupt, continue, clear)
-4. Session management (resume, start new)
+## Next
 
-**Deliverable**: Hands-free terminal control for common tasks
-
-### Phase 3: Bluetooth Integration
-1. Web Bluetooth API integration (where supported)
-2. Headset pairing UI
-3. Audio routing to connected device
-4. Connection status indicators
-
-**Deliverable**: Works with AirPods, other BT headsets
-
-### Phase 4: Background & Polish
-1. Service worker for background listening
-2. Wake lock / audio trick for iOS PWA
-3. Voice feedback customization (speed, verbosity)
-4. Tutorial/onboarding for voice commands
-
-**Deliverable**: Production-ready voice control
-
-### Phase 5: Smart Integration (Future)
-1. Wake word detection ("Hey Anton")
-2. Context-aware commands (understand current state)
-3. Smart glasses support (visual + audio)
-4. Me frames camera integration
-
-## Technical Considerations
-
-### Browser Compatibility
-- **Chrome/Edge**: Full Web Speech API support
-- **Safari/iOS**: Partial support, may need workarounds
-- **Firefox**: Limited speech recognition support
-
-### Privacy & Security
-- All voice processing **on-device** (no cloud)
-- No audio recording/storage unless explicitly saved
-- Bluetooth pairing requires user consent
-- Clear indicators when listening (mic icon, LED)
-
-### Performance
-- Minimal CPU overhead (native speech APIs)
-- Battery impact: moderate (continuous mic access)
-- Network: zero (no external APIs)
-
-### iOS PWA Challenges
-1. **Background execution**: Very limited
-   - Solution: Keep audio playing (silent track) or require foreground
-2. **Bluetooth API**: Not supported in Safari
-   - Solution: Rely on OS-level audio routing
-3. **Wake lock**: Not supported
-   - Solution: Manual activation, no continuous listening
-
-## User Settings
-```javascript
-{
-  voiceControl: {
-    enabled: false,
-    mode: "manual" | "continuous",
-    verbosity: "brief" | "detailed",
-    voice: "default" | "en-US-Male-1" | ...,
-    speed: 1.0,  // 0.5 - 2.0
-    bluetooth: {
-      enabled: true,
-      preferredDevice: null,
-      autoConnect: true
-    },
-    commands: {
-      wakeWord: "hey anton",  // future
-      customMappings: {}
-    }
-  }
-}
-```
-
-## Files to Create/Modify
-1. `web/public/assets/voice-control.js` - Core voice control logic
-2. `web/public/assets/command-parser.js` - NLU/pattern matching
-3. `web/public/assets/speech-utils.js` - TTS helpers, output formatting
-4. `web/public/index.html` - Add voice control UI + script
-5. `web/public/m/index.html` - Mobile version with BT settings
-6. `server/src/voiceCommandHandler.js` - Server-side command execution (if needed)
-7. `docs/voice-commands.md` - User-facing command reference
-
-## Success Metrics
-- Command recognition accuracy > 90%
-- Response latency < 1s (recognition → speech)
-- Battery life impact < 20% over 1hr continuous use
-- User can complete common tasks without touching screen
-
-## Open Questions
-1. Should we use a lightweight ML model (TensorFlow.js) for better intent parsing?
-2. Wake word detection: worth the complexity/battery cost?
-3. How to handle multi-tab scenarios? (voice switches active tab?)
-4. Should TTS interrupt or queue when terminal updates mid-speech?
-
-## Next Steps
-1. Prototype basic speech recognition + TTS in a test page
-2. Test Web Bluetooth API with AirPods/common headsets
-3. Evaluate iOS PWA limitations (background, bluetooth, wake lock)
-4. Build command parser with initial pattern set
-5. Integrate with existing SoA terminal state management
+- On-device Whisper as an optional recognizer, closing the iOS gap.
+- Per-tab voice profiles: a wake word that addresses one agent directly.
+- Speaking `soa-msg` notifications through the same TTS path.

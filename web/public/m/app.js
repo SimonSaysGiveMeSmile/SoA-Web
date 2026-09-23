@@ -19,6 +19,7 @@ import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
+import { QrScanner, parsePairingPayload } from './qrscan.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
@@ -627,13 +628,161 @@ class App {
         } catch (_) { /* network failure → fall through to fatal */ }
 
         if (tokenRequired) {
-            this._showFatal('No session token. Re-scan the QR code on the desktop.');
+            // Not a dead end any more: the phone can re-pair from here without
+            // leaving the app. _showFatal stays for genuinely unrecoverable
+            // states; a missing token is recoverable with the camera.
+            this._showWelcome();
             return;
         }
         this._boot(primaryOrigin, altOrigin, '');
     }
 
+
+    // ── Pairing by camera ─────────────────────────────────────────────────
+    // The phone loses its session more often than anything else here: the
+    // tunnel rotates, the token expires, or the PWA cold-starts with storage
+    // the browser has since evicted. The old answer was "re-scan the QR on the
+    // desktop", which meant leaving the app for the system camera — and on iOS
+    // that hands the URL to Safari, a DIFFERENT storage context from the
+    // home-screen PWA, so the token landed where this app could never read it.
+    // Scanning in-app fixes both halves: same storage, and no trip outside.
+
+    /** Welcome / re-pair screen. An overlay, not an innerHTML replacement, so
+     *  the app shell underneath survives and we can connect in place. */
+    _showWelcome(message) {
+        if (this._welcomeEl) this._welcomeEl.remove();
+        const auto = this._autoScanPref();
+        const el = document.createElement('div');
+        el.className = 'welcome-overlay';
+        el.innerHTML = `
+            <div class="welcome-card">
+                <div class="welcome-title">SON OF ANTON</div>
+                <div class="welcome-sub">${escapeHtml(message || 'Scan the QR code on your desktop to connect this phone.')}</div>
+                <button class="welcome-scan" type="button">Scan QR code</button>
+                <label class="welcome-auto">
+                    <input type="checkbox" ${auto ? 'checked' : ''}>
+                    <span>Open the camera automatically</span>
+                </label>
+                <details class="welcome-manual">
+                    <summary>Paste a pairing link instead</summary>
+                    <input class="welcome-url" type="url" inputmode="url" autocapitalize="off"
+                           autocorrect="off" spellcheck="false" placeholder="https://…/m/?t=…">
+                    <button class="welcome-go" type="button">Connect</button>
+                </details>
+                <div class="welcome-err" hidden></div>
+            </div>`;
+        document.body.appendChild(el);
+        this._welcomeEl = el;
+
+        const err = el.querySelector('.welcome-err');
+        this._welcomeError = (m) => {
+            err.textContent = m;
+            err.hidden = !m;
+        };
+
+        el.querySelector('.welcome-scan').addEventListener('click', () => this._openScanner());
+        el.querySelector('.welcome-auto input').addEventListener('change', (e) => {
+            this._autoScanPref(e.target.checked);
+        });
+        const go = () => {
+            const v = el.querySelector('.welcome-url').value.trim();
+            if (v) this._connectFromScan(v);
+        };
+        el.querySelector('.welcome-go').addEventListener('click', go);
+        el.querySelector('.welcome-url').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); go(); }
+        });
+
+        // The opt-in the user sets once: land here, camera already open. Only
+        // on a genuine cold start — never when we got here from an error, or
+        // the camera would reopen in a loop the user can't escape.
+        if (auto && !message && QrScanner.supported) {
+            setTimeout(() => this._openScanner(), 150);
+        }
+        return el;
+    }
+
+    _dismissWelcome() {
+        if (this._welcomeEl) { this._welcomeEl.remove(); this._welcomeEl = null; }
+        this._welcomeError = null;
+    }
+
+    /** Preference accessor: read with no argument, write with a boolean. */
+    _autoScanPref(next) {
+        const KEY = 'soa.m.autoscan';
+        if (next === undefined) {
+            try { return localStorage.getItem(KEY) === '1'; } catch (_) { return false; }
+        }
+        try { localStorage.setItem(KEY, next ? '1' : '0'); } catch (_) {}
+        return next;
+    }
+
+    _openScanner() {
+        if (this._scanner) this._scanner.stop();
+        this._scanner = new QrScanner({
+            onResult: (value) => this._connectFromScan(value),
+            onError: (e) => {
+                if (this._welcomeError) this._welcomeError(e.message);
+                // A camera that can't open must not leave the user stuck
+                // behind a black overlay with no way back to the paste field.
+                if (this._scanner) { this._scanner.stop(); this._scanner = null; }
+            },
+        });
+        this._scanner.start();
+    }
+
+    /**
+     * Connect to a scanned (or pasted) pairing payload WITHOUT navigating.
+     *
+     * Navigating would work, but it reloads the document — and from a
+     * home-screen PWA a cross-origin URL opens the system browser instead,
+     * which is the exact jump-out this feature exists to avoid. BridgeSocket
+     * already takes an arbitrary origin, so the honest fix is to persist the
+     * token the way readToken() would and boot the socket in place.
+     */
+    _connectFromScan(raw) {
+        const p = parsePairingPayload(raw);
+        if (!p) {
+            if (this._welcomeError) this._welcomeError('That is not a pairing code.');
+            return false;
+        }
+        if (!p.token) {
+            if (this._welcomeError) this._welcomeError('That QR has no session token in it.');
+            return false;
+        }
+
+        const backend = (p.backend || p.origin || location.origin).replace(/\/+$/, '');
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                token: p.token,
+                origin: location.origin,
+                // Same-origin pairing stores no backend, matching what
+                // readToken() writes — otherwise a later reload would pin the
+                // app to an absolute origin it doesn't need.
+                backend: backend === location.origin.replace(/\/+$/, '') ? null : backend,
+                altOrigin: p.altOrigin || null,
+                ts: Date.now(),
+            }));
+        } catch (_) { /* private mode — the session still works, just not across reloads */ }
+
+        if (this._scanner) { this._scanner.stop(); this._scanner = null; }
+        this._dismissWelcome();
+
+        // Re-pairing mid-session: drop the old socket before opening the new one.
+        if (this.socket) { try { this.socket.close(); } catch (_) {} this.socket = null; }
+        if (this._booted) {
+            // Everything downstream (keyboard, views, widget polls) is wired to
+            // the socket instance, so a full re-boot is the safe path here.
+            location.reload();
+            return true;
+        }
+
+        this._boot(backend, p.altOrigin || null, p.token);
+        return true;
+    }
+
     _boot(primaryOrigin, altOrigin, token) {
+        this._booted = true;
         this.socket = new BridgeSocket({
             url: wsBaseFromHttp(primaryOrigin),
             altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
@@ -2893,6 +3042,14 @@ class App {
 
     _wireOverflow() {
         if (this.btnOverflow) this.btnOverflow.addEventListener('click', () => this._openOverflow());
+        // Re-pair mid-session: the tunnel rotated or the token aged out, and
+        // the terminal is there but dead. Same in-app camera as the welcome
+        // screen, so it never bounces out to the system browser.
+        const scanBtn = document.getElementById('btn-scan');
+        if (scanBtn) scanBtn.addEventListener('click', () => {
+            this._showWelcome('Scan the desktop QR code to reconnect this phone.');
+            this._openScanner();
+        });
         if (this.overflowOverlay) {
             this.overflowOverlay.addEventListener('click', (e) => {
                 if (e.target === this.overflowOverlay) this._closeOverflow();
