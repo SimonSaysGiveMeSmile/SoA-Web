@@ -10,7 +10,7 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=31';
+import { t as tr } from '/assets/i18n.js?v=32';
 import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=27';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
 
