@@ -1547,6 +1547,9 @@ async function _loadGlobeAssets() {
         const grid = await gridResp.json();
         return { grid };
     })();
+    // A transient failure (grid.json 502, script blocked once) must not brick
+    // every future mount — drop the cached rejection so the next mount retries.
+    _globeAssetsPromise.catch(() => { _globeAssetsPromise = null; });
     return _globeAssetsPromise;
 }
 
@@ -1884,7 +1887,18 @@ class LocationGlobeWidget extends Widget {
         if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);
         for (const pin of this._peerPins.values()) { try { if (pin && pin.remove) pin.remove(); } catch (_) {} }
         this._peerPins.clear();
+        // Release the WebGL context now, not at GC time: Chrome allows ~16 live
+        // contexts per page and this widget is rebuilt on every sidebar remount
+        // (tab switch, WS reconnect), so a detached-but-undisposed canvas keeps
+        // its slot until the cap force-loses the oldest context — after enough
+        // remounts getContext() returns null and the globe boots into
+        // "unavailable: Cannot read properties of null (reading 'getExtension')".
+        try {
+            const r = this.globe && this.globe.renderer;
+            if (r && typeof r.forceContextLoss === 'function') r.forceContextLoss();
+        } catch (_) {}
         try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
+        this.globe = null;
         super.destroy();
     }
 }
