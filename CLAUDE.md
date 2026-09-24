@@ -161,6 +161,35 @@ or `interrupt`+`resume` if wedged. On `done` → assign the next goal. On
 Prefer `goal`/`btw` over raw `send` so the slash-prefix is correct; never bare
 `claude` after a restart (use `resume`). Keep your own running notes as context.
 
+### Usage limits: automatic resume + prompt replay (Claude AND Codex)
+
+The supervisor parses BOTH agents' limit banners — Claude Code's
+`You've hit your session limit · resets 9pm (…)` (also `resets Sep 4, 6pm` /
+`resets in 2h 15m`) and Codex CLI's `You've hit your usage limit … or try again
+at Sep 30th, 2026 3:09 AM.` (wraps mid-sentence; parsed across the wrap) — and,
+with `autoResume` on (default in `manager.json`), arms a one-shot **timer at
+reset + 2 min**. Everything typed into the tab while it is limited (the TUI
+rejects those prompts) is captured through the PTY input hook and **replayed in
+order** when the timer fires, so the user's queued asks are not lost; with
+nothing queued it types `continue`. The queue is persisted on the schedule
+(survives a restart) and shows as `QUEUED:n` in `list`. Guard against the trap
+that bit on 2026-09-01: the banner stays on screen after the reset, and
+re-parsing `resets 9pm` at 9:02pm reads as *tomorrow* — such a stale banner is
+ignored (no re-arm, no second `limited` event); a genuinely new limit (different
+reset time) re-arms normally. Control commands (`/usage-credits`, `/effort`,
+bare `continue`, …) are never replayed.
+
+**Claude vs Codex is a first-class distinction**: each tab carries
+`agent: claude|codex` (detected from what the TUI paints: `❯`/footer vs `›`/
+`gpt-… medium · cwd`; persisted in `tabs.json` so a restart relaunches the RIGHT
+agent via `codex resume <id>` instead of `claude --resume`). `list` flags Codex
+tabs `CODEX`; `continue`/`resume` build `codex resume --last` / `codex resume
+<id>` for them, `btw` becomes a plain aside and `clear` → `/new`. Claude-only
+slash commands are never sent to a Codex tab (they land as "Unrecognized
+command" noise). `spawn --agent codex` starts a Codex tab. The Codex idle
+composer is a `done` signal, so a parked Codex tab no longer reads as
+working/STUCK.
+
 ### Token-usage control — throttle, never stop
 
 The manager also keeps the fleet under Claude's usage limit so agents don't burn
@@ -393,7 +422,20 @@ launchd jobs):
 4. `com.soa-web.channels` — every 60s owns/heals the public tunnel
    (provider-agnostic: it has switched between cloudflare and ngrok) and
    persists the active channel (`tunnel.json`/`channels.json` in the state
-   dir).
+   dir). **Stable URL (no churn):** by default it mints *ephemeral* quick
+   tunnels, so the public URL rotates on every restart (a phone bookmark dies).
+   To pin a FIXED URL, run **`soa-tunnel-setup`** once — a per-install,
+   provider-agnostic config (`tunnel-config.json` in the state dir) that works
+   for **any** user with **their own** free tunnel: `soa-tunnel-setup ngrok
+   --domain <your>.ngrok-free.app` (a free ngrok account's one reserved
+   subdomain — no domain of your own needed) **or** `soa-tunnel-setup cloudflare
+   --hostname <host>` (a named tunnel on a domain you delegate; wraps
+   `soa-named-tunnel-setup`). The healer then PREFERS that fixed door
+   (`ch_ngrok` runs `ngrok http … --domain=…`; `ch_named` for cloudflare),
+   upgrades a rotating door to it, and never churns under it. `soa-tunnel-setup
+   status|disable` to inspect/revert. Note: the real healer log is
+   `~/.soa-web-local/logs/channels.log` (state dir) — **not**
+   `~/.soa-web/logs/channels.log`, a stale pre-`SOA_WEB_STATE_DIR` leftover.
 5. `com.soa-web.heartbeat` — every 600s produces the fleet blocker digest.
 6. `com.soa-web.nudge-stale-4010` — every **900s (15 min)** runs
    `scripts/soa-nudge-stale` (FLEET-CONTINUE): keeps the whole fleet moving.
@@ -439,6 +481,31 @@ launchd jobs):
    Kill switch `SOA_FLEETLOOP_ENABLE=0`; dry-run `SOA_FLEETLOOP_DRY=1`. On a watch-
    stream end launchd restarts it (5s sleep guards against hot-looping). Log:
    `~/.soa-web/logs/fleet-loop.log`.
+10. `com.soa-web.fleet-restore-4010` — every 60s runs
+    `scripts/soa-fleet-restore-watch`: self-recovery for a fleet **collapse**. The
+    daemon's boot-resume rehydrates on restart, but a boot race (a fresh client
+    binding before rehydrate) or a reconcile that fails to stick can leave the
+    daemon **healthy yet holding only the lone default tab** while the real fleet
+    is gone — "all tabs gone" (2026-08-06, and again 2026-08-14: `boot-resume[1]:
+    no saved tabs on disk` logged while `tabs.json.lastgood` + `scrollback.json`
+    still held 16 tabs). The other supervisors watch liveness/context/usage; none
+    watched "healthy daemon, fleet vanished" — so a collapse sat until the user
+    noticed. This closes that gap: it compares the LIVE fleet (`/api/tabs`,
+    loopback) against `tabs.json.lastgood`, and when the daemon is up + answering
+    but the live fleet has collapsed to ≤1 tab while lastgood holds a real fleet
+    (≥2, **not** `closedByUser`), it runs `soa-restore-fleet` (respawns each
+    project tab + `claude --resume`) and pushes the user. SAFE: never touches the
+    daemon (liveness stays watchdog-4010's job); only respawns already-known
+    project cwds via the idempotent restore (skips open cwds). **Debounced** (the
+    collapse must persist ~45s across two checks), **boot-window-gated** (ignored
+    until the daemon is >90s old, so a mid-rehydrate blip is left alone), and
+    **cooldowned** (10m between restores). Kill switch `SOA_FLEET_RESTORE_ENABLE=0`;
+    dry-run `SOA_FLEET_RESTORE_DRY=1`. Its log also captures the exact live/lastgood
+    state at each collapse — the forensic trail to pin the daemon-side root cause.
+    Log: `~/.soa-web/logs/fleet-restore.log`. (Time Machine gained the browser-side
+    complement the same day: snapshots now record per-tab cwd, and Restore reopens
+    closed terminals at their project folder + `claude --continue` via the
+    cookie-authed tab API — works from mobile.)
 
 The old `:7332` jobs (`com.soa-web.server`, `com.soa-web.watchdog`,
 `com.soa-web.manager-watchdog`) were retired on 2026-06-28 (their logs end

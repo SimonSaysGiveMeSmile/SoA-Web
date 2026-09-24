@@ -6,11 +6,10 @@
  * SW is purely about making the app installable and fast to launch.
  */
 
-// Bumped for the MEET (group meeting) view. Activation reloads the page, which
-// wipes memory-only state — harmless here: a meeting's transcript lives in the
-// server-side ledger and the view re-fetches it with `?since=<cursor>`.
-// No new files: MEET is markup + code inside the shell entries already listed.
-const VERSION = 'soa-mobile-v85';
+// Bumped for codex agent detection: `/agentDetect.js` is a precached SHELL
+// entry, so without a new VERSION an installed phone keeps serving the cached
+// copy and never learns to recognize a Codex tab.
+const VERSION = 'soa-mobile-v86';
 const SHELL = [
     '/',
     '/index.html',
