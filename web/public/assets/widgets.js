@@ -11,7 +11,7 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=31';
-import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=27';
+import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=28';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
 
 const $el = (tag, props = {}, children = []) => {

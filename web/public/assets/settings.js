@@ -152,6 +152,13 @@ export function resetSettings() {
     return { ...current };
 }
 
+// Bridge for classic (non-module) scripts. voice-actions.js is loaded with a
+// plain <script> tag so it cannot import from here, and duplicating the write
+// path in it would mean duplicating normalize() — the clamping, the enum
+// coercion — which is exactly how a voice-set value drifts from a mouse-set
+// one. Exposing the real functions keeps a single write path.
+try { window.__soaSettings = { getSettings, saveSettings }; } catch (_) {}
+
 export function onSettings(fn) {
     const h = e => fn(e.detail);
     window.addEventListener('soa:settings', h);

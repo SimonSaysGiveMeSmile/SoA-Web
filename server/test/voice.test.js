@@ -382,3 +382,47 @@ test('a pairing QR with no token is reported as tokenless, not as junk', async (
     assert.ok(p, 'a valid URL must still parse');
     assert.equal(p.token, '');
 });
+
+// ── settings voice could not reach before ───────────────────────────────────
+// Volume and the interface skin were mouse-only: every other setting in the
+// panel had a voice path, these did not. They go through the app's own
+// saveSettings (via the window bridge) rather than writing localStorage, so a
+// voice-set value normalizes exactly like a mouse-set one.
+test('volume steps clamp to 0..1 instead of running off the end', () => {
+    const step = actions.VOICE_ACTIONS_volumeStep;
+    assert.equal(step(0.5, +0.1), 0.6);
+    assert.equal(step(0.5, -0.1), 0.4);
+    assert.equal(step(1.0, +0.1), 1, 'louder at max is a no-op, not 1.1');
+    assert.equal(step(0.0, -0.1), 0, 'quieter at zero is a no-op, not -0.1');
+    assert.equal(step(undefined, -0.1), 0.9, 'an unset volume starts from the 1.0 default');
+    assert.equal(step('nonsense', +0.1), 1, 'a junk value falls back to the default');
+});
+
+test('the volume steps land on clean tenths, not float dust', () => {
+    // 0.7 - 0.1 is 0.5999999999999999 in IEEE754; a settings blob should not
+    // carry that, and neither should the spoken "60 percent".
+    assert.equal(actions.VOICE_ACTIONS_volumeStep(0.7, -0.1), 0.6);
+    assert.equal(actions.VOICE_ACTIONS_volumeStep(0.3, +0.1), 0.4);
+});
+
+test('every skin action names a skin the settings enum actually accepts', () => {
+    const SKINS = ['tron', 'minimal', 'liquid'];   // settings.js UILANGS
+    const skinActions = actions.VOICE_ACTIONS.filter(a => a.id.startsWith('skin_'));
+    assert.equal(skinActions.length, SKINS.length, 'one action per skin');
+    for (const a of skinActions) {
+        assert.ok(SKINS.includes(a.id.replace('skin_', '')), a.id + ' is not a real skin');
+    }
+});
+
+test('the new settings actions are reachable and do not collide with existing ones', () => {
+    for (const id of ['volume_up', 'volume_down', 'skin_tron', 'skin_minimal', 'skin_liquid']) {
+        const a = actions.voiceActionById(id);
+        assert.ok(a, id + ' is missing from the registry');
+        for (const phrase of a.phrases) {
+            const hit = actions.matchVoiceAction(phrase);
+            assert.ok(hit, `"${phrase}" matches nothing`);
+            // matchVoiceAction returns { action, score }, not the action.
+            assert.equal(hit.action.id, id, `"${phrase}" resolves to ${hit.action.id}, not ${id}`);
+        }
+    }
+});

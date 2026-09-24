@@ -177,6 +177,32 @@ const VOICE_ACTIONS = [
     say: 'Bigger.',
     run: (shell) => VOICE_ACTIONS_font(shell, +1),
   },
+  // ── settings the mouse could reach but voice could not ────────────────
+  {
+    id: 'volume_up', label: 'Volume up', group: 'Settings',
+    phrases: ['volume up', 'louder', 'turn it up', 'turn the volume up', 'increase the volume'],
+    run: () => VOICE_ACTIONS_volume(+0.1),
+  },
+  {
+    id: 'volume_down', label: 'Volume down', group: 'Settings',
+    phrases: ['volume down', 'quieter', 'turn it down', 'turn the volume down', 'lower the volume'],
+    run: () => VOICE_ACTIONS_volume(-0.1),
+  },
+  {
+    id: 'skin_tron', label: 'Terminal-classic skin', group: 'Settings',
+    phrases: ['tron skin', 'classic skin', 'terminal skin', 'switch to tron'],
+    run: () => VOICE_ACTIONS_skin('tron'),
+  },
+  {
+    id: 'skin_minimal', label: 'Minimal skin', group: 'Settings',
+    phrases: ['minimal skin', 'switch to minimal', 'porcelain skin'],
+    run: () => VOICE_ACTIONS_skin('minimal'),
+  },
+  {
+    id: 'skin_liquid', label: 'Liquid-glass skin', group: 'Settings',
+    phrases: ['liquid skin', 'liquid glass', 'switch to liquid', 'glass skin'],
+    run: () => VOICE_ACTIONS_skin('liquid'),
+  },
   {
     id: 'smaller_text', label: 'Smaller text', group: 'Terminal',
     phrases: ['smaller text', 'decrease the font', 'make it smaller', 'zoom out'],
@@ -184,6 +210,39 @@ const VOICE_ACTIONS = [
     run: (shell) => VOICE_ACTIONS_font(shell, -1),
   },
 ];
+
+// Settings that voice can change go through the app's own saveSettings, reached
+// via the window bridge settings.js publishes. That path normalizes (clamps the
+// volume, coerces the skin enum), re-applies the cursor/ui attributes and fires
+// `soa:settings`, which is what makes the change land live AND survive a reload.
+// Writing localStorage directly would skip all three.
+function VOICE_ACTIONS_settings() {
+  try { return (typeof window !== 'undefined' && window.__soaSettings) || null; } catch (_) { return null; }
+}
+
+// Pure so it can be tested without a DOM. Volume is 0..1; a tenth per step is
+// one comfortable press, and clamping here means "louder" at max is a no-op
+// rather than an out-of-range write normalize() would have to catch.
+function VOICE_ACTIONS_volumeStep(current, delta) {
+  const n = Number(current);
+  const base = Number.isFinite(n) ? n : 1;
+  return Math.max(0, Math.min(1, Math.round((base + delta) * 100) / 100));
+}
+
+function VOICE_ACTIONS_volume(delta) {
+  const api = VOICE_ACTIONS_settings();
+  if (!api) return 'Settings are not available.';
+  const next = VOICE_ACTIONS_volumeStep(api.getSettings().audioVolume, delta);
+  api.saveSettings({ audioVolume: next });
+  return next === 0 ? 'Volume off.' : 'Volume ' + Math.round(next * 100) + ' percent.';
+}
+
+function VOICE_ACTIONS_skin(skin) {
+  const api = VOICE_ACTIONS_settings();
+  if (!api) return 'Settings are not available.';
+  api.saveSettings({ uiLang: skin });
+  return skin + ' skin.';
+}
 
 // Font size lives in the settings blob and on every live xterm; nudging both
 // keeps the change after a reload instead of snapping back.
@@ -253,5 +312,6 @@ function voiceActionGroups() {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { VOICE_ACTIONS, matchVoiceAction, voiceActionById, voiceActionMenu, voiceActionGroups };
+  module.exports = { VOICE_ACTIONS, matchVoiceAction, voiceActionById, voiceActionMenu, voiceActionGroups,
+    VOICE_ACTIONS_volumeStep };
 }
