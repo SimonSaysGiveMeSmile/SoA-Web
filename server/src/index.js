@@ -73,7 +73,6 @@ const tunnelGate       = require('./tunnelGate');
 const voice            = require('./voice');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
-const voice            = require('./voice');
 const { dbg, agg }     = require('./debug');
 const { STATE_DIR, MODE } = require('./stateDir');
 const instanceLock     = require('./instanceLock');
@@ -521,7 +520,6 @@ sessionManager.mount(app, requireAuthed, sessions);
 voice.mount(app, requireAuthed, sessions, { allowedOrigins: ALLOWED_ORIGINS });
 meetings.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
-voice.mount(app, requireAuthed, sessions, { allowedOrigins: ALLOWED_ORIGINS });
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {

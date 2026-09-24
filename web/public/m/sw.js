@@ -6,10 +6,7 @@
  * SW is purely about making the app installable and fast to launch.
  */
 
-// Bumped for the MEET (group meeting) view. Activation reloads the page, which
-// wipes memory-only state — harmless here: a meeting's transcript lives in the
-// server-side ledger and the view re-fetches it with `?since=<cursor>`.
-// No new files: MEET is markup + code inside the shell entries already listed.
+// Scope-relative shell cache supports both standalone / and hosted /m/ apps.
 const VERSION = 'soa-mobile-v87-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
@@ -49,7 +46,9 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
     e.waitUntil((async () => {
         const keys = await caches.keys();
-        await Promise.all(keys.filter(k => k.startsWith('soa-mobile-') && k !== VERSION).map(k => caches.delete(k)));
+        const scopePath = new URL(self.registration.scope).pathname;
+        await Promise.all(keys.filter(k => k.startsWith('soa-mobile-') && k !== VERSION &&
+            (!k.includes('-/') || k.endsWith('-' + scopePath))).map(k => caches.delete(k)));
         await self.clients.claim();
     })());
 });

@@ -27,7 +27,8 @@ const { chromium } = require('playwright');
         res.json({ ok: true });
     });
     app.use('/api', (req, res) => res.json({ ok: true, tabs, capabilities: {}, widgets: {}, sessions: [] }));
-    app.use('/m', express.static(path.resolve(__dirname, '../web/public/m')));
+    app.get('/m', (req, res) => res.sendFile(path.resolve(__dirname, '../web/public/m/index.html')));
+    app.use('/m', express.static(path.resolve(__dirname, '../web/public/m'), { extensions: ['html'] }));
     const server = http.createServer(app);
     const wss = new WebSocketServer({ server, path: '/ws' });
     wss.on('connection', ws => {
@@ -45,7 +46,6 @@ const { chromium } = require('playwright');
     try {
         const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
         await context.addInitScript(() => {
-            localStorage.setItem('son-of-anton.session', JSON.stringify({ token: 'test', origin: location.origin }));
             window.__speech = [];
             window.SpeechRecognition = class {
                 constructor() { window.__rec = this; }
@@ -60,8 +60,9 @@ const { chromium } = require('playwright');
         const page = await context.newPage();
         const errors = [];
         page.on('pageerror', e => { errors.push(e.message); console.error('Browser error:', e.message); });
-        await page.goto(`http://127.0.0.1:${server.address().port}/m/`);
+        await page.goto(`http://127.0.0.1:${server.address().port}/m?t=test`);
         await page.waitForFunction(() => window._app?._snapshot?.tabs?.length);
+        assert.ok(page.url().endsWith('/m/index'), 'clean URL stays within the offline worker scope');
         await page.locator('[data-view="chat-view"]').click();
         await page.locator('#chat-manager').click();
         await page.waitForFunction(() => document.getElementById('chat-target').textContent === 'Voice manager');
@@ -119,7 +120,7 @@ const { chromium } = require('playwright');
         await context.setOffline(true);
         for (const ws of wss.clients) ws.terminate();
         await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.locator('#reconnect-history:visible, .welcome-history:visible').click({ timeout: 15000 });
+        await page.locator('#reconnect-history').click({ timeout: 15000 });
         const history = page.locator('#session-history');
         assert.match(await history.textContent(), /Offline copies/);
         assert.match(await history.textContent(), /Check deployment status/);
@@ -127,6 +128,10 @@ const { chromium } = require('playwright');
         assert.match(await history.textContent(), /Codex stream is readable/);
         assert.equal(sends.length, 1, 'offline reload never resubmits a message');
         await page.screenshot({ path: '/private/tmp/soa-mobile-offline-history.png' });
+        await page.evaluate(() => localStorage.removeItem('son-of-anton.session'));
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('.welcome-history').click();
+        assert.match(await page.locator('#session-history').textContent(), /Check deployment status/);
         await context.setOffline(false);
         await page.reload();
         await page.waitForFunction(() => window._app?._activeTabId === 2);
