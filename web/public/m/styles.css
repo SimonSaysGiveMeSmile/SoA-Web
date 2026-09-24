@@ -2542,3 +2542,164 @@ button:active { background: var(--accent-bg-hover); }
     -webkit-backdrop-filter: blur(18px);
     backdrop-filter: blur(18px);
 }
+
+/* ── In-app QR pairing ────────────────────────────────────────────────────
+   The welcome screen and the camera overlay. Both sit above everything and
+   respect the notch: a phone held up to a desktop screen is exactly the case
+   where a control tucked under the home indicator can't be tapped. */
+
+.welcome-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+    background: var(--bg, #0b0d0e);
+}
+
+.welcome-card { width: 100%; max-width: 340px; text-align: center; }
+
+.welcome-title {
+    font-size: 15px;
+    letter-spacing: .28em;
+    color: var(--fg, #dfe6e6);
+    margin-bottom: 10px;
+}
+
+.welcome-sub {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--dim, #7d8a8a);
+    margin-bottom: 22px;
+}
+
+.welcome-scan {
+    display: block;
+    width: 100%;
+    /* 52px: a thumb target on a phone held at arm's length toward a screen. */
+    min-height: 52px;
+    margin-bottom: 14px;
+    font: inherit;
+    font-size: 13px;
+    letter-spacing: .14em;
+    color: var(--bg, #0b0d0e);
+    background: var(--accent, #aacfd1);
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.welcome-scan:active { opacity: .82; }
+
+.welcome-auto {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 18px;
+    font-size: 11px;
+    color: var(--dim, #7d8a8a);
+}
+.welcome-auto input { accent-color: var(--accent, #aacfd1); }
+
+.welcome-manual { text-align: left; }
+.welcome-manual summary {
+    font-size: 11px;
+    letter-spacing: .1em;
+    color: var(--dim, #7d8a8a);
+    cursor: pointer;
+    padding: 6px 0;
+    text-align: center;
+}
+.welcome-url {
+    width: 100%;
+    margin: 8px 0;
+    padding: 10px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--fg, #dfe6e6);
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--line, rgba(255, 255, 255, .12));
+    border-radius: 5px;
+}
+.welcome-go {
+    width: 100%;
+    padding: 10px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--fg, #dfe6e6);
+    background: rgba(255, 255, 255, .07);
+    border: 1px solid var(--line, rgba(255, 255, 255, .12));
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.welcome-err {
+    margin-top: 14px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--err, #ff6b6b);
+}
+
+/* ── camera overlay ── */
+.qr-overlay { position: fixed; inset: 0; z-index: 9500; background: #000; overflow: hidden; }
+
+.qr-video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    /* cover, not contain: a letterboxed preview makes people hold the phone
+       further away than the focus distance the lens actually wants. */
+    object-fit: cover;
+}
+
+.qr-mask {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Dim everything but the reticle so the aim point is unmistakable. */
+    background: radial-gradient(ellipse 46% 26% at 50% 46%, transparent 0 99%, rgba(0, 0, 0, .55) 100%);
+}
+
+.qr-reticle { position: relative; width: min(64vw, 260px); aspect-ratio: 1; margin-bottom: 8vh; }
+.qr-reticle i { position: absolute; width: 30px; height: 30px; border: 2px solid var(--accent, #aacfd1); }
+.qr-reticle i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.qr-reticle i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+.qr-reticle i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+.qr-reticle i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+
+.qr-overlay.qr-hit .qr-reticle i { border-color: #5dbd5a; }
+.qr-overlay.qr-hit::after { content: ''; position: absolute; inset: 0; background: rgba(93, 189, 90, .25); }
+
+.qr-bar {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, rgba(0, 0, 0, .75) 40%);
+}
+
+.qr-btn {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 0 16px;
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: .12em;
+    color: var(--fg, #dfe6e6);
+    background: rgba(255, 255, 255, .12);
+    border: 1px solid rgba(255, 255, 255, .2);
+    border-radius: 5px;
+    cursor: pointer;
+}
+.qr-btn.on { background: var(--accent, #aacfd1); color: #000; }
+
+.qr-hint { flex: 1 1 auto; text-align: center; font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, .8); }
+.qr-hint--err { color: #ff8a8a; }

@@ -18,9 +18,9 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=51';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=52';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=31';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=27';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=28';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=5';
