@@ -1279,3 +1279,42 @@ test('meetLeave: DROPS the seat, so a rejoin is re-baselined instead of inheriti
 });
 
 test.after(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {} });
+
+// ── Terminal-mode reset on agent exit ───────────────────────────────────────
+// A TUI arms mouse tracking; when it exits it must be turned back off. If it
+// isn't, the bare shell underneath receives every pointer move AS INPUT — the
+// coordinate reports pile onto the prompt line and one stray Enter runs them.
+// (Observed 2026-09-23 after a daemon restart, and 2026-07-13 via replay.)
+test('launchClaude: the submitted line resets terminal modes after the agent exits', async () => {
+    const tab = mkTab(1);
+    sm.launchClaude(tab, undefined, { resume: false, coldFallback: false });
+    await waitFor(() => tab._writes.length >= 2);
+    const line = tab._writes[0];
+    assert.match(line, /^claude/, 'still launches the agent first');
+    // `;` not `&&` — the reset must run even when the agent exits non-zero.
+    assert.match(line, /;\s*printf /, 'reset is chained with ; so a failing exit still resets');
+    for (const mode of ['1000l', '1002l', '1003l', '1006l', '1015l', '1049l', '2004l']) {
+        assert.ok(line.includes(mode), `disables mode ${mode}`);
+    }
+});
+
+test('launchClaude: the reset survives a --resume chain that falls through', async () => {
+    const tab = mkTab(2);
+    sm.launchClaude(tab, undefined, { resume: false, model: 'claude-opus-5' });
+    await waitFor(() => tab._writes.length >= 2);
+    const line = tab._writes[0];
+    // The `|| claude` cold fallback must be INSIDE the chain, with the reset
+    // after it — otherwise a fallthrough launch leaves modes armed on exit.
+    assert.ok(line.indexOf('|| claude') < line.indexOf('printf'), 'reset comes after the whole || chain');
+});
+
+test('launchClaude: the reset emits exactly the bytes index.js uses for SANE_TERM_RESET', async () => {
+    const tab = mkTab(3);
+    sm.launchClaude(tab, undefined, { resume: false, coldFallback: false });
+    await waitFor(() => tab._writes.length >= 2);
+    const printf = tab._writes[0].slice(tab._writes[0].indexOf('printf '));
+    const got = require('node:child_process').execFileSync('/bin/sh', ['-c', printf]).toString();
+    const SANE_TERM_RESET =
+        '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b>';
+    assert.equal(got, SANE_TERM_RESET, 'shell-side reset must match the server-side constant byte for byte');
+});
