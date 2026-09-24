@@ -55,6 +55,11 @@ const CFG = {
     max: num(process.env.SOA_THROTTLE_MAX, 3),         // compacts per run
     cooldown: num(process.env.SOA_THROTTLE_COOLDOWN, 1200),
     effort: process.env.SOA_THROTTLE_EFFORT || 'high', // ultracode→this on the heaviest burners when the block is in DANGER (cuts subagent burn /compact can't touch)
+    // Lever 2 (effort) is OPT-IN and OFF by default: the effort level is the
+    // user's setting and nothing may change it behind their back (2026-09-23,
+    // by request). Lever 1 (/compact) and --pause still protect the burn.
+    // Set SOA_THROTTLE_EFFORT_ENABLE=1 to restore the automatic lowering.
+    effortEnable: process.env.SOA_THROTTLE_EFFORT_ENABLE === '1',
     maxEffort: num(process.env.SOA_THROTTLE_EFFORT_MAX, 3),
     week: num(process.env.SOA_THROTTLE_WEEK, 2800),    // WEEKLY $ cap — the real ceiling (5h blocks reset, the week doesn't). Calibrated ≈80% of the ~$3.6k weekly limit; tune via SOA_THROTTLE_WEEK.
 };
@@ -174,7 +179,7 @@ async function main() {
     // while the agent keeps working. Record them in SKIP_FILE so soa-effort stops
     // re-raising them to ultracode until burn recovers. Never stops/interrupts.
     const effDone = [];
-    if (fleetDanger || cands.some(c => c.over)) {
+    if (CFG.effortEnable && (fleetDanger || cands.some(c => c.over))) {
         const eff = [];
         for (const [id, tab] of tabById) {
             const cost = tab.cwd && costByCwd.get(tab.cwd);
