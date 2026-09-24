@@ -2,6 +2,78 @@
    Colours come from the theme tokens so the MINIMAL/accent themes re-tint it
    for free; every var() carries a fallback for the sandbox preview. */
 
+.topbar-actions .voice-toggle {
+    position: relative;
+    flex: 0 0 auto;
+    gap: 6px;
+    min-height: 32px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    letter-spacing: .08em;
+}
+.voice-toggle svg { flex: 0 0 auto; }
+.voice-toggle-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--soa-accent-dim, #778);
+}
+.topbar-actions .voice-toggle[data-state="on"] {
+    color: var(--soa-green, #5dbd5a);
+    border-color: currentColor;
+}
+.voice-toggle[data-state="on"] .voice-toggle-dot { background: currentColor; }
+.voice-toggle[aria-expanded="true"] { background: rgba(var(--soa-accent-rgb, 170, 207, 209), .12); }
+.voice-toggle:focus-visible, .voice-panel :focus-visible {
+    outline: 2px solid var(--soa-accent, #aacfd1);
+    outline-offset: 3px;
+}
+.voice-panel {
+    position: fixed;
+    top: 52px;
+    right: 12px;
+    z-index: 1000;
+    width: min(360px, calc(100vw - 24px));
+    max-height: calc(100dvh - 72px);
+    box-sizing: border-box;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 14px;
+    border: 1px solid var(--soa-accent-dim, #778);
+    border-radius: 8px;
+    background: var(--soa-bg, #11151b);
+    color: var(--soa-fg, #e0e0e0);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, .4);
+}
+.voice-panel[hidden] { display: none; }
+.voice-panel-close {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 24px;
+    cursor: pointer;
+}
+.voice-panel-close:hover { background: rgba(var(--soa-accent-rgb, 170, 207, 209), .12); }
+.voice-panel .widget { margin: 0; padding: 0; border: 0; background: transparent; }
+.voice-panel .widget-h { padding-right: 32px; }
+.voice-panel .widget-body { padding: 8px 0 0; }
+.voice-panel .voice-btn { min-height: 40px; }
+.voice-panel .voice-status-text { white-space: normal; }
+.voice-panel .voice-panel-hint { margin: 8px 0 0; }
+@media (max-width: 768px) {
+    .topbar-actions .voice-toggle { width: 36px; height: 34px; padding: 6px; justify-content: center; }
+    .voice-toggle-label { display: none; }
+    .voice-toggle-dot { position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; }
+    .voice-panel { top: 46px; max-height: calc(100dvh - 62px); }
+}
+
 .voice-status {
     display: flex;
     align-items: center;

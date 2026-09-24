@@ -9,6 +9,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#000000" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Son of Anton" />
@@ -46,6 +47,8 @@
                 <button class="bb-btn" data-view="web-view" title="Web — the agent's browser & localhost preview">WEB</button>
                 <button class="bb-btn" data-view="widgets-view" title="System — device stats, ports & widgets">SYS</button>
             </nav>
+            <button class="bb-btn bb-icon" id="btn-mic" type="button" title="Open voice chat" aria-label="Open voice chat">🎤</button>
+            <button class="bb-btn bb-icon" id="btn-fullscreen" type="button" title="Full screen — hide browser bars" aria-label="Full screen — hide browser bars" aria-pressed="false">⛶</button>
             <!-- Overflow trigger — pinned OUTSIDE the scrolling #controls strip so
                  the secondary actions (mic/speak/camera/…) are always one tap away
                  even if the view row scrolls. The buttons live in #overflow-overlay
@@ -62,6 +65,7 @@
         <div id="install-hint" hidden role="status">
             <span class="ih-icon" aria-hidden="true">⤒</span>
             <span class="ih-text"></span>
+            <button class="ih-action" type="button">Set up</button>
             <button class="ih-close" type="button" aria-label="Dismiss">✕</button>
         </div>
 
@@ -152,10 +156,24 @@
             </section>
         </main>
 
-        <button id="focus-exit" class="focus-exit" title="Exit fullscreen" aria-label="Exit fullscreen">⤢</button>
+        <button id="focus-exit" class="focus-exit" title="Show app controls" aria-label="Show app controls">⤢</button>
 
         <section id="kbd" aria-label="Virtual keyboard"></section>
     </div>
+
+    <dialog id="fullscreen-help" aria-labelledby="fullscreen-title">
+        <div class="fullscreen-help-body">
+            <h2 id="fullscreen-title">Hide the browser bars</h2>
+            <p>Open Son of Anton as a Home Screen app for more room on your screen.</p>
+            <p id="fullscreen-message" role="status"></p>
+            <ol id="fullscreen-steps"></ol>
+            <p class="fullscreen-note">If the app asks to connect again, scan the desktop QR code from the app.</p>
+            <div class="fullscreen-help-actions">
+                <button id="fullscreen-install" type="button" hidden>Install app</button>
+                <button id="fullscreen-close" type="button" autofocus>Done</button>
+            </div>
+        </div>
+    </dialog>
 
     <div id="settings-overlay">
         <div class="settings-sheet">
@@ -297,10 +315,6 @@
             </div>
             <div class="overflow-grid">
                 <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-mic" title="Open voice chat">🎤</button>
-                    <span class="overflow-cap">Voice chat</span>
-                </div>
-                <div class="overflow-tile">
                     <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak the selected agent’s replies aloud" aria-pressed="false">🔊</button>
                     <span class="overflow-cap">Speak</span>
                 </div>
@@ -309,8 +323,8 @@
                     <span class="overflow-cap">Photo</span>
                 </div>
                 <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
-                    <span class="overflow-cap">Fullscreen</span>
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-focus" title="Hide app controls to focus on the terminal" aria-label="Hide app controls" aria-pressed="false">⛶</button>
+                    <span class="overflow-cap">Focus</span>
                 </div>
                 <div class="overflow-tile">
                     <button class="bb-btn bb-icon-sm overflow-btn" id="btn-settings" title="Settings">&#9881;</button>

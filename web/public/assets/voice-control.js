@@ -49,6 +49,9 @@ class VoiceControl {
     this.isEnabled = false;
     this.isSpeaking = false;
     this.currentUtterance = null;
+    this._runId = 0;
+    this._starting = false;
+    this.isThinking = false;
 
     // Wake state
     this.awake = false;
@@ -88,11 +91,15 @@ class VoiceControl {
     rec.lang = this.settings.language;
 
     rec.onstart = () => {
+      if (rec !== this.recognition || !this.isEnabled) return;
+      this._starting = false;
       this.isListening = true;
       this._notifyStatus({ listening: true });
     };
 
     rec.onend = () => {
+      if (rec !== this.recognition) return;
+      this._starting = false;
       this.isListening = false;
       this._notifyStatus({ listening: false });
       // Chrome ends the stream every ~60s of silence and after every result in
@@ -112,6 +119,7 @@ class VoiceControl {
     };
 
     rec.onresult = (event) => {
+      if (rec !== this.recognition || !this.isEnabled) return;
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         // Consider every alternative: ASR's top pick garbles the wake word
@@ -132,6 +140,7 @@ class VoiceControl {
     };
 
     rec.onerror = (event) => {
+      if (rec !== this.recognition || !this.isEnabled) return;
       const err = event.error;
       // 'no-speech' and 'aborted' are normal in continuous mode — surfacing
       // them as errors makes the widget look broken while it works fine.
@@ -146,7 +155,7 @@ class VoiceControl {
       }
       console.warn('[Voice] recognition error:', err);
       if (err === 'not-allowed' || err === 'service-not-allowed') {
-        this.isEnabled = false;
+        this.stop();
         this._notifyError('Microphone permission denied. Allow mic access for this site.');
         return;
       }
@@ -154,9 +163,7 @@ class VoiceControl {
       if (this._errStreak >= 8) {
         // Eight failures in a row with no result in between: stop rather than
         // retry forever. The user re-enables with one tap once the mic is back.
-        this.isEnabled = false;
-        clearTimeout(this._restartTimer);
-        this._notifyStatus({ listening: false });
+        this.stop();
         this._notifyError('Microphone keeps failing (' + err + ') — voice paused. Tap Listen to retry.');
         return;
       }
@@ -167,31 +174,50 @@ class VoiceControl {
   }
 
   _startRaw() {
-    if (!this.recognition || this.isListening) return;
+    if (!this.recognition || !this.isEnabled || this.isListening || this._starting) return;
+    this._starting = true;
     try { this.recognition.start(); }
-    catch (_) { /* already starting — onend will retry */ }
+    catch (err) {
+      this.stop();
+      this._notifyError('Microphone could not start. Check site permissions and try Listen again. ' + (err.message || ''));
+    }
   }
 
   start() {
+    if (this.isEnabled) return true;
     this._errStreak = 0;   // a deliberate (re)start begins the backoff ladder afresh
-    if (!this.recognition) {
-      this._notifyError('Speech recognition is not supported in this browser. Chrome or Edge works; iOS Safari does not.');
+    if (window.isSecureContext === false) {
+      this._notifyError('Microphone access requires HTTPS or localhost. Open the secure terminal URL and try again.');
       return false;
     }
+    if (!this.supported) {
+      this._notifyError('Speech recognition is unavailable in this browser. Try a browser with speech recognition or use keyboard dictation.');
+      return false;
+    }
+    // A new recognizer separates this run from late callbacks after Stop.
+    this._initRecognition();
+    this._runId++;
     this.isEnabled = true;
     this.awake = this.settings.wakeMode === 'always';
     this._startRaw();
-    this._notifyStatus({ enabled: true });
-    return true;
+    this._notifyStatus({});
+    return this.isEnabled;
   }
 
   stop() {
     this.isEnabled = false;
+    this._runId++;
+    this._starting = false;
+    this.isListening = false;
+    this.isThinking = false;
     this.awake = false;
     clearTimeout(this._restartTimer);
     clearTimeout(this._awakeTimer);
-    if (this.recognition && this.isListening) {
-      try { this.recognition.stop(); } catch (_) {}
+    if (this.recognition) {
+      try {
+        if (this.recognition.abort) this.recognition.abort();
+        else this.recognition.stop();
+      } catch (_) {}
     }
     this.stopSpeaking();
     this._notifyStatus({ enabled: false, listening: false });
@@ -313,6 +339,7 @@ class VoiceControl {
 
   // ── dispatch ──────────────────────────────────────────────────────────
   _handleFinal(alts) {
+    if (!this.isEnabled) return;
     // Echo suppression: the mic hears our own TTS. Anything arriving while
     // speaking (or within a beat of finishing) is almost certainly us.
     if (this.settings.duckWhileSpeaking &&
@@ -349,6 +376,8 @@ class VoiceControl {
   }
 
   async _processCommand(transcript, meta = {}) {
+    const runId = this._runId;
+    if (!this.isEnabled) return;
     const normalized = String(transcript || '').toLowerCase().trim();
     if (!normalized) return;
 
@@ -363,16 +392,21 @@ class VoiceControl {
       return;
     }
 
-    this._notifyStatus({ thinking: true });
+    this.isThinking = true;
+    this._notifyStatus({});
     try {
       const remote = await this.interpretRemote(transcript);
-      this._notifyStatus({ thinking: false });
+      if (!this.isEnabled || runId !== this._runId) return;
+      this.isThinking = false;
+      this._notifyStatus({});
       if (remote && remote.intent && remote.intent !== 'unknown') {
         this._emit(remote.intent, remote.params || {}, { ...meta, transcript, source: 'model', say: remote.say });
         return;
       }
     } catch (e) {
-      this._notifyStatus({ thinking: false });
+      if (!this.isEnabled || runId !== this._runId) return;
+      this.isThinking = false;
+      this._notifyStatus({});
       console.warn('[Voice] interpret failed:', e);
     }
     this.speak("I didn't understand that.");
@@ -593,6 +627,7 @@ class VoiceControl {
     this.onStatusChange({
       listening: this.isListening,
       speaking: this.isSpeaking,
+      thinking: this.isThinking,
       enabled: this.isEnabled,
       awake: this.awake,
       wakeMode: this.settings.wakeMode,

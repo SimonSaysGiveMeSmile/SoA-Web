@@ -20,13 +20,14 @@ import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
 import { VoiceChat } from './voice-chat.js';
+import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v87 · offline session history · 2026-09-24';
+const MOBILE_BUILD = 'v88 · mobile fullscreen controls · 2026-09-24';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -515,7 +516,7 @@ class App {
         this.btnMic      = document.getElementById('btn-mic');
         this.btnSpeak    = document.getElementById('btn-speak');
         this.btnCamera   = document.getElementById('btn-camera');
-        this.btnFullscreen = document.getElementById('btn-fullscreen');
+        this.btnFocus = document.getElementById('btn-focus');
         this.cameraInput = document.getElementById('camera-input');
         this.btnSettings = document.getElementById('btn-settings');
         // Tab jump: a persistent chip in the top bar shows the CURRENT tab (which
@@ -652,6 +653,7 @@ class App {
         this._wireTabSheet();
         this._wireOverflow();
         this._wireIdleHide();
+        this.fullscreen = new MobileFullscreen();
 
         const { token, backend, altOrigin } = readToken();
         const primaryOrigin = backend || location.origin;
@@ -845,52 +847,9 @@ class App {
         return true;
     }
 
-    // ── Full screen means "installed" ─────────────────────────────────────
-    // A web page cannot hide Safari's or Chrome's own bars, and an in-app
-    // browser (a link opened from a notification or a chat) cannot even be
-    // added to the home screen. The only route to a chromeless terminal is a
-    // one-time install, so say so — in flow under the tab strip, dismissable,
-    // and remembered. `force` re-shows it briefly (without re-arming the
-    // permanent dismissal) when the user taps fullscreen on a phone that
-    // cannot fullscreen a page, so that tap is never silent.
+    // The browser bars need native fullscreen or a Home Screen launch.
     _installHint(force) {
-        const el = document.getElementById('install-hint');
-        if (!el) return;
-        // The App Store shell is already chromeless; never tell it to open Safari.
-        if (window.Capacitor) return;
-        try {
-            const standalone = window.navigator.standalone === true
-                || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)
-                || (window.matchMedia && matchMedia('(display-mode: fullscreen)').matches);
-            if (standalone) return;
-            if (!force && localStorage.getItem('soa.m.installHint') === 'dismissed') return;
-        } catch (_) { /* private mode: show it, it can still be dismissed */ }
-        const ua = navigator.userAgent || '';
-        const iOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-        // Heuristic for an in-app browser: iOS WebViews lack Safari's version
-        // token (the Google app keeps it but announces GSA); most Android
-        // in-app browsers announce "wv" or the host app.
-        const inApp = (iOS && !/Safari\//.test(ua)) || /\bwv\b|FBAN|FBAV|Instagram|Line\/|ntfy|GSA\//i.test(ua);
-        const text = el.querySelector('.ih-text');
-        if (inApp) {
-            text.innerHTML = 'For full screen, open this link in <b>Safari</b> (⋯ → Open in Safari), then <b>Share → Add to Home Screen</b>.';
-        } else if (iOS) {
-            text.innerHTML = 'Full screen: tap <b>Share</b> then <b>Add to Home Screen</b>, and launch it from there.';
-        } else {
-            text.innerHTML = 'Full screen: use your browser menu’s <b>Install app</b> / <b>Add to Home screen</b>, then launch it from there.';
-        }
-        el.hidden = false;
-        clearTimeout(this._installHintTimer);
-        // Out of the way on its own after a while; ✕ makes it permanent.
-        this._installHintTimer = setTimeout(() => { el.hidden = true; }, force ? 8000 : 20000);
-        if (!el._ihWired) {
-            el._ihWired = true;
-            el.querySelector('.ih-close').addEventListener('click', () => {
-                el.hidden = true;
-                clearTimeout(this._installHintTimer);
-                try { localStorage.setItem('soa.m.installHint', 'dismissed'); } catch (_) {}
-            });
-        }
+        this.fullscreen.showHint(force);
     }
 
     _boot(primaryOrigin, altOrigin, token) {
@@ -1695,9 +1654,9 @@ class App {
             });
         }
 
-        // Focus / fullscreen toggle.
-        if (this.btnFullscreen) {
-            this.btnFullscreen.addEventListener('click', () => this._toggleFocus());
+        // Focus hides only app controls; browser fullscreen has its own button.
+        if (this.btnFocus) {
+            this.btnFocus.addEventListener('click', () => this._toggleFocus());
         }
         const focusExit = document.getElementById('focus-exit');
         if (focusExit) focusExit.addEventListener('click', () => this._toggleFocus(false));
@@ -1724,6 +1683,8 @@ class App {
             };
             window.visualViewport.addEventListener('resize', fit);
             window.visualViewport.addEventListener('scroll', fit);
+            window.addEventListener('resize', fit);
+            fit();
         }
 
         // Tapping the terminal is the explicit "I want to type" gesture — this
@@ -3273,22 +3234,12 @@ class App {
         return "'" + String(p).replace(/'/g, "'\\''") + "'";
     }
 
-    // ── Focus / fullscreen ───────────────────────────────────────────────
+    // ── Focus: app controls only ─────────────────────────────────────────
     _toggleFocus(force) {
         const app = document.getElementById('app');
         const on = force != null ? force : !app.classList.contains('focus-mode');
         app.classList.toggle('focus-mode', on);
-        if (this.btnFullscreen) this.btnFullscreen.setAttribute('aria-pressed', on ? 'true' : 'false');
-        try {
-            if (on && document.documentElement.requestFullscreen) {
-                document.documentElement.requestFullscreen().catch(() => {});
-            } else if (!on && document.fullscreenElement && document.exitFullscreen) {
-                document.exitFullscreen().catch(() => {});
-            }
-        } catch (_) {}
-        // iPhone Safari can't fullscreen a page: say so, briefly, every time
-        // the button is used — even after the standing hint was dismissed.
-        if (on && !document.documentElement.requestFullscreen) this._installHint(true);
+        if (this.btnFocus) this.btnFocus.setAttribute('aria-pressed', String(on));
         setTimeout(() => this._scrollTermBottom(), 120);
     }
 

@@ -97,7 +97,7 @@ button:active { background: var(--accent-bg-hover); }
 }
 /* Overflow trigger — pinned at the right of the top bar, outside the scrolling
    #controls strip, so the actions sheet stays reachable if the view row scrolls. */
-#btn-overflow {
+#btn-overflow, #btn-fullscreen, #btn-mic {
     flex: 0 0 auto;
     align-self: center;
     min-width: 42px;
@@ -106,6 +106,10 @@ button:active { background: var(--accent-bg-hover); }
     font-size: 15px;
     line-height: 1;
 }
+#btn-fullscreen[hidden] { display: none; }
+#btn-fullscreen { min-height: 42px; }
+#btn-mic { min-height: 42px; }
+#btn-fullscreen[aria-pressed="true"] { color: var(--bg); background: var(--accent); }
 /* Divider between the primary view-switchers and the secondary action icons,
    so the strip reads as "views | actions". */
 #controls .bb-divider {
@@ -147,6 +151,10 @@ button:active { background: var(--accent-bg-hover); }
     background: rgba(224, 224, 224, 0.08);
 }
 .tabchip .tabchip-count:empty { display: none; }
+@media (max-width: 480px) {
+    #topbar { gap: 5px; }
+    .tabchip { max-width: 25vw; padding: 7px; }
+}
 
 /* Focus / fullscreen mode — hide chrome, hand the terminal the whole screen */
 #app.focus-mode #topbar,
@@ -346,6 +354,34 @@ button:active { background: var(--accent-bg-hover); }
 #install-hint .ih-close:active { background: rgba(255,255,255,0.08); }
 /* Focus mode hides every bar, including this one. */
 #app.focus-mode #install-hint { display: none; }
+#install-hint .ih-action { flex: 0 0 auto; min-height: 40px; font-size: 11px; letter-spacing: .03em; }
+
+/* Native dialog stays visible above Focus mode and provides keyboard focus
+   management without covering the app until help is explicitly requested. */
+#fullscreen-help {
+    width: min(440px, calc(100vw - 24px));
+    max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px);
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--bg-alt);
+    color: var(--fg);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    font: 14px/1.5 var(--font);
+}
+#fullscreen-help::backdrop { background: rgba(0, 0, 0, .65); }
+.fullscreen-help-body { padding: 20px; }
+#fullscreen-title { margin: 0 0 12px; font-size: 19px; }
+#fullscreen-steps { padding-left: 22px; }
+#fullscreen-steps li { margin: 12px 0; }
+#fullscreen-message:empty { display: none; }
+#fullscreen-message { color: var(--warn); }
+.fullscreen-note { color: var(--fg-dim); font-size: 12px; }
+.fullscreen-help-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+.fullscreen-help-actions button { min-height: 44px; font-size: 12px; }
+#fullscreen-install[hidden] { display: none; }
+#fullscreen-close { color: var(--bg); background: var(--accent); }
 
 .tab-add {
     color: var(--fg-dim);

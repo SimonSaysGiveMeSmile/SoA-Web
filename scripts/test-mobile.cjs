@@ -7,6 +7,7 @@ const http = require('node:http');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { chromium } = require('playwright');
+const testMobileFullscreen = require('./test-mobile-fullscreen.cjs');
 
 (async () => {
     const app = express();
@@ -140,6 +141,8 @@ const { chromium } = require('playwright');
         assert.equal(sends.length, 1, 'reconnect never auto-sends a saved draft');
         assert.deepEqual(errors, []);
         console.log('Mobile browser: voice, Codex redraw, layout, device isolation, real offline reload/history/draft, reconnect without duplicate sends passed.');
+        await context.close();
+        await testMobileFullscreen(browser, `http://127.0.0.1:${server.address().port}/m?t=test`);
     } finally {
         await browser.close();
         for (const ws of wss.clients) ws.terminate();

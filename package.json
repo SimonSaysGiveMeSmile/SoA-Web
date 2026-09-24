@@ -16,6 +16,7 @@
     "postinstall": "node scripts/fix-pty-perms.js",
     "test": "node --test server/test/*.test.js",
     "test:mobile": "node scripts/test-mobile.cjs",
+    "test:voice": "node scripts/test-voice-toolbar.cjs",
     "vendor:terminal": "node scripts/vendor-mobile-terminal.js"
   },
   "dependencies": {

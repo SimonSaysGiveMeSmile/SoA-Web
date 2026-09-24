@@ -2281,11 +2281,9 @@ class VoiceControlWidget extends Widget {
         this.voice = new VoiceControl();
 
         if (!this.voice.supported) {
-            // Say which browsers work rather than a bare "unsupported" — iOS
-            // Safari is the common case and it genuinely has no SpeechRecognition.
             this.body.innerHTML =
                 '<div class="voice-hint voice-hint--warn">This browser has no speech recognition. ' +
-                'Chrome, Edge or desktop Safari work; iOS Safari does not.</div>';
+                'Try a browser with speech recognition, or use keyboard dictation in the terminal.</div>';
             return;
         }
 
@@ -2348,7 +2346,7 @@ class VoiceControlWidget extends Widget {
 
         this._indicator = $el('div', { class: 'voice-indicator voice-indicator--off' });
         this._statusText = $el('span', { class: 'voice-status-text', text: 'Off' });
-        const status = $el('div', { class: 'voice-status' }, [this._indicator, this._statusText]);
+        const status = $el('div', { class: 'voice-status', role: 'status', 'aria-live': 'polite' }, [this._indicator, this._statusText]);
 
         this._startBtn = $el('button', { class: 'voice-btn voice-btn--start', type: 'button', text: '🎤 Listen' });
         this._stopBtn = $el('button', { class: 'voice-btn voice-btn--stop', type: 'button', text: '⏹ Stop' });
@@ -2445,8 +2443,9 @@ class VoiceControlWidget extends Widget {
     _wire() {
         this._startBtn.addEventListener('click', () => {
             if (this.voice.start()) {
-                this._startBtn.style.display = 'none';
-                this._stopBtn.style.display = '';
+                this._log(this.voice.settings.wakeMode === 'wake'
+                    ? 'Say “' + this.voice.settings.wakeWord + ', next tab” or open “What can I say”.'
+                    : 'Listening for commands. Open “What can I say” for examples.');
             }
         });
         this._stopBtn.addEventListener('click', () => {
@@ -2515,6 +2514,7 @@ class VoiceControlWidget extends Widget {
         else if (st.enabled) { cls = 'ready'; text = 'Starting…'; }
         this._indicator.className = 'voice-indicator voice-indicator--' + cls;
         this._statusText.textContent = text;
+        if (this.ctx.onVoiceStatus) this.ctx.onVoiceStatus(st, text);
     }
 
     _log(line, interim, warn) {
@@ -2645,6 +2645,105 @@ class VoiceControlWidget extends Widget {
     }
 }
 
+// One voice session for the page, independent of sidebar layout/rebuilds.
+// Opening the panel only reveals controls; Listen requests the microphone.
+let _voiceToolbar = null;
+export function mountVoiceToolbar(ctx = {}) {
+    const button = document.getElementById('toggle-voice');
+    if (!button) return null;
+    if (_voiceToolbar) return _voiceToolbar;
+
+    let widget = null;
+    const panel = $el('section', {
+        id: 'voice-panel', class: 'voice-panel', role: 'dialog',
+        'aria-label': 'Voice controls', tabindex: '-1',
+    });
+    panel.hidden = true;
+    const closeBtn = $el('button', {
+        type: 'button', class: 'voice-panel-close', text: '×',
+        'aria-label': 'Close voice controls', title: 'Close voice controls (Escape)',
+    });
+    panel.appendChild(closeBtn);
+    const host = $el('div', { class: 'voice-panel-body' });
+    panel.appendChild(host);
+    panel.appendChild($el('p', { class: 'voice-hint voice-panel-hint',
+        text: 'Closing this panel keeps the mic on. Choose Stop to end listening.' }));
+    (document.getElementById('shell') || document.body).appendChild(panel);
+
+    const activity = () => {
+        if (!widget) return;
+        if (panel.hidden || document.hidden) widget._suspend();
+        else widget._resume();
+    };
+    const close = (restoreFocus = false) => {
+        panel.hidden = true;
+        button.setAttribute('aria-expanded', 'false');
+        activity();
+        if (restoreFocus) button.focus();
+    };
+    const open = () => {
+        if (!widget && !isSandbox()) {
+            widget = new VoiceControlWidget({ parent: host, ctx: { ...ctx,
+                onVoiceStatus: (st, status) => {
+                    button.dataset.state = st.enabled ? 'on' : 'off';
+                    const label = 'Voice controls — ' + (st.enabled ? status : 'microphone off');
+                    button.title = label;
+                    button.setAttribute('aria-label', label);
+                    button.querySelector('.voice-toggle-label').textContent = st.enabled ? 'VOICE ON' : 'VOICE';
+                },
+            } });
+        } else if (isSandbox()) {
+            host.textContent = 'Connect to your terminal server to use voice controls.';
+        }
+        panel.hidden = false;
+        button.setAttribute('aria-expanded', 'true');
+        activity();
+        const primary = widget?.voice?.isEnabled ? widget._stopBtn : widget?._startBtn;
+        (primary || closeBtn).focus();
+    };
+    const toggle = () => panel.hidden ? open() : close(true);
+    const outside = e => {
+        if (!panel.hidden && !panel.contains(e.target) && !button.contains(e.target)) close();
+    };
+    const keydown = e => {
+        if (!panel.hidden && e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            close(true);
+        }
+    };
+    const focusout = e => {
+        if (e.relatedTarget && !panel.contains(e.relatedTarget) && !button.contains(e.relatedTarget)) close();
+    };
+    button.addEventListener('click', toggle);
+    closeBtn.addEventListener('click', () => close(true));
+    panel.addEventListener('focusout', focusout);
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', keydown, true);
+    document.addEventListener('visibilitychange', activity);
+    _voiceToolbar = { open, close, destroy() {
+        close();
+        widget?.destroy();
+        panel.remove();
+        button.removeEventListener('click', toggle);
+        document.removeEventListener('pointerdown', outside, true);
+        document.removeEventListener('keydown', keydown, true);
+        document.removeEventListener('visibilitychange', activity);
+        _voiceToolbar = null;
+    } };
+    return _voiceToolbar;
+}
+
+class VoiceLauncherWidget extends Widget {
+    constructor({ parent, ctx }) {
+        super({ titleKey: 'widget.voice', parent, intervalMs: 0 });
+        this.body.appendChild($el('button', { type: 'button', class: 'voice-btn',
+            text: 'Open voice controls', onclick: () => ctx.voiceToolbar?.open() }));
+        this.body.appendChild($el('div', { class: 'voice-hint',
+            text: 'Also available from the microphone button at the top right.' }));
+    }
+}
+
 function _widgetRegistry() {
     return [
         { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
@@ -2664,7 +2763,7 @@ function _widgetRegistry() {
         { id: 'commits',   titleKey: 'widget.commits',     make: p => new GitCommitsWidget({ parent: p }) },
         { id: 'contribute', titleKey: 'widget.contribute', make: p => new ContributeWidget({ parent: p }) },
         { id: 'perf',      titleKey: 'widget.perf',        make: p => new PerfWidget({ parent: p }) },
-        { id: 'voice',     titleKey: 'widget.voice',       make: (p, c) => new VoiceControlWidget({ parent: p, ctx: c }) },
+        { id: 'voice',     titleKey: 'widget.voice',       make: (p, c) => new VoiceLauncherWidget({ parent: p, ctx: c }) },
     ];
 }
 
@@ -2735,7 +2834,9 @@ function _composeSidebar(parent, reg, layoutKey, ctx) {
 }
 
 export function mountSidebar(parent, ctx = {}) {
-    return _composeSidebar(parent, _widgetRegistry(), SIDEBAR_LAYOUT_KEY, ctx);
+    const voiceToolbar = mountVoiceToolbar(ctx);
+    const sidebar = _composeSidebar(parent, _widgetRegistry(), SIDEBAR_LAYOUT_KEY, { ...ctx, voiceToolbar });
+    return { ...sidebar, destroy() { sidebar.destroy(); voiceToolbar?.destroy(); } };
 }
 
 // CUSTOMIZE panel — reorder (↑/↓) + show/hide each widget, applied live so the
@@ -2884,5 +2985,7 @@ export function mountSandboxSidebar(parent, ctx = {}) {
     // path and never pokes /api/*. Same customize/reorder/hide + ⓘ machinery as
     // server mode, under its own layout key.
     (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
-    return _composeSidebar(parent, _sandboxRegistry(), SANDBOX_LAYOUT_KEY, ctx);
+    const voiceToolbar = mountVoiceToolbar(ctx);
+    const sidebar = _composeSidebar(parent, _sandboxRegistry(), SANDBOX_LAYOUT_KEY, ctx);
+    return { ...sidebar, destroy() { sidebar.destroy(); voiceToolbar?.destroy(); } };
 }

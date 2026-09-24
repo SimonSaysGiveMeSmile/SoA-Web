@@ -4,7 +4,7 @@
   "description": "Mobile companion for the Son of Anton sci-fi terminal.",
   "start_url": "./index.html",
   "scope": "./",
-  "display": "standalone",
+  "display": "fullscreen",
   "orientation": "portrait",
   "background_color": "#000000",
   "theme_color": "#000000",

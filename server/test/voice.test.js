@@ -232,6 +232,7 @@ test('free-form requests fall through to unknown so the model can take them', ()
 // ── echo suppression ────────────────────────────────────────────────────
 test('transcripts arriving while speaking are dropped', () => {
     const v = newVoice();
+    v.start();
     v.settings.wakeMode = 'always';
     v.awake = true;
     let fired = 0;
@@ -243,6 +244,89 @@ test('transcripts arriving while speaking are dropped', () => {
     v._lastSpokenAt = 0;
     v._handleFinal(['next tab']);
     assert.equal(fired, 1);
+    v.stop();
+});
+
+test('Stop cancels a starting recognizer and ignores its late callbacks after retry', () => {
+    const v = newVoice();
+    const commands = [], transcripts = [];
+    v.settings.wakeMode = 'always';
+    v.onCommand = intent => commands.push(intent);
+    v.onTranscript = text => transcripts.push(text);
+    v.start();
+    const old = v.recognition;
+    let aborted = 0;
+    old.abort = () => { aborted++; };
+    v.stop();
+    assert.equal(aborted, 1, 'Stop must cancel while start is still pending');
+    old.onstart();
+    const result = [{ transcript: 'next tab' }];
+    result.isFinal = true;
+    old.onresult({ resultIndex: 0, results: [result] });
+    assert.equal(v.isListening, false);
+    v.start();
+    old.onresult({ resultIndex: 0, results: [result] });
+    old.onerror({ error: 'not-allowed' });
+    old.onend();
+    assert.equal(v.isEnabled, true, 'an old error must not stop the new run');
+    assert.deepEqual(commands, []);
+    assert.deepEqual(transcripts, []);
+    assert.equal(v._restartTimer, undefined, 'old end must not restart recognition');
+    v.recognition.onstart();
+    v.recognition.onresult({ resultIndex: 0, results: [result] });
+    assert.deepEqual(commands, ['next_tab']);
+    v.stop();
+});
+
+test('permission denial publishes Off immediately, even without an end event', () => {
+    const v = newVoice();
+    let state, error;
+    v.onStatusChange = st => { state = st; };
+    v.onError = err => { error = err.message; };
+    v.start();
+    v.recognition.onstart();
+    v.recognition.onerror({ error: 'not-allowed' });
+    assert.equal(state.enabled, false);
+    assert.equal(state.listening, false);
+    assert.match(error, /permission denied/);
+    assert.equal(v.start(), true, 'permission failures leave Listen retryable');
+    v.stop();
+});
+
+test('Stop invalidates an in-flight interpreted command, including after a new Listen', async () => {
+    const v = newVoice();
+    const commands = [];
+    let finish;
+    v.interpretRemote = () => new Promise(resolve => { finish = resolve; });
+    v.onCommand = intent => commands.push(intent);
+    v.start();
+    const pending = v._processCommand('help me finish the migration');
+    assert.equal(v.isThinking, true);
+    v.stop();
+    v.start();
+    finish({ intent: 'run_command', params: { command: 'stale command' } });
+    await pending;
+    assert.deepEqual(commands, []);
+    assert.equal(v.isThinking, false);
+    v.stop();
+});
+
+test('synchronous microphone startup failure returns to Off and allows retry', t => {
+    const SR = window.SpeechRecognition;
+    t.after(() => { window.SpeechRecognition = SR; });
+    let fail = true;
+    window.SpeechRecognition = function () {
+        return { start() { if (fail) throw new Error('device unavailable'); }, abort() {} };
+    };
+    const v = newVoice();
+    let error;
+    v.onError = err => { error = err.message; };
+    assert.equal(v.start(), false);
+    assert.equal(v.isEnabled, false);
+    assert.match(error, /could not start/);
+    fail = false;
+    assert.equal(v.start(), true);
+    v.stop();
 });
 
 // ── fuzzy project matching ──────────────────────────────────────────────
