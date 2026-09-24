@@ -39,7 +39,6 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 
 const { stateFile } = require('./stateDir');
-const { submitToTab, writeToTab } = require('./sessionManager');
 
 // system_profiler/blueutil live in sbin dirs a launchd job doesn't inherit.
 const SYS_PATH = '/usr/sbin:/sbin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin';
@@ -527,10 +526,14 @@ function typeIntoTab(sessions, tabId, text, submit, prefer) {
             ? (s.activeTab && mgr.get(s.activeTab) ? s.activeTab : mgr.order[0])
             : Number(tabId);
         const tab = mgr.get(id);
-        if (!tab) return false;
-        if (tab.exited) return false;
-        if (submit) submitToTab(tab, text);
-        else writeToTab(tab, text);
+        if (!tab || tab.exited) return false;
+        // Through sessionManager's per-tab FIFO, not a bare timer: two hands to
+        // the same tab inside the Enter delay (two photos 40ms apart, or a
+        // manager /compact overlapping an ingest) otherwise glue into one
+        // submitted line. That FIFO is the chokepoint every agent-driven
+        // submit already routes through.
+        const sm = require('./sessionManager');
+        if (submit) sm.submitToTab(tab, text); else sm.writeToTab(tab, text);
         return true;
     } catch (_) { return false; }
 }
@@ -538,6 +541,9 @@ function typeIntoTab(sessions, tabId, text, submit, prefer) {
 // ── routes ──────────────────────────────────────────────────────────────
 function mount(app, requireAuthed, sessions, opts = {}) {
     const json = express.json({ limit: '64kb' });
+    // The caller's live array, not a snapshot: index.js pushes the tunnel's
+    // origin onto ALLOWED_ORIGINS after mount (tunnel-up, SIGHUP re-adopt),
+    // and this gate must agree with the CORS and WS gates then too.
     const allowedOrigins = Array.isArray(opts.allowedOrigins) ? opts.allowedOrigins : [];
 
     // POST /api/voice/vision takes a raw body, so a typed-array POST from any
@@ -554,6 +560,12 @@ function mount(app, requireAuthed, sessions, opts = {}) {
         if (origin && allowedOrigins.includes(origin)) return true;
         if (!sfs && !origin) return true;
         return false;
+    }
+    // First on the route: refusing here means a hostile page's POST never
+    // provisions (and persists) a session, and never buffers a 30MB body.
+    function refuseForeign(req, res, next) {
+        if (browserAllowed(req)) return next();
+        res.status(403).json({ ok: false, error: 'request origin not allowed' });
     }
     const watcher = new VisionWatcher(sessions);
     require('./voiceChat').mount(app, requireAuthed, browserAllowed);
@@ -686,22 +698,10 @@ function mount(app, requireAuthed, sessions, opts = {}) {
     // ── vision ──────────────────────────────────────────────────────────
     // Raw image bytes in, absolute path out (and optionally typed straight
     // into a tab so the agent looks at it without the user touching anything).
-    app.post('/api/voice/vision', (req, res, next) => {
-        if (!browserAllowed(req)) return res.status(403).json({ ok: false, error: 'request origin not allowed' });
-        next();
-    }, requireAuthed,
+    app.post('/api/voice/vision', refuseForeign, requireAuthed,
         express.raw({ type: () => true, limit: '30mb' }),
         (req, res) => {
             try {
-                // A typed-array body with no Content-Type is a CORS "simple"
-                // request: no preflight, so the Origin allowlist never runs,
-                // and on loopback requireAuthed hands an anonymous caller a
-                // fresh session. That let any web page the user had open POST
-                // here and type into a terminal. Browsers label such requests
-                // for us — refuse anything the browser says is cross-site.
-                if (!browserAllowed(req)) {
-                    return res.status(403).json({ ok: false, error: 'request origin not allowed' });
-                }
                 const buf = req.body;
                 if (!Buffer.isBuffer(buf) || !buf.length) {
                     return res.status(400).json({ ok: false, error: 'empty body' });

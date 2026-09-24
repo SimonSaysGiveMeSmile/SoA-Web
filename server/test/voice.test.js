@@ -333,11 +333,13 @@ function fakeStore(tabs, activeTab) {
 test('typeIntoTab finds the fleet session without a primary() on the store', async () => {
     const { store, writes } = fakeStore([3, 7], 7);
     assert.equal(voice.typeIntoTab(store, null, 'hello', true), true);
-    await new Promise(resolve => setImmediate(resolve));
-    // null tab → the active tab; text now, Enter 160ms later (a glued CR
-    // reads as a pasted newline in the TUI, not a submit)
+    // null tab → the active tab. The write goes through sessionManager's
+    // per-tab FIFO, so it lands a microtask later, and the Enter follows
+    // after the submit delay (a glued CR reads as a pasted newline in the
+    // TUI, not a submit).
+    await new Promise(r => setTimeout(r, 10));
     assert.deepEqual(writes, [[7, 'hello']]);
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 300));
     assert.deepEqual(writes, [[7, 'hello'], [7, '\r']]);
 });
 
@@ -345,7 +347,7 @@ test('typeIntoTab prefers the caller\'s own session', async () => {
     const a = fakeStore([1], 1);
     const b = fakeStore([9], 9);
     assert.equal(voice.typeIntoTab(a.store, null, 'x', false, b.session), true);
-    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(r => setTimeout(r, 10));
     assert.equal(a.writes.length, 0);
     assert.deepEqual(b.writes, [[9, 'x']]);
 });

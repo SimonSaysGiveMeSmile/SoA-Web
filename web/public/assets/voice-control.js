@@ -7,7 +7,7 @@
  *      This is not a nicety — continuous recognition on a live mic in a room
  *      with a terminal reading output aloud will otherwise "hear" a command in
  *      its own speech. The phrase is matched fuzzily (see _matchWake): browser
- *      ASR renders "hey anton" as "hey antoine", "hay anton", "a anton" and a
+ *      ASR renders "hey anton" as "hey antoine", "hay anton", "hey anthon" and a
  *      dozen other things, and rejecting those makes the feature feel broken.
  *
  *   2. LOCAL PARSE. A regex table covers the hot commands — read output,
@@ -225,8 +225,11 @@ class VoiceControl {
     if (take <= words.length && this._wakeMatches(words.slice(0, take), wakeWords)) {
       return words.slice(take).join(' ');
     }
-    // Also accept ONE leading filler ("okay hey anton", "so hey anton").
-    if (/^(okay|ok|so|well)$/.test(words[0]) && take < words.length && this._wakeMatches(words.slice(1, take + 1), wakeWords)) {
+    // Also accept ONE leading filler ("okay hey anton", "so hey anton") — from
+    // a fixed list, not any word: with a one-word wake phrase, "any leading
+    // word" would make "my computer crashed" a wake.
+    if (take < words.length && VoiceControl.WAKE_FILLERS.has(words[0])
+        && this._wakeMatches(words.slice(1, take + 1), wakeWords)) {
       return words.slice(take + 1).join(' ');
     }
     return null;
@@ -236,10 +239,10 @@ class VoiceControl {
    * A candidate head matches the wake phrase when its FIRST word is the wake
    * phrase's first word (one edit allowed: "hay") AND the rest is close to the
    * name. Scoring the whole phrase in one edit budget let "hey anyone" and
-   * "hey and on the…" wake the terminal — "anyone" is two edits from "anton"
-   * — and one false wake opens a 15s window in which "stop" is a Ctrl-C.
+   * "hey a ton of tests…" wake the terminal — each is within two edits of
+   * "anton" — and one false wake opens a 15s window where "stop" is a Ctrl-C.
    * Splitting the budget keeps every real ASR mangle of the name ("antoine",
-   * "anthon", "and on") while refusing ordinary English that merely starts
+   * "anthon", "antone") while refusing ordinary English that merely starts
    * with "hey".
    */
   _wakeMatches(headWords, wakeWords) {
@@ -251,14 +254,16 @@ class VoiceControl {
     const name = headWords.slice(1).join(' ');
     const wakeName = wakeWords.slice(1).join(' ');
     if (name === wakeName) return true;
-    // Fuzzy path, structural first: the candidate must be at least
-    // as long as the name (so "ann", "ant", "anti" — two edits
-    // from "anton" — cannot stand in for it), share its first two letters
-    // (every real ASR mangle does — "antoine", "anthon", "antone"), sit within
-    // the edit budget, and not be one of the few common words left inside it.
+    // Fuzzy path, structural before fuzzy. ASR mangles a name by adding or
+    // swapping sounds ("antoine", "anthon", "antone") — never by clipping it
+    // to a shorter real word. So: never shorter than the name; same first two
+    // letters; and an equal-length candidate gets ONE edit, not two, which is
+    // what separates a mangle from the ordinary words that sit two edits away
+    // ("anti", "ante", "antic", "antra", "ant", "ann").
     if (name.length < wakeName.length) return false;
     if (name.slice(0, 2) !== wakeName.slice(0, 2)) return false;
     if (VoiceControl.WAKE_DENY.has(name)) return false;
+    if (name.length === wakeName.length) return this._levenshtein(name, wakeName) <= 1;
     return this._closeEnough(name, wakeName);
   }
 
@@ -605,6 +610,9 @@ class VoiceControl {
 // Ordinary words that are within two edits of a short wake name. Kept small
 // and English-only on purpose: the wake phrase is user-configurable, and this
 // only guards the fuzzy path (an exact name always matches).
+// The only words allowed to precede the wake phrase.
+VoiceControl.WAKE_FILLERS = new Set(['okay', 'ok', 'so', 'um', 'uh', 'well', 'alright', 'hey', 'yo', 'and']);
+
 VoiceControl.WAKE_DENY = new Set([
   'anyone', 'anything', 'anybody', 'anon', 'annoy', 'antler', 'antsy', 'anyhow',
   'anno', 'annum', 'anion', 'anent',
