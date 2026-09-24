@@ -21,6 +21,7 @@ const express = require('express');
 const { MSG, frame } = require('./protocol');
 const envStore = require('./envStore');
 const claudeSessions = require('./claudeSessions');
+const codexSessions  = require('./codexSessions');
 const sessionModel = require('./sessionModel');
 const localKey = require('./localKey');
 const automations = require('./automations');
@@ -129,9 +130,6 @@ function saveManagerState(st) {
     } catch (_) { /* best-effort */ }
 }
 
-// "You've hit your session limit · resets 2:30am (America/Los_Angeles)"
-const LIMIT_RE = /hit your (?:session|usage|weekly) limit[^\n]*?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
-
 // Next wall-clock occurrence of H:MM am/pm, as epoch ms (server-local time).
 function nextOccurrence(h12, min, ampm, now = Date.now()) {
     let h = h12 % 12;
@@ -141,6 +139,147 @@ function nextOccurrence(h12, min, ampm, now = Date.now()) {
     if (d.getTime() <= now) d.setTime(d.getTime() + 24 * 60 * 60 * 1000);
     return d.getTime();
 }
+
+// ── Usage-limit banners: Claude Code AND Codex CLI ────────────────────────────
+// Claude Code (cli.js Rd()):
+//   "You've hit your session limit · resets 9pm (America/Los_Angeles)"
+//   >24h out: "… weekly limit · resets Sep 4, 6pm (…)" (year appended if it differs)
+//   fast tier: "… fast limit · resets in 2h 15m"
+// Codex CLI (tui):
+//   "■ You've hit your usage limit. Upgrade to Plus to continue using Codex (…), or try
+//    again at Sep 30th, 2026 3:09 AM."   ← wraps mid-sentence at the terminal width,
+//   so every gap is \s+; "try again at" is the Codex tell, "resets" the Claude one.
+//   Admin-managed: "You've hit your usage limit. To get more access now, send a request
+//   to your admin" (no reset time — flagged limited, nothing to schedule).
+const TIME_PHRASE = String.raw`(?:[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+(?:\d{4},?\s+)?(?:at\s+)?)?\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]`;
+const CLAUDE_LIMIT_RE = new RegExp(String.raw`hit your (?:[a-z-]+ ){0,2}limit\b[\s\S]{0,120}?resets\s+(in\s+(?:\d+\s*h(?:ours?)?\s*)?(?:\d+\s*m(?:in(?:ute)?s?)?)?|${TIME_PHRASE})`, 'ig');
+const CODEX_LIMIT_RE  = new RegExp(String.raw`hit your usage limit\b[\s\S]{0,320}?try\s+again\s+at\s+(${TIME_PHRASE})`, 'ig');
+const CODEX_LIMIT_NOTIME_RE = /hit your usage limit\.\s+To get more access/ig;
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+const H = 3600_000;
+
+// "9pm" | "9:30pm" | "Sep 4, 6pm" | "Sep 30th, 2026 3:09 AM" | "in 2h 15m" → epoch ms (null if unparsable)
+function parseResetTime(phrase, now = Date.now()) {
+    const t = String(phrase || '').replace(/\s+/g, ' ').trim();
+    let m;
+    if ((m = t.match(/^in\s+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i)) && (m[1] || m[2])) {
+        return now + (+(m[1] || 0)) * H + (+(m[2] || 0)) * 60_000;
+    }
+    m = t.match(/^(?:([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4}),?\s+)?(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]/);
+    if (!m) return null;
+    const h12 = +m[4], min = +(m[5] || 0), ampm = m[6].toLowerCase() === 'p' ? 'pm' : 'am';
+    if (!m[1]) return nextOccurrence(h12, min, ampm, now);
+    const mon = MONTHS[m[1].toLowerCase()];
+    if (mon == null) return null;
+    let h = h12 % 12; if (ampm === 'pm') h += 12;
+    const year = m[3] ? +m[3] : new Date(now).getFullYear();
+    const d = new Date(year, mon, +m[2], h, min, 0, 0);
+    if (!m[3] && d.getTime() < now - 12 * H) d.setFullYear(year + 1);   // undated month/day already past → next year
+    return d.getTime();
+}
+
+function lastMatch(re, text) {
+    re.lastIndex = 0;
+    let m, last = null;
+    while ((m = re.exec(text))) { last = m; if (!m[0].length) re.lastIndex++; }
+    return last;
+}
+
+// Newest limit banner in the (ANSI-stripped) tail → { agent, resetAt, label } | null.
+function detectLimit(plain, now = Date.now()) {
+    const hits = [];
+    const cx = lastMatch(CODEX_LIMIT_RE, plain);
+    if (cx) hits.push({ agent: 'codex', idx: cx.index, resetAt: parseResetTime(cx[1], now), label: cx[0] });
+    const cn = lastMatch(CODEX_LIMIT_NOTIME_RE, plain);
+    if (cn) hits.push({ agent: 'codex', idx: cn.index, resetAt: null, label: cn[0] });
+    const cl = lastMatch(CLAUDE_LIMIT_RE, plain);
+    if (cl) hits.push({ agent: 'claude', idx: cl.index, resetAt: parseResetTime(cl[1], now), label: cl[0] });
+    if (!hits.length) return null;
+    hits.sort((a, b) => b.idx - a.idx);
+    const h = hits[0];
+    return { agent: h.agent, resetAt: h.resetAt, label: h.label.replace(/\s+/g, ' ').slice(0, 120) };
+}
+
+// A TUI keeps the banner on screen (and re-paints it into the stream) long after
+// the reset it names has passed. Re-parsing "resets 9pm" at 9:02pm yields TOMORROW
+// 9pm — which used to re-arm the auto-resume a day out and re-fire `limited`.
+// `ref` is the current or most recently lifted limit for the tab.
+function isStaleBanner(det, ref, now = Date.now()) {
+    if (det.resetAt != null && det.resetAt <= now) return true;          // absolute time already behind us
+    if (!ref) return false;
+    if (det.resetAt == null) return ref.resetAt == null && ref.label === det.label;
+    if (ref.resetAt != null && now >= ref.resetAt && now - ref.resetAt < 12 * H
+        && Math.abs((det.resetAt - ref.resetAt) - 24 * H) < 2 * H) return true;   // same wall-clock, rolled to tomorrow
+    return false;
+}
+
+// ── Which agent runs in a tab: Claude Code vs Codex CLI ───────────────────────
+// Stream markers each TUI paints persistently; the marker nearest the end of the
+// tail wins, so a tab that switches agents flips as soon as the new one draws.
+const CODEX_MARKS = [
+    /OpenAI Codex/, /using Codex\b/, /tell Codex what/i, /\bcodex resume\b/,
+    /(?:^|\n)\s*›\s/m,                                                       // Codex composer prompt (U+203A)
+    /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,   // "gpt-5.4-mini medium · ~/proj" status line
+    /ctrl \+ t to view transcript/i, /Type "\/" for a list of supported commands/,
+];
+const CLAUDE_MARKS = [
+    /(?:^|\n)\s*❯\s/m,                                                       // Claude Code composer prompt (U+276F)
+    /bypass\s*permissions/i, /accept\s*edits\s*on/i, /plan\s*mode\s*on/i, /shift\s*\+?\s*tab\s*to\s*cycle/i, /⏵⏵/,
+    /\bclaude-(?:opus|sonnet|haiku|fable|mythos)/i, /\/usage-credits/, /Claude Code/,
+];
+function lastIndexOfAny(marks, text) {
+    let best = -1;
+    for (const p of marks) {
+        const re = new RegExp(p.source, p.flags.includes('g') ? p.flags : p.flags + 'g');
+        const m = lastMatch(re, text);
+        if (m && m.index > best) best = m.index;
+    }
+    return best;
+}
+function detectAgentKind(plain) {
+    const cx = lastIndexOfAny(CODEX_MARKS, plain);
+    const cl = lastIndexOfAny(CLAUDE_MARKS, plain);
+    if (cx < 0 && cl < 0) return null;
+    return cx > cl ? 'codex' : 'claude';
+}
+// Fallback when a tab has painted nothing yet (fresh shell after a restart):
+// whichever agent's transcript for this cwd is newer.
+function agentForCwd(cwd, hours = 72, maps = null) {
+    if (!cwd) return null;
+    let c = null, x = null;
+    try { c = (maps && maps.claude ? maps.claude : claudeSessions.latestSessionByCwd(hours)).get(cwd); } catch (_) {}
+    try { x = (maps && maps.codex ? maps.codex : codexSessions.latestSessionByCwd(hours)).get(cwd); } catch (_) {}
+    if (x && (!c || x.mtime > c.mtime)) return 'codex';
+    return c ? 'claude' : null;
+}
+function sessionMaps(hours = 72) {
+    let claude = new Map(), codex = new Map();
+    try { claude = claudeSessions.latestSessionByCwd(hours); } catch (_) {}
+    try { codex = codexSessions.latestSessionByCwd(hours); } catch (_) {}
+    return { claude, codex };
+}
+// The relaunch line for a tab's agent: resume its latest thread, else the most recent.
+function resumeLineFor(agent, cwd, { model = '', coldFallback = false, maps = null } = {}) {
+    const mm = maps || sessionMaps(72);
+    if (agent === 'codex') {
+        const hit = cwd ? mm.codex.get(cwd) : null;
+        const flag = model ? ` -m ${model}` : '';
+        const tail = coldFallback ? ` || codex${flag}` : '';
+        return hit ? `codex resume ${hit.sessionId}${flag} || codex resume --last${flag}${tail}` : `codex resume --last${flag}${tail}`;
+    }
+    const hit = cwd ? mm.claude.get(cwd) : null;
+    const flag = model ? ` --model ${model}` : '';
+    const tail = coldFallback ? ` || claude${flag}` : '';
+    return hit ? `claude --resume ${hit.sessionId}${flag} || claude --continue${flag}${tail}` : `claude --continue${flag}${tail}`;
+}
+
+// Prompts typed into a limited tab are REJECTED by the TUI ("… resets 9pm"); we
+// capture them and replay them at the reset instead of a bare "continue".
+const REJECT_WINDOW_MS = 20_000;       // a prompt committed this close before the banner IS the rejected one
+const LIMIT_LIFT_GRACE_MS = 5 * 60_000; // drop the LIMITED flag this long after the reset
+const QUEUE_CAP = 10;
+// Control/meta commands are not work — never replay them.
+const NO_REPLAY_RE = /^(?:continue|\/(?:usage-credits|usage|cost|status|help|login|logout|exit|quit|clear|new|compact|effort|model|resume|config|doctor|bug|keymap|theme|mcp|hooks|memory|init|review)\b)/i;
 
 // ── Stream detectors (ported from web/public/m/agentDetect.js; keep in sync) ──
 const WORKING = [
@@ -162,13 +301,19 @@ const ATTENTION = [
     /\(y\/n\)/i, /\[Y\/n\]/i, /\(Y\)es\s*\/\s*\(N\)o/i,
     /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
     /\bPermission\s+(?:required|needed)\b/i,
+    // Codex CLI approval modal ("Yes, proceed" / "No, and tell Codex what to do differently").
+    /tell Codex what to do/i,
+    /Would you like to (?:run|approve|allow)\b/i,
 ];
 // done = agent finished its turn, idle at its input box, waiting for the user
 // (orange). Whitespace-flexible (\s*) so modern Claude Code's cursor-positioned
 // footer ("bypass permissions on" → "bypasspermissionson" after the strip) still
 // matches — otherwise a waiting agent reads as a plain idle shell. Keep in sync
 // with web/public/assets/app.js + web/public/m/agentDetect.js.
-const DONE = [/╭─+╮/, /│\s*>\s*│/, /╰─+╯/, /│\s*>\s*$/m, /bypass\s*permissions\s*on/i, /accept\s*edits\s*on/i, /plan\s*mode\s*on/i, /shift\s*\+?\s*tab\s*to\s*cycle/i, /⏵⏵/];
+const DONE = [/╭─+╮/, /│\s*>\s*│/, /╰─+╯/, /│\s*>\s*$/m, /bypass\s*permissions\s*on/i, /accept\s*edits\s*on/i, /plan\s*mode\s*on/i, /shift\s*\+?\s*tab\s*to\s*cycle/i, /⏵⏵/,
+    // Codex CLI idle: its "› " composer prompt + "<model> <reasoning> · <cwd>" status line
+    // (without these a parked Codex tab stays 'working' forever and reads as STUCK).
+    /(?:^|\n)\s*›\s/m, /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i];
 const SHELL_PROMPT = /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[$#%]\s*$)/m;
 
 function strip(s) {
@@ -305,7 +450,22 @@ function writeToTab(tab, text) {
 const SANE_SHELL_RESET =
     "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?1049l\\033[?2004l\\033[?25h\\033>'";
 
-function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true } = {}) {
+// agent: 'claude' | 'codex' | null (null → whichever agent's transcript for the
+// cwd is newer, defaulting to claude). A Codex tab relaunches `codex resume`.
+function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true, agent = null } = {}) {
+    const kind = agent || (tab && tab.agent) || agentForCwd(cwd) || 'claude';
+    if (tab) tab.agent = kind;
+    if (kind === 'codex') {
+        let sid = sessionId;
+        if (sid == null && resume && cwd) { try { const hit = codexSessions.latestSessionByCwd(72).get(cwd); if (hit) sid = hit.sessionId; } catch (_) {} }
+        const flag = model ? ` -m ${model}` : '';
+        const tail = coldFallback ? ` || codex${flag}` : '';
+        const line = !resume ? `codex${flag}`
+            : sid ? `codex resume ${sid}${flag} || codex resume --last${flag}${tail}`
+            : `codex resume --last${flag}${tail}`;
+        submitToTab(tab, line);
+        return sid;
+    }
     let sid = sessionId;
     if (sid == null && resume && cwd) {
         try { const hit = claudeSessions.latestSessionByCwd(72).get(cwd); if (hit) sid = hit.sessionId; }
@@ -326,6 +486,15 @@ function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, c
     // in index.js covers that case.
     submitToTab(tab, `${cmd}; ${SANE_SHELL_RESET}`);
     return sid;
+}
+// Resolved agent kind for a live tab: what the supervisor saw it paint, else the
+// newest transcript for its cwd, else claude.
+function agentKindFor(man, tab, maps = null) {
+    if (!tab) return 'claude';
+    const s = man && man.tabs ? man.tabs.get(tab.id) : null;
+    if (s && s.agent) return s.agent;
+    if (tab.agent) return tab.agent;
+    return agentForCwd(tab.cwd, 72, maps) || 'claude';
 }
 
 // ── Loopback trust gate for /api/sessions (the ONLY auth on that surface) ──────
@@ -1204,7 +1373,7 @@ class SessionManager {
     }
 
     // ── One-shot "send text to tab at time" schedules ──
-    schedule(tabId, at, text) {
+    schedule(tabId, at, text, extra = {}) {
         const id = Math.random().toString(36).slice(2, 10);
         // Capture the cwd: tab ids are reassigned on a daemon restart, so cwd is
         // the only stable identity for resolving the target when the schedule fires.
@@ -1212,7 +1381,12 @@ class SessionManager {
         const cwd = tab && tab.cwd ? tab.cwd : null;
         // One pending auto/manual resume per tab — newest wins.
         this.state.schedules = this.state.schedules.filter(s => s.tabId !== tabId);
-        this.state.schedules.push({ id, tabId, cwd, at, text: String(text).slice(0, 500) });
+        this.state.schedules.push({
+            id, tabId, cwd, at, text: String(text).slice(0, 500),
+            auto: extra.auto === true,                 // armed by the limit detector (vs a manual `schedule`)
+            agent: extra.agent || null,
+            queued: Array.isArray(extra.queued) ? extra.queued.slice(-QUEUE_CAP) : [],   // rejected prompts to replay
+        });
         this._saveState();
         return id;
     }
@@ -1353,6 +1527,13 @@ class SessionManager {
     _fireDue() {
         const now = Date.now();
         this._reapInactive(now);
+        // Sweep: drop the LIMITED flag once the reset is comfortably behind us, or
+        // when the tab has been genuinely working for a while (e.g. /usage-credits).
+        for (const [tid, st] of this.tabs) {
+            if (!st.limit) continue;
+            if ((st.limit.resetAt != null && now >= st.limit.resetAt + LIMIT_LIFT_GRACE_MS)
+                || (st.status === 'working' && now - st.lastStatusAt > 90_000)) this._liftLimit(tid, st, st.status === 'working' ? 'working' : 'reset');
+        }
         const due = this.state.schedules.filter(s => s.at <= now);
         if (!due.length) return;
         this.state.schedules = this.state.schedules.filter(s => s.at > now);
@@ -1374,7 +1555,18 @@ class SessionManager {
             }
             if (!tab) continue;
             automations.announce(mgr, tab.id, 'manager · scheduled');
-            submitToTab(tab, s.text);
+            // Replay the prompts the TUI rejected while limited (live queue first,
+            // else the copy persisted on the schedule), otherwise the plain nudge.
+            const st = this._state(tab.id);
+            const live = st.limit && Array.isArray(st.limit.queued) ? st.limit.queued : [];
+            const queued = live.length ? live : (Array.isArray(s.queued) ? s.queued : []);
+            const lines = queued.length ? queued.slice() : [s.text || 'continue'];
+            lines.forEach((line, i) => {
+                const t = setTimeout(() => submitToTab(tab, line), i * 900);
+                if (t.unref) t.unref();
+            });
+            console.log(`[sessions] resume fired → #${tab.id} "${tab.title}" (${s.agent || st.agent || 'agent'}): ${lines.length} line(s)${queued.length ? ' replayed' : ''}`);
+            if (st.limit) this._liftLimit(tab.id, st, 'resume');
         }
         this.broadcast();
     }
@@ -1382,7 +1574,8 @@ class SessionManager {
     _state(id) {
         let s = this.tabs.get(id);
         if (!s) {
-            s = { status: 'idle', ctxPct: null, recent: '', lastOutputAt: 0, lastStatusAt: 0, limit: null };
+            s = { status: 'idle', ctxPct: null, recent: '', lastOutputAt: 0, lastStatusAt: 0, limit: null,
+                  agent: null, limitPrev: null, inputLine: '', lastInput: null };
             this.tabs.set(id, s);
         }
         return s;
@@ -1399,8 +1592,11 @@ class SessionManager {
         if (next && next !== s.status) {
             const prev = s.status;
             s.status = next; s.lastStatusAt = Date.now();
-            // Output is flowing again as real work → the limit is behind us.
-            if (next === 'working') s.limit = null;
+            // Real work after the reset → the limit is behind us. BEFORE the reset a
+            // 'working' flash is just the rejected prompt's spinner ("Crunched for 0s"),
+            // so keep the limit (and its replay queue); _fireDue's sweep lifts it if
+            // the work genuinely persists (e.g. /usage-credits).
+            if (next === 'working' && s.limit && s.limit.resetAt != null && Date.now() >= s.limit.resetAt) this._liftLimit(id, s, 'working');
             // Leaving 'working' re-arms the stuck latch for the next episode.
             if (next !== 'working') this._stuckEmitted.delete(id);
             this._emit(next, id, { from: prev, to: next, ctxPct: s.ctxPct });
@@ -1415,19 +1611,80 @@ class SessionManager {
         if (s.ctxPct != null && (prevPct == null || prevPct < HIGH_CTX) && s.ctxPct >= HIGH_CTX) {
             this._emit('highContext', id, { ctxPct: s.ctxPct });
         }
-        // Usage-limit banner → remember when it lifts; optionally schedule an
-        // automatic resume nudge shortly after the reset time.
-        const lm = strip(s.recent).slice(-1000).match(LIMIT_RE);
-        if (lm) {
-            const resetAt = nextOccurrence(+lm[1], +(lm[2] || 0), lm[3]);
-            if (!s.limit || s.limit.resetAt !== resetAt) {
-                s.limit = { resetAt, label: lm[0].slice(0, 120) };
-                this._emit('limited', id, { detail: s.limit.label });
-                if (this.state.autoResume) {
-                    this.schedule(id, resetAt + 2 * 60_000, this.state.autoResumeText);
+        const plain = strip(s.recent).slice(-1500);
+        // Which agent is painting this tab (Claude Code vs Codex CLI). Sticky:
+        // the last known agent still names the right relaunch after it exits.
+        const tab = this.session.tabMgr && this.session.tabMgr.get(id);
+        if (s.agent == null && tab && tab.agent) s.agent = tab.agent;
+        const kind = detectAgentKind(plain);
+        if (kind && kind !== s.agent) { s.agent = kind; if (tab) tab.agent = kind; }
+        // Usage-limit banner (either agent) → one `limited` episode per reset time,
+        // a replay queue for the prompts the TUI rejects meanwhile, and an
+        // automatic resume shortly after the reset.
+        // A restored tab replays its pre-restart scrollback (seeded, ending in the
+        // "context restored" marker) — a banner in there is history, not a live limit.
+        const cut = plain.lastIndexOf('context restored from previous session');
+        const det = detectLimit(cut >= 0 ? plain.slice(cut) : plain);
+        if (det) {
+            const now = Date.now();
+            const cur = s.limit, prev = s.limitPrev;
+            const same = l => l && l.agent === det.agent && l.resetAt === det.resetAt && (det.resetAt != null || l.label === det.label);
+            if (same(cur)) { /* same episode, banner merely re-painted */ }
+            else if (same(prev) && prev.liftedBy !== 'working' && !(prev.resetAt != null && now >= prev.resetAt)) {
+                s.limit = prev; s.limitPrev = null;    // lifted too eagerly — restore silently (no re-emit, no re-arm)
+            } else if (!isStaleBanner(det, cur || prev, now)) {
+                s.limit = { agent: det.agent, resetAt: det.resetAt, label: det.label, at: now, queued: [] };
+                s.limitPrev = null;
+                if (det.agent && det.agent !== s.agent) { s.agent = det.agent; if (tab) tab.agent = det.agent; }
+                // The prompt the user just submitted is what the banner rejected.
+                if (s.lastInput && now - s.lastInput.at < REJECT_WINDOW_MS) this._queueForResume(id, s, s.lastInput.text);
+                this._emit('limited', id, { detail: `${det.agent}: ${det.label}` });
+                if (this.state.autoResume && det.resetAt != null) {
+                    this.schedule(id, det.resetAt + 2 * 60_000, this.state.autoResumeText, { auto: true, agent: det.agent, queued: s.limit.queued });
                 }
             }
         }
+    }
+
+    // Fed with every byte typed INTO a tab (keyboard, mobile line, manager
+    // `send`/`goal`). Reassembles committed lines so that, while the tab is
+    // limited, the rejected prompts are queued for replay at the reset.
+    feedInput(id, data) {
+        const s = this._state(id);
+        const clean = String(data)
+            .replace(/\x1b\[[0-9;?]*[A-Za-z~]/g, '')   // CSI incl. bracketed-paste markers
+            .replace(/\x1b\][^\x07]*\x07/g, '')
+            .replace(/\x1b\r/g, ' ')                    // shift+enter newline inside a prompt
+            .replace(/\x1b[\s\S]/g, '');
+        for (const ch of clean) {
+            if (ch === '\r' || ch === '\n') { this._commitInputLine(id, s); continue; }
+            if (ch === '\x7f' || ch === '\b') { s.inputLine = s.inputLine.slice(0, -1); continue; }
+            if (ch === '\x03' || ch === '\x15') { s.inputLine = ''; continue; }   // ctrl-c / ctrl-u
+            if (ch < ' ' && ch !== '\t') continue;
+            s.inputLine = (s.inputLine + ch).slice(-4000);
+        }
+    }
+    _commitInputLine(id, s) {
+        const line = (s.inputLine || '').trim();
+        s.inputLine = '';
+        if (!line) return;
+        s.lastInput = { text: line, at: Date.now() };
+        if (s.limit && (s.limit.resetAt == null || Date.now() < s.limit.resetAt)) this._queueForResume(id, s, line);
+    }
+    _queueForResume(id, s, line) {
+        if (!s.limit || !line || NO_REPLAY_RE.test(line)) return;
+        const q = s.limit.queued || (s.limit.queued = []);
+        if (q[q.length - 1] === line) return;
+        q.push(line.slice(0, 2000));
+        if (q.length > QUEUE_CAP) q.splice(0, q.length - QUEUE_CAP);
+        // Mirror into the pending auto-resume so the replay survives a daemon restart.
+        const sch = this.state.schedules.find(x => x.tabId === id && x.auto);
+        if (sch) { sch.queued = q.slice(); this._saveState(); }
+    }
+    _liftLimit(id, s, by) {
+        if (!s.limit) return;
+        s.limitPrev = { ...s.limit, liftedAt: Date.now(), liftedBy: by || null };
+        s.limit = null;
     }
 
     // ── Event ring internals ────────────────────────────────────────────────
@@ -1595,8 +1852,11 @@ class SessionManager {
                 stuck,
                 highContext: s.ctxPct != null && s.ctxPct >= HIGH_CTX,
                 idleMs: s.lastOutputAt ? now - s.lastOutputAt : null,
+                agent: s.agent || null,               // 'claude' | 'codex' | null (unknown / plain shell)
                 limited: !!s.limit,
                 limitResetAt: s.limit ? s.limit.resetAt : null,
+                limitAgent: s.limit ? s.limit.agent : null,
+                limitQueued: s.limit && Array.isArray(s.limit.queued) ? s.limit.queued.length : 0,
                 resumeAt: sched ? sched.at : null,
             };
         });
@@ -1609,6 +1869,7 @@ class SessionManager {
             highContext: sessions.filter(x => x.highContext).length,
             limited: sessions.filter(x => x.limited).length,
             inMeeting: sessions.filter(x => x.meeting).length,
+            codex: sessions.filter(x => x.agent === 'codex').length,
         };
         // Rooms ride the MANAGER snapshot (already pushed every 3s) so both the
         // dashboard and the phone get the roster + budget meters with no new
@@ -1996,17 +2257,15 @@ function mount(app, requireAuthed, sessions) {
                 // includeInactive:true, bypass the filter.
                 ids = activeOnlyIds(body.id, ids, man.snapshot(), body.includeInactive);
                 if (self != null) ids = ids.filter(x => x !== self);
+                const maps = (verb === 'continue' || verb === 'resume') ? sessionMaps(72) : null;
                 const buildLine = (tab) => {
+                    const agent = agentKindFor(man, tab, maps);
                     switch (verb) {
                         case 'goal': return '/goal ' + text;
-                        case 'btw': return '/btw ' + text;
-                        case 'clear': return '/clear';
-                        case 'continue': return 'claude --continue';
-                        case 'resume': {
-                            let sid = null;
-                            try { const hit = claudeSessions.latestSessionByCwd(72).get(tab.cwd); if (hit) sid = hit.sessionId; } catch (_) {}
-                            return sid ? `claude --resume ${sid} || claude --continue` : 'claude --continue';
-                        }
+                        case 'btw': return agent === 'codex' ? text : '/btw ' + text;      // Codex has no /btw — a plain aside queues fine
+                        case 'clear': return agent === 'codex' ? '/new' : '/clear';
+                        case 'continue': return agent === 'codex' ? 'codex resume --last' : 'claude --continue';
+                        case 'resume': return resumeLineFor(agent, tab.cwd, { maps });
                         case 'raw': default: return text;
                     }
                 };
@@ -2053,6 +2312,7 @@ function mount(app, requireAuthed, sessions) {
                 const resume = body.resume !== false;
                 const model = typeof body.model === 'string' ? body.model : '';
                 const goalText = typeof body.goal === 'string' ? body.goal : '';
+                const agent = body.agent === 'codex' ? 'codex' : body.agent === 'claude' ? 'claude' : null;
                 let tab;
                 try { tab = mgr.open({ title, cwd, env: envStore.getEnvForShell(), silent: false }); }
                 catch (e) { return res.status(500).json({ ok: false, error: (e && e.message) || 'spawn failed' }); }
@@ -2062,13 +2322,13 @@ function mount(app, requireAuthed, sessions) {
                 if (wantClaude) {
                     const tm = setTimeout(() => {
                         automations.announce(mgr, tab.id, 'manager · spawn');
-                        try { launchClaude(tab, tab.cwd, { resume, model }); } catch (_) {}
+                        try { launchClaude(tab, tab.cwd, { resume, model, agent }); } catch (_) {}
                         if (goalText) { const g = setTimeout(() => submitToTab(tab, '/goal ' + goalText), 3000); if (g.unref) g.unref(); }
                     }, 1200); // let the fresh shell print its prompt first
                     if (tm.unref) tm.unref();
                 }
                 man._emit('spawned', tab.id, { detail: cwd || null });
-                return res.json({ ok: true, id: tab.id, title: tab.title, cwd: tab.cwd, claudeLaunched: wantClaude });
+                return res.json({ ok: true, id: tab.id, title: tab.title, cwd: tab.cwd, agent: agent || tab.agent || null, claudeLaunched: wantClaude });
             }
             // stop: kill a tab/agent. Refuses the caller's own tab.
             if (action === 'stop') {
@@ -2204,6 +2464,7 @@ function mount(app, requireAuthed, sessions) {
 module.exports = {
     SessionManager, ensure, mount,
     classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
+    detectLimit, parseResetTime, isStaleBanner, detectAgentKind, agentForCwd, sessionMaps, resumeLineFor,
     resolveCohort, activeOnlyIds, makeEventFilter, isLocalRequest, autoGroupFromCwd,
     // Meeting pure helpers — exported for the same reason resolveCohort is: the
     // rules that decide who gets prompted must be testable without a daemon.

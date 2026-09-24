@@ -112,7 +112,7 @@ function requirePty() {
 }
 
 class Tab {
-    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, command, args }) {
+    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, onInput, agent, command, args }) {
         this.id = id;
         this.historyId = require('node:crypto').randomUUID();
         this.cwd = cwd || process.cwd();
@@ -129,6 +129,10 @@ class Tab {
         this.rows = rows || DEFAULT_ROWS;
         this.onData = onData || (() => {});
         this.onExit = onExit || (() => {});
+        this.onInput = onInput || (() => {});
+        // 'claude' | 'codex' | null — which agent this tab runs (set by the
+        // supervisor from the stream; seeded from tabs.json on restore).
+        this.agent = agent || null;
         this.pty = null;
         this.exited = false;
         this.exitCode = null;
@@ -171,6 +175,7 @@ class Tab {
     write(data) {
         if (this.exited || !this.pty) return;
         this.pty.write(data);
+        try { this.onInput(data); } catch (_) { /* observer only */ }
     }
 
     resize(cols, rows) {
@@ -198,11 +203,12 @@ class Tab {
 }
 
 class TabManager {
-    constructor({ onData, onTabsChange, onExit, graveyardCap } = {}) {
+    constructor({ onData, onTabsChange, onExit, onInput, graveyardCap } = {}) {
         this.tabs = new Map();
         this.order = [];
         this.next = 1;
         this.onData = onData || (() => {});
+        this.onInput = onInput || (() => {});
         this.onTabsChange = onTabsChange || (() => {});
         this.onExit = onExit || (() => {});
         // Graveyard holds a capped FIFO of recently-closed tabs so the client
@@ -264,7 +270,7 @@ class TabManager {
         return true;
     }
 
-    open({ title, cwd, cols, rows, env, silent, seedScrollback, command, args } = {}) {
+    open({ title, cwd, cols, rows, env, silent, seedScrollback, agent, command, args } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
@@ -278,6 +284,8 @@ class TabManager {
             // `soa-browser` as bare commands (scoped to SoA shells only).
             env: withScriptsOnPath({ ...env, ...tts.envFor(id) }),
             onData: data => this.onData(id, data),
+            onInput: data => this.onInput(id, data),
+            agent,
             onExit: code => {
                 this._archive(id);
                 this.onExit(id, code);

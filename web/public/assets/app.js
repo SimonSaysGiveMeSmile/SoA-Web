@@ -2862,6 +2862,9 @@ class Shell {
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
+                // Codex CLI approval modal ("No, and tell Codex what to do differently").
+                /tell Codex what to do/i,
+                /Would you like to (?:run|approve|allow)\b/i,
             ];
             if (attentionPatterns.some(p => p.test(tail))) {
                 next = 'attention';
@@ -2888,6 +2891,9 @@ class Shell {
                 /plan\s*mode\s*on/i,
                 /shift\s*\+?\s*tab\s*to\s*cycle/i,
                 /⏵⏵/,
+                // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+                /(?:^|\n)\s*›\s/m,
+                /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
             ];
             if (donePatterns.some(p => p.test(tail))) {
                 next = 'done';
@@ -3086,6 +3092,9 @@ class Shell {
                 /plan\s*mode\s*on/i,
                 /shift\s*\+?\s*tab\s*to\s*cycle/i,
                 /⏵⏵/,
+                // Codex CLI idle: "› " composer prompt + "<model> <reasoning> · <cwd>" status line.
+                /(?:^|\n)\s*›\s/m,
+                /\b(?:gpt-[\w.-]+|o[134](?:-[\w-]+)?|codex[\w.-]*)\s+(?:minimal|low|medium|high|xhigh)\s*·/i,
             ],
             // See the stream detector above: attention is narrow — only genuine
             // choice/permission prompts. Idle placeholders and prose that just
@@ -3101,6 +3110,9 @@ class Shell {
                 /\(Y\)es\s*\/\s*\(N\)o/i,
                 /Allow\s+(?:Read|Write|Edit|Bash|Execute|NotebookEdit|WebFetch|WebSearch|Agent|LSP|Monitor)\b/i,
                 /\bPermission\s+(?:required|needed)\b/i,
+                // Codex CLI approval modal ("No, and tell Codex what to do differently").
+                /tell Codex what to do/i,
+                /Would you like to (?:run|approve|allow)\b/i,
             ],
             shellPrompt: /(?:^|\n)[^\n]{0,80}?(?:[➜❯▶►»](?:\s|$)|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\n]*[\$#%]\s*$)/m,
         });

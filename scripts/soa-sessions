@@ -237,19 +237,26 @@ function renderEvent(e) {
 function fmtList(snap, costByTab) {
     if (!snap.sessions || !snap.sessions.length) return '(no sessions)';
     const c = snap.counts || {};
-    const head = `${c.total} sessions · ${c.working || 0} working · ${c.attention || 0} need input · ${c.stuck || 0} stuck · ${c.idle || 0} idle · ${c.highContext || 0} high-context · ${c.limited || 0} limited`;
+    const head = `${c.total} sessions · ${c.working || 0} working · ${c.attention || 0} need input · ${c.stuck || 0} stuck · ${c.idle || 0} idle · ${c.highContext || 0} high-context · ${c.limited || 0} limited${c.codex ? ` · ${c.codex} codex` : ''}`;
     const hhmm = ms => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
+    // A reset more than a day out (Codex weekly/monthly caps: "Sep 30th, 2026 3:09 AM") shows its date.
+    const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const when = ms => (ms - Date.now() > 20 * 3600e3) ? `${MON[new Date(ms).getMonth()]}${new Date(ms).getDate()}@${hhmm(ms)}` : hhmm(ms);
     const rows = snap.sessions.map(s => {
         const flags = [
             // Lifecycle flag first so non-active projects are obvious at a glance.
             // The always-on supervisors (nudge-stale/fleet-loop/heartbeat)
             // grep these tokens to skip non-active tabs — keep them in sync.
             s.lifecycle === 'inactive' ? 'INACTIVE' : s.lifecycle === 'archive' ? 'ARCHIVED' : '',
+            // Agent kind: only Codex tabs are flagged (Claude Code is the default). The
+            // supervisors grep this to skip Claude-only commands (/effort) on Codex tabs.
+            s.agent === 'codex' ? 'CODEX' : '',
             s.attention ? 'NEEDS-INPUT' : '',
             s.stuck ? 'STUCK' : '',
             s.highContext ? 'HIGH-CTX' : '',
-            s.limited ? `LIMITED→${s.limitResetAt ? hhmm(s.limitResetAt) : '?'}` : '',
-            s.resumeAt ? `RESUME@${hhmm(s.resumeAt)}` : '',
+            s.limited ? `LIMITED→${s.limitResetAt ? when(s.limitResetAt) : '?'}` : '',
+            s.resumeAt ? `RESUME@${when(s.resumeAt)}` : '',
+            s.limitQueued ? `QUEUED:${s.limitQueued}` : '',   // rejected prompts that the auto-resume will replay
         ].filter(Boolean).join(' ');
         const ctx = s.ctxPct != null ? s.ctxPct + '%' : '—';
         // Optional spend column (soa-sessions list --cost) — appended AFTER the
@@ -464,7 +471,7 @@ function fmtList(snap, costByTab) {
         }
         // spawn — open a new tab + start/resume a Claude agent in it.
         if (cmd === 'spawn') {
-            const flagsWithVal = new Set(['--title', '--goal', '--model', '--lifecycle']);
+            const flagsWithVal = new Set(['--title', '--goal', '--model', '--lifecycle', '--agent']);
             const positional = [];
             for (let i = 0; i < rest.length; i++) {
                 const a = rest[i];
@@ -480,6 +487,7 @@ function fmtList(snap, costByTab) {
                 goal: argval('--goal'),
                 model: argval('--model'),
                 lifecycle: argval('--lifecycle'),
+                agent: argval('--agent'),          // claude (default) | codex
             });
             console.log(JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
@@ -671,7 +679,7 @@ function fmtList(snap, costByTab) {
                       '       goal <id|all|active|inactive|archive|attention|stuck|idle|done|highContext|limited> <text> | btw <id|cohort> <note> | clear <id|cohort>\n' +
                       '         (cohort fan-outs skip inactive/archived by default; add --include-inactive to reach every tab)\n' +
                       '       resume <id|all|limited> | broadcast <all|working|attention|idle|limited> <text>\n' +
-                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] [--lifecycle active|inactive|archive] | stop <id> [--force] | interrupt <id>\n' +
+                      '       spawn [<cwd>] [--title T] [--no-resume] [--no-claude] [--goal "..."] [--model m] [--agent claude|codex] [--lifecycle active|inactive|archive] | stop <id> [--force] | interrupt <id>\n' +
                       '       todo add <text…> | todo done <id> | todo toggle <id> | todo del <id> | todo list');
         process.exit(1);
     } catch (e) {
