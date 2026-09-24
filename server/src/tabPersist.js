@@ -243,6 +243,18 @@ function _writeMetaSync(tabMgr) {
                 console.log(`tabPersist: refused close-all tombstone over a ${prior.recoveredFrom}-recovered tabs.json (transient empty post-recovery)`);
                 return;
             }
+            // A close-all is only real if the user actually closed tabs. An empty
+            // list with ZERO observed closes is a teardown artifact — shutdown()
+            // flushes via persistableSession(), which can resolve to a session
+            // holding no tabs, and that write used to be tombstoned as intent.
+            // The tombstone then defeated BOTH self-heal paths on the next boot
+            // (reconcile noops on closedByUser; the fleet-restore watchdog logs
+            // `ok` and skips) — the 2026-09-24 collapse: live=1 lastgood=28.
+            // _userCloses is the same counter the shrink guard already trusts.
+            if (_userCloses === 0) {
+                console.log(`tabPersist: refused close-all tombstone over ${prior && prior.tabs ? prior.tabs.length : 0} saved tab(s) (empty list, 0 user closes — teardown artifact, not intent)`);
+                return;
+            }
             data.closedByUser = true;
         }
         const tmp = STATE_FILE + '.tmp';
@@ -425,4 +437,6 @@ module.exports = {
     STATE_FILE, SCROLLBACK_FILE, SESSION_FILE,
     // test hook: reset the per-process "have we seen tabs" latch
     _resetLiveTabsSeen: () => { _liveTabsSeen = false; },
+    // test hook: reset the explicit-user-close counter (gates the tombstone)
+    _resetUserCloses: () => { _userCloses = 0; },
 };

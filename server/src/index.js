@@ -1514,7 +1514,7 @@ process.on('unhandledRejection', (err) => crashFlush('unhandledRejection', err))
 function scheduleBootResume() {
     if (!automations.enabled('bootResume')) return;
     const delay = parseInt(process.env.SOA_WEB_BOOT_RESUME_DELAY_MS || '4000', 10);
-    const MAX_ATTEMPTS = 3;
+    const MAX_ATTEMPTS = 5;
     // UNCONDITIONAL rehydration: the only thing that cancels an attempt is
     // proof the restore actually ran (_diskRestoreRan — set inside
     // restore-on-connect itself). The old heuristic — "the persisted session
@@ -1523,6 +1523,12 @@ function scheduleBootResume() {
     // (2026-07-08). Every skip now says why, and failed attempts retry with
     // backoff instead of giving up for the life of the process.
     const attempt = (n) => {
+        const scheduleRetry = () => {
+            if (n < MAX_ATTEMPTS) {
+                const r = setTimeout(() => { if (!_diskRestoreRan) attempt(n + 1); }, delay * 2 * n);
+                if (r.unref) r.unref();
+            }
+        };
         try {
             if (_diskRestoreRan) { console.log(`boot-resume[${n}]: restore-on-connect already ran — nothing to do`); return; }
             // Self-heal a collapsed tabs.json HERE, at rehydrate time — not only at
@@ -1540,7 +1546,15 @@ function scheduleBootResume() {
             }
             const saved = tabPersist.load();
             if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) {
-                console.log(`boot-resume[${n}]: no saved tabs on disk — nothing to rehydrate`);
+                // NOT terminal. This used to `return` outright, which skipped the
+                // retry scheduler at the tail of attempt() — so a tabs.json that
+                // read empty/unreadable at this one instant (a collapse window, or
+                // a closedByUser tombstone that made reconcile noop) abandoned the
+                // fleet for the LIFE of the process. The 2026-09-24 logs show
+                // exactly that: `boot-resume[1]` three boots running, never [2].
+                // Retry instead — reconcile re-runs each attempt and may recover.
+                console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: no saved tabs on disk yet — retrying`);
+                scheduleRetry();
                 return;
             }
             console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
@@ -1561,10 +1575,7 @@ function scheduleBootResume() {
             });
             probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
         } catch (e) { console.log(`boot-resume[${n}] failed:`, e && e.message); }
-        if (n < MAX_ATTEMPTS) {
-            const r = setTimeout(() => { if (!_diskRestoreRan) attempt(n + 1); }, delay * 2 * n);
-            if (r.unref) r.unref();
-        }
+        scheduleRetry();
     };
     const t = setTimeout(() => attempt(1), delay);
     if (t.unref) t.unref();
