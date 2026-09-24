@@ -18,8 +18,8 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=51';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=31';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=52';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=32';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=27';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
@@ -7704,7 +7704,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=32');
+        await import('/assets/app-wc.js?v=33');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -7758,14 +7758,103 @@ function isPhone() {
     } catch (_) { return false; }
 }
 
-// Friendly mobile landing: showcase the product and explain that the phone is a
-// companion to a desktop, not a host — instead of dropping into a broken boot.
+// Friendly mobile landing. A phone with no paired desktop gets ONE decisive
+// action — pair with the camera — and a quiet second path for visitors who
+// haven't installed the desktop yet.
+//
+// The camera is the whole point. This screen used to say "scan the QR on your
+// desktop" while offering nothing to scan with, so the only way through was the
+// system camera app — which on iOS hands the URL to Safari, a different storage
+// context from a home-screen PWA, dropping the token where the app can't read
+// it. Scanning here keeps the pairing inside the browser the user is already in.
 function renderMobileWelcome() {
     const boot = $('#boot');
     if (boot) boot.classList.add('hidden');
     const prior = document.querySelector('.mwel');
     if (prior) prior.remove();   // rebuilt in place on a language switch
 
+    // One error line, shared by the scanner and the paste fallback.
+    const errEl = el('p', { class: 'mwel-err', role: 'alert', hidden: '' });
+    const showErr = (m) => { errEl.textContent = m || ''; errEl.hidden = !m; };
+
+    // ── Pair by camera (primary action) ───────────────────────────────────
+    let scanner = null;
+
+    const connectFromScan = async (raw) => {
+        const { parsePairingPayload } = await import('/m/qrscan.js');
+        const p = parsePairingPayload(raw);
+        if (!p) { showErr(tr('mwel.err_code')); return false; }
+        if (!p.token) { showErr(tr('mwel.err_token')); return false; }
+        if (scanner) { scanner.stop(); scanner = null; }
+        // The companion at /m/ owns a paired session — its own storage, its own
+        // service worker, its own touch UI. Hand the pairing URL over rather
+        // than trying to drive someone else's desktop shell from this page.
+        //
+        // Carry `alt` and `backend` across in the hash, which is where /m/
+        // reads them: `alt` is the second transport (LAN↔tunnel), so dropping
+        // it costs the phone its failover and forces a re-pair the next time
+        // the network flips.
+        const target = new URL(p.url);
+        const hash = new URLSearchParams();
+        if (p.altOrigin) hash.set('alt', p.altOrigin);
+        if (p.backend) hash.set('backend', p.backend);
+        const h = hash.toString();
+        if (h) target.hash = h;
+        location.href = target.toString();
+        return true;
+    };
+
+    const scanBtn = el('button', { class: 'mwel-scan', type: 'button' }, [
+        el('span', { class: 'mwel-scan-ico', 'aria-hidden': 'true' },
+            [el('i'), el('i'), el('i'), el('i')]),
+        el('span', { class: 'mwel-scan-label', text: tr('mwel.scan') }),
+    ]);
+    scanBtn.addEventListener('click', async () => {
+        showErr('');
+        let mod;
+        try { mod = await import('/m/qrscan.js'); }
+        catch (_) { showErr(tr('mwel.err_cam')); manual.open = true; return; }
+        if (!mod.QrScanner.supported) { showErr(tr('mwel.err_cam')); manual.open = true; return; }
+        scanner = new mod.QrScanner({
+            onResult: (v) => connectFromScan(v),
+            onError: (e) => {
+                showErr((e && e.message) || tr('mwel.err_cam'));
+                if (scanner) { scanner.stop(); scanner = null; }
+                // A denied or missing camera must not be a dead end — open the
+                // paste fallback instead of leaving the user on a bare error.
+                manual.open = true;
+            },
+            labels: {
+                cancel: tr('mwel.scan_cancel'),
+                hint: tr('mwel.scan_hint'),
+                torch: tr('mwel.scan_light'),
+                errNoCam: tr('mwel.err_cam'),
+                errDenied: tr('mwel.err_denied'),
+                // Left uninterpolated on purpose — the scanner fills {detail}
+                // in with the underlying camera error.
+                errOpen: tr('mwel.err_open'),
+            },
+        });
+        scanner.start();
+    });
+
+    // ── Paste fallback, collapsed until it's needed ───────────────────────
+    const urlInput = el('input', {
+        class: 'mwel-url', type: 'url', inputmode: 'url', autocapitalize: 'off',
+        autocorrect: 'off', spellcheck: 'false', placeholder: 'https://…/m/?t=…',
+    });
+    const goBtn = el('button', { class: 'mwel-go', type: 'button', text: tr('mwel.connect') });
+    const go = () => { const v = urlInput.value.trim(); if (v) connectFromScan(v); };
+    goBtn.addEventListener('click', go);
+    urlInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); go(); }
+    });
+    const manual = el('details', { class: 'mwel-manual' }, [
+        el('summary', { text: tr('mwel.manual') }),
+        el('div', { class: 'mwel-manual-row' }, [urlInput, goBtn]),
+    ]);
+
+    // ── Secondary path: no desktop installed yet ──────────────────────────
     const copyBtn = el('button', { class: 'mwel-btn', type: 'button', text: tr('mwel.copy') });
     copyBtn.addEventListener('click', async () => {
         try { await navigator.clipboard.writeText('https://www.s0a.app'); copyBtn.textContent = tr('mwel.copied'); }
@@ -7775,10 +7864,11 @@ function renderMobileWelcome() {
 
     const sandboxBtn = el('button', { class: 'mwel-ghost', type: 'button', text: tr('mwel.sandbox') });
     sandboxBtn.addEventListener('click', () => {
+        if (scanner) { scanner.stop(); scanner = null; }
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=32').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=33').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.
@@ -7788,19 +7878,13 @@ function renderMobileWelcome() {
                 class: 'mwel-lang' + (l.code === getLang() ? ' on' : ''),
                 type: 'button', text: l.label, 'aria-pressed': l.code === getLang() ? 'true' : 'false',
             });
-            btn.addEventListener('click', () => { setLang(l.code); renderMobileWelcome(); });
+            btn.addEventListener('click', () => {
+                if (scanner) { scanner.stop(); scanner = null; }
+                setLang(l.code); renderMobileWelcome();
+            });
             return btn;
         })
     );
-
-    const step = (n, h, p, extra) => el('div', { class: 'mwel-step' }, [
-        el('span', { class: 'mwel-step-n', text: String(n) }),
-        el('div', { class: 'mwel-step-body' }, [
-            el('h3', { class: 'mwel-step-h', text: h }),
-            el('p', { class: 'mwel-step-p', text: p }),
-            ...(extra ? [extra] : []),
-        ]),
-    ]);
 
     const view = el('div', { class: 'mwel' }, [
         langNav,
@@ -7810,19 +7894,22 @@ function renderMobileWelcome() {
                 el('p', { class: 'mwel-sub', text: tr('brand.sub') }),
             ]),
             el('p', { class: 'mwel-lead', text: tr('mwel.lead') }),
-            el('div', { class: 'mwel-note' }, [
-                el('div', { class: 'mwel-note-h', text: tr('mwel.note_h') }),
-                el('p', { class: 'mwel-note-p', text: tr('mwel.note_p') }),
+            el('section', { class: 'mwel-pair' }, [
+                scanBtn,
+                el('p', { class: 'mwel-scan-p', text: tr('mwel.scan_p') }),
+                errEl,
+                manual,
             ]),
-            el('div', { class: 'mwel-steps' }, [
-                step(1, tr('mwel.s1_h'), tr('mwel.s1_p'), copyBtn),
-                step(2, tr('mwel.s2_h'), tr('mwel.s2_p')),
+            el('div', { class: 'mwel-or' }, [el('span', { text: tr('mwel.or') })]),
+            el('section', { class: 'mwel-get' }, [
+                el('h2', { class: 'mwel-get-h', text: tr('mwel.get_h') }),
+                el('p', { class: 'mwel-get-p', text: tr('mwel.get_p') }),
+                copyBtn,
             ]),
             el('ul', { class: 'mwel-feats' }, [
                 el('li', { text: tr('mwel.feat1') }),
                 el('li', { text: tr('mwel.feat2') }),
                 el('li', { text: tr('mwel.feat3') }),
-                el('li', { text: tr('mwel.feat4') }),
             ]),
             el('nav', { class: 'mwel-foot' }, [
                 el('a', { class: 'mwel-ghost', href: 'https://github.com/SimonSaysGiveMeSmile/SoA-Web', target: '_blank', rel: 'noopener', text: 'github ↗' }),

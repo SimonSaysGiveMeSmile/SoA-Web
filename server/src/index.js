@@ -72,6 +72,7 @@ const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
 const meetings         = require('./meetings');
 const tunnelGate       = require('./tunnelGate');
+const voice            = require('./voice');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
 const { dbg, agg }     = require('./debug');
@@ -523,6 +524,7 @@ pasteImage.mount(app, requireAuthed);
 tts.mount(app, sessions);
 agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
+voice.mount(app, requireAuthed, sessions, { allowedOrigins: ALLOWED_ORIGINS });
 meetings.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
 

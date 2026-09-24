@@ -8,8 +8,8 @@
 
 // Bumped for codex agent detection: `/agentDetect.js` is a precached SHELL
 // entry, so without a new VERSION an installed phone keeps serving the cached
-// copy and never learns to recognize a Codex tab. No new files.
-const VERSION = 'soa-mobile-v84';
+// copy and never learns to recognize a Codex tab.
+const VERSION = 'soa-mobile-v86';
 const SHELL = [
     '/',
     '/index.html',

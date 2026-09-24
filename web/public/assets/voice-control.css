@@ -1,0 +1,227 @@
+/* Voice control widget — status light, device pickers, vision panel.
+   Colours come from the theme tokens so the MINIMAL/accent themes re-tint it
+   for free; every var() carries a fallback for the sandbox preview. */
+
+.voice-status {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .35rem 0;
+    font-size: .8rem;
+}
+
+.voice-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--soa-dim, #666);
+    transition: background-color .25s ease;
+}
+
+/* Four live states, deliberately distinguishable at a glance from across the
+   room — the whole point is not having to look closely. */
+.voice-indicator--off       { background: var(--soa-dim, #555); }
+.voice-indicator--ready     { background: var(--soa-accent, #aacfd1); }
+.voice-indicator--listening { background: var(--soa-accent, #aacfd1); animation: voice-pulse 2.4s ease-in-out infinite; }
+.voice-indicator--awake     { background: var(--soa-green, #5dbd5a); animation: voice-pulse 1.1s ease-in-out infinite; box-shadow: 0 0 6px var(--soa-green, #5dbd5a); }
+.voice-indicator--thinking  { background: var(--soa-yellow, #d9b657); animation: voice-pulse .7s linear infinite; }
+.voice-indicator--speaking  { background: var(--soa-blue, #4a9eff); animation: voice-pulse .9s ease-in-out infinite; }
+
+@keyframes voice-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .3; }
+}
+
+.voice-status-text {
+    color: var(--soa-fg, #e0e0e0);
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.voice-controls {
+    display: flex;
+    gap: .4rem;
+    padding: .2rem 0 .4rem;
+}
+
+.voice-btn {
+    flex: 1 1 0;
+    padding: .4rem .5rem;
+    font: inherit;
+    font-size: .78rem;
+    cursor: pointer;
+    color: var(--soa-fg, #e0e0e0);
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--soa-border, rgba(255, 255, 255, .12));
+    border-radius: 3px;
+}
+.voice-btn:hover { background: rgba(255, 255, 255, .1); }
+.voice-btn--stop { color: var(--soa-red, #ff6b6b); }
+
+/* Last thing heard / last thing done. Fixed height so the widget doesn't jump
+   on every utterance — a reflowing sidebar is unreadable while you talk. */
+.voice-transcript {
+    margin: .2rem 0 .5rem;
+    padding: .4rem .5rem;
+    min-height: 2.2rem;
+    background: rgba(0, 0, 0, .22);
+    border-radius: 3px;
+    font-size: .72rem;
+    line-height: 1.35;
+    color: var(--soa-dim-fg, #9aa);
+    overflow-wrap: anywhere;
+}
+.voice-transcript small { display: block; }
+
+.voice-settings {
+    border-top: 1px solid var(--soa-border, rgba(255, 255, 255, .1));
+    padding: .3rem 0;
+}
+.voice-settings > summary {
+    cursor: pointer;
+    user-select: none;
+    padding: .25rem 0;
+    font-size: .72rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--soa-accent, #aacfd1);
+}
+.voice-settings > summary:hover { color: var(--soa-accent-bright, #c8e8ea); }
+.voice-settings-body,
+.voice-audio-body,
+.voice-vision-body { padding: .35rem 0 .2rem; }
+
+.voice-setting {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+    margin-bottom: .45rem;
+    font-size: .72rem;
+    color: var(--soa-dim-fg, #9aa);
+}
+.voice-setting > span { flex: 0 1 auto; }
+
+.voice-select,
+.voice-input {
+    flex: 1 1 8rem;
+    min-width: 0;
+    max-width: 100%;
+    padding: .25rem .35rem;
+    font: inherit;
+    font-size: .72rem;
+    color: var(--soa-fg, #e0e0e0);
+    background: rgba(0, 0, 0, .3);
+    border: 1px solid var(--soa-border, rgba(255, 255, 255, .12));
+    border-radius: 3px;
+}
+.voice-input { width: 100%; margin-bottom: .4rem; }
+.voice-range { flex: 1 1 auto; min-width: 0; }
+.voice-check { flex: 0 0 auto; accent-color: var(--soa-accent, #aacfd1); }
+
+.voice-row {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    flex-wrap: wrap;
+    margin-bottom: .4rem;
+}
+.voice-rate-value {
+    flex: 0 0 2.4rem;
+    text-align: right;
+    font-size: .7rem;
+    color: var(--soa-accent, #aacfd1);
+}
+
+.voice-sec-title {
+    margin: .5rem 0 .3rem;
+    font-size: .66rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--soa-dim, #778);
+}
+
+.voice-mini {
+    padding: .2rem .45rem;
+    font: inherit;
+    font-size: .68rem;
+    cursor: pointer;
+    color: var(--soa-fg, #e0e0e0);
+    background: rgba(255, 255, 255, .06);
+    border: 1px solid var(--soa-border, rgba(255, 255, 255, .12));
+    border-radius: 3px;
+    margin: 0 .25rem .25rem 0;
+}
+.voice-mini:hover { background: rgba(255, 255, 255, .12); }
+
+/* One paired device. The dot is the connection state — same visual grammar as
+   the listening indicator above, so "on" reads the same everywhere. */
+.voice-dev {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    padding: .25rem 0;
+    font-size: .72rem;
+}
+.voice-dev-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--soa-dim, #555);
+}
+.voice-dev.is-on .voice-dev-dot {
+    background: var(--soa-green, #5dbd5a);
+    box-shadow: 0 0 5px var(--soa-green, #5dbd5a);
+}
+.voice-dev-name {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--soa-fg, #e0e0e0);
+}
+.voice-dev.is-on .voice-dev-name { color: var(--soa-green, #5dbd5a); }
+.voice-dev-batt { flex: 0 0 auto; font-size: .66rem; color: var(--soa-dim, #778); }
+
+.voice-hint {
+    margin: .35rem 0;
+    font-size: .66rem;
+    line-height: 1.45;
+    color: var(--soa-dim, #778);
+}
+.voice-hint--warn { color: var(--soa-yellow, #d9b657); }
+.voice-hint em { font-style: normal; color: var(--soa-accent, #aacfd1); }
+
+.voice-code {
+    display: inline-block;
+    margin-top: .2rem;
+    padding: .15rem .3rem;
+    background: rgba(0, 0, 0, .35);
+    border-radius: 2px;
+    font-family: 'Fira Mono', ui-monospace, Menlo, monospace;
+    font-size: .66rem;
+    color: var(--soa-accent, #aacfd1);
+    user-select: all;
+}
+
+/* The "what can I say" list. Each row is also a button — when the room is too
+   loud to talk, the same registry entry is one tap away. */
+.voice-phrase {
+    padding: .3rem .4rem;
+    margin-bottom: .15rem;
+    border-radius: 3px;
+    font-size: .7rem;
+    line-height: 1.4;
+}
+.voice-phrase b {
+    display: block;
+    font-weight: 500;
+    color: var(--soa-fg, #e0e0e0);
+}
+.voice-phrase span { color: var(--soa-dim, #778); }
+.voice-phrase--run { cursor: pointer; }
+.voice-phrase--run:hover { background: rgba(255, 255, 255, .06); }
+.voice-phrase--run:hover b { color: var(--soa-accent, #aacfd1); }

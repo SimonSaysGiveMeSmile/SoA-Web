@@ -2450,25 +2450,30 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .pv-notice-link:hover { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.08); }
 
-/* ── Mobile companion welcome (phones, no paired desktop) ──────────── */
+/* ── Mobile companion welcome (phones, no paired desktop) ──────────────
+   One screen, one decision. The hero is "scan to pair" because a phone that
+   lands here almost always has a desktop waiting; installing is the rarer
+   second path, so it sits below a rule and reads quieter. Prose is kept to a
+   single line per block — anything longer belongs in the docs, not here. */
 .mwel {
   position: fixed; inset: 0; z-index: 200;
   background: var(--soa-bg); color: var(--soa-fg);
   overflow-y: auto; -webkit-overflow-scrolling: touch;
-  padding: max(28px, env(safe-area-inset-top)) 22px calc(40px + env(safe-area-inset-bottom));
+  padding: max(20px, env(safe-area-inset-top)) 22px calc(36px + env(safe-area-inset-bottom));
 }
 .mwel-langs {
-  max-width: 460px; margin: 0 auto 2px; display: flex; gap: 6px;
+  max-width: 460px; margin: 0 auto 4px; display: flex; gap: 5px;
   justify-content: flex-end; flex-wrap: wrap;
 }
 .mwel-lang {
   background: transparent; border: 1px solid var(--soa-line); color: var(--soa-accent-dim);
-  border-radius: 3px; padding: 5px 11px; min-height: 34px; cursor: pointer;
-  font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em;
+  border-radius: 3px; padding: 4px 9px; min-height: 30px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em;
 }
 .mwel-lang.on { color: var(--soa-bg); background: var(--soa-accent); border-color: var(--soa-accent); }
 .mwel-lang:not(.on):active, .mwel-lang:not(.on):hover { color: var(--soa-accent); border-color: var(--soa-accent-dim); }
-.mwel-inner { max-width: 460px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+
+.mwel-inner { max-width: 460px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
 .mwel-inner > * { opacity: 0; transform: translateY(10px); animation: mwelUp 0.5s ease forwards; }
 .mwel-inner > *:nth-child(1) { animation-delay: 0.04s; }
 .mwel-inner > *:nth-child(2) { animation-delay: 0.10s; }
@@ -2476,66 +2481,119 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .mwel-inner > *:nth-child(4) { animation-delay: 0.22s; }
 .mwel-inner > *:nth-child(5) { animation-delay: 0.28s; }
 .mwel-inner > *:nth-child(6) { animation-delay: 0.34s; }
+.mwel-inner > *:nth-child(7) { animation-delay: 0.40s; }
+.mwel-inner > *:nth-child(8) { animation-delay: 0.46s; }
 @keyframes mwelUp { to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) {
-  .mwel-inner > * { opacity: 1; transform: none; animation: none; }
-}
 
-.mwel-head { margin-top: 12px; }
+.mwel-head { margin-top: 10px; }
 .mwel-title {
   margin: 0; font-family: var(--font-display); color: var(--soa-accent);
-  font-size: clamp(30px, 11vw, 46px); letter-spacing: 0.16em; line-height: 1.05;
-  text-shadow: 0 0 18px rgba(var(--soa-accent-rgb), 0.35);
+  font-size: clamp(28px, 10vw, 42px); letter-spacing: 0.16em; line-height: 1.05;
 }
 .mwel-sub {
-  margin: 8px 0 0; font-family: var(--font-mono); font-size: 11px;
+  margin: 8px 0 0; font-family: var(--font-mono); font-size: 10px;
   letter-spacing: 0.28em; color: var(--soa-accent-dim);
 }
-.mwel-lead { margin: 0; font-size: 16px; line-height: 1.55; color: var(--soa-fg); }
+.mwel-lead { margin: 0; font-size: 15px; line-height: 1.5; color: rgba(var(--soa-accent-rgb), 0.82); }
 .mwel-lead b { color: var(--soa-accent); font-weight: 600; }
 
-.mwel-note {
-  border: 1px solid var(--soa-line); border-left: 3px solid var(--soa-accent);
-  background: rgba(var(--soa-accent-rgb), 0.05);
-  border-radius: 4px; padding: 16px 18px;
+/* ── Primary action: pair with the camera ── */
+.mwel-pair { display: flex; flex-direction: column; gap: 10px; }
+.mwel-scan {
+  display: flex; align-items: center; justify-content: center; gap: 13px;
+  width: 100%; min-height: 62px; padding: 0 20px;
+  background: var(--soa-accent); color: var(--soa-bg);
+  border: 0; border-radius: 5px; cursor: pointer;
+  font-family: var(--font-display); font-size: 14px; letter-spacing: 0.16em;
+  text-transform: uppercase;
+  box-shadow: 0 0 26px -4px rgba(var(--soa-accent-rgb), 0.6);
+  animation: mwelPulse 3.4s ease-in-out infinite;
 }
-.mwel-note-h {
-  font-family: var(--font-display); font-size: 13px; letter-spacing: 0.14em;
-  text-transform: uppercase; color: var(--soa-accent); margin: 0 0 6px;
+.mwel-scan:active { transform: translateY(1px); opacity: 0.9; }
+@keyframes mwelPulse {
+  0%, 100% { box-shadow: 0 0 22px -6px rgba(var(--soa-accent-rgb), 0.5); }
+  50%      { box-shadow: 0 0 34px -2px rgba(var(--soa-accent-rgb), 0.75); }
 }
-.mwel-note-p { margin: 0; font-size: 14px; line-height: 1.55; color: rgba(var(--soa-accent-rgb), 0.85); }
-.mwel-note-p b { color: var(--soa-fg); }
+/* A QR reticle drawn from four corner brackets — the same shape the camera
+   overlay frames the code with, so the button previews what it opens. */
+.mwel-scan-ico { position: relative; flex: 0 0 22px; width: 22px; height: 22px; }
+.mwel-scan-ico i { position: absolute; width: 8px; height: 8px; border: 2px solid currentColor; }
+.mwel-scan-ico i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.mwel-scan-ico i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+.mwel-scan-ico i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+.mwel-scan-ico i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+.mwel-scan-label { line-height: 1; }
+.mwel-scan-p {
+  margin: 0; text-align: center; font-size: 13px; line-height: 1.45;
+  color: rgba(var(--soa-accent-rgb), 0.62);
+}
+.mwel-err {
+  margin: 0; padding: 9px 12px; border-radius: 4px;
+  border: 1px solid rgba(255, 138, 138, 0.35); background: rgba(255, 107, 107, 0.08);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.45; color: #ff8a8a;
+}
 
-.mwel-steps { display: flex; flex-direction: column; gap: 16px; }
-.mwel-step { display: flex; gap: 14px; align-items: flex-start; }
-.mwel-step-n {
-  flex: 0 0 30px; height: 30px; display: grid; place-items: center;
-  border: 1px solid var(--soa-accent-dim); border-radius: 50%;
-  font-family: var(--font-display); font-size: 13px; color: var(--soa-accent);
+/* Paste fallback — collapsed until the camera is refused or unavailable. */
+.mwel-manual { font-family: var(--font-mono); font-size: 12px; }
+.mwel-manual > summary {
+  cursor: pointer; list-style: none; text-align: center; padding: 6px 0;
+  color: var(--soa-accent-dim); letter-spacing: 0.06em;
 }
-.mwel-step-body { min-width: 0; }
-.mwel-step-h { margin: 4px 0 4px; font-size: 15px; color: var(--soa-fg); letter-spacing: 0.02em; }
-.mwel-step-p { margin: 0; font-size: 14px; line-height: 1.55; color: rgba(var(--soa-accent-rgb), 0.78); }
-.mwel-step-p b { color: var(--soa-accent); font-weight: 600; }
+.mwel-manual > summary::-webkit-details-marker { display: none; }
+.mwel-manual > summary:hover, .mwel-manual[open] > summary { color: var(--soa-accent); }
+.mwel-manual-row { display: flex; gap: 8px; margin-top: 8px; }
+.mwel-url {
+  flex: 1 1 auto; min-width: 0; min-height: 42px; padding: 0 12px;
+  background: rgba(var(--soa-accent-rgb), 0.05); color: var(--soa-fg);
+  border: 1px solid var(--soa-line); border-radius: 4px;
+  font-family: var(--font-mono); font-size: 13px;
+}
+.mwel-url:focus { outline: none; border-color: var(--soa-accent); }
+.mwel-go {
+  flex: 0 0 auto; min-height: 42px; padding: 0 16px; cursor: pointer;
+  background: transparent; color: var(--soa-accent);
+  border: 1px solid var(--soa-accent-dim); border-radius: 4px;
+  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.1em;
+}
+.mwel-go:active { background: rgba(var(--soa-accent-rgb), 0.12); }
 
+/* ── Divider between the two paths ── */
+.mwel-or {
+  display: flex; align-items: center; gap: 14px;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--soa-accent-dim);
+}
+.mwel-or::before, .mwel-or::after {
+  content: ''; flex: 1 1 auto; height: 1px; background: var(--soa-line);
+}
+
+/* ── Secondary path: install the desktop ── */
+.mwel-get { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.mwel-get-h {
+  margin: 0; font-family: var(--font-display); font-size: 13px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--soa-fg);
+}
+.mwel-get-p { margin: 0; font-size: 13px; line-height: 1.45; color: rgba(var(--soa-accent-rgb), 0.62); }
 .mwel-btn {
-  margin-top: 12px; display: inline-block; min-height: 42px; padding: 0 18px;
-  background: var(--soa-accent); color: var(--soa-bg); border: 0; border-radius: 4px;
-  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.16em;
-  text-transform: uppercase; cursor: pointer;
+  margin-top: 6px; min-height: 40px; padding: 0 16px; cursor: pointer;
+  background: transparent; color: var(--soa-accent);
+  border: 1px solid var(--soa-accent-dim); border-radius: 4px;
+  font-family: var(--font-display); font-size: 11px; letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
-.mwel-btn:active { opacity: 0.85; }
+.mwel-btn:active { background: rgba(var(--soa-accent-rgb), 0.12); }
 
-.mwel-feats { list-style: none; margin: 0; padding: 4px 0 0; display: flex; flex-direction: column; gap: 10px; }
+.mwel-feats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .mwel-feats li {
-  position: relative; padding-left: 24px; font-family: var(--font-mono);
-  font-size: 13px; color: rgba(var(--soa-accent-rgb), 0.8); line-height: 1.4;
+  position: relative; padding-left: 20px; font-family: var(--font-mono);
+  font-size: 12px; color: rgba(var(--soa-accent-rgb), 0.6); line-height: 1.4;
 }
-.mwel-feats li::before {
-  content: '▸'; position: absolute; left: 4px; top: 0; color: var(--soa-accent);
-}
+.mwel-feats li::before { content: '▸'; position: absolute; left: 2px; top: 0; color: var(--soa-accent-dim); }
 
-.mwel-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 6px; border-top: 1px solid var(--soa-line); }
+.mwel-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding-top: 14px; border-top: 1px solid var(--soa-line);
+}
 .mwel-ghost {
   background: transparent; border: none; padding: 8px 0; cursor: pointer;
   font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em;
@@ -2544,9 +2602,9 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .mwel-ghost:hover, .mwel-ghost:active { color: var(--soa-accent); }
 
 /* Creator signature — subtle footer credit on the mobile welcome. */
-.mwel-credit { margin: 14px 0 2px; text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; color: var(--soa-accent-dim); opacity: 0.78; }
-.mwel-credit-link { color: var(--soa-accent); text-decoration: none; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.3); transition: text-shadow 0.2s, border-color 0.2s; }
-.mwel-credit-link:hover, .mwel-credit-link:active { text-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.6); border-color: var(--soa-accent); }
+.mwel-credit { margin: 2px 0; text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; color: var(--soa-accent-dim); opacity: 0.7; }
+.mwel-credit-link { color: var(--soa-accent); text-decoration: none; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.3); }
+.mwel-credit-link:hover, .mwel-credit-link:active { border-color: var(--soa-accent); }
 
 /* ── Tron vibe: neon line-grid + accent glow (no CRT scanlines, no gradients) ── */
 .mwel { isolation: isolate; }
@@ -2558,14 +2616,53 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .mwel-langs, .mwel-inner { position: relative; z-index: 1; }
 .mwel-title { text-shadow: 0 0 10px rgba(var(--soa-accent-rgb), 0.45), 0 0 34px rgba(var(--soa-accent-rgb), 0.28); }
 .mwel-head {
-  padding-bottom: 16px; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.35);
+  padding-bottom: 14px; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.35);
   box-shadow: 0 1px 0 rgba(var(--soa-accent-rgb), 0.14), 0 10px 24px -16px rgba(var(--soa-accent-rgb), 0.55);
 }
-.mwel-note { box-shadow: inset 0 0 0 1px rgba(var(--soa-accent-rgb), 0.10), 0 0 26px -10px rgba(var(--soa-accent-rgb), 0.4); }
-.mwel-note-h { text-shadow: 0 0 12px rgba(var(--soa-accent-rgb), 0.4); }
-.mwel-step-n { box-shadow: 0 0 14px -2px rgba(var(--soa-accent-rgb), 0.5); }
-.mwel-btn { box-shadow: 0 0 18px -2px rgba(var(--soa-accent-rgb), 0.5); }
-.mwel-feats li::before { text-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.6); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mwel-inner > * { opacity: 1; transform: none; animation: none; }
+  .mwel-scan { animation: none; }
+}
+
+/* ── In-app QR camera overlay (shared shape with the /m/ companion) ──────
+   Lives here too because the root landing page loads only /assets/styles.css,
+   and the scanner it lazy-imports from /m/ ships no stylesheet of its own. */
+.qr-overlay { position: fixed; inset: 0; z-index: 9500; background: #000; overflow: hidden; }
+.qr-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  /* cover, not contain: a letterboxed preview makes people hold the phone
+     further away than the focus distance the lens actually wants. */
+  object-fit: cover;
+}
+.qr-mask {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  /* Dim everything but the reticle so the aim point is unmistakable. */
+  background: radial-gradient(ellipse 46% 26% at 50% 46%, transparent 0 99%, rgba(0, 0, 0, .55) 100%);
+}
+.qr-reticle { position: relative; width: min(64vw, 260px); aspect-ratio: 1; margin-bottom: 8vh; }
+.qr-reticle i { position: absolute; width: 30px; height: 30px; border: 2px solid var(--soa-accent, #aacfd1); }
+.qr-reticle i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.qr-reticle i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+.qr-reticle i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+.qr-reticle i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+.qr-overlay.qr-hit .qr-reticle i { border-color: #5dbd5a; }
+.qr-overlay.qr-hit::after { content: ''; position: absolute; inset: 0; background: rgba(93, 189, 90, .25); }
+.qr-bar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
+  background: linear-gradient(transparent, rgba(0, 0, 0, .75) 40%);
+}
+.qr-btn {
+  flex: 0 0 auto; min-height: 40px; padding: 0 16px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em;
+  color: #dfe6e6; background: rgba(255, 255, 255, .12);
+  border: 1px solid rgba(255, 255, 255, .2); border-radius: 5px;
+}
+.qr-btn.on { background: var(--soa-accent, #aacfd1); color: #000; }
+.qr-hint { flex: 1 1 auto; text-align: center; font-family: var(--font-mono); font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, .8); }
+.qr-hint--err { color: #ff8a8a; }
 
 /* ── New-tab folder picker ─────────────────────────────────────── */
 .soa-folder-picker { width: min(560px, calc(100vw - 32px)); }
