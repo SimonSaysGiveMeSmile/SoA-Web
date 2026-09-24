@@ -49,6 +49,16 @@
         <input id="camera-input" type="file" accept="image/*" hidden />
 
         <nav id="tabs" aria-label="Open tabs"></nav>
+        <!-- Shown only when the page is NOT running as a home-screen app: the
+             browser's URL bar and toolbar are the browser's, so true full screen
+             means installing once. In flow (not fixed) so it never covers the
+             top bar, the tab strip, the keyboard row or the chat composer. -->
+        <div id="install-hint" hidden role="status">
+            <span class="ih-icon" aria-hidden="true">⤒</span>
+            <span class="ih-text"></span>
+            <button class="ih-close" type="button" aria-label="Dismiss">✕</button>
+        </div>
+
 
         <main id="stage">
             <section id="terminal-view" class="view active">
