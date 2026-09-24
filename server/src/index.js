@@ -55,6 +55,7 @@ const tabPersist       = require('./tabPersist');
 const procMem          = require('./procMem');
 const claudeSessions   = require('./claudeSessions');
 const contextCanvas    = require('./contextCanvas');
+const skillsApi        = require('./skillsApi');
 const tabApi           = require('./tabApi');
 const fleetRestore     = require('./fleetRestore');
 const envStore         = require('./envStore');
@@ -507,6 +508,7 @@ pairing.mount(app, requireAuthed, pair, {
 });
 tabApi.mount(app, requireAuthed, sessions);
 fleetRestore.mount(app, requireAuthed, sessions);
+skillsApi.mount(app, requireAuthed);
 envStore.mount(app, requireAuthed);
 autoCompact.mount(app, requireAuthed);
 autoPilot.mount(app, requireAuthed);
