@@ -855,7 +855,11 @@ class App {
     _boot(primaryOrigin, altOrigin, token) {
         this._historySource = primaryOrigin;
         this._booted = true;
-        setTimeout(() => this._installHint(), 1500);
+        // Fullscreen setup is always available from the top-right control.
+        try {
+            if (localStorage.getItem('soa.m.installHint') === 'auto')
+                setTimeout(() => this._installHint(), 1500);
+        } catch (_) {}
         this.socket = new BridgeSocket({
             url: wsBaseFromHttp(primaryOrigin),
             altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
