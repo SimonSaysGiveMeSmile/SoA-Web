@@ -112,9 +112,12 @@ function requirePty() {
 }
 
 class Tab {
-    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit }) {
+    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, command, args }) {
         this.id = id;
+        this.historyId = require('node:crypto').randomUUID();
         this.cwd = cwd || process.cwd();
+        this.command = command || DEFAULT_SHELL;
+        this.args = args || [];
         // Default the tab label to the cwd's folder name so "Hireal" shows
         // up as "Hireal" instead of "tab 1". A caller-supplied title wins,
         // and so does any later user rename (tracked via userRenamed).
@@ -135,7 +138,7 @@ class Tab {
     spawn() {
         const pty = requirePty();
         try {
-            this.pty = pty.spawn(DEFAULT_SHELL, [], {
+            this.pty = pty.spawn(this.command, this.args, {
                 name: 'xterm-256color',
                 cols: this.cols,
                 rows: this.rows,
@@ -220,7 +223,7 @@ class TabManager {
             // cwd lets clients dedup by project — soa-relaunch skips tabs whose
             // cwd is already open instead of duplicating the whole fleet.
             return {
-                id: t.id, title: t.title, cols: t.cols, rows: t.rows,
+                id: t.id, historyId: t.historyId, title: t.title, cols: t.cols, rows: t.rows,
                 exited: t.exited, cwd: t.cwd || null,
                 // Per-tab process-tree memory (bytes), refreshed ~10s by the
                 // daemon's memory sampler. null until the first sample.
@@ -261,12 +264,14 @@ class TabManager {
         return true;
     }
 
-    open({ title, cwd, cols, rows, env, silent, seedScrollback } = {}) {
+    open({ title, cwd, cols, rows, env, silent, seedScrollback, command, args } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
             title: title || undefined,
             cwd, cols, rows,
+            ...require('./voiceChat').launchOptions(cwd),
+            ...(command ? { command, args } : {}),
             // Inject SOA_WEB_TTS_URL + SOA_WEB_TAB so a Claude Code Stop hook
             // running under this shell can post its spoken text back to us, and
             // put our scripts dir on PATH so agents can run `soa-msg` /

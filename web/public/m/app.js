@@ -14,18 +14,19 @@
  */
 
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
-import { ansiToHtml, newState } from './ansi.js';
 import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
+import { VoiceChat } from './voice-chat.js';
+import { SessionHistory, openHistory } from './session-history.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v57 · MEET · agent group meetings · 2026-08-20';
+const MOBILE_BUILD = 'v87 · offline session history · 2026-09-24';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -654,6 +655,17 @@ class App {
 
         const { token, backend, altOrigin } = readToken();
         const primaryOrigin = backend || location.origin;
+        this._historySource = primaryOrigin;
+        let historyStorage;
+        try { historyStorage = localStorage; } catch (_) {}
+        this._history = new SessionHistory(historyStorage);
+        this._historyKeys = new Map();
+        this._chatDrafts = new Map();
+        for (const id of ['chat-history', 'reconnect-history'])
+            document.getElementById(id)?.addEventListener('click', () => this._openHistory());
+        this.chatInput?.addEventListener('input', () => this._saveHistory());
+        window.addEventListener('pagehide', () => this._saveHistory());
+        document.addEventListener('visibilitychange', () => { if (document.hidden) this._saveHistory(); });
 
         if (!token) {
             // The QR/link arrived without a token. That's only fine if the
@@ -670,7 +682,7 @@ class App {
     async _bootWithoutToken(primaryOrigin, altOrigin) {
         let tokenRequired = true;
         try {
-            const res = await fetch(primaryOrigin + '/api/ping', { cache: 'no-store' });
+            const res = await fetch(primaryOrigin + '/api/ping', { cache: 'no-store', signal: AbortSignal.timeout(4000) });
             if (res.ok) {
                 const body = await res.json().catch(() => null);
                 if (body && body.tokenRequired === false) tokenRequired = false;
@@ -709,6 +721,7 @@ class App {
                 <div class="welcome-title">SON OF ANTON</div>
                 <div class="welcome-sub">${escapeHtml(message || 'Scan the QR code on your desktop to connect this phone.')}</div>
                 <button class="welcome-scan" type="button">Scan QR code</button>
+                <button class="welcome-history welcome-scan" type="button">Read saved history</button>
                 <label class="welcome-auto">
                     <input type="checkbox" ${auto ? 'checked' : ''}>
                     <span>Open the camera automatically</span>
@@ -731,6 +744,7 @@ class App {
         };
 
         el.querySelector('.welcome-scan').addEventListener('click', () => this._openScanner());
+        el.querySelector('.welcome-history').addEventListener('click', () => this._openHistory());
         el.querySelector('.welcome-auto input').addEventListener('change', (e) => {
             this._autoScanPref(e.target.checked);
         });
@@ -831,8 +845,58 @@ class App {
         return true;
     }
 
+    // ── Full screen means "installed" ─────────────────────────────────────
+    // A web page cannot hide Safari's or Chrome's own bars, and an in-app
+    // browser (a link opened from a notification or a chat) cannot even be
+    // added to the home screen. The only route to a chromeless terminal is a
+    // one-time install, so say so — in flow under the tab strip, dismissable,
+    // and remembered. `force` re-shows it briefly (without re-arming the
+    // permanent dismissal) when the user taps fullscreen on a phone that
+    // cannot fullscreen a page, so that tap is never silent.
+    _installHint(force) {
+        const el = document.getElementById('install-hint');
+        if (!el) return;
+        // The App Store shell is already chromeless; never tell it to open Safari.
+        if (window.Capacitor) return;
+        try {
+            const standalone = window.navigator.standalone === true
+                || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)
+                || (window.matchMedia && matchMedia('(display-mode: fullscreen)').matches);
+            if (standalone) return;
+            if (!force && localStorage.getItem('soa.m.installHint') === 'dismissed') return;
+        } catch (_) { /* private mode: show it, it can still be dismissed */ }
+        const ua = navigator.userAgent || '';
+        const iOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        // Heuristic for an in-app browser: iOS WebViews lack Safari's version
+        // token (the Google app keeps it but announces GSA); most Android
+        // in-app browsers announce "wv" or the host app.
+        const inApp = (iOS && !/Safari\//.test(ua)) || /\bwv\b|FBAN|FBAV|Instagram|Line\/|ntfy|GSA\//i.test(ua);
+        const text = el.querySelector('.ih-text');
+        if (inApp) {
+            text.innerHTML = 'For full screen, open this link in <b>Safari</b> (⋯ → Open in Safari), then <b>Share → Add to Home Screen</b>.';
+        } else if (iOS) {
+            text.innerHTML = 'Full screen: tap <b>Share</b> then <b>Add to Home Screen</b>, and launch it from there.';
+        } else {
+            text.innerHTML = 'Full screen: use your browser menu’s <b>Install app</b> / <b>Add to Home screen</b>, then launch it from there.';
+        }
+        el.hidden = false;
+        clearTimeout(this._installHintTimer);
+        // Out of the way on its own after a while; ✕ makes it permanent.
+        this._installHintTimer = setTimeout(() => { el.hidden = true; }, force ? 8000 : 20000);
+        if (!el._ihWired) {
+            el._ihWired = true;
+            el.querySelector('.ih-close').addEventListener('click', () => {
+                el.hidden = true;
+                clearTimeout(this._installHintTimer);
+                try { localStorage.setItem('soa.m.installHint', 'dismissed'); } catch (_) {}
+            });
+        }
+    }
+
     _boot(primaryOrigin, altOrigin, token) {
+        this._historySource = primaryOrigin;
         this._booted = true;
+        setTimeout(() => this._installHint(), 1500);
         this.socket = new BridgeSocket({
             url: wsBaseFromHttp(primaryOrigin),
             altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
@@ -1508,6 +1572,7 @@ class App {
                     if (this._prevSocketState !== SocketState.CONNECTED) sounds.play('connect');
                     break;
                 case SocketState.DISCONNECTED:
+                    this._saveHistory();
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
                     this._scheduleReconnect('link lost · retrying');
                     this._releaseWakeLock();
@@ -1538,8 +1603,13 @@ class App {
                 // Background tabs' scrollback, streamed one frame per tab after
                 // HELLO (active tab ships inline with HELLO). Same handling as a
                 // live term-data chunk: write the off-screen buffer + classify.
-                case 'replay':    this._applyTerminalChunk(msg.d); break;
+                case 'replay':
+                    if (msg.d && msg.d.id != null) this._getTabState(msg.d.id).term.reset();
+                    this._applyTerminalChunk(msg.d); break;
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
+                case 'term-batch':
+                    for (const item of msg.d?.items || []) this._applyTerminalChunk(item);
+                    break;
                 case 'term-exit': break;
                 // The daemon now announces a tab's real PTY geometry the moment
                 // it changes, instead of it only riding along on the next
@@ -1547,8 +1617,9 @@ class App {
                 // its own font to whatever `cols` the desktop is drawing at — so
                 // acting on this promptly is what keeps the wrapping identical.
                 case 'term-size':
-                    if (msg.d && msg.d.id === this._activeTabId && msg.d.cols > 1) {
-                        this._fitTerminalFont(msg.d.cols);
+                    if (msg.d && msg.d.id != null) {
+                        this._getTabState(msg.d.id).term.setSize(msg.d.cols, msg.d.rows);
+                        if (msg.d.id === this._activeTabId) this._fitTerminalFont(msg.d.cols);
                     }
                     break;
                 case 'notice':    this._showNotice(msg.d); break;
@@ -1584,7 +1655,8 @@ class App {
         });
 
         this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
-        this.btnMic.addEventListener('click', () => this.socket.sendInput('voice-toggle'));
+        this._wireVoiceChat();
+        this.btnMic.addEventListener('click', () => this._openVoiceManager());
 
         // Chat composer: send a message to the active tab's PTY (exactly like
         // typing it in the terminal) and echo it as an outgoing bubble.
@@ -1731,6 +1803,7 @@ class App {
     }
 
     _showView(target) {
+        if (target !== 'chat-view') this._voiceChat?.cancel();
         // Premium-feature gate: the DASH/FLEET and MEET views are manager-only.
         // On a free/unlicensed install (`capabilities.manager` false) navigating
         // to one is a no-op that falls back to the terminal — /api/manager and
@@ -2378,11 +2451,39 @@ class App {
         const thread = this._chatThreads.get(tabId);
         thread.push(msg);
         if (thread.length > 200) thread.shift();   // cap memory per tab
+        this._saveHistory(tabId);
     }
 
-    _sendChat() {
+    _saveHistory(id = this._activeTabId) {
+        const tab = this._snapshot?.tabs?.find(t => t.id === id);
+        if (!tab || !this._history) return;
+        if (id !== this._activeTabId && !this._history.get(this._historySource, tab)) return;
+        const terminal = this._tabStates.get(id)?.term.recentText(250);
+        this._history.update(this._historySource, tab, {
+            messages: this._chatThreads.get(id) || [],
+            draft: id === this._activeTabId ? this.chatInput.value : this._chatDrafts.get(id) || '',
+            ...(terminal?.trim() ? { terminal } : {}),
+        });
+        if (!this._history.available) this._voiceStatus('Browser storage is full or unavailable; new history may not survive closing this page.');
+    }
+
+    _openHistory() {
+        this._saveHistory();
+        this._voiceChat?.cancel();
+        openHistory(this._history, { connected: this.socket?.state === SocketState.CONNECTED,
+            onClear: () => { this._chatThreads.clear(); this._chatDrafts.clear(); this.chatInput.value = ''; this._renderChat(); },
+        });
+    }
+
+    async _sendChat() {
+        if (this._chatSending) return;
         const raw = (this.chatInput && this.chatInput.value || '').trim();
         if (!raw) return;
+        if (this.socket?.state !== SocketState.CONNECTED) {
+            this._saveHistory();
+            this._voiceStatus(this._history.available ? 'Offline. Your draft is saved on this device. Reconnect, then Send.' : 'Offline. Browser storage is unavailable; keep this page open to retain your draft.');
+            return;
+        }
         const id = this._activeTabId;
         if (id == null) return;
         // Chat-mode verbosity commands (/brief, /verbose, /details) rewrite to a
@@ -2390,12 +2491,77 @@ class App {
         // stays clean and the bubble still shows what you typed.
         const text = this._chatCommand(raw) || raw;
         // Type it into the PTY (newline submits, like pressing Enter in terminal).
-        this.socket.sendInput('term-keys', { id, text: text + '\r' });
+        this._voiceChat?.cancel();
+        this._chatSending = true;
+        try {
+            const r = await this._api('/api/voice/chat/send', { id, text });
+            if (!r?.ok) throw new Error(r?.error || 'Could not send. Your draft is kept.');
+        } catch (err) {
+            this._voiceStatus(err.message);
+            return;
+        } finally { this._chatSending = false; }
         this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
-        this.chatInput.value = '';
+        if (this._activeTabId === id && this.chatInput.value.trim() === raw) this.chatInput.value = '';
+        if (this._chatDrafts.get(id)?.trim() === raw) this._chatDrafts.set(id, '');
+        this._saveHistory(id);
         this.chatInput.style.height = 'auto';
         this._renderChat();
         sounds.play('tabSwitch');
+        this._voiceStatus('Sent.');
+    }
+
+    _voiceStatus(text) {
+        const el = document.getElementById('voice-chat-status');
+        if (el) el.textContent = text;
+    }
+
+    _wireVoiceChat() {
+        const mic = document.getElementById('chat-mic');
+        this._voiceChat = new VoiceChat({
+            onDraft: text => { this.chatInput.value = text; this.chatInput.dispatchEvent(new Event('input')); },
+            onState: state => {
+                const active = this._voiceChat.active;
+                mic.textContent = active ? 'Done' : 'Talk';
+                mic.setAttribute('aria-pressed', String(active));
+                this._voiceStatus(({ starting: 'Opening microphone…', listening: 'Listening… Tap Done when finished.',
+                    finishing: 'Finishing…', review: 'Review your message, then Send.', idle: 'Tap Talk, review your message, then Send.' })[state]);
+            },
+            onError: text => this._voiceStatus(text),
+        });
+        mic.addEventListener('click', () => {
+            if (this._voiceChat.active) this._voiceChat.stop();
+            else {
+                this._stopMicMonitor();
+                this.chatInput.blur();
+                this._voiceChat.start(this.chatInput.value);
+            }
+        });
+        document.getElementById('chat-manager').addEventListener('click', () => this._openVoiceManager());
+        document.getElementById('chat-read').addEventListener('click', () => {
+            this.btnSpeak.click();
+            document.getElementById('chat-read').setAttribute('aria-pressed', String(this._ttsEnabled));
+        });
+        document.getElementById('chat-read').setAttribute('aria-pressed', String(this._ttsEnabled));
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) { this._voiceChat.cancel(); window.speechSynthesis?.cancel(); }
+        });
+        if (!this._voiceChat.supported) this._voiceStatus('Use your keyboard’s dictation microphone to speak a message.');
+    }
+
+    async _openVoiceManager() {
+        if (this._openingVoiceManager) return;
+        this._openingVoiceManager = true;
+        this._showView('chat-view');
+        this._voiceStatus('Connecting to your voice manager…');
+        try {
+            const r = await this._api('/api/voice/chat/session', {});
+            if (!r?.ok) throw new Error(r?.error || 'Could not open the manager.');
+            this._voiceManagerId = r.tab.id;
+            this._applySnapshot({ ...this._snapshot, tabs: r.tabs });
+            this._switchTabLocal(r.tab.id);
+            this._voiceStatus(r.created ? 'Manager terminal opened. Finish any sign-in or approval in TERM, then Talk.' : 'Ready. Tap Talk, review, then Send.');
+        } catch (err) { this._voiceStatus(err.message); }
+        finally { this._openingVoiceManager = false; }
     }
 
     // Chat-mode quick commands: map a typed slash-command to a plain-English
@@ -2420,6 +2586,8 @@ class App {
 
     _renderChat() {
         if (!this.chatLog) return;
+        const target = document.getElementById('chat-target');
+        if (target) target.textContent = this._tabName(this._activeTabId);
         const thread = this._chatThreads.get(this._activeTabId) || [];
         if (!thread.length) {
             this.chatLog.innerHTML =
@@ -3047,6 +3215,7 @@ class App {
     }
 
     _speak(text) {
+        if (this._voiceChat?.active) return;
         try {
             const synth = window.speechSynthesis;
             if (!synth) return;
@@ -3117,12 +3286,9 @@ class App {
                 document.exitFullscreen().catch(() => {});
             }
         } catch (_) {}
-        // iPhone Safari can't fullscreen a page — nudge the PWA install once.
-        if (on && !document.documentElement.requestFullscreen && !this._fsHinted) {
-            this._fsHinted = true;
-            const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
-            if (!standalone) this._showNotice({ level: 'info', text: 'Tip: Share → “Add to Home Screen” for true fullscreen on iPhone.' });
-        }
+        // iPhone Safari can't fullscreen a page: say so, briefly, every time
+        // the button is used — even after the standing hint was dismissed.
+        if (on && !document.documentElement.requestFullscreen) this._installHint(true);
         setTimeout(() => this._scrollTermBottom(), 120);
     }
 
@@ -3510,6 +3676,9 @@ class App {
 
     _applyHello(data) {
         if (!data) return;
+        for (const ts of this._tabStates.values()) ts.term.reset();
+        this._agentRecent?.clear();
+        this._mobileStatus?.clear();
         // HELLO carries the full initial state: tabs, activeId, replay (scrollback)
         this._applySnapshot(data);
         // Replay scrollback for each tab so the terminal shows existing output
@@ -3552,6 +3721,13 @@ class App {
     // repaints tabs + terminal. Output for every tab is already buffered, so the
     // switched-to tab shows correct content immediately.
     _switchTabLocal(id) {
+        this._saveHistory();
+        this._voiceChat?.cancel();
+        if (id !== this._activeTabId && this.chatInput) {
+            if (!this._chatDrafts) this._chatDrafts = new Map();
+            this._chatDrafts.set(this._activeTabId, this.chatInput.value);
+            this.chatInput.value = this._chatDrafts.get(id) || '';
+        }
         if (id == null) return;
         if (this._activeTabId !== id && this._snapshot) {
             this._activeTabId = id;
@@ -3567,6 +3743,15 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
+        for (const tab of rawTabs) {
+            const key = this._history.key(this._historySource, tab);
+            if (this._historyKeys.get(tab.id) === key) continue;
+            const saved = this._history.get(this._historySource, tab);
+            this._historyKeys.set(tab.id, key);
+            this._chatThreads.set(tab.id, saved?.messages || []);
+            this._chatDrafts.set(tab.id, saved?.draft || '');
+            if (tab.id === this._activeTabId && this.chatInput) this.chatInput.value = saved?.draft || '';
+        }
         // Per-device active-tab resolution.
         //
         // "Which tab this phone is viewing" is a CLIENT-LOCAL concept. The server
@@ -3600,7 +3785,9 @@ class App {
         let activeId;
         if (!this._hasReceivedSnapshot) {
             this._adoptNewTabIds = null;
-            activeId = idList.includes(snap.activeId) ? snap.activeId
+            const recent = this._history.records.find(r => rawTabs.some(t => this._history.key(this._historySource, t) === r.key));
+            const savedTab = recent && rawTabs.find(t => this._history.key(this._historySource, t) === recent.key);
+            activeId = savedTab ? savedTab.id : idList.includes(snap.activeId) ? snap.activeId
                 : (idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0));
         } else if (this._adoptNewTabIds && idList.includes(snap.activeId) && !this._adoptNewTabIds.has(snap.activeId)) {
             this._adoptNewTabIds = null;
@@ -3617,6 +3804,7 @@ class App {
             active: t.id === activeId,
             status: t.exited ? 'exited' : null,
             cols: t.cols,
+            rows: t.rows,
         }));
 
         const activeTab = tabs.find(t => t.active);
@@ -3625,17 +3813,20 @@ class App {
             sounds.play('tabSwitch');
         }
         this._hasReceivedSnapshot = true;
+        if (this._activeTabId !== activeId && this.chatInput) {
+            this._chatDrafts.set(this._activeTabId, this.chatInput.value);
+            this.chatInput.value = this._chatDrafts.get(activeId) || '';
+        }
         this._activeTab = newActiveTab;
         this._activeTabId = activeId;
         pushLog(`snapshot: raw=${JSON.stringify(snap.activeId)} → resolved activeId=${activeId} tabs=[${idList.join(',')}]`);
         console.log('%c[app] snapshot activeId=' + activeId + ' (type: ' + typeof activeId + ')', 'color:#ff9');
 
         for (const t of tabs) {
-            if (!this._tabStates.has(t.id)) {
-                this._tabStates.set(t.id, { term: new TermBuffer({ rows: t.rows || 24 }) });
-            } else if (t.rows) {
-                this._tabStates.get(t.id).term.setRows(t.rows);
-            }
+            this._getTabState(t.id).term.setSize(t.cols, t.rows);
+        }
+        for (const [id, ts] of this._tabStates) {
+            if (!tabs.some(t => t.id === id)) { ts.term.dispose(); this._tabStates.delete(id); }
         }
 
         this._connectedDevices = snap.connectedDevices || 0;
@@ -4054,6 +4245,7 @@ class App {
     }
 
     _resync() {
+        for (const ts of this._tabStates.values()) ts.term.dispose();
         this._tabStates.clear();
         this._hasReceivedSnapshot = false;
         this._adoptNewTabIds = null;
@@ -4064,7 +4256,7 @@ class App {
     _renderTerminalSnapshot(term) {
         const ts = this._getTabState(this._activeTabId);
         ts.term.reset();
-        if (term.rows) ts.term.setRows(term.rows);
+        ts.term.setSize(term.cols, term.rows);
         ts.term.write(term.screen || term.recent || '');
         this.termEl.innerHTML = ts.term.toHtml();
         this._fitTerminalFont(term.cols);
@@ -4079,11 +4271,6 @@ class App {
         const tabId = payload.id ?? this._activeTabId;
         const ts = this._getTabState(tabId);
         ts.term.write(payload.data);
-        this._detectTabAgent(tabId, payload.data);
-        if (tabId === this._activeTabId && !this._flushScheduled) {
-            this._flushScheduled = true;
-            requestAnimationFrame(() => this._renderActive());
-        }
     }
 
     // Watch each tab's stream for agent-status patterns (green=working,
@@ -4142,7 +4329,22 @@ class App {
 
     _getTabState(id) {
         if (!this._tabStates.has(id)) {
-            this._tabStates.set(id, { term: new TermBuffer({ rows: this._screenRows || 24 }) });
+            this._tabStates.set(id, { term: new TermBuffer({ rows: this._screenRows || 24,
+                onChange: () => {
+                    const ts = this._tabStates.get(id);
+                    if (!ts) return;
+                    if (id === this._activeTabId && !this._historyTimer) {
+                        this._historyTimer = setTimeout(() => { this._historyTimer = null; this._saveHistory(); }, 1000);
+                    }
+                    // Classify the current screen, not stale redraw bytes.
+                    if (this._agentRecent) this._agentRecent.delete(id);
+                    this._detectTabAgent(id, ts.term.recentText(40));
+                    if (id === this._activeTabId && !this._flushScheduled) {
+                        this._flushScheduled = true;
+                        requestAnimationFrame(() => this._renderActive());
+                    }
+                },
+            }) });
         }
         return this._tabStates.get(id);
     }
@@ -4341,17 +4543,17 @@ function formatRate(bps) {
 
 window.addEventListener('DOMContentLoaded', () => {
     window._app = new App();
-    // Only register the service worker when served at the root scope (i.e.
-    // same-origin as the backend). On Vercel we live under /m/ which would
-    // give the SW the wrong scope and cache stale assets.
+    // Cache the shell relative to its own root, including the /m/ deployment.
     // Skip the SW inside the native shell: Capacitor already serves the assets
     // from the app bundle (offline works without it) and registering a SW on the
     // capacitor:// scheme is unreliable. window.Capacitor is injected by the
     // native runtime and is undefined on the plain web build.
-    if ('serviceWorker' in navigator && location.pathname === '/' && !window.Capacitor) {
-        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    if ('serviceWorker' in navigator && !window.Capacitor) {
+        const hadController = !!navigator.serviceWorker.controller;
+        const scope = location.pathname.startsWith('/m') ? '/m/' : '/';
+        navigator.serviceWorker.register(scope + 'sw.js', { scope }).catch(() => {});
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-            location.reload();
+            if (hadController) { window._app?._saveHistory(); location.reload(); }
         });
     }
     checkVersionMatch();

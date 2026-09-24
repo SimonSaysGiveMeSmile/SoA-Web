@@ -320,6 +320,33 @@ button:active { background: var(--accent-bg-hover); }
     transform: translateX(-50%) translateY(0);
     opacity: 1;
 }
+/* ── "Add to Home Screen" hint: only when not running standalone ──
+   A flex-column child of #app between #tabs and #stage: it takes its own
+   row, so nothing is covered and nothing needs a z-index. */
+#install-hint {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    margin: 6px 10px 2px;
+    padding: 9px 10px 9px 12px;
+    background: rgba(12, 16, 20, 0.96);
+    border: 1px solid rgba(170, 207, 209, 0.35);
+    border-radius: 12px;
+    color: var(--fg, #dfe6e6);
+    font-size: 12.5px; line-height: 1.4;
+}
+#install-hint[hidden] { display: none; }
+#install-hint .ih-icon { color: var(--accent, #aacfd1); font-size: 16px; flex: 0 0 auto; }
+#install-hint .ih-text { flex: 1 1 auto; }
+#install-hint .ih-text b { color: var(--accent, #aacfd1); font-weight: 600; }
+#install-hint .ih-close {
+    flex: 0 0 auto; min-width: 34px; min-height: 34px;
+    background: transparent; border: 0; color: var(--fg-dim, #8a9a9b);
+    font-size: 15px; cursor: pointer; border-radius: 8px;
+}
+#install-hint .ih-close:active { background: rgba(255,255,255,0.08); }
+/* Focus mode hides every bar, including this one. */
+#app.focus-mode #install-hint { display: none; }
+
 .tab-add {
     color: var(--fg-dim);
     font-size: 16px;

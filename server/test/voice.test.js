@@ -23,6 +23,9 @@ const path = require('node:path');
 const TMP = path.join(os.tmpdir(), `soa-web-voice-test-${process.pid}`);
 fs.mkdirSync(TMP, { recursive: true });
 process.env.SOA_WEB_STATE_DIR = TMP;
+// interpret() spawns the Claude CLI; point it at a binary that exits at once
+// so the test below can prove a dead child cannot take the daemon down.
+process.env.SOA_VOICE_CLAUDE = '/usr/bin/false';
 
 const voice = require('../src/voice');
 
@@ -75,11 +78,91 @@ test('wake word does not fire on unrelated speech', () => {
     }
 });
 
+test('wake word does not fire on ordinary English that merely starts with "hey"', () => {
+    // These are within two edits of "hey anton" as a whole phrase. A false
+    // wake opens a 15s window in which a bare "stop" is a Ctrl-C to a live
+    // agent, so the near-neighbours are the edge that matters.
+    const v = newVoice();
+    for (const heard of [
+        'hey anyone know why the build broke',
+        'hey anyone else seeing this',
+        'hey and on the deploy front we should ship friday',
+        'hey anything else',
+        'hey anybody home',
+        'hey and one more thing',
+        'they often break',
+        // one edit from the name across a word boundary — the split path is gone
+        'hey a ton of tests are failing',
+        'hey an ton of stuff',
+        'hey at on second thought',
+        'hey a town called malice',
+        // real names two edits from the name
+        'hey anthony will review it',
+        'hey antonio said yes',
+        'hey antenna is loose',
+        // short words that share "an" and sit within two edits
+        'hey ann can you look at this pr',
+        'hey ants are all over the kitchen',
+        'hey anti aliasing looks wrong here',
+        'hey ant build is broken',
+        'hey ant stop',
+        'he ants marched in',
+    ]) {
+        assert.equal(v._matchWake(heard), null, heard + ' must NOT wake');
+    }
+});
+
 test('a custom wake phrase replaces the default', () => {
     const v = newVoice();
     v.setWakeWord('yo computer');
     assert.equal(v._matchWake('yo computer read output'), 'read output');
     assert.equal(v._matchWake('hey anton read output'), null);
+});
+
+test('a one-word wake phrase must match exactly — no fuzz, so ordinary sentences cannot wake it', () => {
+    const v = newVoice();
+    v.setWakeWord('computer');
+    assert.equal(v._matchWake('computer next tab'), 'next tab');
+    assert.equal(v._matchWake('okay computer next tab'), 'next tab');
+    assert.equal(v._matchWake('my computer crashed'), null);
+    assert.equal(v._matchWake('the computer is slow'), null);
+    assert.equal(v._matchWake('compute the total'), null);
+});
+
+test('"stop talking" silences speech and never Ctrl-Cs the agent', () => {
+    const v = newVoice();
+    for (const said of ['stop talking', 'stop reading', 'stop speaking', 'be quiet', 'shut up']) {
+        const r = v._parseCommand(said);
+        assert.equal(r.intent, 'app_action', said + ' must be an app action');
+        assert.equal(r.params.actionId, 'shut_up', said);
+    }
+    assert.equal(v._parseCommand('stop').intent, 'interrupt');
+    assert.equal(v._parseCommand('stop it').intent, 'interrupt');
+    assert.equal(v._parseCommand('stop the build').intent, 'interrupt');
+    assert.notEqual(v._parseCommand('stop worrying and ship it').intent, 'interrupt');
+    // "stop reading the output" is a request for silence, not for more reading
+    const r = v._parseCommand('stop reading the output');
+    assert.equal(r.intent, 'app_action'); assert.equal(r.params.actionId, 'shut_up');
+    // the TTS toggle's own advertised phrase turns narration off
+    const t = v._parseCommand('stop speaking replies');
+    assert.equal(t.intent, 'app_action'); assert.equal(t.params.actionId, 'toggle_tts');
+});
+
+test('a dead interpreter child cannot crash the daemon (EPIPE on a large prompt)', async () => {
+    // SOA_VOICE_CLAUDE is /usr/bin/false: the child exits before reading
+    // stdin, so ending a >64KB prompt into it fails asynchronously with
+    // EPIPE. With no 'error' listener that was an uncaughtException.
+    let crashed = null;
+    const onUncaught = (e) => { crashed = e; };
+    process.on('uncaughtException', onUncaught);
+    try {
+        const r = await voice.interpret('x'.repeat(300 * 1024), { tabs: [], projects: [], controls: [] }, { model: 'haiku' });
+        assert.equal(r.intent, 'unknown');
+        await new Promise(res => setTimeout(res, 150));   // let any late stream error surface
+        assert.equal(crashed, null, 'stdin/stdout error must be handled: ' + (crashed && crashed.message));
+    } finally {
+        process.off('uncaughtException', onUncaught);
+    }
 });
 
 // ── intent parsing ──────────────────────────────────────────────────────
@@ -207,8 +290,10 @@ test('the interpret prompt carries the tab list so project names resolve', () =>
         projects: ['/Users/x/other'],
     });
     assert.match(p, /#4 "iPlan"/);
-    assert.match(p, /\/Users\/x\/iPlan/);
-    assert.match(p, /\/Users\/x\/other/);
+    assert.match(p, /^  other$/m, 'known projects are listed by name');
+    // Names only: this prompt leaves the machine (claude -p → Anthropic API),
+    // and the client resolves names back to tabs/paths itself.
+    assert.doesNotMatch(p, /\/Users\/x/, 'absolute paths must not be sent');
     // The sentence must be JSON-quoted so an apostrophe can't break the prompt.
     assert.match(p, /Sentence: "go to the iplan repo"/);
 });
@@ -236,6 +321,49 @@ test('config round-trips and merges onto the defaults', () => {
     voice.saveConfig(base);
 });
 
+// ── typing into a tab ───────────────────────────────────────────────────
+// The store is SessionStore: `.sessions` is a Map and there is NO primary().
+function fakeStore(tabs, activeTab) {
+    const writes = [];
+    const byId = new Map(tabs.map(id => [id, { write: (d) => writes.push([id, d]) }]));
+    const session = { tabMgr: { order: [...tabs], get: (id) => byId.get(id) }, activeTab };
+    return { store: { sessions: new Map([['s1', session]]) }, session, writes };
+}
+
+test('typeIntoTab finds the fleet session without a primary() on the store', async () => {
+    const { store, writes } = fakeStore([3, 7], 7);
+    assert.equal(voice.typeIntoTab(store, null, 'hello', true), true);
+    await new Promise(resolve => setImmediate(resolve));
+    // null tab → the active tab; text now, Enter 160ms later (a glued CR
+    // reads as a pasted newline in the TUI, not a submit)
+    assert.deepEqual(writes, [[7, 'hello']]);
+    await new Promise(r => setTimeout(r, 250));
+    assert.deepEqual(writes, [[7, 'hello'], [7, '\r']]);
+});
+
+test('typeIntoTab prefers the caller\'s own session', async () => {
+    const a = fakeStore([1], 1);
+    const b = fakeStore([9], 9);
+    assert.equal(voice.typeIntoTab(a.store, null, 'x', false, b.session), true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(a.writes.length, 0);
+    assert.deepEqual(b.writes, [[9, 'x']]);
+});
+
+test('typeIntoTab refuses text carrying a newline or other control byte', () => {
+    const { store, writes } = fakeStore([1], 1);
+    assert.equal(voice.typeIntoTab(store, 1, 'ok\rrm -rf ~', true), false);
+    assert.equal(voice.typeIntoTab(store, 1, 'a;b\n', true), false);
+    assert.equal(writes.length, 0);
+    assert.equal(voice.isTypeSafe('/Users/x/Pictures/receipt 2.jpg look'), true);
+    assert.equal(voice.isTypeSafe('receipt\nrm -rf HOME.jpg'), false);
+});
+
+test('typeIntoTab returns false, not a throw, with no fleet session', () => {
+    assert.equal(voice.typeIntoTab({ sessions: new Map() }, null, 'x', true), false);
+    assert.equal(voice.typeIntoTab(null, null, 'x', true), false);
+});
+
 // ── vision watcher ──────────────────────────────────────────────────────
 test('the watcher refuses a missing directory instead of throwing', () => {
     const w = new voice.VisionWatcher(null);
@@ -255,6 +383,93 @@ test('the watcher seeds on existing files so it does not replay a library', () =
     assert.ok(w.seen.has('old.jpg'), 'pre-existing photos must be treated as seen');
     w.stop();
     assert.equal(w.dir, '');
+});
+
+test('the watcher cancels a pending ingest when stopped', async () => {
+    const dir = path.join(TMP, 'photos-stop');
+    fs.mkdirSync(dir, { recursive: true });
+    let ingested = 0;
+    const w = new voice.VisionWatcher(null);
+    w.onIngest = () => { ingested++; };
+    assert.equal(w.start(dir).ok, true);
+    fs.writeFileSync(path.join(dir, 'new.png'), 'x');
+    await new Promise(r => setTimeout(r, 150));   // let fs.watch schedule the 900ms ingest
+    w.stop();
+    assert.equal(w._timers.size, 0, 'pending timers must be cleared on stop');
+    await new Promise(r => setTimeout(r, 1100));
+    assert.equal(ingested, 0, 'nothing may be ingested after stop()');
+});
+
+test('the watcher hands a hostile filename to the tab as ONE quoted argument, in order', async () => {
+    const dir = path.join(TMP, 'photos-quote');
+    fs.mkdirSync(dir, { recursive: true });
+    const { store, writes } = fakeStore([2], 2);
+    voice.saveConfig({ ...voice.loadConfig(), vision: { ...voice.loadConfig().vision, targetTab: 2, prompt: 'describe' } });
+    const w = new voice.VisionWatcher(store);
+    assert.equal(w.start(dir).ok, true);
+    fs.writeFileSync(path.join(dir, 'a;touch pwn.png'), 'x');
+    await new Promise(r => setTimeout(r, 40));
+    fs.writeFileSync(path.join(dir, 'b$(id).png'), 'x');
+    await new Promise(r => setTimeout(r, 1500));
+    w.stop();
+    const lines = writes.map(([, d]) => d);
+    // Each path single-quoted, then its own Enter — never "A B \r \r".
+    assert.deepEqual(lines, [
+        `'${path.join(dir, 'a;touch pwn.png')}' describe`, '\r',
+        `'${path.join(dir, 'b$(id).png')}' describe`, '\r',
+    ]);
+    assert.equal(voice.shellQuote('/plain/path.jpg'), '/plain/path.jpg');
+    assert.equal(voice.shellQuote("it's here.jpg"), "'it'\\''s here.jpg'");
+});
+
+test('the vision route refuses foreign browsers before auth, and follows the live allowlist', async () => {
+    const express = require('express');
+    const http = require('node:http');
+    const { store, writes } = fakeStore([5], 5);
+    const allowed = ['https://www.s0a.app'];
+    let authed = 0;
+    const app = express();
+    voice.mount(app, (req, res, next) => { authed++; req.session = { tabMgr: { order: [] } }; next(); }, store, { allowedOrigins: allowed });
+    const srv = http.createServer(app);
+    await new Promise(r => srv.listen(0, r));
+    const port = srv.address().port;
+    const post = (headers) => new Promise((resolve) => {
+        const before = writes.length;
+        const req = http.request({ port, path: '/api/voice/vision?prompt=look', method: 'POST', headers }, (res) => {
+            res.resume(); res.on('end', () => setTimeout(() => resolve({ status: res.statusCode, typed: writes.length - before }), 150));
+        });
+        req.end(Buffer.from([0xff, 0xd8, 1, 2]));
+    });
+    try {
+        for (const [headers, want] of [
+            [{ 'sec-fetch-site': 'cross-site', origin: 'http://evil.example' }, 403],
+            [{ 'sec-fetch-site': 'same-site', origin: 'http://127.0.0.1:9' }, 403],
+            [{ origin: 'https://evil.example' }, 403],
+            [{}, 200],
+            [{ 'sec-fetch-site': 'same-origin' }, 200],
+            [{ 'sec-fetch-site': 'none' }, 200],
+            [{ origin: 'https://www.s0a.app' }, 200],
+        ]) {
+            const r = await post(headers);
+            assert.equal(r.status, want, JSON.stringify(headers));
+            assert.equal(r.typed > 0, want === 200, 'typed only on 200: ' + JSON.stringify(headers));
+        }
+        // A refused request never reached requireAuthed (no session provisioned).
+        const before = authed;
+        assert.equal((await post({ 'sec-fetch-site': 'cross-site', origin: 'http://evil.example' })).status, 403);
+        assert.equal(authed, before, 'gate must run before auth');
+        // index.js pushes the tunnel origin onto the SAME array after mount.
+        assert.equal((await post({ origin: 'https://abc.trycloudflare.com' })).status, 403);
+        allowed.push('https://abc.trycloudflare.com');
+        assert.equal((await post({ origin: 'https://abc.trycloudflare.com' })).status, 200, 'live allowlist, not a snapshot');
+    } finally {
+        srv.close();
+    }
+});
+
+test('expandHome expands only a leading tilde', () => {
+    assert.equal(voice.expandHome('~/Pictures'), path.join(os.homedir(), 'Pictures'));
+    assert.equal(voice.expandHome('/abs/path'), '/abs/path');
 });
 
 // ── app control registry ────────────────────────────────────────────────
@@ -381,48 +596,4 @@ test('a pairing QR with no token is reported as tokenless, not as junk', async (
     const p = parsePairingPayload('https://x.example/m/');
     assert.ok(p, 'a valid URL must still parse');
     assert.equal(p.token, '');
-});
-
-// ── settings voice could not reach before ───────────────────────────────────
-// Volume and the interface skin were mouse-only: every other setting in the
-// panel had a voice path, these did not. They go through the app's own
-// saveSettings (via the window bridge) rather than writing localStorage, so a
-// voice-set value normalizes exactly like a mouse-set one.
-test('volume steps clamp to 0..1 instead of running off the end', () => {
-    const step = actions.VOICE_ACTIONS_volumeStep;
-    assert.equal(step(0.5, +0.1), 0.6);
-    assert.equal(step(0.5, -0.1), 0.4);
-    assert.equal(step(1.0, +0.1), 1, 'louder at max is a no-op, not 1.1');
-    assert.equal(step(0.0, -0.1), 0, 'quieter at zero is a no-op, not -0.1');
-    assert.equal(step(undefined, -0.1), 0.9, 'an unset volume starts from the 1.0 default');
-    assert.equal(step('nonsense', +0.1), 1, 'a junk value falls back to the default');
-});
-
-test('the volume steps land on clean tenths, not float dust', () => {
-    // 0.7 - 0.1 is 0.5999999999999999 in IEEE754; a settings blob should not
-    // carry that, and neither should the spoken "60 percent".
-    assert.equal(actions.VOICE_ACTIONS_volumeStep(0.7, -0.1), 0.6);
-    assert.equal(actions.VOICE_ACTIONS_volumeStep(0.3, +0.1), 0.4);
-});
-
-test('every skin action names a skin the settings enum actually accepts', () => {
-    const SKINS = ['tron', 'minimal', 'liquid'];   // settings.js UILANGS
-    const skinActions = actions.VOICE_ACTIONS.filter(a => a.id.startsWith('skin_'));
-    assert.equal(skinActions.length, SKINS.length, 'one action per skin');
-    for (const a of skinActions) {
-        assert.ok(SKINS.includes(a.id.replace('skin_', '')), a.id + ' is not a real skin');
-    }
-});
-
-test('the new settings actions are reachable and do not collide with existing ones', () => {
-    for (const id of ['volume_up', 'volume_down', 'skin_tron', 'skin_minimal', 'skin_liquid']) {
-        const a = actions.voiceActionById(id);
-        assert.ok(a, id + ' is missing from the registry');
-        for (const phrase of a.phrases) {
-            const hit = actions.matchVoiceAction(phrase);
-            assert.ok(hit, `"${phrase}" matches nothing`);
-            // matchVoiceAction returns { action, score }, not the action.
-            assert.equal(hit.action.id, id, `"${phrase}" resolves to ${hit.action.id}, not ${id}`);
-        }
-    }
 });

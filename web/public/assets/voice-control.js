@@ -100,7 +100,14 @@ class VoiceControl {
       // trusting `continuous`.
       if (this.isEnabled) {
         clearTimeout(this._restartTimer);
-        this._restartTimer = setTimeout(() => { if (this.isEnabled) this._startRaw(); }, 250);
+        // Back off on repeated errors: a mic that keeps failing ('audio-capture',
+        // 'network') used to be restarted every 250ms forever, which on a page
+        // left open overnight is a hot loop. Doubling from 250ms to 15s, and
+        // giving up after a run of failures, keeps the "Chrome ended the stream"
+        // case instant while making a broken mic go quiet.
+        const n = this._errStreak || 0;
+        const delay = n ? Math.min(250 * Math.pow(2, n), 15000) : 250;
+        this._restartTimer = setTimeout(() => { if (this.isEnabled) this._startRaw(); }, delay);
       }
     };
 
@@ -114,6 +121,7 @@ class VoiceControl {
         const text = alts[0] || '';
         if (!text) continue;
 
+        this._errStreak = 0;   // a result means the mic works — reset the backoff
         if (!result.isFinal) {
           if (this.onTranscript) this.onTranscript(text, { final: false });
           continue;
@@ -127,11 +135,29 @@ class VoiceControl {
       const err = event.error;
       // 'no-speech' and 'aborted' are normal in continuous mode — surfacing
       // them as errors makes the widget look broken while it works fine.
-      if (err === 'no-speech' || err === 'aborted') return;
+      // 'no-speech' is the service's own ~7s idle timeout — normal, and
+      // self-throttling. 'aborted' is immediate (a start/stop race, a mic
+      // grabbed by another app) and used to restart at 250ms forever; it
+      // counts toward the backoff streak but is not surfaced as an error.
+      if (err === 'no-speech') return;
+      if (err === 'aborted') {
+        this._errStreak = (this._errStreak || 0) + 1;
+        if (this._errStreak < 8) return;
+      }
       console.warn('[Voice] recognition error:', err);
       if (err === 'not-allowed' || err === 'service-not-allowed') {
         this.isEnabled = false;
         this._notifyError('Microphone permission denied. Allow mic access for this site.');
+        return;
+      }
+      if (err !== 'aborted') this._errStreak = (this._errStreak || 0) + 1;
+      if (this._errStreak >= 8) {
+        // Eight failures in a row with no result in between: stop rather than
+        // retry forever. The user re-enables with one tap once the mic is back.
+        this.isEnabled = false;
+        clearTimeout(this._restartTimer);
+        this._notifyStatus({ listening: false });
+        this._notifyError('Microphone keeps failing (' + err + ') — voice paused. Tap Listen to retry.');
         return;
       }
       this._notifyError('Recognition error: ' + err);
@@ -147,6 +173,7 @@ class VoiceControl {
   }
 
   start() {
+    this._errStreak = 0;   // a deliberate (re)start begins the backoff ladder afresh
     if (!this.recognition) {
       this._notifyError('Speech recognition is not supported in this browser. Chrome or Edge works; iOS Safari does not.');
       return false;
@@ -176,9 +203,10 @@ class VoiceControl {
    * phrase (possibly ''), or null when the phrase isn't there.
    *
    * Browser ASR is unreliable on a two-syllable name: "anton" comes back as
-   * "antoine", "anthon", "and on", "auntie on". An exact match would make the
-   * wake word feel broken maybe a third of the time, so we compare the first
-   * few words by edit distance instead.
+   * "antoine", "anthon", "antone" (and sometimes split in two — "and on",
+   * "auntie on" — which we deliberately no longer accept; see below). An
+   * exact match would make the wake word feel broken a third of the time, so
+   * the name is compared by edit distance, with structural guards.
    */
   _matchWake(text) {
     const wake = (this.settings.wakeWord || 'hey anton').toLowerCase().trim();
@@ -187,26 +215,57 @@ class VoiceControl {
     if (!norm) return null;
     const words = norm.split(' ');
 
-    // Try to consume the wake phrase from the front, allowing the name to be
-    // split across an extra word ("and on" for "anton").
-    for (let take = wakeWords.length; take <= wakeWords.length + 1 && take <= words.length; take++) {
-      const head = words.slice(0, take).join(' ');
-      if (this._closeEnough(head, wake)) {
-        return words.slice(take).join(' ');
-      }
-      // Also accept a leading filler ("okay hey anton", "so hey anton").
-      if (take < words.length) {
-        const shifted = words.slice(1, take + 1).join(' ');
-        if (this._closeEnough(shifted, wake)) return words.slice(take + 1).join(' ');
-      }
+    // Consume the wake phrase from the front, word for word. The name may not
+    // span two words: that path let every cheap two-word neighbour of "anton"
+    // wake the terminal ("a ton of tests", "an ton", "at on"), and one false
+    // wake opens a window in which a bare "stop" is a Ctrl-C. The price is
+    // that the two-word mangles ("and on", "auntie on") no longer wake —
+    // recall lost, spurious interrupts gone.
+    const take = wakeWords.length;
+    if (take <= words.length && this._wakeMatches(words.slice(0, take), wakeWords)) {
+      return words.slice(take).join(' ');
+    }
+    // Also accept ONE leading filler ("okay hey anton", "so hey anton").
+    if (/^(okay|ok|so|well)$/.test(words[0]) && take < words.length && this._wakeMatches(words.slice(1, take + 1), wakeWords)) {
+      return words.slice(take + 1).join(' ');
     }
     return null;
   }
 
+  /**
+   * A candidate head matches the wake phrase when its FIRST word is the wake
+   * phrase's first word (one edit allowed: "hay") AND the rest is close to the
+   * name. Scoring the whole phrase in one edit budget let "hey anyone" and
+   * "hey and on the…" wake the terminal — "anyone" is two edits from "anton"
+   * — and one false wake opens a 15s window in which "stop" is a Ctrl-C.
+   * Splitting the budget keeps every real ASR mangle of the name ("antoine",
+   * "anthon", "and on") while refusing ordinary English that merely starts
+   * with "hey".
+   */
+  _wakeMatches(headWords, wakeWords) {
+    if (headWords.length !== wakeWords.length) return false;
+    // A one-word wake phrase has no leading word to pin, so it must match
+    // exactly — fuzzing it would let "my computer crashed" wake "computer".
+    if (wakeWords.length === 1) return headWords[0] === wakeWords[0];
+    if (this._levenshtein(headWords[0], wakeWords[0]) > 1) return false;
+    const name = headWords.slice(1).join(' ');
+    const wakeName = wakeWords.slice(1).join(' ');
+    if (name === wakeName) return true;
+    // Fuzzy path, structural first: the candidate must be at least
+    // as long as the name (so "ann", "ant", "anti" — two edits
+    // from "anton" — cannot stand in for it), share its first two letters
+    // (every real ASR mangle does — "antoine", "anthon", "antone"), sit within
+    // the edit budget, and not be one of the few common words left inside it.
+    if (name.length < wakeName.length) return false;
+    if (name.slice(0, 2) !== wakeName.slice(0, 2)) return false;
+    if (VoiceControl.WAKE_DENY.has(name)) return false;
+    return this._closeEnough(name, wakeName);
+  }
+
   _closeEnough(a, b) {
     if (a === b) return true;
-    // Distance budget scales with length: 2 edits on "hey anton" (9 chars) is
-    // enough for "hey antoine"/"hay anton" without matching unrelated speech.
+    // Distance budget scales with length: 2 edits on "anton" (5 chars) is
+    // enough for "antoine"/"anthon"/"antone" once the leading word is pinned.
     const budget = Math.max(2, Math.floor(b.length * 0.28));
     return this._levenshtein(a, b) <= budget;
   }
@@ -336,8 +395,23 @@ class VoiceControl {
       return { intent: 'sleep', params: {} };
     }
 
+    // Silence requests first: these begin with "stop" too, and the registry
+    // advertises them ("stop talking", "stop reading"). Matched here so they
+    // can never fall through to the interrupt below and Ctrl-C a live agent.
+    // "stop speaking replies" is the TTS toggle's own advertised phrase —
+    // it turns narration OFF, not just this sentence.
+    if (/^stop speaking replies$/.test(t)) {
+      return { intent: 'app_action', params: { actionId: 'toggle_tts' } };
+    }
+    if (/^(be quiet|shut up|quiet|stop (talking|reading|speaking|narrating|the voice)(\b.*)?)$/.test(t)) {
+      return { intent: 'app_action', params: { actionId: 'shut_up' } };
+    }
+
     // Control — checked early so "stop" can always stop a runaway process.
-    if (/^(stop|interrupt|cancel|abort|control c|ctrl c)\b/.test(t)) {
+    // Anchored: a bare "stop" (or "stop it/that/the agent/…") interrupts; any
+    // longer sentence starting with "stop" is not an interrupt and falls
+    // through to the phrase registry / interpreter.
+    if (/^(stop|interrupt|cancel|abort|control c|ctrl c)( (it|that|this|him|her|them|the (process|agent|command|run|build|job)))?$/.test(t)) {
       return { intent: 'interrupt', params: {} };
     }
 
@@ -527,6 +601,16 @@ class VoiceControl {
     if (this.onError) this.onError({ type: 'general', message });
   }
 }
+
+// Ordinary words that are within two edits of a short wake name. Kept small
+// and English-only on purpose: the wake phrase is user-configurable, and this
+// only guards the fuzzy path (an exact name always matches).
+VoiceControl.WAKE_DENY = new Set([
+  'anyone', 'anything', 'anybody', 'anon', 'annoy', 'antler', 'antsy', 'anyhow',
+  'anno', 'annum', 'anion', 'anent',
+  // Real names two edits from the default wake name.
+  'anthony', 'antonio', 'antonia', 'antony', 'antoni',
+]);
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { VoiceControl, VOICE_DEFAULTS };

@@ -10,8 +10,8 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=31';
-import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=28';
+import { t as tr } from '/assets/i18n.js?v=32';
+import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=27';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
 
 const $el = (tag, props = {}, children = []) => {
@@ -2256,6 +2256,13 @@ class PerfWidget extends Widget {
 // what an intent DOES, VoiceAudio owns device routing, VoiceVision owns the
 // camera. This file wires the four together and draws the panel.
 class VoiceControlWidget extends Widget {
+    // intervalMs is 0 (event-driven), but the audio sub-panel owns a poll of
+    // its own — route the shared visibility hooks to it so a collapsed sidebar
+    // or a backgrounded tab stops the system_profiler spawns like every other
+    // polling widget.
+    _suspend() { if (this.audioPanel) this.audioPanel.pause(); }
+    _resume() { if (this.audioPanel && this._audioSec && this._audioSec.open) this.audioPanel.resume(); }
+
     constructor({ parent, ctx }) {
         super({ titleKey: 'widget.voice', helpKey: 'widget.voice.body', parent, intervalMs: 0 });
         this.ctx = ctx || {};
@@ -2378,7 +2385,7 @@ class VoiceControlWidget extends Widget {
                 row('Speed', $el('div', { class: 'voice-row' }, [this._rateInput, this._rateVal])),
                 row('Understand free speech', this._modelChk),
                 $el('div', { class: 'voice-hint' },
-                    'Free speech goes to a local Haiku for translation into a command. Turn it off to stay on the built-in phrase list.'),
+                    'Free speech that matches no built-in phrase is sent to Claude (Haiku) through your Claude Code login, with your open tab names and project names, to be turned into a command. Turn it off to stay on the built-in phrase list and send nothing.'),
             ]),
         ]);
 
@@ -2389,11 +2396,15 @@ class VoiceControlWidget extends Widget {
             this._audioBody,
         ]);
         audioSec.addEventListener('toggle', () => {
-            if (!audioSec.open || this.audioPanel || typeof VoiceAudio === 'undefined') return;
+            if (typeof VoiceAudio === 'undefined') return;
+            if (!audioSec.open) { if (this.audioPanel) this.audioPanel.pause(); return; }
+            if (this.audioPanel) { this.audioPanel.resume(); return; }
+            // No mic prompt here: opening a disclosure is not a reason to ask
+            // for the microphone. Listen asks when the user actually starts.
             this.audioPanel = new VoiceAudio({ api, onStatus: (m) => this._log(m) });
-            this.audioPanel.grantMicPermission();
             this.audioPanel.mount(this._audioBody);
         });
+        this._audioSec = audioSec;
 
         // ── what can I say ──
         // Voice is undiscoverable without this: nothing on screen tells you
@@ -2489,6 +2500,13 @@ class VoiceControlWidget extends Widget {
 
     _paintStatus(st) {
         if (!this._indicator) return;
+        // Voice can switch itself off (mic denied, or eight failures in a
+        // row). The buttons are toggled in the click handlers, so mirror the
+        // real state here or "Tap Listen to retry" points at a hidden button.
+        if (this._startBtn && this._stopBtn) {
+            this._startBtn.style.display = st.enabled ? 'none' : '';
+            this._stopBtn.style.display = st.enabled ? '' : 'none';
+        }
         let cls = 'off', text = 'Off';
         if (st.speaking) { cls = 'speaking'; text = 'Speaking'; }
         else if (st.thinking) { cls = 'thinking'; text = 'Thinking…'; }

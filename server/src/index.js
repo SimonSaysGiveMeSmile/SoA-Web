@@ -519,7 +519,7 @@ agentBrowser.mount(app, requireAuthed, sessions);
 sessionManager.mount(app, requireAuthed, sessions);
 meetings.mount(app, requireAuthed, sessions);
 userProfile.mount(app, requireAuthed);
-voice.mount(app, requireAuthed, sessions);
+voice.mount(app, requireAuthed, sessions, { allowedOrigins: ALLOWED_ORIGINS });
 
 // ── Static ──────────────────────────────────────────────────────────────
 app.get('/_config.js', (req, res) => {
@@ -1105,6 +1105,7 @@ function scheduleAutoResume(restoredTabs, tabMgr) {
         catch (e) { dbg('auto-resume', 'scan failed', String((e && e.message) || e)); return; }
         let n = 0;
         for (const { tab, cwd } of restoredTabs) {
+            if (cwd === require('./voiceChat').CWD) continue;
             const hit = map.get(cwd);
             if (!hit) continue;
             const wait = n * 1500; // stagger cold-starts

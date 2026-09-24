@@ -62,6 +62,18 @@ function loadManagerState() {
             // tabs. Default OFF — the manager never reaps a tab unless the user
             // explicitly opts in. Env override wins for headless/prod pinning.
             closeInactive: CLOSE_INACTIVE_ENV != null ? CLOSE_INACTIVE_ENV : (d.closeInactive === true),
+            // How long a tab must be silent — no PTY output AND no Claude
+            // transcript activity for its cwd — before the hourly reaper closes
+            // it (only when closeInactive is on). Days; clamped 1..365.
+            closeInactiveDays: clampDays(d.closeInactiveDays, 30),
+            // The hourly reaper is its OWN opt-in. closeInactive above is the
+            // older, passive permission for the manager agent's `stop` action;
+            // flipping that (one tap on the phone) must not arm an autonomous
+            // job that SIGHUPs shells.
+            autoCloseInactive: d.autoCloseInactive === true,
+            // First time this daemon saw a cwd as an open tab, persisted so a
+            // restart does not reset every tab's age to "just opened".
+            firstSeen: (d.firstSeen && typeof d.firstSeen === 'object' && !Array.isArray(d.firstSeen)) ? d.firstSeen : {},
             schedules: Array.isArray(d.schedules) ? d.schedules.filter(s => s && Number(s.at) > 0) : [],
             // Messages queued for a tab's next turn. Surviving a restart is half
             // the point of keeping the queue server-side rather than in a
@@ -93,8 +105,14 @@ function loadManagerState() {
             meetings: (d.meetings && typeof d.meetings === 'object' && !Array.isArray(d.meetings)) ? d.meetings : {},
         };
     } catch (_) {
-        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, schedules: [], todos: [], groups: {}, lifecycles: {}, meetings: {} };
+        return { autoResume: false, autoResumeText: 'continue', closeInactive: CLOSE_INACTIVE_ENV === true, closeInactiveDays: 30, autoCloseInactive: false, firstSeen: {}, schedules: [], todos: [], groups: {}, lifecycles: {}, meetings: {} };
     }
+}
+
+function clampDays(v, dflt) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return dflt;
+    return Math.min(365, Math.max(1, n));
 }
 
 // Auto-group name for a cwd = its project folder (basename). Pure + exported so
@@ -280,6 +298,13 @@ function writeToTab(tab, text) {
 // `claude` there starts a FRESH session, losing pre-restart context AND
 // poisoning future --continue (see feedback: never bare-claude after a restart),
 // so index.js passes coldFallback:false to keep the original 2-step chain.
+// Shell-side form of index.js's SANE_TERM_RESET: mouse tracking
+// (1000/1002/1003/1006/1015), alt screen (1049), bracketed paste (2004), cursor
+// shown, keypad normal. Single-quoted so the shell passes the escapes to printf
+// verbatim.
+const SANE_SHELL_RESET =
+    "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?1049l\\033[?2004l\\033[?25h\\033>'";
+
 function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true } = {}) {
     let sid = sessionId;
     if (sid == null && resume && cwd) {
@@ -288,10 +313,18 @@ function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, c
     }
     const flag = model ? ` --model ${model}` : '';
     const tail = coldFallback ? ` || claude${flag}` : '';
-    const line = sid
+    const cmd = sid
         ? `claude --resume ${sid}${flag} || claude --continue${flag}${tail}`
         : `claude${flag}`;
-    submitToTab(tab, line);
+    // Reset the terminal modes the TUI arms once it exits, whatever the exit
+    // was (/exit, Ctrl-C, crash, a failed --resume falling through the chain).
+    // Without this the shell is exposed with mouse tracking still on, and every
+    // pointer move over the terminal is delivered to ZSH AS INPUT — coordinate
+    // reports pile onto the prompt line and one stray Enter runs them. `;` (not
+    // `&&`) so it runs on failure too. This cannot help when the PTY itself is
+    // killed (a daemon restart takes the shell with it); the restore-path seed
+    // in index.js covers that case.
+    submitToTab(tab, `${cmd}; ${SANE_SHELL_RESET}`);
     return sid;
 }
 
@@ -1223,8 +1256,103 @@ class SessionManager {
         return this.state.todos;
     }
 
+    // ── Inactive-tab reaper ─────────────────────────────────────────────
+    // Opt-in (autoCloseInactive) with a day threshold (closeInactiveDays).
+    // PTY output is NOT a usable liveness signal here: a restart respawns
+    // every shell's prompt, and the supervisors type into parked tabs on
+    // 15-minute timers, so every tab's lastOutputAt is minutes old at all
+    // times. What actually tracks the user is the Claude transcript for the
+    // tab's cwd. So: a tab is inactive when its newest transcript is older
+    // than the threshold AND the tab itself has been open that long
+    // (persisted firstSeen). A tab with NO Claude history at all is never
+    // judged — there is nothing to judge it by. Manager tabs are never
+    // closed. Runs from the 15s tick, once an hour.
+    _reapInactive(now) {
+        if (this.state.autoCloseInactive !== true) return;
+        if (now - (this._lastReapAt || 0) < 60 * 60 * 1000) return;
+        this._lastReapAt = now;
+        // Same entitlement as every surface that shows or edits this setting:
+        // a state file copied onto an unlicensed install must not keep reaping
+        // tabs the user can no longer see a switch for.
+        if (!entitlements.isEnabled('manager', {})) return;
+        const days = clampDays(this.state.closeInactiveDays, 30);
+        const maxSilenceMs = days * 24 * 60 * 60 * 1000;
+        const mgr = this.session.tabMgr;
+        if (!mgr) return;
+        const live = mgr.order.map(id => mgr.get(id)).filter(t => t && !t.exited);
+        // Age is keyed by cwd and PERSISTED — a process-lifetime stamp would
+        // reset every tab to "just opened" on each restart, which happens far
+        // more often than monthly, leaving the reaper inert forever.
+        if (!this.state.firstSeen) this.state.firstSeen = {};
+        let stamped = false;
+        for (const t of live) {
+            if (t.cwd && !this.state.firstSeen[t.cwd]) { this.state.firstSeen[t.cwd] = now; stamped = true; }
+        }
+        if (stamped) this._saveState();
+        let byCwd = new Map();
+        try { byCwd = this._transcriptsByCwd(days * 24 + 24); } catch (_) {}
+        // The transcript signal must never fail OPEN: if it reads as empty
+        // while tabs are open, something is wrong with the read (permissions,
+        // a moved config dir) and closing on PTY silence alone would be wrong.
+        if (live.length && byCwd.size === 0) {
+            console.warn('[manager] reap skipped: no Claude transcripts readable — refusing to judge inactivity on PTY silence alone');
+            return;
+        }
+        const managerId = this._managerTabId();
+        const closed = [];
+        // Never reduce the fleet below the size the restore watchdogs treat as
+        // healthy (tabPersist MIN_HEALTHY_TABS = 2), or a legitimate reap reads
+        // as a collapse and every closed tab is respawned — session resumes,
+        // token spend and a "fleet collapsed" push included.
+        let remaining = live.length;
+        for (const tab of live) {
+            if (remaining <= 2) break;
+            const id = tab.id;
+            const title = String(tab.title || '');
+            if (id === managerId) continue;
+            if (/^(manager|\.soa-web)/i.test(title) || /\/\.soa-web(\/|$)/.test(String(tab.cwd || ''))) continue;
+            const transcript = tab.cwd && byCwd.get(tab.cwd);
+            if (!transcript || !transcript.mtime) continue;        // no Claude history: not judged
+            const last = Math.max(transcript.mtime, (tab.cwd && this.state.firstSeen[tab.cwd]) || 0);
+            if (!last || now - last < maxSilenceMs) continue;
+            try { mgr.close(id); remaining--; closed.push(`#${id} ${title || path.basename(tab.cwd || '')}`); }
+            catch (e) { console.warn(`[manager] reap #${id} failed: ${e && e.message}`); }
+        }
+        if (!closed.length) return closed;
+        const msg = `Closed ${closed.length} tab${closed.length === 1 ? '' : 's'} inactive for ${days}+ days: ${closed.join(', ')}`;
+        console.log(`[manager] ${msg}`);
+        this._notifyUser(msg);
+        this.broadcast();
+        return closed;
+    }
+
+    // Newest Claude transcript per cwd — a method so tests can feed a fixture
+    // instead of reading this machine's ~/.claude/projects.
+    _transcriptsByCwd(hours) { return require('./claudeSessions').latestSessionByCwd(hours); }
+
+    // The tab the fleet lead runs in, by the same rule snapshot() uses.
+    _managerTabId() {
+        const mgr = this.session.tabMgr;
+        if (!mgr) return null;
+        for (const id of mgr.order) {
+            const tab = mgr.get(id);
+            if (tab && typeof tab.title === 'string' && tab.title.trim().toLowerCase() === 'manager') return id;
+        }
+        return null;
+    }
+
+    // One IM bubble via scripts/soa-msg (best-effort). A method so tests can
+    // stub it instead of messaging a real phone.
+    _notifyUser(msg) {
+        try {
+            const bin = path.join(__dirname, '..', '..', 'scripts', 'soa-msg');
+            if (fs.existsSync(bin)) require('child_process').execFile(bin, [msg], { timeout: 8000 }, () => {});
+        } catch (_) {}
+    }
+
     _fireDue() {
         const now = Date.now();
+        this._reapInactive(now);
         const due = this.state.schedules.filter(s => s.at <= now);
         if (!due.length) return;
         this.state.schedules = this.state.schedules.filter(s => s.at > now);
@@ -1493,6 +1621,8 @@ class SessionManager {
             sessions, counts, ts: now,
             autoResume: this.state.autoResume,
             closeInactive: this.state.closeInactive === true,
+            autoCloseInactive: this.state.autoCloseInactive === true,
+            closeInactiveDays: this.state.closeInactiveDays || 30,
             todos: this.state.todos,
             meetings,
             managerTabId,
@@ -1630,11 +1760,13 @@ function mount(app, requireAuthed, sessions) {
         const body = req.body || {};
         if (typeof body.autoResume === 'boolean') man.state.autoResume = body.autoResume;
         if (typeof body.closeInactive === 'boolean') man.state.closeInactive = body.closeInactive;
+        if (typeof body.autoCloseInactive === 'boolean') man.state.autoCloseInactive = body.autoCloseInactive;
+        if (Number(body.closeInactiveDays) >= 1) man.state.closeInactiveDays = clampDays(body.closeInactiveDays, man.state.closeInactiveDays || 30);
         if (typeof body.autoResumeText === 'string' && body.autoResumeText.trim()) {
             man.state.autoResumeText = body.autoResumeText.trim().slice(0, 200);
         }
         man._saveState();
-        res.json({ ok: true, autoResume: man.state.autoResume, closeInactive: man.state.closeInactive === true, autoResumeText: man.state.autoResumeText });
+        res.json({ ok: true, autoResume: man.state.autoResume, closeInactive: man.state.closeInactive === true, autoCloseInactive: man.state.autoCloseInactive === true, closeInactiveDays: man.state.closeInactiveDays, autoResumeText: man.state.autoResumeText });
     });
 
     // Authed manager to-do mutations (the desktop Manager view, over the tunnel).
@@ -1773,11 +1905,13 @@ function mount(app, requireAuthed, sessions) {
             if (action === 'config') {
                 if (typeof body.autoResume === 'boolean') man.state.autoResume = body.autoResume;
                 if (typeof body.closeInactive === 'boolean') man.state.closeInactive = body.closeInactive;
+                if (typeof body.autoCloseInactive === 'boolean') man.state.autoCloseInactive = body.autoCloseInactive;
+                if (Number(body.closeInactiveDays) >= 1) man.state.closeInactiveDays = clampDays(body.closeInactiveDays, man.state.closeInactiveDays || 30);
                 if (typeof body.autoResumeText === 'string' && body.autoResumeText.trim()) {
                     man.state.autoResumeText = body.autoResumeText.trim().slice(0, 200);
                 }
                 man._saveState();
-                return res.json({ ok: true, autoResume: man.state.autoResume, closeInactive: man.state.closeInactive === true, autoResumeText: man.state.autoResumeText });
+                return res.json({ ok: true, autoResume: man.state.autoResume, closeInactive: man.state.closeInactive === true, autoCloseInactive: man.state.autoCloseInactive === true, closeInactiveDays: man.state.closeInactiveDays, autoResumeText: man.state.autoResumeText });
             }
 
             // ── Manager to-do store ─────────────────────────────────────────

@@ -25,9 +25,20 @@
 const QR_SCAN_INTERVAL_MS = 120;   // ~8 decodes/sec — plenty, and easy on battery
 
 export class QrScanner {
-    constructor({ onResult, onError } = {}) {
+    constructor({ onResult, onError, labels } = {}) {
         this.onResult = onResult || (() => {});
         this.onError = onError || (() => {});
+        // Chrome labels default to English so the /m/ companion keeps its
+        // existing strings verbatim; the localized root landing passes its own.
+        this.labels = Object.assign({
+            cancel: 'Cancel',
+            hint: 'Point at the QR code on the desktop',
+            torch: 'Light',
+            errNoCam: 'This browser has no camera access.',
+            errDenied: 'Camera permission denied. Allow camera access for this site, then try again.',
+            // '{detail}' is substituted with the underlying DOMException text.
+            errOpen: 'Could not open the camera: {detail}',
+        }, labels || {});
         this.stream = null;
         this.el = null;
         this.video = null;
@@ -88,7 +99,7 @@ export class QrScanner {
     // ── lifecycle ─────────────────────────────────────────────────────────
     async start() {
         if (!QrScanner.supported) {
-            this.onError(new Error('This browser has no camera access.'));
+            this.onError(new Error(this.labels.errNoCam));
             return false;
         }
         this._stopped = false;
@@ -120,8 +131,8 @@ export class QrScanner {
         } catch (e) {
             // Distinguish "said no" from "no camera" — the fixes are different.
             this._fail(e && e.name === 'NotAllowedError'
-                ? 'Camera permission denied. Allow camera access for this site, then try again.'
-                : 'Could not open the camera: ' + (e && e.message || e));
+                ? this.labels.errDenied
+                : this.labels.errOpen.replace('{detail}', String((e && e.message) || e)));
             return false;
         }
 
@@ -201,10 +212,15 @@ export class QrScanner {
                 <div class="qr-reticle"><i></i><i></i><i></i><i></i></div>
             </div>
             <div class="qr-bar">
-                <button class="qr-btn qr-cancel" type="button">Cancel</button>
-                <div class="qr-hint">Point at the QR code on the desktop</div>
-                <button class="qr-btn qr-torch" type="button" hidden>Light</button>
+                <button class="qr-btn qr-cancel" type="button"></button>
+                <div class="qr-hint"></div>
+                <button class="qr-btn qr-torch" type="button" hidden></button>
             </div>`;
+        // textContent, not interpolation: these strings are translated and a
+        // language with an apostrophe or angle bracket must not break the markup.
+        el.querySelector('.qr-cancel').textContent = this.labels.cancel;
+        el.querySelector('.qr-hint').textContent = this.labels.hint;
+        el.querySelector('.qr-torch').textContent = this.labels.torch;
         document.body.appendChild(el);
         this.el = el;
         this.video = el.querySelector('.qr-video');

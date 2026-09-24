@@ -21,6 +21,7 @@ const WORKING = [
 ];
 
 const ATTENTION = [
+    /would you like to (?:run|make|apply)|approve this command|press enter to confirm/i,
     /❯\s*(?:Yes|No|Allow once|Allow always|Deny|Accept|Reject)/i,
     /Do you want to (?:proceed|continue|make this change|accept)/i,
     /\(y\/n\)/i,
@@ -37,6 +38,8 @@ const ATTENTION = [
 // space-collapsed status line ("bypasspermissionson") still registers — else a
 // waiting agent falls through to the idle shell-prompt and shows blue.
 const DONE = [
+    /(?:^|\n)\s*›(?:\s|$)/m,
+    /\d+%\s+context\s+left/i,
     /╭─+╮/,
     /│\s*>\s*│/,
     /╰─+╯/,

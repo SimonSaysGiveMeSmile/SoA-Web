@@ -12,6 +12,7 @@
     <link rel="apple-touch-icon" href="icon.svg" />
     <title>Son of Anton · Mobile</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="voice-chat.css" />
 </head>
 <body>
     <div id="app">
@@ -49,6 +50,15 @@
         <input id="camera-input" type="file" accept="image/*" hidden />
 
         <nav id="tabs" aria-label="Open tabs"></nav>
+        <!-- Shown only when the page is NOT running as a home-screen app: the
+             browser's URL bar and toolbar are the browser's, so true full screen
+             means installing once. In flow (not fixed) so it never covers the
+             top bar, the tab strip, the keyboard row or the chat composer. -->
+        <div id="install-hint" hidden role="status">
+            <span class="ih-icon" aria-hidden="true">⤒</span>
+            <span class="ih-text"></span>
+            <button class="ih-close" type="button" aria-label="Dismiss">✕</button>
+        </div>
 
         <main id="stage">
             <section id="terminal-view" class="view active">
@@ -56,12 +66,20 @@
                 <button id="term-jump" class="term-jump" type="button" aria-label="Jump to latest output">↓ LATEST</button>
             </section>
             <section id="chat-view" class="view">
+                <div class="voice-chat-bar">
+                    <button id="chat-history" type="button">History</button>
+                    <button id="chat-manager" type="button">Manager chat</button>
+                    <span id="chat-target">Selected terminal</span>
+                    <button id="chat-read" type="button" aria-pressed="false">Read replies</button>
+                </div>
+                <div id="voice-chat-status" class="voice-chat-status" role="status">Tap Talk, review your message, then Send.</div>
                 <div id="chat-status" class="chat-status" hidden>
                     <span class="chat-status-dot"></span>
                     <span class="chat-status-text"></span>
                 </div>
                 <div id="chat-log" class="chat-log"></div>
                 <form id="chat-composer" class="chat-composer">
+                    <button id="chat-mic" class="chat-send" type="button" aria-label="Dictate a message" aria-pressed="false">Talk</button>
                     <textarea id="chat-input" class="chat-input" rows="1"
                               placeholder="Message the agent…" autocapitalize="sentences"
                               autocorrect="on" spellcheck="true"></textarea>
@@ -208,9 +226,9 @@
                 <div class="settings-label">Sound</div>
                 <div class="sound-grid" id="sound-grid"></div>
             </div>
-            <div class="settings-section">
-                <div class="settings-label">Microphone</div>
-                <div class="settings-hint">Select input device and adjust gain.</div>
+            <details class="settings-section">
+                <summary class="settings-label">Microphone diagnostics</summary>
+                <div class="settings-hint">These controls only affect the test meter. Voice chat uses your phone’s default microphone.</div>
                 <div class="mic-control">
                     <label for="mic-device-select" class="mic-label">Input Device</label>
                     <select id="mic-device-select" class="mic-select">
@@ -234,7 +252,7 @@
                     <button class="settings-btn" id="btn-test-mic" type="button">TEST MIC</button>
                     <button class="settings-btn" id="btn-refresh-devices" type="button">REFRESH DEVICES</button>
                 </div>
-            </div>
+            </details>
             <div class="settings-section">
                 <div class="settings-label">Connection</div>
                 <div class="settings-hint" id="reload-hint">
@@ -274,11 +292,11 @@
             </div>
             <div class="overflow-grid">
                 <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-mic" title="Toggle microphone">🎤</button>
-                    <span class="overflow-cap">Mic</span>
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-mic" title="Open voice chat">🎤</button>
+                    <span class="overflow-cap">Voice chat</span>
                 </div>
                 <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak the selected agent’s replies aloud" aria-pressed="false">🔊</button>
                     <span class="overflow-cap">Speak</span>
                 </div>
                 <div class="overflow-tile">
@@ -324,6 +342,7 @@
             <div class="reconnect-sub" id="reconnect-sub">checking link…</div>
             <p class="reconnect-diag" id="reconnect-diag" hidden></p>
             <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY NOW</button>
+            <button class="reconnect-btn" id="reconnect-history">READ SAVED HISTORY</button>
             <button class="reconnect-btn reconnect-open" id="reconnect-open-browser" hidden>OPEN WIFI LOGIN</button>
         </div>
     </div>

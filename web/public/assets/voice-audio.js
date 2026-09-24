@@ -54,24 +54,6 @@ class VoiceAudio {
     this._render();
   }
 
-  /**
-   * Browser device labels are empty until the page holds a mic permission.
-   * Asking here (rather than at first "start listening") means the picker is
-   * useful before the user has ever spoken.
-   */
-  async grantMicPermission() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach(t => t.stop());
-      return true;
-    } catch (_) { return false; }
-  }
-
-  async browserOutputs() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return [];
-    const all = await navigator.mediaDevices.enumerateDevices();
-    return all.filter(d => d.kind === 'audiooutput');
-  }
 
   /**
    * Play a short tone through a specific sink. This is the ONLY per-device
@@ -161,14 +143,29 @@ class VoiceAudio {
   mount(el) {
     this._el = el;
     this._render();
-    this.refresh();
-    clearInterval(this._poll);
-    this._poll = setInterval(() => { if (this._el && this._el.isConnected) this.refresh(); }, BT_POLL_MS);
+    this.resume();   // refreshes once, then polls
     return this;
   }
 
-  destroy() {
+  // The poll costs two system_profiler spawns on the daemon per tick, so it
+  // runs only while someone can see the panel: mounted, page visible, and
+  // not paused by the owning widget (sidebar collapsed / panel closed).
+  resume() {
     clearInterval(this._poll);
+    // Refresh once on resume (the widget contract), then poll.
+    if (this._el && this._el.isConnected && !document.hidden) this.refresh();
+    this._poll = setInterval(() => {
+      if (this._el && this._el.isConnected && !document.hidden) this.refresh();
+    }, BT_POLL_MS);
+  }
+
+  pause() {
+    clearInterval(this._poll);
+    this._poll = null;
+  }
+
+  destroy() {
+    this.pause();
     this._el = null;
     if (this._testEl) { try { this._testEl.pause(); } catch (_) {} }
   }

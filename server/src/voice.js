@@ -39,6 +39,7 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 
 const { stateFile } = require('./stateDir');
+const { submitToTab, writeToTab } = require('./sessionManager');
 
 // system_profiler/blueutil live in sbin dirs a launchd job doesn't inherit.
 const SYS_PATH = '/usr/sbin:/sbin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin';
@@ -236,10 +237,21 @@ const CLAUDE_BIN = process.env.SOA_VOICE_CLAUDE || 'claude';
 const INTERPRET_TIMEOUT_MS = Number(process.env.SOA_VOICE_TIMEOUT_MS || 9000);
 
 function buildPrompt(transcript, ctx) {
+    // Names only. The model resolves "the iPlan project" to a NAME; the client
+    // maps that name back to a tab or a path itself (voice-commands.js
+    // bestMatch on title/basename). Absolute paths would leave the machine for
+    // nothing — this prompt goes to the Anthropic API via `claude -p`.
     const tabs = (ctx.tabs || []).slice(0, 40)
-        .map(t => `  #${t.id} "${t.title || ''}"${t.cwd ? ' @ ' + t.cwd : ''}${t.status ? ' [' + t.status + ']' : ''}`)
+        .map(t => {
+            const proj = t.cwd ? path.basename(String(t.cwd)) : '';
+            const title = String(t.title || proj);
+            // A renamed tab keeps its project name in parentheses so "the
+            // iPlan project" still resolves to an OPEN tab (switch, not open).
+            const label = (proj && title !== proj && !title.includes('/')) ? `${title} (${proj})` : (title.includes('/') ? proj || title : title);
+            return `  #${t.id} "${label}"${t.status ? ' [' + t.status + ']' : ''}`;
+        })
         .join('\n');
-    const projects = (ctx.projects || []).slice(0, 40).map(p => '  ' + p).join('\n');
+    const projects = (ctx.projects || []).slice(0, 40).map(p => '  ' + path.basename(String(p))).join('\n');
     // The client owns the control registry (it is what executes them), so it
     // ships the menu with each request rather than the server keeping a second
     // copy that could drift out of sync.
@@ -316,6 +328,13 @@ function interpret(transcript, ctx = {}, opts = {}) {
         let out = '';
         const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, INTERPRET_TIMEOUT_MS);
 
+        // stdin/stdout are Sockets: a write that fails AFTER end() returns —
+        // EPIPE when the timeout above SIGKILLs the child with the prompt still
+        // queued past the 64KB pipe buffer — surfaces as an 'error' EVENT, not a
+        // throw. Unhandled, that event is an uncaughtException that takes the
+        // whole daemon (and every PTY it hosts) down. 'close' still settles us.
+        child.stdin.on('error', () => {});
+        child.stdout.on('error', () => {});
         child.stdout.on('data', (d) => { out += d; if (out.length > 64 * 1024) { try { child.kill('SIGKILL'); } catch (_) {} } });
         child.on('error', (e) => { clearTimeout(timer); done({ intent: 'unknown', params: {}, source: 'error', error: e.message }); });
         child.on('close', () => {
@@ -396,6 +415,7 @@ class VisionWatcher {
         this.seen = new Set();
         this.lastIngest = null;
         this.onIngest = null;
+        this._timers = new Set();   // pending 900ms ingests, cleared by stop()
     }
 
     stop() {
@@ -403,12 +423,16 @@ class VisionWatcher {
         this.watcher = null;
         this.dir = '';
         this.seen.clear();
+        // A photo that landed just before stop() must not be typed into a tab
+        // 900ms later by a watcher the user turned off.
+        for (const t of this._timers) clearTimeout(t);
+        this._timers.clear();
     }
 
     start(dir) {
         this.stop();
         if (!dir) return { ok: false, error: 'no directory' };
-        const abs = dir.startsWith('~') ? path.join(os.homedir(), dir.slice(1)) : dir;
+        const abs = expandHome(dir);
         let st;
         try { st = fs.statSync(abs); } catch (_) { return { ok: false, error: 'directory not found: ' + abs }; }
         if (!st.isDirectory()) return { ok: false, error: 'not a directory: ' + abs };
@@ -424,8 +448,13 @@ class VisionWatcher {
                 if (this.seen.has(filename)) return;
                 if (!IMAGE_EXT.has(path.extname(filename).toLowerCase())) return;
                 this.seen.add(filename);
+                // The name is untrusted — it is whatever dropped the file (a
+                // download, an AirDrop, a sync). It ends up typed into a PTY, so
+                // a newline in it would submit a second line. Refuse those.
+                if (!isTypeSafe(filename)) { console.warn('[voice] vision: refused a filename with control bytes'); return; }
                 // fs.watch fires on create, before the writer has finished.
-                setTimeout(() => this._ingest(path.join(abs, filename)), 900);
+                const t = setTimeout(() => { this._timers.delete(t); this._ingest(path.join(abs, filename)); }, 900);
+                this._timers.add(t);
             });
         } catch (e) {
             return { ok: false, error: e.message };
@@ -441,7 +470,9 @@ class VisionWatcher {
         this.lastIngest = { path: file, at: Date.now() };
         const tabId = cfg.vision.targetTab;
         const prompt = cfg.vision.prompt || 'Look at this image and tell me what you see.';
-        typeIntoTab(this.sessions, tabId, `${file} ${prompt}`, true);
+        if (!typeIntoTab(this.sessions, tabId, `${shellQuote(file)} ${prompt}`, true)) {
+            console.warn(`[voice] vision: could not hand ${path.basename(file)} to a tab (no fleet session, or unsafe text)`);
+        }
         if (this.onIngest) { try { this.onIngest(file); } catch (_) {} }
     }
 }
@@ -449,9 +480,45 @@ class VisionWatcher {
 // ── tab typing ──────────────────────────────────────────────────────────
 // Shared with sessionManager's split-write trick: a glued CR reads as a pasted
 // newline in Claude Code's TUI rather than a submit, so send Enter separately.
-function typeIntoTab(sessions, tabId, text, submit) {
+function expandHome(p) {
+    const d = String(p || '');
+    return d.startsWith('~') ? path.join(os.homedir(), d.slice(1)) : d;
+}
+
+// A path typed into a tab must survive a bare shell prompt as ONE literal
+// argument: the tab is pty.spawn($SHELL), and Claude Code is only sometimes the
+// foreground process. Same rule as the dashboard's _shellQuote (app.js): leave
+// plain names alone, single-quote anything else, escaping embedded quotes.
+function shellQuote(p) {
+    const str = String(p);
+    if (/^[\w@%+=:,./-]+$/.test(str)) return str;
+    return "'" + str.replace(/'/g, "'\\''") + "'";
+}
+
+// Only single-line text may be typed: a CR/LF or any other control byte in
+// the payload would be delivered to the PTY as a keystroke — a newline is an
+// Enter, i.e. a second, unreviewed submission.
+function isTypeSafe(text) {
+    return typeof text === 'string' && !/[\x00-\x1f\x7f]/.test(text);
+}
+
+// The session that owns the fleet. SessionStore has no primary(); the same
+// walk sessionManager.mount does — first session with at least one tab —
+// preferring the caller's own session when a request is in hand.
+function fleetSession(sessions, prefer) {
+    if (prefer && prefer.tabMgr && prefer.tabMgr.order.length > 0) return prefer;
+    const all = sessions && sessions.sessions;
+    if (!all || typeof all.values !== 'function') return null;
+    for (const s of all.values()) {
+        if (s && s.tabMgr && s.tabMgr.order.length > 0) return s;
+    }
+    return null;
+}
+
+function typeIntoTab(sessions, tabId, text, submit, prefer) {
     try {
-        const s = sessions && sessions.primary && sessions.primary();
+        if (!isTypeSafe(text)) return false;
+        const s = fleetSession(sessions, prefer);
         const mgr = s && s.tabMgr;
         if (!mgr) return false;
         // A null tabId means "whatever the user is looking at": the session
@@ -461,16 +528,35 @@ function typeIntoTab(sessions, tabId, text, submit) {
             : Number(tabId);
         const tab = mgr.get(id);
         if (!tab) return false;
-        tab.write(text);
-        if (submit) setTimeout(() => { try { tab.write('\r'); } catch (_) {} }, 160);
+        if (tab.exited) return false;
+        if (submit) submitToTab(tab, text);
+        else writeToTab(tab, text);
         return true;
     } catch (_) { return false; }
 }
 
 // ── routes ──────────────────────────────────────────────────────────────
-function mount(app, requireAuthed, sessions) {
+function mount(app, requireAuthed, sessions, opts = {}) {
     const json = express.json({ limit: '64kb' });
+    const allowedOrigins = Array.isArray(opts.allowedOrigins) ? opts.allowedOrigins : [];
+
+    // POST /api/voice/vision takes a raw body, so a typed-array POST from any
+    // page is a CORS "simple" request — no preflight, so index.js's Origin
+    // allowlist never runs — and on loopback requireAuthed provisions an
+    // anonymous session. The browser still labels the request; refuse unless
+    // it says same-origin/none, or the Origin is one the daemon already
+    // trusts (the same list the CORS and WS gates use), or there is no
+    // browser at all (no Sec-Fetch-Site AND no Origin: curl, the CLI).
+    function browserAllowed(req) {
+        const sfs = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+        const origin = req.headers.origin;
+        if (sfs === 'same-origin' || sfs === 'none') return true;
+        if (origin && allowedOrigins.includes(origin)) return true;
+        if (!sfs && !origin) return true;
+        return false;
+    }
     const watcher = new VisionWatcher(sessions);
+    require('./voiceChat').mount(app, requireAuthed, browserAllowed);
 
     // Restore a configured watch on boot.
     const boot = loadConfig();
@@ -494,14 +580,20 @@ function mount(app, requireAuthed, sessions) {
             interpretModel: typeof b.interpretModel === 'string' ? b.interpretModel.slice(0, 40) : cur.interpretModel,
             vision: { ...cur.vision, ...(b.vision && typeof b.vision === 'object' ? b.vision : {}) },
         };
-        saveConfig(next);
+        if (!saveConfig(next)) {
+            return res.status(500).json({ ok: false, error: 'could not write ' + CONFIG_FILE });
+        }
 
         // Apply the watch change immediately — a saved-but-inert setting is
         // the classic "I turned it on and nothing happened".
         let watch = { ok: true, dir: watcher.dir || null };
         if (next.vision.enabled && next.vision.watchDir) {
-            if (watcher.dir !== next.vision.watchDir) watch = watcher.start(next.vision.watchDir);
-        } else if (!next.vision.enabled && watcher.dir) {
+            // watcher.dir is stored expanded; compare the expanded form or a
+            // '~/…' setting restarts the watch on every save.
+            if (watcher.dir !== expandHome(next.vision.watchDir)) watch = watcher.start(next.vision.watchDir);
+        } else if (watcher.dir) {
+            // Disabled, OR enabled with the folder cleared: either way the old
+            // folder must stop being watched.
             watcher.stop();
             watch = { ok: true, dir: null };
         }
@@ -594,10 +686,22 @@ function mount(app, requireAuthed, sessions) {
     // ── vision ──────────────────────────────────────────────────────────
     // Raw image bytes in, absolute path out (and optionally typed straight
     // into a tab so the agent looks at it without the user touching anything).
-    app.post('/api/voice/vision', requireAuthed,
+    app.post('/api/voice/vision', (req, res, next) => {
+        if (!browserAllowed(req)) return res.status(403).json({ ok: false, error: 'request origin not allowed' });
+        next();
+    }, requireAuthed,
         express.raw({ type: () => true, limit: '30mb' }),
         (req, res) => {
             try {
+                // A typed-array body with no Content-Type is a CORS "simple"
+                // request: no preflight, so the Origin allowlist never runs,
+                // and on loopback requireAuthed hands an anonymous caller a
+                // fresh session. That let any web page the user had open POST
+                // here and type into a terminal. Browsers label such requests
+                // for us — refuse anything the browser says is cross-site.
+                if (!browserAllowed(req)) {
+                    return res.status(403).json({ ok: false, error: 'request origin not allowed' });
+                }
                 const buf = req.body;
                 if (!Buffer.isBuffer(buf) || !buf.length) {
                     return res.status(400).json({ ok: false, error: 'empty body' });
@@ -609,9 +713,11 @@ function mount(app, requireAuthed, sessions) {
                 const q = req.query || {};
                 let typed = false;
                 if (q.tab !== undefined || q.prompt !== undefined) {
-                    const prompt = String(q.prompt || loadConfig().vision.prompt || '').trim();
+                    // One line only — strip control bytes rather than let a
+                    // crafted prompt carry an Enter into the terminal.
+                    const prompt = String(q.prompt || loadConfig().vision.prompt || '').replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
                     const tabId = q.tab === '' || q.tab === undefined ? null : Number(q.tab);
-                    typed = typeIntoTab(sessions, tabId, `${saved.path}${prompt ? ' ' + prompt : ''}`, true);
+                    typed = typeIntoTab(sessions, tabId, `${shellQuote(saved.path)}${prompt ? ' ' + prompt : ''}`, true, req.session);
                 }
                 res.json({ ok: true, ...saved, typed });
             } catch (err) {
@@ -645,4 +751,5 @@ module.exports = {
     // exported for tests
     audioDevices, bluetoothDevices, extractJson, buildPrompt,
     loadConfig, saveConfig, knownProjects, VisionWatcher, TRANSPORT,
+    typeIntoTab, isTypeSafe, fleetSession, expandHome, shellQuote, interpret,
 };

@@ -10,7 +10,7 @@
 // wipes memory-only state — harmless here: a meeting's transcript lives in the
 // server-side ledger and the view re-fetches it with `?since=<cursor>`.
 // No new files: MEET is markup + code inside the shell entries already listed.
-const VERSION = 'soa-mobile-v84';
+const VERSION = 'soa-mobile-v87-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
     '/index.html',
@@ -19,6 +19,10 @@ const SHELL = [
     '/socket.js',
     '/ansi.js',
     '/terminal.js',
+    '/voice-chat.js',
+    '/voice-chat.css',
+    '/session-history.js',
+    '/vendor/xterm-headless.mjs',
     '/agentDetect.js',
     '/keyboard.js',
     '/sounds.js',
@@ -34,7 +38,7 @@ const SHELL = [
     '/audio/panels.wav',
     '/audio/keyboard.wav',
     '/audio/theme.wav',
-];
+].map(file => new URL(file.slice(1), self.registration.scope).href);
 
 self.addEventListener('install', (e) => {
     e.waitUntil(
@@ -45,7 +49,7 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
     e.waitUntil((async () => {
         const keys = await caches.keys();
-        await Promise.all(keys.filter(k => k !== VERSION).map(k => caches.delete(k)));
+        await Promise.all(keys.filter(k => k.startsWith('soa-mobile-') && k !== VERSION).map(k => caches.delete(k)));
         await self.clients.claim();
     })());
 });
@@ -54,6 +58,8 @@ self.addEventListener('fetch', (e) => {
     const req = e.request;
     if (req.method !== 'GET') return;
     const url = new URL(req.url);
+    const scope = new URL(self.registration.scope);
+    if (url.origin !== scope.origin || !url.pathname.startsWith(scope.pathname)) return;
     // Don't cache API or WS upgrade calls
     if (url.pathname.startsWith('/api/') || url.pathname === '/ws') return;
 
@@ -62,10 +68,10 @@ self.addEventListener('fetch', (e) => {
             try {
                 const fresh = await fetch(req);
                 const cache = await caches.open(VERSION);
-                cache.put(req, fresh.clone());
+                if (fresh.ok) cache.put(new URL('index.html', scope).href, fresh.clone());
                 return fresh;
             } catch (_) {
-                const cached = await caches.match('/index.html');
+                const cached = await caches.match(new URL('index.html', scope).href);
                 return cached || new Response('offline', { status: 503 });
             }
         })());
