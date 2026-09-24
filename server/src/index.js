@@ -914,9 +914,15 @@ function onWsConnect(ws, session, req) {
                 const sb = sbList[i];
                 const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
                 const label = entry.userRenamed && entry.title ? entry.title : (cwd || 'tab');
+                // The reset is NOT conditional on having scrollback to replay.
+                // A tab with no saved scrollback still inherits whatever mode
+                // the dead TUI left armed in the client's xterm (that state
+                // lives in the browser and survives the reconnect), so skipping
+                // the reset here left mouse tracking on over a fresh shell —
+                // exactly the 2026-07-13 flood, minus the replay.
                 const seed = prior
                     ? SANE_TERM_RESET + prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n` + SANE_TERM_RESET
-                    : '';
+                    : SANE_TERM_RESET;
                 const tab = session.tabMgr.open({
                     title: entry.userRenamed ? entry.title : undefined,
                     cwd,

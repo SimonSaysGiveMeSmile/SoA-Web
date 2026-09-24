@@ -280,6 +280,13 @@ function writeToTab(tab, text) {
 // `claude` there starts a FRESH session, losing pre-restart context AND
 // poisoning future --continue (see feedback: never bare-claude after a restart),
 // so index.js passes coldFallback:false to keep the original 2-step chain.
+// Shell-side form of index.js's SANE_TERM_RESET: mouse tracking
+// (1000/1002/1003/1006/1015), alt screen (1049), bracketed paste (2004), cursor
+// shown, keypad normal. Single-quoted so the shell passes the escapes to printf
+// verbatim.
+const SANE_SHELL_RESET =
+    "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?1049l\\033[?2004l\\033[?25h\\033>'";
+
 function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true } = {}) {
     let sid = sessionId;
     if (sid == null && resume && cwd) {
@@ -288,10 +295,18 @@ function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, c
     }
     const flag = model ? ` --model ${model}` : '';
     const tail = coldFallback ? ` || claude${flag}` : '';
-    const line = sid
+    const cmd = sid
         ? `claude --resume ${sid}${flag} || claude --continue${flag}${tail}`
         : `claude${flag}`;
-    submitToTab(tab, line);
+    // Reset the terminal modes the TUI arms once it exits, whatever the exit
+    // was (/exit, Ctrl-C, crash, a failed --resume falling through the chain).
+    // Without this the shell is exposed with mouse tracking still on, and every
+    // pointer move over the terminal is delivered to ZSH AS INPUT — coordinate
+    // reports pile onto the prompt line and one stray Enter runs them. `;` (not
+    // `&&`) so it runs on failure too. This cannot help when the PTY itself is
+    // killed (a daemon restart takes the shell with it); the restore-path seed
+    // in index.js covers that case.
+    submitToTab(tab, `${cmd}; ${SANE_SHELL_RESET}`);
     return sid;
 }
 
