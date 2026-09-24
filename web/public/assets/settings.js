@@ -754,6 +754,22 @@ function buildAutomationPane() {
     const orchPrompt = el('textarea', { id: 'set-orch-prompt', rows: '4', placeholder: tr('settings.auto.orch_prompt_hint') });
     const orchInterval = el('input', { id: 'set-orch-interval', type: 'number', value: '30', min: '15', max: '600' });
 
+    // Inactive-tab reaper (manager-gated on the server; the section hides
+    // itself when /api/manager answers 403 on a free install).
+    const inactiveEnabled = el('select', { id: 'set-inactive-enabled' });
+    inactiveEnabled.append(el('option', { value: 'false', text: 'false' }), el('option', { value: 'true', text: 'true' }));
+    const inactiveDays = el('input', { id: 'set-inactive-days', type: 'number', value: '30', min: '1', max: '365' });
+    const inactiveSection = el('div', { class: 'settings-inactive', hidden: '' }, [
+        el('h4', { class: 'settings-section-title', text: tr('settings.auto.inactive_title') }),
+        el('p', { class: 'settings-hint', text: tr('settings.auto.inactive_hint') }),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.inactive_enabled'), class: 'env-label' }), inactiveEnabled,
+        ]),
+        el('div', { class: 'env-field' }, [
+            el('label', { text: tr('settings.auto.inactive_days'), class: 'env-label' }), inactiveDays,
+        ]),
+    ]);
+
     const saveAutoBtn = el('button', { class: 'soa-modal-copy', text: tr('settings.btn.save') });
     const autoStatus = el('p', { class: 'settings-status' });
 
@@ -770,8 +786,29 @@ function buildAutomationPane() {
 
     addSchedBtn.addEventListener('click', () => addSchedRow());
 
+    // A POST that came back non-ok must not be reported as "Saved".
+    async function postJson(url, body) {
+        const r = await _apiFetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+        const j = await _apiJson(r);
+        if (!r.ok || !j || j.ok === false) throw new Error((j && j.error) || (url + ': HTTP ' + r.status));
+        return j;
+    }
+
     saveAutoBtn.addEventListener('click', async () => {
         try {
+            // Validate the reaper threshold BEFORE anything is written, so an
+            // error here means nothing was saved — not "three sections saved,
+            // one silently dropped".
+            const wantOn = inactiveEnabled.value === 'true';
+            const daysRaw = String(inactiveDays.value).trim();
+            const days = Math.round(Number(daysRaw));
+            const validDays = daysRaw !== '' && Number.isFinite(days) && days >= 1 && days <= 365;
+            const daysTouched = daysRaw !== String(inactiveLoaded.days);
+            const inactiveDirty = !inactiveSection.hidden && (wantOn !== inactiveLoaded.on || daysTouched);
+            if (inactiveDirty && daysTouched && !validDays) {
+                throw new Error(tr('settings.auto.inactive_days') + ': 1–365');
+            }
+
             await _apiFetch('/api/automation', {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
@@ -810,9 +847,44 @@ function buildAutomationPane() {
                 }),
             });
 
+            // Post the reaper section only when the user changed it (the same
+            // knobs are writable over the loopback CLI — an untouched Save
+            // must not revert that), and write the daemon's authoritative
+            // values back.
+            if (inactiveDirty) {
+                const j = await postJson('/api/manager/config', {
+                    autoCloseInactive: wantOn,
+                    ...(validDays ? { closeInactiveDays: days } : {}),
+                });
+                inactiveLoaded.on = j.autoCloseInactive === true;
+                inactiveLoaded.days = Number(j.closeInactiveDays) || inactiveLoaded.days;
+                inactiveEnabled.value = String(inactiveLoaded.on);
+                inactiveDays.value = String(inactiveLoaded.days);
+            }
+
             autoStatus.textContent = tr('settings.status.saved', { t: new Date().toTimeString().slice(0, 8) });
         } catch (e) { autoStatus.textContent = 'Error: ' + e.message; }
     });
+
+    // Manager config is a separate, entitlement-gated surface: a 403 means
+    // "no reaper on this install" — keep the section hidden. Probed on its
+    // own so a bad reply from the two automation endpoints cannot hide it,
+    // and revealed only when the reply really carries the config (the
+    // no-session fallback answers ok:true with no fields at all).
+    const inactiveLoaded = { on: false, days: 30 };
+    (async () => {
+        try {
+            const mres = await _apiFetch('/api/manager');
+            const m = mres.ok ? await _apiJson(mres) : null;
+            if (m && m.ok && typeof m.autoCloseInactive === 'boolean') {
+                inactiveLoaded.on = m.autoCloseInactive === true;
+                inactiveLoaded.days = Number(m.closeInactiveDays) || 30;
+                inactiveEnabled.value = String(inactiveLoaded.on);
+                inactiveDays.value = String(inactiveLoaded.days);
+                inactiveSection.hidden = false;
+            }
+        } catch (_) {}
+    })();
 
     (async () => {
         try {
@@ -863,6 +935,7 @@ function buildAutomationPane() {
         el('div', { class: 'env-field' }, [
             el('label', { text: tr('settings.auto.orch_interval'), class: 'env-label' }), orchInterval,
         ]),
+        inactiveSection,
         el('div', { class: 'settings-row-actions' }, [saveAutoBtn]),
         autoStatus,
     );

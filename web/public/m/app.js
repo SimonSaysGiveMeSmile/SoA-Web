@@ -683,7 +683,56 @@ class App {
         this._boot(primaryOrigin, altOrigin, '');
     }
 
+    // ── Full screen means "installed" ─────────────────────────────────────
+    // A web page cannot hide Safari's or Chrome's own bars, and an in-app
+    // browser (a link opened from a notification or a chat) cannot even be
+    // added to the home screen. The only route to a chromeless terminal is a
+    // one-time install, so say so — in flow under the tab strip, dismissable,
+    // and remembered. `force` re-shows it briefly (without re-arming the
+    // permanent dismissal) when the user taps fullscreen on a phone that
+    // cannot fullscreen a page, so that tap is never silent.
+    _installHint(force) {
+        const el = document.getElementById('install-hint');
+        if (!el) return;
+        // The App Store shell is already chromeless; never tell it to open Safari.
+        if (window.Capacitor) return;
+        try {
+            const standalone = window.navigator.standalone === true
+                || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)
+                || (window.matchMedia && matchMedia('(display-mode: fullscreen)').matches);
+            if (standalone) return;
+            if (!force && localStorage.getItem('soa.m.installHint') === 'dismissed') return;
+        } catch (_) { /* private mode: show it, it can still be dismissed */ }
+        const ua = navigator.userAgent || '';
+        const iOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        // Heuristic for an in-app browser: iOS WebViews lack Safari's version
+        // token (the Google app keeps it but announces GSA); most Android
+        // in-app browsers announce "wv" or the host app.
+        const inApp = (iOS && !/Safari\//.test(ua)) || /\bwv\b|FBAN|FBAV|Instagram|Line\/|ntfy|GSA\//i.test(ua);
+        const text = el.querySelector('.ih-text');
+        if (inApp) {
+            text.innerHTML = 'For full screen, open this link in <b>Safari</b> (⋯ → Open in Safari), then <b>Share → Add to Home Screen</b>.';
+        } else if (iOS) {
+            text.innerHTML = 'Full screen: tap <b>Share</b> then <b>Add to Home Screen</b>, and launch it from there.';
+        } else {
+            text.innerHTML = 'Full screen: use your browser menu’s <b>Install app</b> / <b>Add to Home screen</b>, then launch it from there.';
+        }
+        el.hidden = false;
+        clearTimeout(this._installHintTimer);
+        // Out of the way on its own after a while; ✕ makes it permanent.
+        this._installHintTimer = setTimeout(() => { el.hidden = true; }, force ? 8000 : 20000);
+        if (!el._ihWired) {
+            el._ihWired = true;
+            el.querySelector('.ih-close').addEventListener('click', () => {
+                el.hidden = true;
+                clearTimeout(this._installHintTimer);
+                try { localStorage.setItem('soa.m.installHint', 'dismissed'); } catch (_) {}
+            });
+        }
+    }
+
     _boot(primaryOrigin, altOrigin, token) {
+        setTimeout(() => this._installHint(), 1500);
         this.socket = new BridgeSocket({
             url: wsBaseFromHttp(primaryOrigin),
             altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
@@ -2968,12 +3017,9 @@ class App {
                 document.exitFullscreen().catch(() => {});
             }
         } catch (_) {}
-        // iPhone Safari can't fullscreen a page — nudge the PWA install once.
-        if (on && !document.documentElement.requestFullscreen && !this._fsHinted) {
-            this._fsHinted = true;
-            const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
-            if (!standalone) this._showNotice({ level: 'info', text: 'Tip: Share → “Add to Home Screen” for true fullscreen on iPhone.' });
-        }
+        // iPhone Safari can't fullscreen a page: say so, briefly, every time
+        // the button is used — even after the standing hint was dismissed.
+        if (on && !document.documentElement.requestFullscreen) this._installHint(true);
         setTimeout(() => this._scrollTermBottom(), 120);
     }
 
