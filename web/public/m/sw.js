@@ -10,7 +10,7 @@
 // wipes memory-only state — harmless here: a meeting's transcript lives in the
 // server-side ledger and the view re-fetches it with `?since=<cursor>`.
 // No new files: MEET is markup + code inside the shell entries already listed.
-const VERSION = 'soa-mobile-v83';
+const VERSION = 'soa-mobile-v84';
 const SHELL = [
     '/',
     '/index.html',
@@ -22,6 +22,11 @@ const SHELL = [
     '/agentDetect.js',
     '/keyboard.js',
     '/sounds.js',
+    '/qrscan.js',
+    // 130KB, precached deliberately: the scanner's whole job is recovering a
+    // phone whose session is dead, and a lazy fetch at that moment is one more
+    // thing that can fail. Only iOS (no BarcodeDetector) ever executes it.
+    '/vendor/jsQR.min.js',
     '/manifest.webmanifest',
     '/icon.svg',
     '/audio/granted.wav',
