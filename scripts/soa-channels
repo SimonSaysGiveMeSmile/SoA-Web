@@ -76,6 +76,36 @@ S0A="https://s0a.app"
 NAMED_HOST="${SOA_TUNNEL_HOSTNAME:-m.s0a.app}"
 NAMED_CFG="$HOME/.cloudflared/config.yml"
 
+# ── Per-install STABLE-tunnel config (soa-tunnel-setup) ───────────────────────
+# Provider-agnostic + per-user: when present we PREFER this fixed door and never
+# churn quick tunnels under it. Works for ANY user with their OWN tunnel — not
+# just the owner's m.s0a.app. Two providers: ngrok (reserved --domain, no domain
+# of your own needed) or cloudflare (named tunnel on a host you delegate).
+TUNCFG="$STATE_DIR/tunnel-config.json"
+STABLE_PROVIDER=""; NGROK_DOMAIN=""
+STABLE_HOST="$NAMED_HOST"   # what "already on the stable door" matches (default: named cf)
+if [ -f "$TUNCFG" ]; then
+    # One self-contained parse (jget isn't defined yet at this point): emit
+    # provider / ngrok domain / cloudflare hostname as three shell-eval lines.
+    eval "$(python3 - "$TUNCFG" <<'PY' 2>/dev/null || true
+import json,sys,shlex
+try: d=json.load(open(sys.argv[1]))
+except Exception: d={}
+prov=d.get("provider","") or ""
+dom=(d.get("ngrok") or {}).get("domain","") or ""
+host=(d.get("cloudflare") or {}).get("hostname","") or ""
+print("STABLE_PROVIDER=%s"%shlex.quote(prov))
+print("__NGROK_DOMAIN=%s"%shlex.quote(dom))
+print("__CF_HOST=%s"%shlex.quote(host))
+PY
+)"
+    if [ "$STABLE_PROVIDER" = "ngrok" ] && [ -n "${__NGROK_DOMAIN:-}" ]; then
+        NGROK_DOMAIN="$__NGROK_DOMAIN"; STABLE_HOST="$NGROK_DOMAIN"
+    elif [ "$STABLE_PROVIDER" = "cloudflare" ] && [ -n "${__CF_HOST:-}" ]; then
+        NAMED_HOST="$__CF_HOST"; STABLE_HOST="$__CF_HOST"
+    fi
+fi
+
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
 now() { date +%s; }
@@ -354,9 +384,18 @@ ch_cloudflare() {
 # 2. ngrok — reuse a running agent pointed at our port, else (re)start one.
 ch_ngrok() {
     command -v ngrok >/dev/null 2>&1 || return 1
-    if ! curl -fsS --max-time 4 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null | grep -q "localhost:${PORT}\|:${PORT}\""; then
+    # STABLE mode: when a reserved domain is configured (soa-tunnel-setup ngrok
+    # --domain), run ngrok pinned to it so the URL never rotates. (Re)start ngrok
+    # if none serves our port OR a domain is configured but the live agent isn't
+    # on it yet. Zero-config installs keep the old random-URL behavior.
+    local dom=""; [ -n "$NGROK_DOMAIN" ] && dom="--domain=$NGROK_DOMAIN"
+    local tuns need=0
+    tuns="$(curl -fsS --max-time 4 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null || true)"
+    if ! printf '%s' "$tuns" | grep -q "localhost:${PORT}\|:${PORT}\""; then need=1; fi
+    if [ -n "$NGROK_DOMAIN" ] && ! printf '%s' "$tuns" | grep -q "$NGROK_DOMAIN"; then need=1; fi
+    if [ "$need" -eq 1 ]; then
         pkill -f "ngrok http" 2>/dev/null; sleep 1
-        nohup ngrok http "${PORT}" --log="$NGROK_LOG" >/dev/null 2>&1 &
+        nohup ngrok http "${PORT}" $dom --log="$NGROK_LOG" >/dev/null 2>&1 &
         sleep 6
     fi
     local url i hdr; hdr="$(skip_hdr_for ngrok)"
@@ -403,7 +442,10 @@ ch_lan() {
 
 failover() {
     local ch url
-    # 0. Prefer the STABLE named tunnel (never rotates). No-op until it's set up.
+    # 0. Prefer the configured STABLE door (never rotates). No-op until set up.
+    if [ "$STABLE_PROVIDER" = "ngrok" ] && [ -n "$NGROK_DOMAIN" ]; then
+        if url="$(ch_ngrok)"; then adopt ngrok "$url"; return 0; fi
+    fi
     if url="$(ch_named)"; then adopt cloudflare "$url"; return 0; fi
     for ch in cloudflare ngrok lan; do
         # Skip a recently-failed cloudflare so a multi-hour CF outage doesn't burn
@@ -476,8 +518,14 @@ if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
     # rotates, so this is a one-time move to permanence, not URL churn. Skipped once
     # we're already on it (and a no-op entirely until the named tunnel is set up).
     case "$cur_url" in
-        *"$NAMED_HOST"*) : ;;                       # already on the stable door
-        *)  if nurl="$(ch_named)"; then
+        *"$STABLE_HOST"*) : ;;                      # already on the stable door
+        *)  # Upgrade a rotating door to the configured STABLE one if it's up.
+            if [ "$STABLE_PROVIDER" = "ngrok" ] && [ -n "$NGROK_DOMAIN" ]; then
+                if nurl="$(ch_ngrok)"; then
+                    log "UPGRADE ${cur_ch} ${cur_url} → stable ngrok ${nurl}"
+                    adopt ngrok "$nurl"; exit 0
+                fi
+            elif nurl="$(ch_named)"; then
                 log "UPGRADE ${cur_ch} ${cur_url} → stable named tunnel ${nurl}"
                 adopt cloudflare "$nurl"; exit 0
             fi ;;
