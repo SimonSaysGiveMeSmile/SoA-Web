@@ -37,7 +37,7 @@ function mount(app, requireAuthed, browserAllowed) {
             res.json({ ok: true, created, tab: { id: tab.id, title: tab.title }, tabs });
         } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
     });
-    app.post('/api/voice/chat/send', gate, requireAuthed, express.json({ limit: '32kb' }), (req, res) => {
+    app.post('/api/voice/chat/send', gate, requireAuthed, express.json({ limit: '32kb' }), async (req, res) => {
         const id = Number(req.body?.id);
         const text = req.body?.text;
         const tab = Number.isInteger(id) && req.session?.tabMgr?.get(id);
@@ -46,7 +46,8 @@ function mount(app, requireAuthed, browserAllowed) {
             return res.status(400).json({ ok: false, error: 'Message is empty, too long, or contains control characters.' });
         // Bracketed paste keeps multiline messages as one prompt; shared FIFO
         // keeps a second send from landing before the first Enter.
-        submitToTab(tab, '\x1b[200~' + text.trim() + '\x1b[201~');
+        const sent = await submitToTab(tab, '\x1b[200~' + text.trim() + '\x1b[201~');
+        if (!sent) return res.status(503).json({ ok: false, error: 'Could not submit to that terminal. Your draft is kept; check TERM before trying again.' });
         res.json({ ok: true });
     });
 }

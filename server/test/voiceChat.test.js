@@ -24,7 +24,7 @@ test('voice chat route reuses its Codex manager, serializes prompts, and refuses
     const manager = await (await post('/session', {})).json();
     assert.equal(manager.created, false); assert.equal(manager.tab.id, 7);
     assert.equal((await post('/send', { id: 7, text: 'hello\nworld' })).status, 200);
-    await new Promise(resolve => setTimeout(resolve, 150));
+    // The response itself acknowledges BOTH writes; no extra sleep should be needed.
     assert.deepEqual(writes, ['\x1b[200~hello\nworld\x1b[201~', '\r']);
     assert.equal((await post('/send', { id: 7, text: '\x1bunsafe' })).status, 400);
     assert.equal((await post('/send', { id: 99, text: 'missing' })).status, 404);
@@ -34,4 +34,14 @@ test('voice chat route reuses its Codex manager, serializes prompts, and refuses
     tab.exited = true;
     assert.equal((await post('/send', { id: 7, text: 'closed' })).status, 404);
     assert.equal(writes.length, 2);
+    tab.exited = false;
+    tab.write = () => { throw new Error('PTY disconnected'); };
+    assert.equal((await post('/send', { id: 7, text: 'failed write' })).status, 503);
+    tab.write = s => { writes.push(s); tab.exited = true; };
+    assert.equal((await post('/send', { id: 7, text: 'closes before Enter' })).status, 503);
+    assert.equal(writes.at(-1), '\x1b[200~closes before Enter\x1b[201~');
+    tab.exited = false;
+    tab.write = s => writes.push(s);
+    assert.equal((await post('/send', { id: 7, text: 'recovered' })).status, 200);
+    assert.deepEqual(writes.slice(-2), ['\x1b[200~recovered\x1b[201~', '\r']);
 });

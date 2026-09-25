@@ -564,6 +564,7 @@ button:active { background: var(--accent-bg-hover); }
     background: var(--bg-alt, var(--bg));
 }
 .chat-input {
+    min-width: 0;
     flex: 1 1 auto;
     resize: none;
     max-height: 120px;
@@ -588,6 +589,13 @@ button:active { background: var(--accent-bg-hover); }
     display: flex; align-items: center; justify-content: center;
 }
 .chat-send:disabled { opacity: 0.4; }
+.chat-attachments { display: flex; flex: 0 0 auto; gap: 8px; overflow-x: auto; padding: 8px; }
+.chat-attachments[hidden] { display: none; }
+#chat-view.vc-has-images #chat-send { opacity: 1; transform: none; pointer-events: auto; }
+.chat-attachment { position: relative; flex: 0 0 92px; min-width: 0; }
+.chat-attachment img { width: 92px; height: 72px; object-fit: cover; border-radius: 8px; }
+.chat-attachment span { display: block; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-attachment button { position: absolute; top: 0; right: 0; width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 50%; color: var(--fg); background: var(--bg); font-size: 22px; }
 /* Unread badge on the CHAT nav button — iOS-style corner badge, matching the
    desktop app's chat badge. A red pill pinned to the button's top-right corner
    with a bg-coloured cut-out ring, capped at "99+" by _updateChatBadge. The

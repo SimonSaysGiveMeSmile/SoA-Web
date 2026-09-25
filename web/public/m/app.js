@@ -20,6 +20,7 @@ import { VirtualKeyboard } from './keyboard.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
 import { VoiceChat } from './voice-chat.js';
+import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
 
@@ -27,7 +28,7 @@ import { SessionHistory, openHistory } from './session-history.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v89 · mobile help popups disabled · 2026-09-24';
+const MOBILE_BUILD = 'v92 · chat and image attachments · 2026-09-25';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -1050,20 +1051,30 @@ class App {
         this._refreshModelAccess();
     }
 
-    // Authed JSON call against the backend (cookie + ?t= token like _refreshWidgets).
-    async _api(path, body) {
+    // Use the same credentials as the socket, even when third-party cookies are blocked.
+    _apiUrl(path) {
         const base = (this.socket && this.socket.baseUrl)
             ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
         const tok = this.socket && this.socket.token;
-        const url = base + path + (tok ? (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(tok) : '');
-        const res = await fetch(url, {
+        const url = new URL(base + path, location.origin);
+        if (tok) url.searchParams.set('t', tok);
+        let unlock = this.socket?.unlock || '';
+        try { unlock = unlock || localStorage.getItem('soa.m.unlock') || ''; } catch (_) {}
+        if (unlock) url.searchParams.set('u', unlock);
+        return url.toString();
+    }
+
+    async _api(path, body) {
+        const res = await fetch(this._apiUrl(path), {
             method: body ? 'POST' : 'GET',
             credentials: 'include',
             cache: 'no-store',
             headers: body ? { 'content-type': 'application/json' } : undefined,
             body: body ? JSON.stringify(body) : undefined,
         });
-        return res.json();
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data) throw new Error(data?.passwordRequired ? 'Unlock this desktop again to send messages.' : data?.error || 'Desktop request failed (' + res.status + '). Your draft is kept.');
+        return data;
     }
 
     /* ── Model Access (provider profiles) + Auto-Resume settings ── */
@@ -1623,6 +1634,8 @@ class App {
         // Chat composer: send a message to the active tab's PTY (exactly like
         // typing it in the terminal) and echo it as an outgoing bubble.
         if (this.chatComposer && this.chatInput) {
+            this._chatAttachments = new ChatAttachments({ currentTab: () => this._activeTabId,
+                status: text => this._voiceStatus(text), composer: this.chatComposer, input: this.chatInput });
             const autosize = () => {
                 this.chatInput.style.height = 'auto';
                 this.chatInput.style.height = Math.min(120, this.chatInput.scrollHeight) + 'px';
@@ -1631,7 +1644,7 @@ class App {
             this.chatComposer.addEventListener('submit', (e) => { e.preventDefault(); this._sendChat(); });
             // Enter sends; Shift+Enter inserts a newline (desktop keyboards).
             this.chatInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
+                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); this._sendChat(); }
             });
         }
 
@@ -2385,29 +2398,45 @@ class App {
     async _sendChat() {
         if (this._chatSending) return;
         const raw = (this.chatInput && this.chatInput.value || '').trim();
-        if (!raw) return;
+        const id = this._activeTabId;
+        const attachments = this._chatAttachments.get(id).slice();
+        const targetKey = this._historyKeys.get(id);
+        if (!raw && !attachments.length) return;
         if (this.socket?.state !== SocketState.CONNECTED) {
             this._saveHistory();
-            this._voiceStatus(this._history.available ? 'Offline. Your draft is saved on this device. Reconnect, then Send.' : 'Offline. Browser storage is unavailable; keep this page open to retain your draft.');
+            this._voiceStatus(attachments.length ? 'Offline. Keep this page open to retain your images. Reconnect, then Send.' : this._history.available ? 'Offline. Your draft is saved on this device. Reconnect, then Send.' : 'Offline. Browser storage is unavailable; keep this page open to retain your draft.');
             return;
         }
-        const id = this._activeTabId;
         if (id == null) return;
         // Chat-mode verbosity commands (/brief, /verbose, /details) rewrite to a
         // plain instruction so the agent adjusts how it replies — the terminal
         // stays clean and the bubble still shows what you typed.
-        const text = this._chatCommand(raw) || raw;
+        let text = this._chatCommand(raw) || raw;
         // Type it into the PTY (newline submits, like pressing Enter in terminal).
         this._voiceChat?.cancel();
         this._chatSending = true;
+        this._chatAttachments.setBusy(true);
+        const send = document.getElementById('chat-send');
+        send.disabled = true;
+        this._voiceStatus(attachments.length ? 'Uploading images…' : 'Sending…');
         try {
+            const paths = [];
+            for (const a of attachments) paths.push(await this._uploadImage(a.file));
+            if (this.socket?.state !== SocketState.CONNECTED || this._historyKeys.get(id) !== targetKey || !this._snapshot?.tabs?.some(t => t.id === id && !t.exited))
+                throw new Error('That terminal disconnected or changed. Check TERM before sending again.');
+            if (paths.length) text = [text || 'Please look at these images.', ...paths.map(p => this._quotePath(p))].join('\n');
             const r = await this._api('/api/voice/chat/send', { id, text });
             if (!r?.ok) throw new Error(r?.error || 'Could not send. Your draft is kept.');
         } catch (err) {
             this._voiceStatus(err.message);
             return;
-        } finally { this._chatSending = false; }
-        this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
+        } finally {
+            this._chatSending = false;
+            this._chatAttachments.setBusy(false);
+            send.disabled = false;
+        }
+        this._pushChat(id, { from: 'you', full: [raw, ...attachments.map(a => 'Image: ' + a.file.name)].filter(Boolean).join('\n'), t: Date.now() });
+        this._chatAttachments.remove(id, attachments);
         if (this._activeTabId === id && this.chatInput.value.trim() === raw) this.chatInput.value = '';
         if (this._chatDrafts.get(id)?.trim() === raw) this._chatDrafts.set(id, '');
         this._saveHistory(id);
@@ -2492,6 +2521,8 @@ class App {
     }
 
     _renderChat() {
+        this._chatAttachments?.render();
+        this._syncVoiceDraft?.();
         if (!this.chatLog) return;
         const target = document.getElementById('chat-target');
         if (target) target.textContent = this._tabName(this._activeTabId);
@@ -3147,12 +3178,18 @@ class App {
 
     // ── Camera / photo → prompt ──────────────────────────────────────────
     async _sendPhoto(file) {
+        if (this._currentView === 'chat-view') {
+            this._chatAttachments.add([file]);
+            return;
+        }
+        const id = this._activeTabId;
+        if (id == null || this.socket?.state !== SocketState.CONNECTED) return;
         try {
             const path = await this._uploadImage(file);
-            if (path && this._activeTabId != null) {
+            if (path && this.socket?.state === SocketState.CONNECTED) {
                 // Bracketed paste (ESC[200~ … ESC[201~) so Claude Code treats the
                 // path like a drag-drop and attaches the image, not as typed text.
-                this.socket.sendInput('term-keys', { id: this._activeTabId, text: '\x1b[200~' + path + '\x1b[201~' });
+                this.socket.sendInput('term-keys', { id, text: '\x1b[200~' + this._quotePath(path) + '\x1b[201~' });
                 if ('vibrate' in navigator) try { navigator.vibrate(12); } catch (_) {}
             }
         } catch (_) {
@@ -3161,16 +3198,12 @@ class App {
     }
 
     async _uploadImage(blob) {
-        const base = (this.socket && this.socket.baseUrl)
-            ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : location.origin;
-        const tok = this.socket && this.socket.token;
-        const url = base + '/api/paste-image' + (tok ? '?t=' + encodeURIComponent(tok) : '');
-        const res = await fetch(url, {
+        const res = await fetch(this._apiUrl('/api/paste-image'), {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob,
         });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(data?.passwordRequired ? 'Unlock this desktop again to upload images.' : data?.error || 'Image upload failed (' + res.status + ').');
         if (!data || !data.ok || !data.path) throw new Error('bad response');
         return data.path;
     }
@@ -3640,9 +3673,13 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
+        for (const [id, images] of this._chatAttachments?.drafts || []) {
+            if (!rawTabs.some(t => t.id === id)) this._chatAttachments.remove(id, images);
+        }
         for (const tab of rawTabs) {
             const key = this._history.key(this._historySource, tab);
             if (this._historyKeys.get(tab.id) === key) continue;
+            if (this._historyKeys.has(tab.id)) this._chatAttachments?.remove(tab.id, this._chatAttachments.get(tab.id));
             const saved = this._history.get(this._historySource, tab);
             this._historyKeys.set(tab.id, key);
             this._chatThreads.set(tab.id, saved?.messages || []);
@@ -4450,6 +4487,10 @@ window.addEventListener('DOMContentLoaded', () => {
         const scope = location.pathname.startsWith('/m') ? '/m/' : '/';
         navigator.serviceWorker.register(scope + 'sw.js', { scope }).catch(() => {});
         navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (window._app?._chatSending || window._app?._chatAttachments?.drafts.size) {
+                window._app._voiceStatus('Update ready. Finish sending your message and images, then reload.');
+                return;
+            }
             if (hadController) { window._app?._saveHistory(); location.reload(); }
         });
     }

@@ -1,0 +1,70 @@
+const assert = require('node:assert/strict');
+
+module.exports = async function testImages(browser, url) {
+    const context = await browser.newContext({ viewport: { width: 320, height: 740 }, isMobile: true, hasTouch: true });
+    await context.addInitScript(() => localStorage.setItem('soa.m.unlock', 'test-unlock'));
+    const page = await context.newPage();
+    const uploads = [], sends = [], errors = [];
+    let failUpload = false, failSend = false, releaseUpload, blockUpload = false, uploadStarted;
+    const uploadReceived = new Promise(resolve => { uploadStarted = resolve; });
+    page.on('pageerror', e => errors.push(e.message));
+    await page.route('**/api/paste-image?*', async route => {
+        assert.equal(new URL(route.request().url()).searchParams.get('u'), 'test-unlock', 'upload includes unlock without a cookie');
+        uploads.push(route.request().postDataBuffer());
+        if (blockUpload) await new Promise(resolve => { releaseUpload = resolve; uploadStarted(); });
+        await route.fulfill({ status: failUpload ? 503 : 200, json: failUpload ? { ok: false, error: 'Upload unavailable' } : { ok: true, path: '/test/pasted/photo.png' } });
+    });
+    await page.route('**/api/voice/chat/send?*', async route => {
+        assert.equal(new URL(route.request().url()).searchParams.get('u'), 'test-unlock', 'chat includes unlock without a cookie');
+        sends.push(route.request().postDataJSON());
+        await route.fulfill({ status: failSend ? 503 : 200, json: failSend ? { ok: false, error: 'Terminal unavailable' } : { ok: true } });
+    });
+    try {
+        await page.goto(url);
+        await page.waitForFunction(() => window._app?._snapshot?.tabs?.length > 1);
+        await page.locator('[data-view="chat-view"]').click();
+        const target = await page.evaluate(() => window._app._activeTabId);
+        const other = target === 1 ? 2 : 1;
+        const photo = { name: 'photo.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/L9sAAAAASUVORK5CYII=', 'base64') };
+        await page.locator('#chat-image-input').setInputFiles(photo);
+        assert.equal(await page.locator('#chat-attachments img').count(), 1);
+        assert.equal(uploads.length, 0, 'selection never uploads or sends');
+        await page.locator('#chat-input').fill('Explain this screenshot');
+        failUpload = true;
+        await page.locator('#chat-send').click();
+        await page.waitForFunction(() => document.getElementById('voice-chat-status').textContent.includes('Upload unavailable'));
+        assert.equal(sends.length, 0, 'failed upload never submits a partial message');
+        assert.equal(await page.locator('#chat-input').inputValue(), 'Explain this screenshot');
+        assert.equal(await page.locator('#chat-attachments img').count(), 1);
+        failUpload = false; failSend = true;
+        await page.locator('#chat-send').click();
+        await page.waitForFunction(() => document.getElementById('voice-chat-status').textContent.includes('Terminal unavailable'));
+        assert.equal(await page.locator('#chat-attachments img').count(), 1, 'failed send retains image');
+        failSend = false; blockUpload = true;
+        await page.locator('#chat-send').click();
+        await page.waitForFunction(() => document.getElementById('chat-send').disabled);
+        await uploadReceived;
+        await page.evaluate(id => window._app._switchTabLocal(id), other);
+        await page.locator('#chat-input').fill('New terminal draft');
+        assert.equal(await page.locator('#chat-attachments img').count(), 0, 'image belongs only to original terminal');
+        releaseUpload(); blockUpload = false;
+        await page.waitForFunction(() => !document.getElementById('chat-send').disabled);
+        assert.equal(sends.at(-1).id, target, 'tab switch during upload cannot redirect the message');
+        assert.equal(sends.at(-1).text, 'Explain this screenshot\n/test/pasted/photo.png');
+        assert.equal(await page.locator('#chat-input').inputValue(), 'New terminal draft');
+        await page.evaluate(id => window._app._switchTabLocal(id), target);
+        assert.equal(await page.locator('#chat-input').inputValue(), '');
+        assert.match(await page.locator('#chat-log').textContent(), /Image: photo.png/);
+        await page.locator('#chat-image-input').setInputFiles(photo);
+        await page.locator('#chat-send').click();
+        await page.waitForFunction(() => !document.getElementById('chat-send').disabled);
+        assert.equal(sends.at(-1).text, 'Please look at these images.\n/test/pasted/photo.png', 'image-only message submits');
+        await page.locator('#chat-image-input').setInputFiles(photo);
+        await page.getByRole('button', { name: 'Remove photo.png' }).click();
+        assert.equal(await page.locator('#chat-attachments img').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'composer fits 320px phone');
+        assert.deepEqual(uploads[0], photo.buffer, 'raw image bytes survive upload');
+        assert.deepEqual(errors, []);
+        console.log('Mobile chat: cookie-free unlock, image previews, explicit send, failure recovery, target isolation, image-only send, narrow layout passed.');
+    } finally { await context.close(); }
+};

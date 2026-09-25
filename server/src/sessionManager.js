@@ -410,14 +410,19 @@ const SUBMIT_DELAY_MS = Math.max(0, parseInt(process.env.SOA_WEB_SUBMIT_DELAY_MS
 // when the Tab is GC'd; node-pty has no per-tab write lock of its own.
 const _submitChain = new WeakMap();
 function submitToTab(tab, text) {
-    if (!tab) return;
+    if (!tab) return Promise.resolve(false);
     const prev = _submitChain.get(tab) || Promise.resolve();
     const next = prev.then(() => new Promise((resolve) => {
-        try { tab.write(String(text)); } catch (_) { return resolve(); }
-        const t = setTimeout(() => { try { tab.write('\r'); } catch (_) {} resolve(); }, SUBMIT_DELAY_MS);
+        if (tab.exited) return resolve(false);
+        try { tab.write(String(text)); } catch (_) { return resolve(false); }
+        const t = setTimeout(() => {
+            if (tab.exited) return resolve(false);
+            try { tab.write('\r'); resolve(true); } catch (_) { resolve(false); }
+        }, SUBMIT_DELAY_MS);
         if (t.unref) t.unref();
     }));
     _submitChain.set(tab, next.catch(() => {}));
+    return next;
 }
 
 // Chain-aware raw write (NO trailing Enter). Shares the per-tab FIFO with
