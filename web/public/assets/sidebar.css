@@ -27,38 +27,101 @@
 .bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--soa-accent); transition: width 0.5s ease; }
 
-/* ── TOKEN USAGE widget ─────────────────────────────────────────────── */
-/* Source pills. Present only when there is a second agent to switch to, so a
-   Claude-only install never sees them. They sit inside a body that is itself a
-   click target (it opens the usage dashboard), which is why the handlers stop
-   propagation — picking a source must not also open a panel. */
-.usage-src { display: flex; gap: 4px; margin-bottom: 8px; }
-.usage-src-btn {
-  flex: 1;
-  padding: 3px 0;
-  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.16em;
-  color: var(--soa-accent-dim);
-  background: transparent;
+/* Two compact usage dials, with details shown on selection. Unknown
+   limits use dashed tracks; the inner clock ring measures elapsed time. */
+.usage-dials { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.usage-dials.solo { grid-template-columns: 1fr; }
+.usage-card {
+  min-width: 0;
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 9px 6px 8px;
   border: 1px solid var(--soa-line-soft);
-  cursor: pointer;
+  background: rgba(var(--soa-accent-rgb), 0.025);
+  cursor: pointer; user-select: none;
+  transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
 }
-.usage-src-btn:hover { color: var(--soa-accent); border-color: rgba(var(--soa-accent-rgb), 0.4); }
-.usage-src-btn.on {
-  color: var(--soa-bg);
-  background: var(--soa-accent);
+.usage-card[hidden], .usage-more[hidden] { display: none; }
+.usage-card:hover { border-color: rgba(var(--soa-accent-rgb), 0.35); background: rgba(var(--soa-accent-rgb), 0.045); }
+.usage-card:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
+.usage-card.open {
   border-color: var(--soa-accent);
+  background: rgba(var(--soa-accent-rgb), 0.07);
+  box-shadow: inset 0 0 14px rgba(var(--soa-accent-rgb), 0.07);
+}
+/* The open card points at its panel: a small notch through the bottom edge. */
+.usage-card.open::after {
+  content: ''; position: absolute; left: 50%; bottom: -5px;
+  width: 8px; height: 8px; transform: translateX(-50%) rotate(45deg);
+  background: var(--soa-bg-panel); border-right: 1px solid var(--soa-accent); border-bottom: 1px solid var(--soa-accent);
+}
+/* Ring palette per source. Each ring's colour is one custom property, so the
+   track (same colour, low opacity), the value and the glow all agree, and a
+   theme only has to retint the property. CODEX rings run green so the two
+   dials never read as one. */
+.usage-card[data-src="claude"] { --ring-a: var(--soa-accent); --ring-b: var(--soa-orange); --ring-c: var(--soa-accent-dim); }
+.usage-card[data-src="codex"]  { --ring-a: var(--soa-green);  --ring-b: var(--soa-orange); --ring-c: var(--soa-accent-dim); }
+.usage-ring { width: 80px; height: 80px; display: block; }
+.usage-ring .ring-a { --ring: var(--ring-a); }
+.usage-ring .ring-b { --ring: var(--ring-b); }
+.usage-ring .ring-c { --ring: var(--ring-c); }
+.usage-ring .ring.hot  { --ring: var(--soa-yellow); }
+.usage-ring .ring.crit { --ring: var(--soa-red); }
+.usage-ring circle { fill: none; stroke: var(--ring); stroke-width: 7.5; }
+.usage-ring .track { stroke-opacity: 0.13; }
+.usage-ring .ring.none .track { stroke-opacity: 0.06; stroke-dasharray: 2 3; }
+.usage-ring .val {
+  stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: 50% 50%;
+  transition: stroke-dashoffset .9s cubic-bezier(.22, .8, .3, 1), stroke .4s ease;
+  filter: drop-shadow(0 0 2.5px var(--ring));
+}
+.usage-ring .ring.none .val { display: none; }
+.usage-card-name { margin-top: 2px; font-family: var(--font-display); font-size: 10px; letter-spacing: 0.3em; color: var(--soa-accent-dim); transition: color .2s; }
+.usage-card.open .usage-card-name, .usage-card:hover .usage-card-name { color: var(--soa-accent); }
+.usage-card-big { font-family: var(--font-display); font-size: 19px; line-height: 1; letter-spacing: 0.02em; color: var(--soa-fg); font-variant-numeric: tabular-nums; }
+.usage-card-big.warn { color: var(--soa-yellow); }
+.usage-card-cap { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.08em; color: var(--soa-accent-dim); white-space: normal; max-width: 100%; overflow-wrap: anywhere; text-align: center; }
+.usage-card-cap.warn { color: var(--soa-yellow); }
+/* Tokens are flowing this minute: a pulse in the corner, nothing louder. */
+.usage-live { position: absolute; top: 6px; right: 6px; width: 5px; height: 5px; border-radius: 50%; background: var(--soa-green); box-shadow: 0 0 6px var(--soa-green); animation: pulse 1.6s infinite; display: none; }
+.usage-card.live .usage-live { display: block; }
+
+/* The panel: collapsed to nothing, opens under the dials. max-height (not
+   height:auto) so it can animate; the cap is generous because TOP SESSIONS
+   can run to six rows. */
+.usage-detail { max-height: 0; opacity: 0; overflow: hidden; margin-top: 0; transition: max-height .35s ease, opacity .25s ease, margin-top .3s ease; }
+.usage-detail.open { max-height: 720px; opacity: 1; margin-top: 8px; }
+.usage-detail-in { display: flex; flex-direction: column; gap: 3px; padding-top: 6px; border-top: 1px solid var(--soa-line-soft); }
+.usage-status { font: 11px/1.5 var(--font-mono); color: var(--soa-yellow); }
+.usage-status:empty { display: none; }
+/* Legend rows tie each ring to its number; the dot is the ring's colour,
+   which the panel takes from whichever card is open. */
+.usage-detail[data-src="claude"] { --ring-a: var(--soa-accent); --ring-b: var(--soa-orange); --ring-c: var(--soa-accent-dim); }
+.usage-detail[data-src="codex"]  { --ring-a: var(--soa-green);  --ring-b: var(--soa-orange); --ring-c: var(--soa-accent-dim); }
+.usage-leg { display: grid; grid-template-columns: 8px auto minmax(0, 1fr); align-items: baseline; gap: 6px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; }
+.usage-leg-a .usage-leg-dot { background: var(--ring-a); box-shadow: 0 0 5px var(--ring-a); }
+.usage-leg-b .usage-leg-dot { background: var(--ring-b); box-shadow: 0 0 5px var(--ring-b); }
+.usage-leg-c .usage-leg-dot { background: var(--ring-c); box-shadow: 0 0 5px var(--ring-c); }
+.usage-leg-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; align-self: center; }
+.usage-leg-l { color: var(--soa-accent-dim); }
+.usage-leg .usage-leg-v { text-align: right; letter-spacing: 0.04em; white-space: normal; overflow-wrap: anywhere; }
+.usage-more { min-height: 32px; margin-top: 6px; align-self: flex-end; background: transparent; border: 0; padding: 4px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.18em; color: var(--soa-accent-dim); cursor: pointer; }
+.usage-more:hover { color: var(--soa-accent); }
+/* Light themes: the glow is a dark-room effect, and on paper it just blurs. */
+[data-ui="minimal"] .usage-ring .val { filter: none; }
+[data-ui="minimal"] .usage-leg-dot { box-shadow: none; }
+[data-ui="minimal"] .usage-card.open::after { background: var(--soa-bg-panel); }
+@media (prefers-reduced-motion: reduce) {
+  .usage-ring .val, .usage-detail, .usage-card { transition: none; }
+  .usage-live { animation: none; }
 }
 
 /* ── CLAUDE USAGE widget ────────────────────────────────────────────── */
-.claude-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.18em; }
 .claude-head-l { color: var(--soa-accent-dim); }
 .claude-reset { color: var(--soa-accent); letter-spacing: 0.06em; white-space: nowrap; }
 .claude-reset.warn { color: var(--soa-yellow); }
-.claude-bar { margin-top: 5px; }
 .claude-sub { margin-top: 5px; font-family: var(--font-mono); font-size: 10.5px; color: var(--soa-fg); letter-spacing: 0.03em; }
-/* WEEKLY sub-window: a little breathing room above its header, and an amber
-   fill once it crosses 80% so the slow-reset ceiling reads as urgent. */
-.claude-head-week { margin-top: 9px; }
 .bar-fill.hot { background: var(--soa-yellow); }
 .claude-spark { display: block; width: 100%; height: 34px; margin: 7px 0 5px; background: rgba(var(--soa-accent-rgb), 0.04); border: 1px solid rgba(var(--soa-accent-rgb), 0.14); }
 .claude-sess-head { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--soa-line-soft); font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.18em; color: var(--soa-accent-dim); }
@@ -69,8 +132,6 @@
 /* A session leaning hard on the model (>= soa-usage-alert thresholds) — the phone got a push too. */
 .claude-sess-row.hot .claude-sess-name { color: #ff6b6b; }
 .claude-sess-row.hot .claude-sess-val { color: #ff5b5b; font-weight: 600; }
-.claude-clickable { cursor: pointer; }
-.claude-clickable:hover .claude-head-l { color: var(--soa-accent); }
 
 /* ── Mobile QR widget ───────────────────────────────────────────────── */
 .mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }

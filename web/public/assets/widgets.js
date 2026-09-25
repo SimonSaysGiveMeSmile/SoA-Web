@@ -485,40 +485,51 @@ const _fmtDur = ms => {
     return h ? `${h}h ${m}m` : `${m}m`;
 };
 
+let usagePanelSequence = 0;
+
 class ClaudeUsageWidget extends Widget {
     constructor({ parent }) {
         // 2.5s poll: the server memoizes compute() for 1.2s and tails only
         // appended bytes, so the fast cadence is cheap — the remaining lag is
         // transcript flush timing (a record lands when its message completes).
         super({ titleKey: 'widget.claude', title: 'TOKEN USAGE', parent, intervalMs: 2500 });
-        // Which agent is on screen. Remembered, because a fleet that is mostly
-        // one of them should not have to re-pick on every load.
-        this._source = 'claude';
+        // Two dials, one detail panel. The dials — a CLAUDE card and a CODEX
+        // card, each three concentric rings — are the whole widget until a
+        // card is clicked; then the detail for THAT source opens beneath both
+        // (the other dial stays in view, so the two are always comparable).
+        // Which one is open is remembered: a fleet that is mostly one agent
+        // should not have to re-pick on every load.
+        this._open = null;
         try {
-            const saved = localStorage.getItem('soa_usage_source');
-            if (saved === 'codex' || saved === 'claude') this._source = saved;
+            const saved = localStorage.getItem('soa_usage_open');
+            if (saved === 'codex' || saved === 'claude') this._open = saved;
         } catch (_) {}
         this._codexSeen = false;
-        this._srcBtns = {};
-        this._srcRow = $el('div', { class: 'usage-src' }, ['claude', 'codex'].map(k => {
-            const b = $el('button', {
-                class: 'usage-src-btn', type: 'button',
-                text: tr('widget.usage.src_' + k),
-                onclick: (e) => { e.stopPropagation(); this._setSource(k); },
-            });
-            this._srcBtns[k] = b;
-            return b;
-        }));
-        this._srcRow.style.display = 'none';
-        // Persistent DOM — tick() only updates text/width/canvas so the
-        // sparkline never flickers on refresh.
-        this._reset = $el('span', { class: 'claude-reset', text: '—' });
-        this._fill = $el('span', { class: 'bar-fill' });
+        this._claude = null;
+        this._codex = null;
+        this._codexAt = null;
+        this._codexFresh = false;
+        this._claudeFresh = false;
+        this._codexChecked = false;
+        this._fetching = null;
+        this._cards = { claude: this._makeCard('claude'), codex: this._makeCard('codex') };
+        this._dials = $el('div', { class: 'usage-dials' }, [this._cards.claude.el, this._cards.codex.el]);
+
+        // ── detail panel (persistent DOM — tick() only updates text/width/
+        // canvas so the sparkline never flickers on refresh) ──
+        const leg = (k) => {
+            // Doubled class names on purpose: the minimal/liquid themes
+            // already restyle .claude-reset / .claude-head-l, and the legend
+            // is the same thing in a new place.
+            const v = $el('span', { class: 'usage-leg-v claude-reset' });
+            const l = $el('span', { class: 'usage-leg-l claude-head-l' });
+            const row = $el('div', { class: `usage-leg usage-leg-${k}` }, [$el('i', { class: 'usage-leg-dot' }), l, v]);
+            return { row, l, v };
+        };
+        this._legA = leg('a'); this._legB = leg('b'); this._legC = leg('c');
+        this._reset = this._legA.v;        // kept under their old names: the
+        this._weekPct = this._legB.v;      // session/spark code reads them
         this._sub = $el('div', { class: 'claude-sub', text: '—' });
-        // Weekly usage-limit window (mirrors the 5H block above it). The weekly
-        // is the constraint that resets slowest, so surface it alongside the 5H.
-        this._weekPct = $el('span', { class: 'claude-reset', text: '—' });
-        this._weekFill = $el('span', { class: 'bar-fill' });
         this._weekSub = $el('div', { class: 'claude-sub', text: '—' });
         this._spark = $el('canvas', { class: 'claude-spark', width: 240, height: 34 });
         this._series = new Array(30).fill(0);
@@ -536,118 +547,293 @@ class ClaudeUsageWidget extends Widget {
         this._sessList = $el('div', { class: 'claude-sess-list' });
         this._sessHead.style.display = 'none';
         this._sessList.style.display = 'none';
-        this._mountStructure();
-        // Kept so a source switch can relabel the gauges without rebuilding
-        // the subtree the sparkline lives in.
-        this._headL = this.body.querySelector('.claude-head .claude-head-l');
         // The widget is the teaser; the full usage dashboard lives in the
         // manager view's USAGE pane. app.js listens for this event.
-        this.body.classList.add('claude-clickable');
-        this.body.title = 'Open the usage dashboard';
-        this.body.addEventListener('click', () =>
-            window.dispatchEvent(new CustomEvent('soa:open-usage')));
-    }
-
-    // Assemble the persistent DOM. Re-callable: a 404/sandbox tick swaps in a
-    // note (detaching these nodes), so _render re-mounts before updating them.
-    _mountStructure() {
-        this._headL = $el('span', { class: 'claude-head-l', text: '5H WINDOW' });
-        this._weekHeadL = $el('span', { class: 'claude-head-l', text: 'WEEKLY' });
-        this._weekHead = $el('div', { class: 'claude-head claude-head-week' }, [this._weekHeadL, this._weekPct]);
-        this._weekBar = $el('div', { class: 'bar claude-bar' }, [this._weekFill]);
-        this.body.replaceChildren(
-            this._srcRow,
-            $el('div', { class: 'claude-head' }, [this._headL, this._reset]),
-            $el('div', { class: 'bar claude-bar' }, [this._fill]),
-            this._sub,
-            this._weekHead,
-            this._weekBar,
-            this._weekSub,
+        this._more = $el('button', {
+            class: 'usage-more', type: 'button', text: 'OPEN DASHBOARD ↗',
+            onclick: (e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('soa:open-usage')); },
+        });
+        this._status = $el('div', { class: 'usage-status', role: 'status' });
+        this._detailInner = $el('div', { class: 'usage-detail-in' }, [
+            this._status,
+            this._legA.row, this._legB.row, this._legC.row,
+            this._sub, this._weekSub,
             this._spark,
             this._burn.row, this._today.row, this._model.row,
             this._sessHead, this._sessList,
-        );
+            this._more,
+        ]);
+        this._detail = $el('div', { class: 'usage-detail' }, [this._detailInner]);
+        this._detail.id = `usage-detail-${++usagePanelSequence}`;
+        for (const c of Object.values(this._cards)) c.el.setAttribute('aria-controls', this._detail.id);
+        this._mountStructure();
+        this._paintCodexPresence();
+        this._paintOpen();
     }
 
-    /** Show or hide the second gauge — codex plans do not all have one. */
-    _setSecondGauge(on) {
-        for (const n of [this._weekHead, this._weekBar, this._weekSub]) {
-            if (n) n.style.display = on ? '' : 'none';
+    // Outer: short usage window; middle: weekly window; inner: elapsed time.
+    // Unknown limits stay dashed. Claude only exposes a weekly estimate;
+    // Codex reports actual limits. Labels and accessible names explain each.
+    _makeCard(src) {
+        const NS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 100 100');
+        svg.setAttribute('class', 'usage-ring');
+        svg.setAttribute('aria-hidden', 'true');
+        const rings = {};
+        [['a', 42], ['b', 32.5], ['c', 23]].forEach(([k, r]) => {
+            const C = 2 * Math.PI * r;
+            const g = document.createElementNS(NS, 'g');
+            g.setAttribute('class', `ring ring-${k}`);
+            const mk = (cls) => {
+                const c = document.createElementNS(NS, 'circle');
+                c.setAttribute('cx', '50'); c.setAttribute('cy', '50'); c.setAttribute('r', String(r));
+                c.setAttribute('class', cls);
+                return c;
+            };
+            const track = mk('track');
+            const val = mk('val');
+            val.setAttribute('stroke-dasharray', String(C));
+            val.setAttribute('stroke-dashoffset', String(C));
+            g.appendChild(track); g.appendChild(val);
+            svg.appendChild(g);
+            rings[k] = { g, val, C };
+        });
+        const name = $el('div', { class: 'usage-card-name', text: tr('widget.usage.src_' + src) });
+        const big = $el('div', { class: 'usage-card-big', text: '—' });
+        const cap = $el('div', { class: 'usage-card-cap', text: '—' });
+        const live = $el('span', { class: 'usage-live', title: 'tokens flowing right now' });
+        const el = $el('div', {
+            class: 'usage-card', 'data-src': src, role: 'button', tabindex: '0', 'aria-expanded': 'false',
+            title: 'Show details',
+            onclick: () => this._toggle(src),
+            onkeydown: (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    if (!e.repeat) this._toggle(src);
+                }
+            },
+        }, [live, svg, name, big, cap]);
+        return { el, rings, name, big, cap };
+    }
+
+    _setRing(card, k, pct) {
+        const r = card.rings[k];
+        if (pct == null || !Number.isFinite(pct)) {
+            // No such window on this plan: the track stays as a faint outline,
+            // the value ring simply never draws.
+            r.g.classList.add('none');
+            r.val.setAttribute('stroke-dashoffset', String(r.C));
+            r.g.classList.remove('hot', 'crit');
+            return;
         }
+        r.g.classList.remove('none');
+        const p = Math.max(0, Math.min(100, pct)) / 100;
+        r.val.setAttribute('stroke-dashoffset', String(r.C * (1 - p)));
+        r.g.classList.toggle('hot', k !== 'c' && pct >= 80 && pct < 95);
+        r.g.classList.toggle('crit', k !== 'c' && pct >= 95);
     }
 
-    _setSource(src) {
-        if (this._source === src) return;
-        this._source = src;
-        try { localStorage.setItem('soa_usage_source', src); } catch (_) {}
-        this._paintSrc();
+    _mountStructure() {
+        this.body.replaceChildren(this._dials, this._detail);
+    }
+
+    _toggle(src) {
+        this._open = this._open === src ? null : src;
+        try {
+            if (this._open) localStorage.setItem('soa_usage_open', this._open);
+            else localStorage.removeItem('soa_usage_open');
+        } catch (_) {}
+        this._paintOpen();
+        // A freshly opened codex panel requests current numbers immediately.
+        if (this._open === 'codex') this._codexAt = null;
         this._series = new Array(30).fill(0);
+        this._paintDetail();
         this.tick();
     }
 
-    // The pills appear only once there is a second source to switch to, so an
-    // install that has never run codex is unchanged.
-    _paintSrc() {
-        this._srcRow.style.display = this._codexSeen ? '' : 'none';
-        for (const [k, b] of Object.entries(this._srcBtns)) b.classList.toggle('on', k === this._source);
-        if (!this._codexSeen && this._source === 'codex') this._source = 'claude';
+    _paintOpen() {
+        const open = !!this._open && (this._open !== 'codex' || this._codexSeen);
+        if (!open && this._detail.contains(document.activeElement)) {
+            this._cards[this._detail.dataset.src || 'claude'].el.focus();
+        }
+        for (const [k, c] of Object.entries(this._cards)) {
+            const on = open && this._open === k;
+            c.el.classList.toggle('open', on);
+            c.el.setAttribute('aria-expanded', on ? 'true' : 'false');
+            c.el.title = on ? 'Hide details' : 'Show details';
+        }
+        this._detail.classList.toggle('open', open);
+        this._detail.inert = !open;
+        this._detail.setAttribute('aria-hidden', String(!open));
+        this._more.tabIndex = open ? 0 : -1;
+        this._more.hidden = !window.__SOA_WEB__?._shell?._managerEnabled?.();
+        this._detail.dataset.src = this._open || '';
+    }
+
+    // The codex dial appears only once there is codex to show, so an install
+    // that has never run it sees a single, wider CLAUDE dial and nothing else.
+    _paintCodexPresence() {
+        if (!this._codexSeen && (document.activeElement === this._cards.codex.el ||
+            (this._detail.dataset.src === 'codex' && this._detail.contains(document.activeElement)))) {
+            this._cards.claude.el.focus();
+        }
+        this._cards.codex.el.hidden = !this._codexSeen;
+        this._dials.classList.toggle('solo', !this._codexSeen);
+        if (this._codexChecked && !this._codexSeen && this._open === 'codex') this._open = null;
+        this._paintOpen();
     }
 
     async tick() {
+        if (this._destroyed) return;
         if (isSandbox()) { this._note(tr('widget.claude.sandbox')); return; }
-        // Ask codex once a minute while CLAUDE is on screen: it is what decides
-        // whether the switch exists at all, and a 2.5s poll of a source nobody
-        // is looking at would be work for nothing. The minute applies to the
-        // FAILING case too — on a daemon old enough not to have the endpoint
-        // this would otherwise 404 every 2.5s forever, which is the shape of
-        // background noise that makes a real error impossible to spot.
-        const now = Date.now();
-        if (this._source === 'codex' || (now - (this._codexAt || 0)) > 60000) {
-            this._codexAt = now;
-            try {
-                const { data } = await jget('/api/codex-usage');
-                this._codex = data;
-                this._codexSeen = !!(data && data.available);
-            } catch (_) { /* older backend, or no codex on this machine */ }
-        }
-        this._paintSrc();
-        if (this._source === 'codex') { this._renderCodex(this._codex); return; }
-        let data;
-        try {
-            ({ data } = await jget('/api/claude-usage'));
-        } catch (e) {
-            // The endpoint ships in a server build; before the backend restarts
-            // it 404s — show a hint rather than a scary ERR.
-            if (/\b404\b/.test(e.message)) this._note(tr('widget.claude.restart'));
-            return;
-        }
-        this._render(data);
+        // A click and an interval may arrive together; never race older data
+        // against a newer refresh, or duplicate the same requests.
+        if (this._fetching) return this._fetching;
+        this._fetching = this._refreshUsage();
+        try { await this._fetching; } finally { this._fetching = null; }
     }
 
-    // A note replaces the gauges, but never the source pills: "no codex
-    // sessions yet" with no way back to CLAUDE is a dead end.
+    async _refreshUsage() {
+        const now = Date.now();
+        const pollCodex = this._codexAt == null ||
+            (this._open === 'codex' && this._codexFresh) || now - this._codexAt >= 20000;
+        if (pollCodex) this._codexAt = now;
+        const read = async path => {
+            try { return { data: (await jget(path)).data }; }
+            catch (error) { return { error }; }
+        };
+        // Either source can be available while the other is restarting.
+        const [claude, codex] = await Promise.all([
+            read('/api/claude-usage'),
+            pollCodex ? read('/api/codex-usage') : null,
+        ]);
+        if (this._destroyed) return;
+        this._claudeFresh = !!claude.data && !claude.error;
+        if (this._claudeFresh) this._claude = claude.data;
+        if (codex) {
+            this._codexFresh = !!codex.data && !codex.error;
+            if (this._codexFresh) {
+                this._codex = codex.data;
+                this._codexSeen = !!codex.data.available;
+                this._codexChecked = true;
+            }
+        }
+        if (!this.body.contains(this._dials)) this._mountStructure();
+        this._paintCodexPresence();
+        if (this._claudeFresh) this._paintClaudeCard(this._claude);
+        else this._paintUnavailable(this._cards.claude);
+        if (this._codexSeen) {
+            if (this._codexFresh) this._paintCodexCard(this._codex);
+            else this._paintUnavailable(this._cards.codex);
+        }
+        this._paintDetail();
+    }
+
+    _paintUnavailable(c) {
+        for (const k of ['a', 'b', 'c']) this._setRing(c, k, null);
+        c.big.textContent = '—';
+        c.big.classList.remove('warn');
+        c.cap.textContent = 'Unavailable · retrying';
+        c.cap.classList.remove('warn');
+        c.el.classList.remove('live');
+        c.el.setAttribute('aria-label', `${c.name.textContent}: usage unavailable, retrying`);
+    }
+
+    _describeCard(c, details) {
+        c.el.setAttribute('aria-label', `${c.name.textContent}: ${details}` +
+            (c.el.classList.contains('live') ? ', tokens flowing now' : ''));
+    }
+
+    _codexClock(p) {
+        const span = (p?.windowMinutes || 0) * 60000;
+        // A missing or expired reset timestamp does not mean 100% elapsed.
+        return span && p.resetsAt > Date.now() && Number.isFinite(p.remainingMs)
+            ? Math.min(100, Math.max(0, 100 - p.remainingMs / span * 100)) : null;
+    }
+
     _note(text) {
-        this.body.replaceChildren(this._srcRow, $el('div', { class: 'widget-note', text }));
-        this._paintSrc();
+        this.body.replaceChildren($el('div', { class: 'widget-note', text }));
+    }
+
+    // ── the dials ──────────────────────────────────────────────────────
+    _paintClaudeCard(d) {
+        const c = this._cards.claude;
+        const b = d.block || {};
+        const wkPct = Math.max(0, Math.round(((d.week?.cost || 0) / WEEK_LIMIT_USD) * 100));
+        // block.pct is elapsed TIME, not the percentage of Claude's quota.
+        // The local transcript data does not report a five-hour usage cap.
+        this._setRing(c, 'a', null);
+        const span = Math.max(1, (b.endTs || 0) - (b.startTs || 0));
+        const clock = b.active ? Math.min(100, b.elapsedMs / span * 100) : null;
+        this._setRing(c, 'c', clock);
+        this._setRing(c, 'b', wkPct);
+        c.big.textContent = `≈${wkPct}%`;
+        c.cap.textContent = 'weekly estimate';
+        c.cap.classList.remove('warn');
+        c.big.classList.toggle('warn', wkPct >= 80);
+        c.el.classList.toggle('live', !!b.active && (b.burnRatePerMin || 0) > 0 && (Date.now() - (b.lastTs || 0)) < 3 * 60000);
+        this._describeCard(c, `five-hour usage limit not reported, weekly usage approximately ${wkPct} percent, ` +
+            (Number.isFinite(clock) ? `five-hour window ${Math.round(clock)} percent elapsed` : 'no active five-hour window'));
+    }
+
+    _paintCodexCard(d) {
+        const c = this._cards.codex;
+        if (!d || !d.available) {
+            this._setRing(c, 'a', null); this._setRing(c, 'b', null); this._setRing(c, 'c', null);
+            c.big.textContent = '—';
+            c.cap.textContent = tr('widget.usage.codex_none');
+            c.el.classList.remove('live');
+            return;
+        }
+        const lim = d.limits || {};
+        const p = lim.primary, s = lim.secondary;
+        if (p) {
+            const clock = this._codexClock(p);
+            this._setRing(c, 'a', p.usedPercent);
+            this._setRing(c, 'c', clock);
+            c.big.textContent = `${Math.round(p.usedPercent)}%`;
+            c.cap.textContent = p.remainingMs ? tr('widget.claude.resets', { t: _fmtDur(p.remainingMs) }) : 'reset not reported';
+            c.cap.classList.toggle('warn', p.usedPercent >= 80);
+        } else {
+            this._setRing(c, 'a', null); this._setRing(c, 'c', null);
+            c.big.textContent = '—';
+            c.cap.textContent = tr('widget.usage.codex_limit');
+            c.cap.classList.remove('warn');
+        }
+        this._setRing(c, 'b', s ? s.usedPercent : null);
+        c.big.classList.toggle('warn', !!p && p.usedPercent >= 80);
+        c.el.classList.toggle('live', (d.burnRatePerMin || 0) > 0 && (Date.now() - (d.lastTs || 0)) < 3 * 60000);
+        const clock = this._codexClock(p);
+        this._describeCard(c, `${p ? `${p.label || 'primary'} usage ${Math.round(p.usedPercent)} percent` : 'primary limit unavailable'}, ` +
+            `${s ? `${s.label || 'secondary'} usage ${Math.round(s.usedPercent)} percent` : 'secondary limit unavailable'}, ` +
+            (clock == null ? 'window clock unavailable' : `window ${Math.round(clock)} percent elapsed`));
+    }
+
+    // ── the detail panel (one source at a time) ────────────────────────
+    _paintDetail() {
+        if (!this._open || this._detail.inert) return;
+        const fresh = this._open === 'codex' ? this._codexFresh : this._claudeFresh;
+        this._status.textContent = fresh ? '' : 'Usage unavailable. Retrying; any details below are from the last update.';
+        if (this._open === 'codex') { this._renderCodex(this._codex); return; }
+        if (this._claude) this._render(this._claude);
     }
 
     _render(d) {
-        // A prior note tick may have detached the structure — re-mount it.
-        if (!this.body.contains(this._reset)) this._mountStructure();
-        this._headL.textContent = '5H WINDOW';
-        this._weekHeadL.textContent = 'WEEKLY';
-        this._setSecondGauge(true);
         const b = d.block || {};
+        this._legA.l.textContent = '5H USAGE';
+        this._legB.l.textContent = 'WEEKLY EST.';
+        this._legC.l.textContent = 'CLOCK';
+        this._legB.row.style.display = '';
+        this._reset.textContent = 'limit not reported';
+        this._reset.classList.remove('warn');
         if (b.active) {
-            this._reset.textContent = tr('widget.claude.resets', { t: _fmtDur(b.remainingMs) });
-            this._reset.classList.toggle('warn', b.remainingMs < 20 * 60000);
-            this._fill.style.width = `${Math.min(100, b.pct || 0)}%`;
+            const span = Math.max(1, (b.endTs || 0) - (b.startTs || 0));
+            this._legC.v.textContent = `${Math.round((b.elapsedMs / span) * 100)}% elapsed · ${_fmtDur(b.remainingMs)} left`;
             this._sub.textContent = `${_fmtTok(b.tokens.total)} ${tr('widget.claude.tok')} · ${b.requests} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
             this._burn.v.textContent = `${_fmtTok(b.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
         } else {
-            this._reset.textContent = tr('widget.claude.idle');
-            this._reset.classList.remove('warn');
-            this._fill.style.width = '0%';
+            this._legC.v.textContent = '—';
             this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
             this._burn.v.textContent = '0 ' + tr('widget.claude.tokmin');
         }
@@ -656,16 +842,15 @@ class ClaudeUsageWidget extends Widget {
         const wk = d.week || {};
         const wkCost = wk.cost || 0;
         const wkTok = (wk.tokens && wk.tokens.total) || 0;
-        const wkPct = Math.min(100, Math.round((wkCost / WEEK_LIMIT_USD) * 100));
-        this._weekPct.textContent = `${wkPct}% used`;
+        const wkPct = Math.max(0, Math.round((wkCost / WEEK_LIMIT_USD) * 100));
+        this._weekPct.textContent = `≈${wkPct}% of ≈$${WEEK_LIMIT_USD}`;
         this._weekPct.classList.toggle('warn', wkPct >= 80);
-        this._weekFill.style.width = `${wkPct}%`;
-        this._weekFill.classList.toggle('hot', wkPct >= 80);
         this._weekSub.textContent = `${_fmtTok(wkTok)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(wkCost)}`;
+        this._weekSub.style.display = '';
         const today = d.today || { tokens: { total: 0 }, cost: 0 };
         this._today.v.textContent = `${_fmtTok(today.tokens.total)} · ≈${_fmtUsd(today.cost)}`;
         const top = (d.models || [])[0];
-        if (top) {
+        if (top && top.tokens > 0) {
             const totAll = (d.models || []).reduce((s, m) => s + m.tokens, 0) || 1;
             const share = Math.round((top.tokens / totAll) * 100);
             this._model.v.textContent = `${top.tier} ${share}%`;
@@ -722,39 +907,44 @@ class ClaudeUsageWidget extends Widget {
     // ── CODEX ───────────────────────────────────────────────────────────
     //
     // The shape is the CLAUDE view's, but almost nothing here is inferred. The
-    // gauges are the limit windows the API reports back to codex — used
+    // rings are the limit windows the API reports back to codex — used
     // percent, window length and reset time — so they are the real ceiling
     // rather than a calibration guess, and a plan with only one window simply
-    // shows one gauge. TODAY is exact too: the transcripts carry a running
-    // per-thread total, so a day is one subtraction rather than a sum over
-    // records nobody read. What is missing is money, deliberately: there is no
-    // published rate for the model this runs, and a made-up one in a column
-    // labelled "≈" would be worse than an empty column.
+    // leaves the middle ring as an outline. TODAY is exact too: the transcripts
+    // carry a running per-thread total, so a day is one subtraction rather
+    // than a sum over records nobody read. What is missing is money,
+    // deliberately: there is no published rate for the model this runs, and a
+    // made-up one in a column labelled "≈" would be worse than an empty column.
     _renderCodex(d) {
-        if (!this.body.contains(this._reset)) this._mountStructure();
-        this._paintSrc();
-        if (!d || !d.available) { this._note(tr('widget.usage.codex_none')); return; }
-        const lim = d.limits || {};
-        const gauge = (headL, pctEl, fillEl, subEl, l, sub) => {
-            headL.textContent = l ? l.label : 'LIMIT';
-            pctEl.textContent = l && l.remainingMs
-                ? tr('widget.claude.resets', { t: _fmtDur(l.remainingMs) })
-                : (l ? `${Math.round(l.usedPercent)}%` : '—');
-            pctEl.classList.toggle('warn', !!l && l.usedPercent >= 80);
-            fillEl.style.width = `${l ? Math.min(100, l.usedPercent) : 0}%`;
-            fillEl.classList.toggle('hot', !!l && l.usedPercent >= 80);
-            subEl.textContent = sub;
-        };
-        const plan = (d.planType || '').replace(/_/g, ' ');
-        gauge(this._headL, this._reset, this._fill, this._sub, lim.primary,
-            lim.primary
-                ? `${Math.round(lim.primary.usedPercent)}% used · ${plan || tr('widget.usage.codex_limit')}`
-                : tr('widget.usage.codex_limit'));
-        this._setSecondGauge(!!lim.secondary);
-        if (lim.secondary) {
-            gauge(this._weekHeadL, this._weekPct, this._weekFill, this._weekSub, lim.secondary,
-                `${Math.round(lim.secondary.usedPercent)}% used`);
+        if (!d || !d.available) {
+            this._legA.l.textContent = 'CODEX'; this._reset.textContent = tr('widget.usage.codex_none');
+            this._legB.row.style.display = 'none';
+            this._legC.v.textContent = '—';
+            this._sub.textContent = '—'; this._weekSub.style.display = 'none';
+            this._burn.v.textContent = '—'; this._today.v.textContent = '—'; this._model.v.textContent = '—';
+            this._renderCodexSessions({ sessions: [] });
+            this._series = new Array(30).fill(0); this._paintSpark();
+            return;
         }
+        const lim = d.limits || {};
+        const p = lim.primary, s = lim.secondary;
+        const plan = (d.planType || '').replace(/_/g, ' ');
+        this._legA.l.textContent = p ? p.label : 'LIMIT';
+        this._reset.textContent = p
+            ? `${Math.round(p.usedPercent)}%` + (p.remainingMs ? ` · ${_fmtDur(p.remainingMs)} left` : '')
+            : tr('widget.usage.codex_limit');
+        this._reset.classList.toggle('warn', !!p && p.usedPercent >= 80);
+        this._legB.row.style.display = s ? '' : 'none';
+        if (s) {
+            this._legB.l.textContent = s.label || 'LIMIT 2';
+            this._weekPct.textContent = `${Math.round(s.usedPercent)}%` + (s.remainingMs ? ` · ${_fmtDur(s.remainingMs)} left` : '');
+            this._weekPct.classList.toggle('warn', s.usedPercent >= 80);
+        }
+        this._legC.l.textContent = 'CLOCK';
+        const clock = this._codexClock(p);
+        this._legC.v.textContent = clock == null ? '—' : `${Math.round(clock)}% elapsed`;
+        this._sub.textContent = plan ? `${plan} plan · ${tr('widget.usage.codex_limit')}` : tr('widget.usage.codex_limit');
+        this._weekSub.style.display = 'none';
         this._burn.v.textContent = `${_fmtTok(d.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
         // Tokens in, tokens out — both exact, both from the cumulative
         // counters. Not a request count: see requestsSeen in codexUsage.js for
@@ -804,14 +994,19 @@ class ClaudeUsageWidget extends Widget {
         }));
     }
 
-    onLangChange() { /* labels refresh on next tick */ }
+    onLangChange() {
+        for (const [k, c] of Object.entries(this._cards)) c.name.textContent = tr('widget.usage.src_' + k);
+        if (this._claudeFresh) this._paintClaudeCard(this._claude);
+        if (this._codexFresh && this._codexSeen) this._paintCodexCard(this._codex);
+        this._paintDetail();
+    }
 
     _paintSpark() {
         const c = this._spark, ctx = c.getContext('2d');
         const w = c.width, h = c.height;
         ctx.clearRect(0, 0, w, h);
         const n = this._series.length;
-        if (!n) return;
+        if (n < 2) return;
         const max = Math.max(1, ...this._series);
         // Filled area + line, Tron accent.
         ctx.beginPath();

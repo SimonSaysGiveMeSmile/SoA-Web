@@ -17,6 +17,7 @@
     "test": "node --test server/test/*.test.js",
     "test:mobile": "node scripts/test-mobile.cjs",
     "test:voice": "node scripts/test-voice-toolbar.cjs",
+    "test:usage": "node scripts/test-usage-widget.cjs",
     "vendor:terminal": "node scripts/vendor-mobile-terminal.js"
   },
   "dependencies": {
