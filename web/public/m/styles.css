@@ -589,6 +589,10 @@ button:active { background: var(--accent-bg-hover); }
     display: flex; align-items: center; justify-content: center;
 }
 .chat-send:disabled { opacity: 0.4; }
+#chat-feedback { flex: 0 0 auto; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12px; }
+#chat-feedback summary { cursor: pointer; padding: 6px 0; }
+#chat-feedback pre { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+#chat-feedback button { min-height: 40px; margin: 4px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
 .chat-attachments { display: flex; flex: 0 0 auto; gap: 8px; overflow-x: auto; padding: 8px; }
 .chat-attachments[hidden] { display: none; }
 #chat-view.vc-has-images #chat-send { opacity: 1; transform: none; pointer-events: auto; }

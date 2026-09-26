@@ -19,6 +19,12 @@ function mount(app, requireAuthed, browserAllowed) {
         if (!browserAllowed(req)) return res.status(403).json({ ok: false, error: 'request origin not allowed' });
         next();
     };
+    app.get('/api/voice/chat/replies', gate, requireAuthed, (req, res) => {
+        const id = Number(req.query.id);
+        if (!Number.isInteger(id) || !req.session?.tabMgr?.get(id)) return res.status(404).json({ ok: false, error: 'Terminal not found.' });
+        res.set('Cache-Control', 'no-store');
+        res.json({ ok: true, replies: require('./tts').repliesFor(req.session, id) });
+    });
     app.post('/api/voice/chat/session', gate, requireAuthed, (req, res) => {
         const s = req.session;
         if (!s?.tabMgr) return res.status(503).json({ ok: false, error: 'Pair with your desktop first.' });

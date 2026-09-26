@@ -28,7 +28,7 @@ import { SessionHistory, openHistory } from './session-history.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v92 · chat and image attachments · 2026-09-25';
+const MOBILE_BUILD = 'v93 · reply feedback and stable streaming · 2026-09-25';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -667,7 +667,11 @@ class App {
             document.getElementById(id)?.addEventListener('click', () => this._openHistory());
         this.chatInput?.addEventListener('input', () => this._saveHistory());
         window.addEventListener('pagehide', () => this._saveHistory());
-        document.addEventListener('visibilitychange', () => { if (document.hidden) this._saveHistory(); });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this._saveHistory();
+            else { this._renderActive(); this._pollReplies(); }
+        });
+        this._replyTimer = setInterval(() => this._pollReplies(), 3000);
 
         if (!token) {
             // The QR/link arrived without a token. That's only fine if the
@@ -1015,7 +1019,8 @@ class App {
         // Reset local render state so the next snapshot rebuilds from scratch
         // rather than diffing against stale data from before the hang.
         this._snapshot = null;
-        this._tabStates = new Map();
+        for (const ts of this._tabStates.values()) ts.term.dispose();
+        this._tabStates.clear();
         this._hasReceivedSnapshot = false;
         if (this.termEl) this.termEl.innerHTML = '';
         try { this.socket && this.socket.connect(); } catch (_) {}
@@ -1064,11 +1069,12 @@ class App {
         return url.toString();
     }
 
-    async _api(path, body) {
+    async _api(path, body, { signal } = {}) {
         const res = await fetch(this._apiUrl(path), {
             method: body ? 'POST' : 'GET',
             credentials: 'include',
             cache: 'no-store',
+            signal,
             headers: body ? { 'content-type': 'application/json' } : undefined,
             body: body ? JSON.stringify(body) : undefined,
         });
@@ -1596,7 +1602,7 @@ class App {
                     }
                     break;
                 case 'notice':    this._showNotice(msg.d); break;
-                case 'tts':       this._onTTS(msg.d); this._onAgentMessage(msg.d); break;
+                case 'tts':       if (this._onAgentMessage(msg.d)) this._onTTS(msg.d); break;
                 case 'browser-frame': this._onBrowserFrame(msg.d); break;
                 case 'manager':   this._onManager(msg.d); break;
                 // MSG.MEETING — pushed the instant a line is said, ahead of the
@@ -1744,6 +1750,7 @@ class App {
         }
         this._updateTermJump();
         if (target === 'terminal-view') {
+            this._renderActiveTerminal();
             // Don't auto-raise the keyboard on entry (e.g. tapping a dashboard
             // tile). It appears only when the user taps the terminal to type.
         } else {
@@ -1752,6 +1759,7 @@ class App {
         }
         // Chat: render the active tab's thread and clear the unread badge.
         if (target === 'chat-view') {
+            this._pollReplies();
             this._chatUnread = 0;
             this._updateChatBadge();
             this._renderChat();
@@ -2347,11 +2355,13 @@ class App {
     // The agent's clean final message for a turn (same feed that drives TTS)
     // becomes an incoming bubble on that tab's thread. Raw terminal output never
     // enters here, so the conversation stays readable.
-    _onAgentMessage(d) {
+    _onAgentMessage(d, { replay = false } = {}) {
         const text = d && d.text;
         if (!text) return;
         const tab = (d.tab != null) ? d.tab : this._activeTabId;
-        this._pushChat(tab, { from: 'agent', full: String(text), t: Date.now() });
+        if (d.id && this._chatThreads.get(tab)?.some(m => m.id === d.id)) return false;
+        this._pushChat(tab, { from: 'agent', full: String(text), t: d.at || Date.now(), ...(d.id ? { id: d.id } : {}) }, !replay);
+        if (replay) return true;
         const onChat = this._currentView === 'chat-view';
         const onThisTab = tab === this._activeTabId;
         if (onChat && onThisTab) {
@@ -2363,15 +2373,33 @@ class App {
             this._chatUnread++;
             this._updateChatBadge();
         }
+        return true;
     }
 
-    _pushChat(tabId, msg) {
+    async _pollReplies() {
+        if (document.hidden || this._currentView !== 'chat-view' || this.socket?.state !== SocketState.CONNECTED || this._replyFetching) return;
+        const id = this._activeTabId, key = this._historyKeys.get(id);
+        if (id == null) return;
+        this._replyFetching = true;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        try {
+            const data = await this._api('/api/voice/chat/replies?id=' + encodeURIComponent(id), undefined, { signal: controller.signal });
+            if (this._historyKeys.get(id) !== key) return;
+            let changed = false;
+            for (const reply of data.replies || []) if (reply.tab === id) changed = this._onAgentMessage(reply, { replay: true }) || changed;
+            if (changed) { this._saveHistory(id); if (this._activeTabId === id) this._renderChat(); }
+        } catch (_) { /* The socket owns connectivity feedback; retry on the next tick. */ }
+        finally { clearTimeout(timeout); this._replyFetching = false; }
+    }
+
+    _pushChat(tabId, msg, persist = true) {
         if (tabId == null) return;
         if (!this._chatThreads.has(tabId)) this._chatThreads.set(tabId, []);
         const thread = this._chatThreads.get(tabId);
         thread.push(msg);
         if (thread.length > 200) thread.shift();   // cap memory per tab
-        this._saveHistory(tabId);
+        if (persist) this._saveHistory(tabId);
     }
 
     _saveHistory(id = this._activeTabId) {
@@ -2523,6 +2551,7 @@ class App {
     _renderChat() {
         this._chatAttachments?.render();
         this._syncVoiceDraft?.();
+        this._renderChatFeedback();
         if (!this.chatLog) return;
         const target = document.getElementById('chat-target');
         if (target) target.textContent = this._tabName(this._activeTabId);
@@ -2600,6 +2629,7 @@ class App {
     // Live status strip: reflects the active tab's detected agent state so you
     // can see it's thinking / waiting on you even between final messages.
     _renderChatStatus() {
+        this._renderChatFeedback();
         if (!this.chatStatus) return;
         const status = (this._mobileStatus && this._mobileStatus.get(this._activeTabId)) || 'idle';
         const css = cssStatus(status);   // working→running, attention→input, done→completed
@@ -2622,6 +2652,39 @@ class App {
         }
         this.chatStatus.setAttribute('data-state', m.state);
         if (textEl) textEl.textContent = m.text + ctxSuffix;
+    }
+
+    _renderChatFeedback() {
+        if (this._currentView !== 'chat-view') return;
+        if (!this._chatFeedback) {
+            const panel = document.createElement('details');
+            panel.id = 'chat-feedback';
+            const summary = document.createElement('summary');
+            const preview = document.createElement('pre');
+            const open = document.createElement('button');
+            open.type = 'button'; open.textContent = 'Open terminal to respond';
+            open.onclick = () => this._showView('terminal-view');
+            const play = document.createElement('button');
+            play.type = 'button'; play.textContent = 'Play latest reply';
+            play.onclick = () => {
+                const reply = this._chatThreads.get(this._activeTabId)?.filter(m => m.from === 'agent').at(-1);
+                if (reply) this._speak(reply.full);
+            };
+            panel.append(summary, preview, open, play);
+            this.chatLog.before(panel);
+            this._chatFeedback = { panel, summary, preview, play };
+        }
+        const { panel, summary, preview, play } = this._chatFeedback;
+        const text = this._tabStates.get(this._activeTabId)?.term.recentText(24).trim() || '';
+        const status = this._mobileStatus?.get(this._activeTabId);
+        const needsInput = status === 'attention' || /\?\s*\d+\s+questions?|approval required|would you like to proceed|allow this/i.test(text);
+        const label = needsInput ? 'Agent needs your input — view question' : status === 'working' ? 'Agent working — view activity' : 'View terminal activity / play reply';
+        if (summary.textContent !== label) summary.textContent = label;
+        const value = text || 'Waiting for terminal output…';
+        if (preview.textContent !== value) preview.textContent = value;
+        if (needsInput && !this._chatNeedsInput) panel.open = true;
+        this._chatNeedsInput = needsInput;
+        play.hidden = !this._chatThreads.get(this._activeTabId)?.some(m => m.from === 'agent');
     }
 
     _updateChatBadge() {
@@ -3160,6 +3223,7 @@ class App {
             if (!this._ttsVoice) this._ttsVoice = this._pickVoice();
             synth.cancel();
             const u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+            u.onerror = () => this._voiceStatus('Reply received. Tap Play latest reply to hear it.');
             u.rate = 1.05; u.pitch = 1.0;
             if (this._ttsVoice) u.voice = this._ttsVoice;
             synth.speak(u);
@@ -3925,6 +3989,7 @@ class App {
     }
 
     _renderActiveTerminal() {
+        if (this._currentView !== 'terminal-view' || document.hidden) return;
         // Repaint the active tab's grid buffer (e.g. after a tab switch or a
         // snapshot). Content lives in each tab's TermBuffer; here we just render
         // whichever is active and fit the font.
@@ -3934,8 +3999,7 @@ class App {
         if (activeTab && activeTab.cols) this._fitTerminalFont(activeTab.cols);
         const ts = this._getTabState(this._activeTabId);
         if (activeTab && activeTab.rows) ts.term.setRows(activeTab.rows);
-        this.termEl.innerHTML = ts.term.toHtml();
-        this._scrollTermBottom();
+        this._renderActive();
     }
 
     _updateDeviceCount() {
@@ -4192,7 +4256,7 @@ class App {
         ts.term.reset();
         ts.term.setSize(term.cols, term.rows);
         ts.term.write(term.screen || term.recent || '');
-        this.termEl.innerHTML = ts.term.toHtml();
+        this._renderActive();
         this._fitTerminalFont(term.cols);
         this._scrollTermBottom();
     }
@@ -4273,6 +4337,7 @@ class App {
                     // Classify the current screen, not stale redraw bytes.
                     if (this._agentRecent) this._agentRecent.delete(id);
                     this._detectTabAgent(id, ts.term.recentText(40));
+                    if (id === this._activeTabId) this._renderChatFeedback();
                     if (id === this._activeTabId && !this._flushScheduled) {
                         this._flushScheduled = true;
                         requestAnimationFrame(() => this._renderActive());
@@ -4287,10 +4352,12 @@ class App {
     // a burst of frames produces at most one paint per animation frame.
     _renderActive() {
         this._flushScheduled = false;
+        if (this._activeTabId == null || this._currentView !== 'terminal-view' || document.hidden) return;
         const ts = this._getTabState(this._activeTabId);
         const stayBottom = !this._userScrolledUp;
         const prevTop = this.termEl.scrollTop;
-        this.termEl.innerHTML = ts.term.toHtml();
+        const html = ts.term.toHtml();
+        if (this.termEl.innerHTML !== html) this.termEl.innerHTML = html;
         this.termEl.scrollTop = stayBottom ? this.termEl.scrollHeight : prevTop;
     }
 

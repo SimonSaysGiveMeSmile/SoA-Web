@@ -24,7 +24,8 @@ export class SessionHistory {
             record.messages = fields.messages.slice(-200).reverse().filter(m => {
                 chars += String(m.full || '').length;
                 return chars <= 100000;
-            }).reverse().map(m => ({ from: m.from === 'you' ? 'you' : 'agent', full: String(m.full || '').slice(0, 32000), t: m.t }));
+            }).reverse().map(m => ({ from: m.from === 'you' ? 'you' : 'agent', full: String(m.full || '').slice(0, 32000), t: m.t,
+                ...(typeof m.id === 'string' ? { id: m.id.slice(0, 100) } : {}) }));
         }
         if (typeof fields.draft === 'string') record.draft = fields.draft.slice(0, 16000);
         if (typeof fields.terminal === 'string') record.terminal = fields.terminal.slice(-24000);

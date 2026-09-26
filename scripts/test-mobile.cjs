@@ -145,6 +145,7 @@ const testMobileFullscreen = require('./test-mobile-fullscreen.cjs');
         console.log('Mobile browser: voice, Codex redraw, layout, device isolation, real offline reload/history/draft, reconnect without duplicate sends passed.');
         await context.close();
         await require('./test-mobile-images.cjs')(browser, `http://127.0.0.1:${server.address().port}/m?t=test`);
+        await require('./test-mobile-feedback.cjs')(browser, `http://127.0.0.1:${server.address().port}/m?t=test`);
         await testMobileFullscreen(browser, `http://127.0.0.1:${server.address().port}/m?t=test`);
     } finally {
         await browser.close();

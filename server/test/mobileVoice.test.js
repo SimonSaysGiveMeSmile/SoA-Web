@@ -51,8 +51,43 @@ test('mobile terminal: publish only complete synchronized redraws', async () => 
     await write(t, '\x1b[?2026hpartial');
     assert.equal(renders, 0);
     await write(t, ' complete\x1b[?2026l');
+    await new Promise(resolve => setTimeout(resolve, 80));
     assert.equal(renders, 1);
     t.dispose();
+});
+
+test('mobile terminal: bounded geometry and DOM, coalesced refresh, disposal stops pending work', async () => {
+    const { TermBuffer } = await terminalModule;
+    let renders = 0;
+    const t = new TermBuffer({ cols: Infinity, rows: -1, onChange: () => renders++ });
+    assert.equal(t.term.cols, 80); assert.equal(t.term.rows, 24);
+    t.setSize(1000000, 1000000);
+    assert.equal(t.term.cols, 512); assert.equal(t.term.rows, 200);
+    t.setSize(80, 24);
+    for (let i = 0; i < 100; i++) t.write('stream ' + i + '\r\n');
+    await write(t, 'last\r\n'.repeat(1000));
+    assert.ok(t.lineCount() <= 624);
+    assert.ok(t.toHtml().split('\n').length <= 400);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.ok(renders < 10, 'burst does not request a render per chunk');
+    await write(t, 'pending');
+    t.dispose();
+    const before = renders;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(renders, before);
+});
+
+test('voice manager resumes its conversation with the reply relay still attached', () => {
+    const { buildArgs } = require('../../scripts/voice-manager.cjs');
+    const args = buildArgs('saved-thread', { SOA_WEB_TAB: '7', SOA_WEB_TTS_URL: 'http://127.0.0.1:4010/api/tts' });
+    assert.deepEqual(args.slice(0, 2), ['resume', 'saved-thread']);
+    assert.ok(args.some(x => x.startsWith('notify=') && x.includes('soa-codex-notify.cjs')));
+    const notify = JSON.parse(args.find(x => x.startsWith('notify=')).slice(7));
+    const { parseArgs } = require('../../scripts/soa-codex-notify.cjs');
+    const parsed = parseArgs([...notify.slice(2), JSON.stringify({ type: 'agent-turn-complete' })], { SOA_WEB_TAB: '99' });
+    assert.equal(parsed.env.SOA_WEB_TAB, '7', 'a shared daemon cannot redirect the reply to its inherited tab');
+    assert.equal(parsed.env.SOA_WEB_TTS_URL, 'http://127.0.0.1:4010/api/tts');
+    assert.ok(!buildArgs().includes('resume'));
 });
 
 function recognitionHost() {

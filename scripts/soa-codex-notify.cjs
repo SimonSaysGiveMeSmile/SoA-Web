@@ -12,7 +12,15 @@ async function relay(event, env = process.env, send = fetch) {
         body: JSON.stringify({ text: String(text).slice(0, 4000), tab }) });
     return res.ok;
 }
-if (require.main === module) {
-    try { relay(JSON.parse(process.argv[2] || '{}')).catch(() => {}); } catch (_) {}
+function parseArgs(args, env = process.env) {
+    const scoped = { ...env };
+    for (const arg of args.slice(0, -1)) {
+        if (arg.startsWith('--tab=')) scoped.SOA_WEB_TAB = arg.slice(6);
+        if (arg.startsWith('--url=')) scoped.SOA_WEB_TTS_URL = arg.slice(6);
+    }
+    return { event: JSON.parse(args.at(-1) || '{}'), env: scoped };
 }
-module.exports = { relay };
+if (require.main === module) {
+    try { const parsed = parseArgs(process.argv.slice(2)); relay(parsed.event, parsed.env).catch(() => {}); } catch (_) {}
+}
+module.exports = { relay, parseArgs };

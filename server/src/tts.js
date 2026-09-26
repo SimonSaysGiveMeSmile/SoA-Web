@@ -21,6 +21,15 @@ const { MSG, frame } = require('./protocol');
 const localKey = require('./localKey');
 
 let _port = null;
+const replyHistory = new WeakMap();
+let replySequence = 0;
+const replyEpoch = require('node:crypto').randomUUID();
+
+function repliesFor(session, tabId) {
+    const tab = session?.tabMgr?.get(tabId);
+    if (!tab) return [];
+    return (replyHistory.get(session) || []).filter(r => r.tab === tabId && r.historyId === tab.historyId);
+}
 
 // Discovery file so the Stop hook and `soa-msg` can find us even when a shell
 // missed the SOA_WEB_TTS_URL env injection (restored tabs, tabs that predate
@@ -75,8 +84,8 @@ function isLoopback(req) {
 
 function mount(app, sessions) {
     // The hook posts from localhost only. No session token is required — we
-    // bind to loopback and broadcast to every live session (in practice the
-    // desktop + paired phone share one session).
+    // bind to loopback. A numbered reply belongs to one session's terminal;
+    // unnumbered local announcements retain their broadcast behavior.
     app.post('/api/tts', express.json({ limit: '512kb' }), (req, res) => {
         if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'loopback only' });
         const body = req.body || {};
@@ -84,13 +93,28 @@ function mount(app, sessions) {
         text = text.replace(/\s+/g, ' ').trim().slice(0, 4000);
         if (!text) return res.json({ ok: true, skipped: 'empty' });
         const tab = body.tab != null ? Number(body.tab) : null;
-        const payload = frame(MSG.TTS, { text, tab });
+        let recipients = [...sessions.sessions.values()];
+        if (tab != null) {
+            if (!Number.isInteger(tab) || tab < 1) return res.status(400).json({ ok: false, error: 'invalid terminal' });
+            recipients = recipients.filter(s => s.tabMgr?.get(tab));
+            // Terminal numbers are session-local. Never guess across two owners.
+            if (recipients.length !== 1) return res.json({ ok: true, skipped: 'terminal missing or ambiguous', delivered: 0 });
+        }
+        const reply = { text, tab, id: `${replyEpoch}:${++replySequence}`, at: Date.now() };
+        const payload = frame(MSG.TTS, reply);
         let delivered = 0;
-        for (const s of sessions.sessions.values()) {
+        for (const s of recipients) {
+            const target = tab != null && s.tabMgr?.get(tab);
+            if (target) {
+                const history = replyHistory.get(s) || [];
+                history.push({ ...reply, historyId: target.historyId });
+                if (history.length > 100) history.shift();
+                replyHistory.set(s, history);
+            }
             if (s.send(payload)) delivered++;
         }
         res.json({ ok: true, delivered });
     });
 }
 
-module.exports = { mount, setPort, envFor };
+module.exports = { mount, setPort, envFor, repliesFor };

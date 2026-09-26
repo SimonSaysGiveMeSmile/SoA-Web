@@ -3,8 +3,9 @@ import { Terminal } from './vendor/xterm-headless.mjs';
 import { escHtml, spanFor, palette256 } from './ansi.js';
 
 export class TermBuffer {
-    constructor({ rows = 24, cols = 80, maxRows = 1200, onChange = () => {} } = {}) {
-        this.term = new Terminal({ rows, cols, scrollback: maxRows, allowProposedApi: true });
+    constructor({ rows = 24, cols = 80, maxRows = 600, onChange = () => {} } = {}) {
+        this.term = new Terminal({ rows: dimension(rows, 24, 200), cols: dimension(cols, 80, 512),
+            scrollback: dimension(maxRows, 600, 1200), allowProposedApi: true });
         this.onChange = onChange;
         this._disposed = false;
         this._sync = false;
@@ -17,15 +18,16 @@ export class TermBuffer {
                 clearTimeout(this._syncTimer);
                 if (this._sync) this._syncTimer = setTimeout(() => {
                     this._sync = false;
-                    if (!this._disposed) this.onChange();
+                    this._changed();
                 }, 1000);
                 return false;
             });
     }
 
     setSize(cols, rows) {
-        cols = Number(cols) > 0 ? Number(cols) : this.term.cols;
-        rows = Number(rows) > 0 ? Number(rows) : this.term.rows;
+        if (this._disposed) return;
+        cols = dimension(cols, this.term.cols, 512);
+        rows = dimension(rows, this.term.rows, 200);
         if (cols !== this.term.cols || rows !== this.term.rows) this.term.resize(cols, rows);
     }
     setRows(rows) { this.setSize(null, rows); }
@@ -33,7 +35,7 @@ export class TermBuffer {
         if (this._disposed) return;
         this.term.write(text, () => {
             if (this._disposed) return;
-            if (!this._sync) this.onChange();
+            if (!this._sync) this._changed();
             if (done) done();
         });
     }
@@ -43,9 +45,17 @@ export class TermBuffer {
         // Ordered behind writes already accepted by the asynchronous parser.
         this.write('\x18\x1bc');
     }
+    _changed() {
+        if (this._disposed || this._changeTimer) return;
+        this._changeTimer = setTimeout(() => {
+            this._changeTimer = null;
+            if (!this._disposed && !this._sync) this.onChange();
+        }, 50);
+    }
     dispose() {
         this._disposed = true;
         clearTimeout(this._syncTimer);
+        clearTimeout(this._changeTimer);
         this.term.dispose();
     }
     lineCount() { return this.term.buffer.active.length; }
@@ -61,7 +71,7 @@ export class TermBuffer {
             .map(s => s.replace(/[─-▟⠀-⣿■-◿]/g, ' ').replace(/\s+/g, ' ').trim())
             .filter(s => s.length > 1 && /[\p{L}\p{N}]/u.test(s)).slice(-n).join('\n');
     }
-    toHtml() {
+    toHtml(maxRows = 400) {
         const b = this.term.buffer.active, out = [];
         const color = (cell, fg) => {
             const n = fg ? cell.getFgColor() : cell.getBgColor();
@@ -69,7 +79,7 @@ export class TermBuffer {
             if (fg ? cell.isFgPalette() : cell.isBgPalette()) return palette256(n);
             return null;
         };
-        for (let r = 0; r < b.length; r++) {
+        for (let r = Math.max(0, b.length - maxRows); r < b.length; r++) {
             const line = b.getLine(r);
             let html = '', run = '', signature = '', tag = null;
             const flush = () => { if (run) html += (tag || '') + escHtml(run) + (tag ? '</span>' : ''); run = ''; };
@@ -88,4 +98,9 @@ export class TermBuffer {
         }
         return out.join('\n');
     }
+}
+
+function dimension(value, fallback, max) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(max, Math.floor(n))) : fallback;
 }
