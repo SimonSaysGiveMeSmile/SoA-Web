@@ -1,0 +1,177 @@
+#!/usr/bin/env node
+/**
+ * soa-fleet-restore-watch — self-recovery layer for a fleet COLLAPSE.
+ *
+ * The daemon's own boot-resume rehydrates the fleet on restart, but a boot race
+ * (a fresh client binding to the primary session BEFORE the fleet rehydrates) or
+ * a reconcile that fails to stick can leave the daemon HEALTHY yet holding only
+ * the lone default tab while the real fleet is gone — the "all tabs gone"
+ * incident (2026-08-06 and again 2026-08-14). Direct evidence 2026-08-14:
+ *   boot-resume[1]: no saved tabs on disk — nothing to rehydrate
+ * logged while tabs.json.lastgood + scrollback.json both still held 16 tabs.
+ * Nothing DETECTED that collapse — it sat until the user noticed. The other 12
+ * supervisors watch liveness / context / usage; none watches "healthy daemon,
+ * but the fleet vanished." This is that missing layer.
+ *
+ * On a timer it compares the LIVE fleet (/api/tabs, loopback) against the
+ * protected tabs.json.lastgood snapshot. When the daemon is up + answering but
+ * the live fleet has COLLAPSED (<= COLLAPSE_MAX tabs) while lastgood still holds
+ * a real fleet (>= MIN_HEALTHY tabs, and the user has NOT explicitly closed
+ * everything), it runs `soa-restore-fleet` and notifies the user.
+ *
+ * Safe by construction — this is why it can run unattended every 60s:
+ *   - No-op unless the daemon actually answers /api/tabs. Liveness stays the
+ *     job of watchdog-4010; we never restart or touch the daemon, only respawn
+ *     the missing project tabs via the same idempotent soa-restore-fleet the
+ *     user would run by hand (it skips already-open cwds).
+ *   - DEBOUNCED: the collapse must persist across two consecutive checks before
+ *     we act, so a mid-rehydrate blip never triggers a spurious restore.
+ *   - BOOT WINDOW: ignored until the daemon is past its rehydrate window
+ *     (MIN_UPTIME), so a fresh restart that's still bringing tabs back is left
+ *     alone.
+ *   - Respects an explicit user close-all (tabs.json.closedByUser) — never
+ *     resurrects a fleet the user intentionally retired.
+ *   - COOLDOWN after any restore so a still-settling fleet isn't hit again.
+ *
+ * Env:
+ *   SOA_FLEET_RESTORE_ENABLE=0        kill switch (default on)
+ *   SOA_FLEET_RESTORE_DRY=1           detect + log + notify, but don't restore
+ *   SOA_FLEET_RESTORE_COOLDOWN_MS     min gap between restores (default 600000)
+ *   SOA_FLEET_RESTORE_MIN_UPTIME_MS   ignore collapse until daemon this old (default 90000)
+ *   SOA_FLEET_RESTORE_DEBOUNCE_MS     collapse must persist this long (default 45000)
+ *   SOA_WEB_STATE_DIR                 state dir override
+ *
+ * Log: ~/.soa-web/logs/fleet-restore.log (via the plist StandardOut/Err).
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const http = require('http');
+const { execFileSync } = require('child_process');
+
+const ENABLED = process.env.SOA_FLEET_RESTORE_ENABLE !== '0';
+const DRY = process.env.SOA_FLEET_RESTORE_DRY === '1';
+const COOLDOWN_MS = parseInt(process.env.SOA_FLEET_RESTORE_COOLDOWN_MS || String(10 * 60 * 1000), 10);
+const MIN_UPTIME_MS = parseInt(process.env.SOA_FLEET_RESTORE_MIN_UPTIME_MS || String(90 * 1000), 10);
+const DEBOUNCE_MS = parseInt(process.env.SOA_FLEET_RESTORE_DEBOUNCE_MS || String(45 * 1000), 10);
+
+// The collapse signature: a lone/empty fleet. A real multi-project session never
+// sits here; MIN_HEALTHY mirrors tabPersist's own MIN_HEALTHY_TABS.
+const COLLAPSE_MAX = 1;
+const MIN_HEALTHY = 2;
+
+function stateDir() {
+    if (process.env.SOA_WEB_STATE_DIR) return process.env.SOA_WEB_STATE_DIR.replace(/^~/, os.homedir());
+    const local = path.join(os.homedir(), '.soa-web-local');
+    if (fs.existsSync(local)) return local;
+    return path.join(os.homedir(), '.soa-web');
+}
+const SD = stateDir();
+const CURSOR = path.join(SD, 'fleet-restore-watch.json');
+
+function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) { return null; } }
+function tabCount(obj) { return (obj && Array.isArray(obj.tabs)) ? obj.tabs.length : 0; }
+function log(msg) { console.log(`[${new Date().toISOString()}] soa-fleet-restore-watch: ${msg}`); }
+
+function loadCursor() { return readJson(CURSOR) || { collapseSince: 0, lastRestoreAt: 0 }; }
+function saveCursor(c) { try { fs.writeFileSync(CURSOR, JSON.stringify(c, null, 2) + '\n'); } catch (_) {} }
+
+function daemonInfo() {
+    const lock = readJson(path.join(SD, 'daemon.lock'));
+    if (!lock) return null;
+    const port = lock.port || 4010;
+    const startedAt = lock.startedAt ? Date.parse(lock.startedAt) : 0;
+    return { port, startedAt };
+}
+
+function liveTabs(port) {
+    return new Promise((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port, path: '/api/tabs', timeout: 4000 }, (res) => {
+            let b = ''; res.on('data', c => b += c); res.on('end', () => {
+                try { const j = JSON.parse(b); resolve(Array.isArray(j) ? j : (j.tabs || [])); }
+                catch (_) { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+}
+
+function notify(title, body) {
+    try {
+        execFileSync('soa-notify', ['-t', title, '-p', 'high', '-T', 'robot,recycle', '--also-msg', body],
+            { stdio: 'ignore', timeout: 15000 });
+    } catch (_) { /* best-effort; the log is the source of truth */ }
+}
+
+(async () => {
+    if (!ENABLED) { log('disabled via SOA_FLEET_RESTORE_ENABLE=0 — exiting'); return; }
+
+    const now = Date.now();
+    const cur = loadCursor();
+
+    const dae = daemonInfo();
+    if (!dae) { log('no daemon.lock — daemon not up (watchdog-4010 owns liveness); noop'); return; }
+
+    const live = await liveTabs(dae.port);
+    if (live == null) { log(`daemon not answering /api/tabs on :${dae.port} — leaving liveness to watchdog-4010; noop`); return; }
+
+    const liveCount = live.length;
+    const lastgood = readJson(path.join(SD, 'tabs.json.lastgood'));
+    const lgCount = tabCount(lastgood);
+    const meta = readJson(path.join(SD, 'tabs.json'));
+    const closedByUser = !!(meta && meta.closedByUser);
+
+    const collapsed = liveCount <= COLLAPSE_MAX && lgCount >= MIN_HEALTHY && !closedByUser;
+
+    if (!collapsed) {
+        if (cur.collapseSince) { cur.collapseSince = 0; saveCursor(cur); }
+        log(`ok — live=${liveCount} lastgood=${lgCount}${closedByUser ? ' closedByUser' : ''}`);
+        return;
+    }
+
+    // Collapsed. Gate on the daemon being past its rehydrate window so a fresh
+    // restart still bringing tabs back is never fought.
+    const uptime = dae.startedAt ? now - dae.startedAt : Infinity;
+    if (uptime < MIN_UPTIME_MS) {
+        log(`collapse seen (live=${liveCount}, lastgood=${lgCount}) but daemon only ${Math.round(uptime / 1000)}s old — inside rehydrate window; waiting`);
+        return;
+    }
+
+    // Debounce: require the collapse to persist across checks before acting.
+    if (!cur.collapseSince) {
+        cur.collapseSince = now; saveCursor(cur);
+        log(`collapse DETECTED (live=${liveCount}, lastgood=${lgCount}) — arming; will restore if it persists ${Math.round(DEBOUNCE_MS / 1000)}s`);
+        return;
+    }
+    if (now - cur.collapseSince < DEBOUNCE_MS) {
+        log(`collapse persisting ${Math.round((now - cur.collapseSince) / 1000)}s/${Math.round(DEBOUNCE_MS / 1000)}s (live=${liveCount}) — holding`);
+        return;
+    }
+
+    // Cooldown: give a prior restore time to settle before another.
+    if (now - (cur.lastRestoreAt || 0) < COOLDOWN_MS) {
+        log(`collapse confirmed but within ${Math.round(COOLDOWN_MS / 1000)}s cooldown of last restore — holding`);
+        return;
+    }
+
+    log(`FLEET COLLAPSE CONFIRMED — live=${liveCount} tab(s), lastgood=${lgCount}. ${DRY ? 'DRY-RUN: would restore.' : 'Running soa-restore-fleet…'}`);
+    if (DRY) { cur.collapseSince = 0; saveCursor(cur); return; }
+
+    let out = '';
+    try {
+        out = execFileSync('soa-restore-fleet', [], { encoding: 'utf8', timeout: 120000 });
+    } catch (e) {
+        out = (e && (e.stdout || e.message)) || String(e);
+        log(`soa-restore-fleet errored: ${(e && e.message) || e}`);
+    }
+    const spawned = (out.match(/-> \{"ok":true/g) || []).length;
+    log(`restore done — ${spawned} tab(s) respawned. Details:\n${out.trim()}`);
+    notify('SoA fleet auto-recovered',
+        `Fleet had collapsed to ${liveCount} tab — auto-restored ${spawned} project tab(s) from the last-good snapshot.`);
+
+    cur.lastRestoreAt = Date.now();
+    cur.collapseSince = 0;
+    saveCursor(cur);
+})();
