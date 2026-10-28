@@ -27,38 +27,181 @@
 .bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--soa-accent); transition: width 0.5s ease; }
 
-/* ── TOKEN USAGE widget ─────────────────────────────────────────────── */
-/* Source pills. Present only when there is a second agent to switch to, so a
-   Claude-only install never sees them. They sit inside a body that is itself a
-   click target (it opens the usage dashboard), which is why the handlers stop
-   propagation — picking a source must not also open a panel. */
-.usage-src { display: flex; gap: 4px; margin-bottom: 8px; }
-.usage-src-btn {
-  flex: 1;
-  padding: 3px 0;
-  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.16em;
-  color: var(--soa-accent-dim);
-  background: transparent;
-  border: 1px solid var(--soa-line-soft);
-  cursor: pointer;
+/* Usage summary: session outside, weekly inside; one shared gauge per provider. */
+.usage-dials { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.usage-card {
+  min-width: 0; position: relative; padding: 12px 10px;
+  border: 1px solid var(--soa-line-soft); background: rgba(var(--soa-accent-rgb), .025);
+  cursor: pointer; user-select: none;
+  transition: border-color .2s ease, background .2s ease;
 }
-.usage-src-btn:hover { color: var(--soa-accent); border-color: rgba(var(--soa-accent-rgb), 0.4); }
-.usage-src-btn.on {
-  color: var(--soa-bg);
-  background: var(--soa-accent);
-  border-color: var(--soa-accent);
+.usage-card[hidden], .usage-more[hidden], .usage-sample[hidden], .usage-provider-status[hidden] { display: none; }
+.usage-card:hover { border-color: rgba(var(--soa-accent-rgb), .35); background: rgba(var(--soa-accent-rgb), .045); }
+.usage-card:focus-visible { outline: 2px solid var(--soa-accent); outline-offset: 2px; }
+.usage-card.open { border-color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), .055); }
+.usage-card[data-src] { --ring-a: var(--soa-accent); --ring-b: var(--soa-green); }
+.usage-card-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; min-width: 0; }
+.usage-card-name { font: 11px/1.3 var(--font-display); letter-spacing: .08em; color: var(--soa-fg); }
+.usage-chevron { margin-left: auto; font: 18px/1 var(--font-display); color: var(--soa-accent-dim); transition: transform .2s; }
+.usage-card.open .usage-chevron { transform: rotate(90deg); }
+/* The readings live INSIDE the stack — one row per window, each coloured to the
+   ring it reports — so the gauge stays a single object and adds no height.
+   The inset keeps them off the inner stroke; line-height 1 keeps them compact. */
+.usage-legend { position: absolute; inset: 27%; display: flex; flex-direction: column; justify-content: center; gap: 2px; pointer-events: none; }
+.usage-metric { min-width: 0; width: 100%; display: flex; flex-direction: row; justify-content: space-between; align-items: baseline; gap: 4px; text-align: left; }
+.usage-metric + .usage-metric { border-left: 0; padding-left: 0; }
+.usage-metric-dot { display: none; }
+.usage-card-period { font: 8px/1 var(--font-mono); color: var(--soa-accent-dim); letter-spacing: .02em; white-space: nowrap; }
+.usage-gauge { position: relative; width: 84px; height: 84px; max-width: 100%; margin: 0 auto; aspect-ratio: 1; flex-shrink: 0; }
+.usage-gauge-value { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.usage-card-big { font: 12px/1 var(--font-display); letter-spacing: -.03em; color: var(--ring); font-variant-numeric: tabular-nums; }
+.usage-metric.unknown :is(.usage-card-period, .usage-card-big) { color: var(--soa-accent-dim); }
+.usage-card-cap { font: 9px/1.4 var(--font-mono); color: var(--soa-accent-dim); overflow-wrap: anywhere; }
+.usage-ring { width: 100%; height: 100%; display: block; }
+.usage-ring .ring, .usage-metric { --ring: var(--ring-a); }
+.usage-ring .ring.weekly, .usage-metric[data-window="weekly"] { --ring: var(--ring-b); }
+.usage-ring .ring.hot, .usage-metric.hot { --ring: var(--soa-yellow); }
+.usage-ring .ring.crit, .usage-metric.crit { --ring: var(--soa-red); }
+.usage-ring circle { fill: none; stroke: var(--ring); stroke-width: 7; }
+.usage-ring .track { stroke-opacity: .18; }
+.usage-ring .val { stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; transition: stroke-dashoffset .6s ease, stroke .3s; }
+/* An unreported window keeps its EMPTY track: both providers must read as
+   the same two-ring object, or a missing quota looks like a missing ring. */
+.usage-ring .ring.none .val { visibility: hidden; }
+/* ...but a neutral one: tinted in the window's colour it read as a reading. */
+.usage-ring .ring.none .track { stroke: var(--soa-accent-dim); stroke-opacity: .14; }
+/* Pace projection: a thin arc on the session ring's centre line, from the
+   reading to where the window lands at its reset. Yellow once it would run
+   out first — the same claim Range makes in time, so the two agree. */
+.usage-ring .proj, :root[data-ui] .usage-ring circle.proj { stroke-width: 2; stroke-opacity: .55; stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; transition: stroke-dasharray .6s ease; }
+.usage-ring .ring.over .proj { stroke: var(--soa-yellow); stroke-opacity: .9; }
+.usage-ring .ring.none .proj { visibility: hidden; }
+/* Both arcs sweep up from empty on first paint. Landing the inner one a beat
+   later makes the pair resolve as a single gauge instead of two racing bars. */
+.usage-ring .ring.weekly .val { transition-delay: .14s; }
+/* At 95% the quota is about to stop the work. Colour alone carries that only
+   for people who can separate this red from the yellow below it. */
+@keyframes soa-ring-crit { 0%, 100% { opacity: 1; } 50% { opacity: .58; } }
+.usage-ring .ring.crit .val { animation: soa-ring-crit 2.6s ease-in-out infinite; }
+.usage-metric.unknown .usage-card-big { color: var(--soa-accent-dim); }
+.usage-ring .ring.stale .val { opacity: .55; }
+.usage-health, .usage-provider-status, .usage-sample { font: 9px/1.35 var(--font-mono); letter-spacing: 0; color: var(--soa-accent-dim); }
+.usage-health { margin-right: 7px; white-space: nowrap; }
+.usage-sample { color: var(--soa-yellow); overflow-wrap: anywhere; }
+[data-usage-status] .widget-h-ctl { display: flex; align-items: center; }
+[data-usage-status] .widget-pulse { display: none; }
+.usage-drive { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--soa-line-soft); }
+.usage-drive > div { min-width: 0; }
+.usage-drive-label { display: block; font: 9px/1.4 var(--font-mono); color: var(--soa-accent-dim); }
+.usage-drive-reading { margin-top: 3px; font-family: var(--font-display); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.usage-drive-value { font-size: 13px; font-weight: 500; color: var(--soa-fg); }
+.usage-drive-unit { font-size: 9px; color: var(--soa-accent-dim); }
+.usage-drive-range[data-state="limited"] .usage-drive-value { color: var(--soa-red); }
+.usage-drive-range[data-state="estimated"] .usage-drive-value { color: var(--soa-yellow); }
+.usage-reset-window { color: var(--soa-fg); }
+/* Spend spans the drive: three windows cannot share a column with "Measuring".
+   Each window is a captioned cell; the hot colour is the $20-per-block mark. */
+.usage-drive-cost { grid-column: 1 / -1; }
+/* Three columns clip: at sidebar width each cell lands at ~21px and "≈$1.3k"
+   needs ~38px. One row per window instead — label left, figure right. */
+/* The pack rule above lays each drive child out as [label | reading]; the cost
+   strip is three readings, so it spans both tracks. The standalone "Cost"
+   heading would then cost a whole line for one word — the first row's label
+   carries it instead, and the heading returns only in the credits form. */
+.usage-cost-grid, .usage-cost-single { grid-column: 1 / -1; }
+:root .usage-drive-cost[data-cost="grid"] > .usage-drive-label { display: none; }
+.usage-cost-grid { display: flex; flex-direction: column; gap: 3px; margin-top: 0; }
+.usage-cost-cell { min-width: 0; display: flex; flex-direction: row; justify-content: space-between; align-items: baseline; gap: 6px; }
+.usage-cost-l { white-space: nowrap; }
+.usage-cost-v { font: 11px/1 var(--font-display); letter-spacing: -.02em; color: var(--soa-fg); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-cost-cell.unknown .usage-cost-v { color: var(--soa-accent-dim); }
+.usage-cost-cell[data-state="hot"] .usage-cost-v { color: var(--soa-yellow); }
+.usage-cost-single { margin-top: 3px; font: 13px/1 var(--font-display); letter-spacing: -.02em; color: var(--soa-fg); font-variant-numeric: tabular-nums; }
+.usage-drive-cost[data-cost="single"] .usage-cost-grid { display: none; }
+.usage-drive-cost:not([data-cost="single"]) .usage-cost-single { display: none; }
+
+/* Compact quota overview. Keep the providers side by side in every pack;
+   color-linked readings identify the outer session and inner weekly rings. */
+:root[data-ui] .usage-dials { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; align-items: stretch; }
+:root[data-ui] .usage-dials.solo { grid-template-columns: minmax(0, 1fr); }
+:root[data-ui] .usage-card:not([hidden]) {
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+  padding: 8px 6px; border: 0; border-radius: 0; container-type: inline-size;
+}
+:root[data-ui] .usage-card + .usage-card { border-top: 0; border-left: 1px solid var(--soa-line-soft); border-radius: 0; }
+:root[data-ui] .usage-card-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px; margin: 0; }
+:root[data-ui] .usage-provider-status { grid-column: 1 / -1; grid-row: 2; }
+:root[data-ui] .usage-chevron { grid-column: 2; grid-row: 1; margin: 0; }
+:root[data-ui] .usage-gauge-dual { width: 100%; max-width: 100px; height: auto; margin: 0 auto; container-type: inline-size; }
+:root[data-ui] .usage-legend { inset: 27%; gap: 1px; }
+:root[data-ui] .usage-metric { gap: 3px; }
+:root[data-ui] .usage-metric + .usage-metric { border: 0; padding-left: 0; }
+:root[data-ui] .usage-card-period { min-height: 0; font-size: clamp(6px, 8cqi, 8px); line-height: 1; color: var(--soa-accent-dim); letter-spacing: .02em; text-transform: none; white-space: nowrap; }
+:root[data-ui] .usage-card-big { font-size: clamp(8px, 11.5cqi, 12px); font-weight: 600; line-height: 1; letter-spacing: -.02em; color: var(--ring); }
+:root[data-ui] .usage-metric.unknown :is(.usage-card-period, .usage-card-big) { color: var(--soa-accent-dim); }
+:root[data-ui] .usage-ring circle { stroke-width: 6; }
+:root[data-ui] .usage-next-reset { display: flex; justify-content: center; align-items: baseline; gap: 4px; font: clamp(8px, 9cqi, 9px)/1.4 var(--font-display); letter-spacing: 0; color: var(--soa-accent-dim); font-variant-numeric: tabular-nums; }
+:root[data-ui] .usage-drive { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: auto; padding: 8px 0 0; }
+:root[data-ui] .usage-drive > div { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 4px 3px; }
+:root[data-ui] .usage-drive-label { display: block; font-size: clamp(7px, 9cqi, 9px); line-height: 1.4; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+:root[data-ui] .usage-drive-reading { min-width: 0; margin: 0; text-align: right; line-height: 1.4; letter-spacing: 0; white-space: nowrap; overflow: visible; }
+:root[data-ui] .usage-drive-value { font-size: clamp(8px, 10cqi, 11px); letter-spacing: -.02em; }
+:root[data-ui] .usage-drive-unit { font-size: clamp(6px, 7cqi, 8px); letter-spacing: 0; }
+.usage-burn-chart { display: block; grid-column: 1 / -1; width: 100%; height: 20px; margin-top: 1px; color: var(--ring-a); overflow: hidden; }
+.usage-burn-chart rect { fill: currentColor; opacity: .4; transition: height .25s ease, y .25s ease; }
+.usage-burn-chart rect.current { opacity: 1; }
+.usage-burn-baseline { fill: none; stroke: var(--soa-line); stroke-width: .5; }
+.usage-quota-details { display: grid; gap: 8px; }
+.usage-quota-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; font: 11px/1.4 var(--font-display); }
+.usage-quota-label, .usage-quota-value { color: var(--soa-fg); }
+.usage-quota-value { font-variant-numeric: tabular-nums; }
+.usage-quota-row .usage-card-cap, .usage-quota-row .usage-sample { grid-column: 1 / -1; }
+.usage-detail .claude-sub:empty { display: none; }
+
+/* The panel: collapsed to nothing, opens under the dials. max-height (not
+   height:auto) so it can animate; the cap is generous because TOP SESSIONS
+   can run to six rows. */
+.usage-detail { max-height: 0; opacity: 0; overflow: hidden; margin-top: 0; transition: max-height .35s ease, opacity .25s ease, margin-top .3s ease; }
+.usage-detail.open { max-height: 720px; opacity: 1; margin-top: 8px; }
+.usage-detail-in { display: flex; flex-direction: column; gap: 3px; padding-top: 6px; border-top: 1px solid var(--soa-line-soft); }
+.usage-status { font: 11px/1.5 var(--font-mono); color: var(--soa-yellow); }
+.usage-status:empty { display: none; }
+/* Detail rows label each measure directly. */
+.usage-detail[data-src="claude"] { --ring-a: var(--soa-accent); --ring-b: var(--soa-orange); --ring-c: var(--soa-accent-dim); }
+.usage-detail[data-src="codex"]  { --ring-a: var(--soa-green);  --ring-b: var(--soa-orange); --ring-c: var(--soa-accent-dim); }
+.usage-leg { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; }
+.usage-leg-a .usage-leg-dot { background: var(--ring-a); box-shadow: 0 0 5px var(--ring-a); }
+.usage-leg-b .usage-leg-dot { background: var(--ring-b); box-shadow: 0 0 5px var(--ring-b); }
+.usage-leg-c .usage-leg-dot { background: var(--ring-c); box-shadow: 0 0 5px var(--ring-c); }
+.usage-leg-dot { display: none; }
+.usage-leg-l { color: var(--soa-accent-dim); }
+.usage-leg .usage-leg-v { text-align: right; letter-spacing: 0.04em; white-space: normal; overflow-wrap: anywhere; }
+.usage-more { min-height: 32px; margin-top: 6px; align-self: flex-end; background: transparent; border: 0; padding: 4px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.18em; color: var(--soa-accent-dim); cursor: pointer; }
+.usage-more:hover { color: var(--soa-accent); }
+/* Light themes: the glow is a dark-room effect, and on paper it just blurs. */
+[data-ui="minimal"] .usage-ring .val { filter: none; }
+[data-ui="minimal"] .usage-leg-dot { box-shadow: none; }
+[data-ui="minimal"] .usage-card.open::after { background: var(--soa-bg-panel); }
+@media (prefers-reduced-motion: reduce) {
+  .usage-ring .val, .usage-burn-chart rect, .usage-detail, .usage-card, .usage-chevron { transition: none; }
+  .usage-ring .ring.weekly .val { transition-delay: 0s; }
+  .usage-ring .proj { transition: none; }
+  .usage-ring .ring.crit .val { animation: none; }
+  .usage-live { animation: none; }
+}
+/* SVG stroke colour is NOT auto-forced, so in high-contrast mode the gauge used
+   to flatten into one shape. Keep the two-tone ring and drop the motion. */
+@media (forced-colors: active) {
+  .usage-ring .track { stroke: GrayText; stroke-opacity: 1; }
+  .usage-ring .val { stroke: Highlight; filter: none; }
+  .usage-ring .ring.crit .val { animation: none; }
 }
 
 /* ── CLAUDE USAGE widget ────────────────────────────────────────────── */
-.claude-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.18em; }
 .claude-head-l { color: var(--soa-accent-dim); }
 .claude-reset { color: var(--soa-accent); letter-spacing: 0.06em; white-space: nowrap; }
 .claude-reset.warn { color: var(--soa-yellow); }
-.claude-bar { margin-top: 5px; }
 .claude-sub { margin-top: 5px; font-family: var(--font-mono); font-size: 10.5px; color: var(--soa-fg); letter-spacing: 0.03em; }
-/* WEEKLY sub-window: a little breathing room above its header, and an amber
-   fill once it crosses 80% so the slow-reset ceiling reads as urgent. */
-.claude-head-week { margin-top: 9px; }
 .bar-fill.hot { background: var(--soa-yellow); }
 .claude-spark { display: block; width: 100%; height: 34px; margin: 7px 0 5px; background: rgba(var(--soa-accent-rgb), 0.04); border: 1px solid rgba(var(--soa-accent-rgb), 0.14); }
 .claude-sess-head { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--soa-line-soft); font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.18em; color: var(--soa-accent-dim); }
@@ -69,8 +212,6 @@
 /* A session leaning hard on the model (>= soa-usage-alert thresholds) — the phone got a push too. */
 .claude-sess-row.hot .claude-sess-name { color: #ff6b6b; }
 .claude-sess-row.hot .claude-sess-val { color: #ff5b5b; font-weight: 600; }
-.claude-clickable { cursor: pointer; }
-.claude-clickable:hover .claude-head-l { color: var(--soa-accent); }
 
 /* ── Mobile QR widget ───────────────────────────────────────────────── */
 .mqr-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.25em; margin-bottom: 6px; }
@@ -119,6 +260,21 @@
 .msim-shot { object-fit: contain; cursor: pointer; display: block; }
 .msim-status { font-size: 10px; opacity: 0.7; letter-spacing: 0.08em; white-space: nowrap; }
 .mqr-err { color: var(--soa-red); font-family: var(--font-mono); font-size: 10px; padding-top: 6px; }
+
+/* Pairing password — the second factor the QR's URL cannot carry. Sits under
+   the actions, separated by a rule so it reads as a property of the link
+   rather than another button in the row. */
+.mqr-pw { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--soa-line-soft); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; }
+.mqr-pw-state { flex: 1 1 auto; color: var(--soa-accent-dim); }
+.mqr-pw-on .mqr-pw-state { color: var(--soa-green); }
+.mqr-pw .mqr-toggle { flex: 0 0 auto; }
+.mqr-pw-editing { display: block; }
+.mqr-pw-label { color: var(--soa-accent); margin-bottom: 6px; }
+.mqr-pw-input { width: 100%; box-sizing: border-box; background: var(--soa-bg-soft, transparent); color: var(--soa-fg); border: 1px solid var(--soa-line-soft); padding: 5px 6px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; }
+.mqr-pw-input:focus { outline: none; border-color: var(--soa-accent); }
+.mqr-pw-actions { display: flex; gap: 6px; margin-top: 6px; }
+.mqr-pw-err { flex: 1 0 100%; color: var(--soa-red); font-size: 9px; letter-spacing: 0.06em; padding-top: 6px; }
+.mqr-pw-err[hidden] { display: none; }
 
 /* ── Listening ports, inside the NETWORK widget ──────────────────────
    The count used to be the headline, in display type, above a cloud of every
@@ -1022,3 +1178,163 @@ body.ctx-resizing * { cursor: inherit !important; }
     font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em;
 }
 .cfg-add:hover { color: var(--soa-accent); }
+
+/* ── Rail modes: CANVAS · NOTES · RECALL ────────────────────────────────
+   The right rail is one surface with three modes and the header is the
+   switch. Same letter-spaced micro-labels as everything else here; the
+   active mode carries the accent and its glow, the others sit dim until
+   hovered. The NOTES count rides as a superscript so the label stays a word. */
+.ctx-rail { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
+.ctx-rail-tab {
+    appearance: none; background: none; border: 0; padding: 0 0 2px;
+    font-family: var(--font-display); font-size: 10px; letter-spacing: 0.3em;
+    color: var(--soa-accent-dim); cursor: pointer; position: relative;
+    transition: color 140ms ease, text-shadow 140ms ease;
+}
+.ctx-rail-tab:hover { color: var(--soa-accent); }
+.ctx-rail-tab:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 2px; }
+.ctx-rail-tab.active {
+    color: var(--soa-accent);
+    text-shadow: 0 0 6px rgba(var(--soa-accent-rgb), 0.3);
+}
+/* The active mode is underlined by a hairline that stops where the letter-
+   spacing's trailing gap begins — the seam, not a box. */
+.ctx-rail-tab.active::after {
+    content: ''; position: absolute; left: 0; right: 0.28em; bottom: -3px;
+    height: 1px; background: var(--soa-accent);
+    box-shadow: 0 0 5px rgba(var(--soa-accent-rgb), 0.5);
+}
+.ctx-rail-n {
+    font-family: var(--font-mono); font-size: 8px; letter-spacing: 0;
+    color: var(--soa-accent); vertical-align: super; margin-left: 3px;
+    font-variant-numeric: tabular-nums; opacity: 0.8;
+}
+
+/* A mode owns the whole column below the header; only one is in the flow. */
+.ctx-mode { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.ctx-mode[hidden] { display: none !important; }
+.ctx-mode-notes, .ctx-mode-recall { overflow: hidden; }
+.np-screen { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.np-screen[hidden] { display: none !important; }
+
+/* ── NOTES ──────────────────────────────────────────────────────────────
+   Apple-Notes-shaped, in this panel's dialect: a list you drill into, the
+   first line as the title, checklists in the text. */
+.np-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--soa-line-soft); flex: 0 0 auto;
+}
+.np-bar-edit { justify-content: space-between; }
+.np-search {
+    flex: 1 1 auto; min-width: 0; padding: 4px 7px; background: transparent;
+    border: 1px solid var(--soa-line-soft); border-radius: 2px;
+    font-family: var(--font-mono); font-size: 10px; color: var(--soa-fg);
+}
+.np-search::placeholder { color: var(--soa-accent-dim); opacity: 0.6; }
+.np-search:focus { outline: none; border-color: var(--soa-accent); }
+.np-new {
+    appearance: none; background: transparent; cursor: pointer;
+    border: 1px solid var(--soa-accent-dim); border-radius: 2px;
+    padding: 4px 8px; font-family: var(--font-mono); font-size: 9px;
+    letter-spacing: 0.14em; color: var(--soa-accent); white-space: nowrap;
+    transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+.np-new:hover { background: rgba(var(--soa-accent-rgb), 0.08);
+    box-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.18); }
+
+.np-list { overflow-y: auto; flex: 1 1 auto; padding: 2px 0 8px; }
+.np-row {
+    appearance: none; background: none; border: 0; cursor: pointer;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    width: 100%; text-align: left; padding: 7px 12px 7px 10px;
+    border-left: 2px solid transparent;
+    border-bottom: 1px solid var(--soa-line-soft);
+    transition: background-color 120ms ease;
+}
+.np-row:hover { background: rgba(var(--soa-accent-rgb), 0.05); }
+.np-row:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: -1px; }
+.np-row.pinned { border-left-color: var(--soa-accent-dim); }
+.np-row-t {
+    font-family: var(--font-display); font-size: 11px; color: var(--soa-fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.np-row.pinned .np-row-t { color: var(--soa-accent); }
+.np-row-s {
+    font-family: var(--font-mono); font-size: 9.5px; color: var(--soa-accent-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.np-row-m { font-family: var(--font-mono); font-size: 8.5px; color: var(--soa-accent-dim);
+    opacity: 0.65; font-variant-numeric: tabular-nums; }
+
+.np-tools { display: flex; align-items: center; gap: 10px; }
+.np-tool {
+    appearance: none; background: none; border: 0; padding: 0; cursor: pointer;
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.1em;
+    color: var(--soa-accent-dim); transition: color 120ms ease;
+}
+.np-tool:hover { color: var(--soa-accent); }
+.np-tool:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
+.np-back { letter-spacing: 0.18em; }
+.np-del { font-size: 12px; }
+.np-del.armed { color: #ff6b6b; letter-spacing: 0.05em; }
+.np-savedot { width: 5px; height: 5px; border-radius: 50%; flex: 0 0 auto;
+    background: rgba(var(--soa-accent-rgb), 0.4); transition: background-color 200ms ease; }
+.np-savedot.dirty { background: var(--soa-accent);
+    box-shadow: 0 0 5px rgba(var(--soa-accent-rgb), 0.6); }
+.np-savedot.err { background: #ff6b6b; box-shadow: 0 0 5px rgba(255, 107, 107, 0.6); }
+
+/* The editor: a textarea holding the caret and the truth, a backdrop painting
+   the ink. They MUST share every metric — font, size, line-height, padding,
+   wrap — or the glyphs drift; that is the whole contract of this block. */
+.np-editor { position: relative; flex: 1 1 auto; min-height: 0; }
+.np-bd, .np-ta {
+    position: absolute; inset: 0; margin: 0; padding: 10px 12px 18px;
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.6;
+    letter-spacing: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    word-break: normal; overflow-y: auto; border: 0; border-radius: 0;
+    background: transparent; box-sizing: border-box;
+}
+.np-bd { color: var(--soa-fg); pointer-events: none; overflow: hidden; z-index: 0; }
+.np-ta {
+    resize: none; outline: none; z-index: 1;
+    color: transparent; caret-color: var(--soa-accent);
+}
+.np-ta::selection { background: rgba(var(--soa-accent-rgb), 0.22); }
+.np-ta::placeholder { color: var(--soa-accent-dim); opacity: 0.55; }
+.np-box { color: var(--soa-accent); }
+.np-done { color: var(--soa-accent-dim); text-decoration: line-through;
+    text-decoration-color: rgba(var(--soa-accent-rgb), 0.5); }
+.np-done .np-box { color: var(--soa-accent-dim); text-decoration: none; }
+
+/* ── RECALL — the retrieval tab ─────────────────────────────────────────
+   The Time Machine's history, in the rail: when, what it holds, and the one
+   verb. Restore arms on the first press and fires on the second. */
+.rc-list { overflow-y: auto; flex: 1 1 auto; padding: 2px 0 8px; }
+.rc-row {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 8px;
+    align-items: baseline; padding: 6px 12px;
+    border-bottom: 1px solid var(--soa-line-soft);
+}
+.rc-when { font-family: var(--font-mono); font-size: 10px; color: var(--soa-fg);
+    font-variant-numeric: tabular-nums; }
+.rc-what { font-family: var(--font-mono); font-size: 9px; color: var(--soa-accent-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-restore {
+    appearance: none; background: transparent; cursor: pointer;
+    border: 1px solid var(--soa-line-soft); border-radius: 2px;
+    padding: 2px 6px; font-family: var(--font-mono); font-size: 8.5px;
+    letter-spacing: 0.12em; color: var(--soa-accent-dim);
+    transition: color 120ms ease, border-color 120ms ease;
+}
+.rc-row:hover .rc-restore, .rc-restore:focus-visible {
+    color: var(--soa-accent); border-color: var(--soa-accent-dim); }
+.rc-restore.armed { color: #ffb454; border-color: #ffb454; }
+.rc-restore:disabled { opacity: 0.5; cursor: default; }
+
+/* ── ACCOUNT widget (cloud "find my desktop") — borrows the MOBILE LINK forms ── */
+.acct-row { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; color: var(--soa-fg); margin: 2px 0; word-break: break-all; }
+.acct-row.acct-bad { color: var(--soa-red); }
+.acct-form .acct-input { margin-bottom: 6px; }
+.acct-toggle { margin-top: 6px; }
+.acct-note { color: var(--soa-accent-dim); white-space: normal; line-height: 1.4; margin-top: 6px; }
+.acct-err { flex-basis: auto; }

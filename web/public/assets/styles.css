@@ -112,6 +112,14 @@ html, body {
 
 /* ── Shell layout ────────────────────────────────────────────────────── */
 .shell { display: grid; grid-template-rows: 44px 1fr; height: 100%; }
+/* Launched from a Home Screen with a translucent status bar (or into full
+   screen on a notched phone) the page runs edge to edge; keep the topbar
+   below the clock and the terminal above the home indicator. Every inset is
+   0 on a desktop and in an ordinary browser tab. */
+.shell {
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+           env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
 
 .topbar {
   display: grid;
@@ -927,7 +935,7 @@ html[data-load="high"] .status-bar { transition: none; }
 @media (max-width: 768px) {
     .shell { grid-template-rows: 40px 1fr; }
     .topbar {
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: auto minmax(0, 1fr) auto;
         gap: 8px;
         padding: 0 8px;
     }
@@ -1382,6 +1390,160 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 .wiz-alt > summary::-webkit-details-marker { display: none; }
 .wiz-alt > summary:hover { color: var(--soa-accent); }
 .wiz-alt[open] > summary { margin-bottom: 8px; }
+
+/* Pair instead of install: the daemon already runs on another machine. */
+.wiz-pair {
+    margin: 22px auto 0; max-width: 380px; padding-top: 18px;
+    border-top: 1px dashed rgba(var(--soa-accent-rgb), 0.18);
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.wiz-pair-p { margin: 0; font-size: 12px; letter-spacing: 0.04em; color: rgba(var(--soa-accent-rgb), 0.62); }
+.wiz-pair-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+    min-width: 240px; padding: 11px 18px;
+    font-family: inherit; font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
+    color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.4); border-radius: 6px; cursor: pointer;
+    transition: background 120ms, border-color 120ms, transform 80ms;
+}
+.wiz-pair-btn:hover { background: rgba(var(--soa-accent-rgb), 0.12); border-color: var(--soa-accent); }
+.wiz-pair-btn:active { transform: translateY(1px); }
+.wiz-pair-ico { position: relative; flex: 0 0 18px; width: 18px; height: 18px; }
+.wiz-pair-ico i { position: absolute; width: 7px; height: 7px; border: 2px solid currentColor; }
+.wiz-pair-ico i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.wiz-pair-ico i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+.wiz-pair-ico i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+.wiz-pair-ico i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+.wiz-pair-manual { margin-top: 0; width: 100%; }
+.wiz-pair-url {
+    flex: 1; min-width: 0; padding: 8px 10px;
+    font-family: var(--font-mono); font-size: 12px; color: var(--soa-accent-bright);
+    background: rgba(var(--soa-accent-rgb), 0.06); border: 1px solid rgba(var(--soa-accent-rgb), 0.22); border-radius: 4px;
+}
+.wiz-pair-url:focus { outline: none; border-color: var(--soa-accent); }
+.wiz-pair-err { margin: 0; font-size: 12px; line-height: 1.45; color: var(--soa-red, #e06c62); }
+.wiz-pair-pwrow { margin-top: 8px; }
+#wiz-devhist { margin-top: 2px; }
+
+/* The boot-screen password prompt: one field, under the status line. */
+.boot-unlock {
+    margin: 18px auto 0; max-width: 360px; display: flex; flex-direction: column; gap: 8px; align-items: center;
+    font-family: var(--font-mono); text-align: center;
+}
+.boot-unlock-lead { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--soa-fg); }
+.boot-unlock-host { margin: 0; font-size: 11px; letter-spacing: 0.06em; color: var(--soa-accent-dim); }
+.boot-unlock-row { display: flex; gap: 8px; width: 100%; }
+.boot-unlock-pw {
+    flex: 1; min-width: 0; padding: 9px 11px; font: inherit; font-size: 13px;
+    color: var(--soa-accent-bright); background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.3); border-radius: 5px;
+}
+.boot-unlock-pw:focus { outline: none; border-color: var(--soa-accent); }
+.boot-unlock-go {
+    padding: 9px 16px; font: inherit; font-size: 12px; letter-spacing: 0.1em; cursor: pointer;
+    color: var(--soa-bg); background: var(--soa-accent); border: 1px solid var(--soa-accent); border-radius: 5px;
+}
+.boot-unlock-go:disabled { opacity: 0.6; cursor: default; }
+.boot-unlock-err { margin: 0; font-size: 12px; line-height: 1.45; color: var(--soa-red, #e06c62); }
+.boot-unlock-back { background: none; border: 0; padding: 4px; font: inherit; font-size: 11px; letter-spacing: 0.08em; color: var(--soa-accent-dim); cursor: pointer; }
+.boot-unlock-back:hover { color: var(--soa-accent); }
+
+/* The recovery panel's way to what is saved here. */
+.recovery-history {
+    margin: 2px 0 10px; padding: 8px 12px; font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.06em; cursor: pointer;
+    color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.35); border-radius: 5px;
+}
+.recovery-history:hover { background: rgba(var(--soa-accent-rgb), 0.12); border-color: var(--soa-accent); }
+
+/* Pair with a desktop: a sheet over everything, camera first. */
+.pair-sheet {
+    position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center;
+    padding: 20px; background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(3px);
+    font-family: var(--font-mono);
+}
+.pair-card {
+    width: min(420px, 100%); max-height: 90vh; overflow: auto; padding: 20px;
+    display: flex; flex-direction: column; gap: 12px;
+    background: var(--soa-bg); color: var(--soa-fg);
+    border: 1px solid var(--soa-line); border-radius: 8px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+.pair-title { margin: 0; font: 600 15px/1.3 var(--font-display); letter-spacing: 0.04em; }
+.pair-lead { margin: 0; font-size: 12px; line-height: 1.5; color: var(--soa-accent-dim); }
+.pair-scan {
+    display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+    padding: 13px 18px; font-family: inherit; font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
+    color: var(--soa-bg); background: var(--soa-accent);
+    border: 1px solid var(--soa-accent); border-radius: 6px; cursor: pointer;
+}
+.pair-scan:hover { background: var(--soa-accent-bright); border-color: var(--soa-accent-bright); }
+.pair-scan:active { transform: translateY(1px); }
+.pair-scan-ico { position: relative; flex: 0 0 18px; width: 18px; height: 18px; }
+.pair-scan-ico i { position: absolute; width: 7px; height: 7px; border: 2px solid currentColor; }
+.pair-scan-ico i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.pair-scan-ico i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+.pair-scan-ico i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+.pair-scan-ico i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+.pair-field { display: flex; flex-direction: column; gap: 5px; }
+/* The flex display above would otherwise beat the attribute: the password row
+   must stay gone until a tokenless link turns out to need it. */
+.pair-sheet [hidden] { display: none !important; }
+.pair-field-l { font-size: 10.5px; letter-spacing: 0.08em; color: var(--soa-accent-dim); }
+.pair-url, .pair-pw {
+    padding: 9px 11px; font-family: inherit; font-size: 12.5px; min-width: 0;
+    color: var(--soa-accent-bright); background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.28); border-radius: 5px;
+}
+.pair-url:focus, .pair-pw:focus { outline: none; border-color: var(--soa-accent); }
+.pair-actions { display: flex; gap: 8px; }
+.pair-go, .pair-close {
+    flex: 1; padding: 10px 14px; font-family: inherit; font-size: 11.5px; letter-spacing: 0.1em; cursor: pointer;
+    color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.35); border-radius: 5px;
+}
+.pair-go { color: var(--soa-bg); background: var(--soa-accent); border-color: var(--soa-accent); }
+.pair-go:disabled { opacity: 0.6; cursor: default; }
+.pair-close:hover { border-color: var(--soa-accent); }
+.pair-err { margin: 0; font-size: 12px; line-height: 1.45; color: var(--soa-red, #e06c62); }
+
+/* History on this device: a read-only sheet over everything. */
+.devhist {
+    position: fixed; inset: 0; z-index: 9600; overflow: auto; padding: 22px clamp(14px, 4vw, 40px) 40px;
+    background: var(--soa-bg); color: var(--soa-fg); font-family: var(--font-mono);
+}
+.devhist-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 900px; margin: 0 auto; }
+.devhist-head h2 { margin: 0; font: 600 15px/1.3 var(--font-display); letter-spacing: 0.04em; }
+.devhist-back, .devhist-copy, .devhist-clear {
+    padding: 7px 12px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+    color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.06);
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.35); border-radius: 5px;
+}
+.devhist-back:hover, .devhist-copy:hover, .devhist-clear:hover { border-color: var(--soa-accent); }
+.devhist-sub { max-width: 900px; margin: 8px auto 16px; font-size: 12px; line-height: 1.5; color: var(--soa-accent-dim); }
+.devhist-list { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+.devhist-item { border: 1px solid var(--soa-line); border-radius: 6px; background: var(--soa-bg-panel); padding: 0 12px 10px; }
+.devhist-item > summary { list-style: none; cursor: pointer; padding: 10px 0; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.devhist-item > summary::-webkit-details-marker { display: none; }
+.devhist-title { font-size: 12.5px; font-weight: 600; color: var(--soa-fg); }
+.devhist-meta { font-size: 10.5px; color: var(--soa-accent-dim); }
+.devhist-copy { margin-bottom: 8px; }
+.devhist-text {
+    margin: 0; padding: 10px 12px; max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font-size: 11.5px; line-height: 1.45; color: var(--soa-fg); background: var(--soa-bg-deep);
+    border: 1px solid var(--soa-line-soft); border-radius: 4px; user-select: text;
+}
+.devhist-clear { display: block; margin: 22px auto 0; color: var(--soa-red, #e06c62); border-color: rgba(224, 108, 98, 0.4); }
+
+/* A tablet on the companion welcome chooses where the pairing lands. */
+.mwel-openas { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; }
+.mwel-openas-l { margin-right: 4px; color: rgba(var(--soa-accent-rgb), 0.6); }
+.mwel-openas-o {
+    padding: 6px 12px; border-radius: 999px; font: inherit; cursor: pointer;
+    color: rgba(var(--soa-accent-rgb), 0.75); background: transparent;
+    border: 1px solid rgba(var(--soa-accent-rgb), 0.3); transition: background 120ms, color 120ms;
+}
+.mwel-openas-o.on { color: var(--soa-bg); background: var(--soa-accent); border-color: var(--soa-accent); }
 
 .wiz-wait {
     display: flex; align-items: center; justify-content: center; gap: 10px;
