@@ -9,13 +9,24 @@
  *
  *     GET /           the viewer page            (daemon: requireAuthed)
  *     GET /token      a short-lived WS token     (daemon: requireAuthed)
- *     WS  /ws?token=  JPEG frames out, JSON input in
+ *     WS  /ws?token=  video (H.264) or JPEG frames out, JSON input in
  *
  * The HTTP side is gated by the daemon (pairing token + password); the WS
  * upgrade is not, so the socket carries its own token minted by /token —
  * a bearer the viewer can only obtain after passing the daemon's gate.
  *
- * Capture: ffmpeg (AVFoundation, mjpeg) — only while someone is watching.
+ * Capture: only while someone is watching. The default is a low-latency
+ *          H.264 stream (soa-screen-stream: ScreenCaptureKit + VideoToolbox,
+ *          or ffmpeg + h264_videotoolbox when that helper cannot run), one
+ *          encode per video viewer, sized for that viewer's screen and paced
+ *          for that viewer's link. Viewers whose browser cannot decode it (no
+ *          WebCodecs) get the older JPEG-per-frame stream (ffmpeg mjpeg).
+ *
+ *          Video message (binary): u8 0x01 · u8 flags (bit 0 keyframe) ·
+ *          u32 BE seq · f64 BE capture time (ms since epoch) · the access
+ *          unit as 4-byte-length NAL units (AVCC). The decoder config goes
+ *          as JSON {t:'vconfig', codec, description(base64 avcC)} right
+ *          before the first keyframe that needs it. JPEG messages start 0xff.
  * Input:   the `computeruse` CLI, which hands every event to Sarea.app; that
  *          app holds Accessibility + Screen Recording, so nothing here needs a
  *          permission grant or sudo. Clicks are delivered to the process that
@@ -54,12 +65,43 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ── screen geometry ──────────────────────────────────────────────────────
 let screen = { width: 1728, height: 1080, scale: 2 };
-function readScreen() {
-    try {
-        const j = JSON.parse(execFileSync(COMPUTERUSE, ['screen-info'], { timeout: 3000 }).toString());
-        if (j.width && j.height) screen = { width: j.width, height: j.height, scale: j.scale_factor || 1 };
-    } catch (e) { log('screen-info failed:', e.message); }
+function readScreen() {           // synchronous: start-up only
+    // computeruse needs Sarea running; the screen-stream helper reads the
+    // same geometry straight from CoreGraphics when it is not.
+    for (const [cmd, args] of [[COMPUTERUSE, ['screen-info']], [path.join(WORK_DIR, 'screen-stream'), ['--info']]]) {
+        try {
+            const j = JSON.parse(execFileSync(cmd, args, { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString());
+            if (j.width && j.height) { screen = { width: j.width, height: j.height, scale: j.scale_factor || 1 }; return screen; }
+        } catch (_) { /* try the next source */ }
+    }
+    log('screen geometry unavailable — keeping', `${screen.width}x${screen.height}`);
     return screen;
+}
+
+// Later reads run in the background, so a connect never stalls the streams
+// (a hung Sarea would hold every viewer's video for up to 3 s per source);
+// a changed geometry is pushed to the viewers when it arrives.
+let screenReading = false;
+function refreshScreen() {
+    if (screenReading) return;
+    screenReading = true;
+    const sources = [[COMPUTERUSE, ['screen-info']], [path.join(WORK_DIR, 'screen-stream'), ['--info']]];
+    const next = (i) => {
+        if (i >= sources.length) { screenReading = false; return; }
+        execFile(sources[i][0], sources[i][1], { timeout: 3000 }, (err, out) => {
+            let j = null;
+            if (!err) { try { j = JSON.parse(out); } catch (_) {} }
+            if (!j || !j.width || !j.height) { next(i + 1); return; }
+            screenReading = false;
+            const s = { width: j.width, height: j.height, scale: j.scale_factor || 1 };
+            if (s.width !== screen.width || s.height !== screen.height || s.scale !== screen.scale) {
+                log('screen geometry', `${screen.width}x${screen.height} → ${s.width}x${s.height}`);
+                screen = s;
+                if (viewers.size) { reconcileVideo(); broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready'); }
+            }
+        });
+    };
+    next(0);
 }
 
 // ── which pid owns the window under a point (persistent helper) ──────────
@@ -256,11 +298,15 @@ function enqueue(job) { queue.push(job); pump(); }
 
 const MODS = { cmd: 'cmd', meta: 'cmd', shift: 'shift', alt: 'option', option: 'option', ctrl: 'control', control: 'control' };
 function modList(mods) {
-    return [...new Set((mods || []).map((m) => MODS[String(m).toLowerCase()]).filter(Boolean))];
+    // A viewer's message is untrusted: anything but a list of names is no modifiers.
+    if (!Array.isArray(mods)) return [];
+    return [...new Set(mods.slice(0, 8).map((m) => MODS[String(m).toLowerCase()]).filter(Boolean))];
 }
-const KEYS = new Set(['return', 'tab', 'escape', 'delete', 'space', 'up', 'down', 'left', 'right',
-    'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12']);
-const KEY_ALIAS = { enter: 'return', esc: 'escape', backspace: 'delete', arrowup: 'up', arrowdown: 'down', arrowleft: 'left', arrowright: 'right', ' ': 'space' };
+// Names Sarea's key table knows ('delete' is Backspace; 'forwarddelete' is ⌦).
+const KEYS = new Set(['return', 'tab', 'escape', 'delete', 'forwarddelete', 'space', 'up', 'down', 'left', 'right',
+    'home', 'end', 'pageup', 'pagedown', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12']);
+const KEY_ALIAS = { enter: 'return', esc: 'escape', backspace: 'delete', arrowup: 'up', arrowdown: 'down', arrowleft: 'left', arrowright: 'right', ' ': 'space',
+    del: 'forwarddelete', forward_delete: 'forwarddelete', page_up: 'pageup', page_down: 'pagedown' };
 
 function clampPoint(m) {
     const x = Math.max(0, Math.min(screen.width - 1, Math.round(+m.x || 0)));
@@ -344,7 +390,20 @@ function handleInput(m, from) {
             if (m.t === 'up') refreshActivePid();
             break;
         }
-        case 'quality': setQuality(m); break;
+        case 'quality':
+            if (from && !from.mode) setMode(from, 'jpeg');      // a viewer that predates the video stream
+            setQuality(m);
+            break;
+        case 'mode': if (from) setMode(from, m.mode === 'h264' ? 'h264' : 'jpeg', m); break;
+        case 'pref': if (from) { from.pref = prefOf(m.pref); reconcileVideo(); } break;
+        case 'display': if (from) { from.display = cleanDisplay(m); reconcileVideo(); } break;
+        case 'vack': if (from) videoAck(from, m); break;
+        case 'keyframe':
+            if (from && from.mode === 'h264' && from.enc) { from.vs.needKey = true; from.vs.idrAsked = true; requestIdr(from.enc); }
+            break;
+        case 'ping':
+            if (from && from.readyState === WebSocket.OPEN) from.send(JSON.stringify({ t: 'pong', c: +m.c || 0, s: Date.now() }));
+            break;
         default: break;
     }
 }
@@ -369,8 +428,9 @@ function setQuality(m) {
     if (ffmpeg) { stopCapture(); ensureCapture(); }
 }
 
+const jpegViewers = () => [...viewers].filter((ws) => ws.mode === 'jpeg');
 function ensureCapture() {
-    if (ffmpeg || !viewers.size) return;
+    if (ffmpeg || !jpegViewers().length) return;
     const args = [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
         '-f', 'avfoundation', '-pixel_format', 'nv12', '-framerate', String(quality.fps),
@@ -392,7 +452,7 @@ function ensureCapture() {
         if (ffmpeg !== child) return;
         ffmpeg = null; fBuf = Buffer.alloc(0);
         log('capture died', code, stderr.trim().slice(-200));
-        broadcastStatus('error', stderr.trim() || `Screen capture stopped (${code}).`);
+        broadcastStatus('error', stderr.trim() || `Screen capture stopped (${code}).`, 'jpeg');
     });
     log('capture started', JSON.stringify(quality));
     broadcastStatus('live');
@@ -419,14 +479,673 @@ function consume(chunk) {
         frames++;
         for (const ws of viewers) {
             // Drop frames for a viewer that is behind instead of queueing a backlog.
-            if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 2 * frame.length) ws.send(frame, { binary: true });
+            if (ws.mode === 'jpeg' && ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 2 * frame.length) ws.send(frame, { binary: true });
         }
     }
 }
-function broadcastStatus(state, message = '') {
-    const msg = JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen, quality });
-    for (const ws of viewers) if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+function sendStatus(ws, state, message = '') {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen, quality, video: videoInfo(ws.enc) }));
 }
+function broadcastStatus(state, message = '', onlyMode = null) {
+    for (const ws of viewers) if (!onlyMode || ws.mode === onlyMode) sendStatus(ws, state, message);
+}
+
+// ── capture: H.264 video ─────────────────────────────────────────────────
+// One encoder PER video viewer (each is its own ScreenCaptureKit stream,
+// ~1% CPU), so every viewer gets a stream sized for its own screen and paced
+// for its own link: a phone on a slow tunnel is not sent a desktop's 2560-wide
+// frames, and a desktop on a fast link is not held down to the phone's rate.
+// Size: the viewer's screen in physical pixels (the Mac's aspect, zoom
+// included), between 1280 and 2560 wide and never above the source. Bitrate:
+// Auto follows the link, or the chosen preset. A viewer that falls behind is
+// not waited on: it skips frames until the next keyframe, and Auto lowers the
+// bitrate.
+const VIDEO_MSG = 0x01;
+const VIDEO_HDR = 14;
+const VIDEO_FPS = Math.max(10, Math.min(60, parseInt(process.env.SOA_DESKTOP_FPS || '30', 10) || 30));
+const HELPER_SRC = path.join(__dirname, 'soa-screen-stream.swift');
+const HELPER_BIN = path.join(WORK_DIR, 'screen-stream');
+// Auto spends 2-12 Mbit/s on a healthy link. A link that measurably carries
+// less (the Mac's uplink is the usual limit) is followed further down, to
+// BPS_FLOOR, rather than held above what it can deliver.
+const BPS_MIN = 2e6, BPS_MAX = 12e6, BPS_START = 6e6, BPS_FLOOR = 5e5;
+const PRESETS = Object.freeze({ '1440': { h: 1440, bps: 12e6 }, '1080': { h: 1080, bps: 8e6 }, '720': { h: 720, bps: 4e6 } });
+// Own keys only: a viewer sending "constructor" or "__proto__" gets Auto.
+const isPreset = (p) => typeof p === 'string' && Object.prototype.hasOwnProperty.call(PRESETS, p);
+const prefOf = (p) => (isPreset(p) ? p : 'auto');
+const W_MIN = 1280, W_MAX = 2560;
+const MAX_ENCODERS = Math.max(1, parseInt(process.env.SOA_DESKTOP_MAX_ENCODERS || '4', 10) || 4);
+const RESIZE_DEBOUNCE_MS = 1500;
+// Lag = time from sending a frame to the viewer reporting it received. Its
+// floor is the path's round trip (plus the viewer's ~50 ms report interval),
+// so "behind" is judged above that floor, never as an absolute figure that a
+// 250 ms tunnel would already be close to.
+const LAG_MAX_MS = 900;       // queueing above the floor past this → the viewer is behind
+const LAG_OK_MS = 350;        // ...and back under this → it may resume (from a keyframe)
+const QUEUE_SLOW_MS = 450;    // standing queue past this → Auto steps the bitrate down
+const QUEUE_OK_MS = 300;      // ...and under this → it may step up
+// Bytes sent but not yet reported received. On a healthy path that is about
+// bitrate × (floor + one report interval); past bitrate × (floor + SLACK) the
+// link is carrying less than is being sent. This is the EARLY signal: the
+// socket's own buffer stays empty (the backlog sits in kernel and tunnel
+// buffers), and frame age only shows it once a second of video is in flight.
+const UNACKED_SLACK_MS = 150;
+const BACKLOG_OVER_MS = 150;  // ...and the oldest frame is this late: not a keyframe burst
+
+const encoders = new Set();
+let vgen = 0;
+let lastAutoBps = BPS_START;  // what the last Auto stream settled at: a new one starts near it
+let helperFailedAt = 0, videoFails = [];
+
+const videoViewers = () => [...viewers].filter((ws) => ws.mode === 'h264' && ws.readyState === WebSocket.OPEN);
+const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+
+function newVideoState() {
+    // inflight: [seq, sentAt, bytes] per frame not yet reported received;
+    // unacked is their byte total. busy: [at, bytes, ms] per report that
+    // arrived while a queue stood in the path — bytes delivered over the
+    // interval when the link, not the encoder, set the pace. Their sum over
+    // the last few seconds is what the link can carry; what the encoder
+    // happens to send (a still screen sends little) says nothing about that.
+    return { needKey: true, idrAsked: false, gen: 0, drops: 0, dropEvents: 0, inflight: [], unacked: 0, lag: 0, minLag: Infinity, minLagAt: 0,
+        lastAckAt: 0, busy: [], goodput: 0, queue: 0, sent: 0, slowTicks: 0 };
+}
+function setMode(ws, mode, m = {}) {
+    ws.mode = mode;
+    if (m.pref !== undefined) ws.pref = prefOf(m.pref);
+    if (m.display && typeof m.display === 'object') ws.display = cleanDisplay(m.display);
+    ws.vs = newVideoState();
+    // This viewer now speaks for itself: a video viewer takes over the
+    // capture its own /token request started; otherwise that lapses now.
+    if (mode === 'h264' && !ws.enc && prewarm && prewarm.enc) {
+        const e = prewarm.enc; prewarm.enc = null;
+        e.owner = ws; ws.enc = e;
+        log('video: viewer took over the prewarmed stream');
+    }
+    clearPrewarm();
+    if (mode !== 'h264' && ws.enc) stopEncoder(ws.enc);
+    reconcileVideo();
+    if (mode === 'h264' && ws.enc) requestIdr(ws.enc);
+    if (jpegViewers().length) ensureCapture(); else stopCapture();
+    broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
+}
+function cleanDisplay(d) {
+    d = d && typeof d === 'object' ? d : {};
+    const n = (v, lo, hi, def) => { v = +v; return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def; };
+    return { w: Math.round(n(d.w, 100, 10000, 1920)), h: Math.round(n(d.h, 100, 10000, 1080)), dpr: n(d.dpr, 0.5, 5, 1), zoom: n(d.zoom, 0.2, 8, 1) };
+}
+
+function sourcePx() { const k = screen.scale || 1; return { w: Math.round(screen.width * k), h: Math.round(screen.height * k) }; }
+// Fit the Mac's aspect into the viewer's physical pixels; zooming in asks for
+// more pixels (the visible part would otherwise be upscaled), up to the cap.
+function sizeFor(src) {
+    const aspect = screen.width / screen.height;
+    const cap = Math.min(W_MAX, sourcePx().w);
+    let w;
+    if (isPreset(src.pref)) w = PRESETS[src.pref].h * aspect;
+    else {
+        const d = src.display || { w: 1920, h: 1080, zoom: 1 };
+        w = Math.max(W_MIN, Math.min(d.w, d.h * aspect) * Math.max(1, d.zoom || 1));
+    }
+    w = even(Math.min(cap, w));
+    return { w, h: even(w / aspect) };
+}
+function targetFor(e, src) {
+    const auto = !isPreset(src.pref);
+    return { ...sizeFor(src), auto, bps: Math.round(auto ? e.autoBps : PRESETS[src.pref].bps) };
+}
+// A viewer about to connect: /token?v=1 carries the screen it will report,
+// so capture starts while the socket is still being opened (one tunnel round
+// trip and the capture start-up overlap instead of adding up). It lapses on
+// its own after PREWARM_MS, or as soon as a viewer says what it wants (and a
+// video viewer takes that encoder over).
+const PREWARM_MS = 6000;
+let prewarm = null, prewarmTimer = null;
+function setPrewarm(q) {
+    clearTimeout(prewarmTimer);
+    const d = cleanDisplay({ w: q.get('w'), h: q.get('h'), dpr: q.get('dpr'), zoom: q.get('zoom') });
+    prewarm = Object.assign(prewarm || { enc: null }, { pref: prefOf(q.get('pref')), display: d });
+    prewarmTimer = setTimeout(() => clearPrewarm(), PREWARM_MS);
+    reconcileVideo();
+}
+function clearPrewarm() {
+    if (!prewarm) return;
+    clearTimeout(prewarmTimer);
+    const e = prewarm.enc; prewarm = null;
+    if (e) stopEncoder(e);
+}
+function videoInfo(e) {
+    if (!e) return null;
+    return { kind: e.kind, codec: e.config ? e.config.codec : null, w: e.w, h: e.h, bps: e.bps, fps: e.stat.fps, kbps: e.stat.kbps, auto: e.auto };
+}
+
+function newEncoder(owner, src) {
+    const e = { owner, kind: null, child: null, w: 0, h: 0, bps: 0, auto: true, autoBps: 0, gotFrame: false, startedAt: 0, config: null,
+        seq: 0, cutSeq: 0, lastCongestAt: 0, lastRaiseAt: 0, resizeTimer: null, lastIdrAt: 0, idrTimer: null, retryTimer: null, lastKeyLen: 0,
+        dead: false, stat: { frames: 0, bytes: 0, fps: 0, kbps: 0 } };
+    // A new Auto stream starts from what the last link carried, but not so
+    // low that a better link would take a minute to climb back.
+    e.autoBps = Math.max(3e6, Math.min(BPS_START, lastAutoBps));
+    const t = targetFor(e, src);
+    Object.assign(e, { w: t.w, h: t.h, bps: t.bps, auto: t.auto });
+    encoders.add(e);
+    startEncoder(e);
+    return e;
+}
+function stopEncoder(e) {
+    if (e.dead) return;
+    e.dead = true;
+    encoders.delete(e);
+    clearTimeout(e.resizeTimer); clearTimeout(e.idrTimer); clearTimeout(e.retryTimer);
+    if (e.owner && e.owner.enc === e) e.owner.enc = null;
+    const c = e.child; e.child = null; e.config = null;
+    if (c) { endChild(c); log('video stopped', `(${encoders.size} running)`); }
+}
+// The helper is let go by closing its stdin, so it stops its capture
+// cleanly: a ScreenCaptureKit stream killed mid-capture interrupts the other
+// streams of the same process (another viewer's helper then fails and has to
+// restart). ffmpeg, or a helper that does not exit, is killed.
+let lastStopAt = 0;
+function endChild(c) {
+    lastStopAt = Date.now();
+    if (c.stdin && !c.stdin.destroyed && e2helper(c)) {
+        try { c.stdin.end(); } catch (_) {}
+        setTimeout(() => { if (c.exitCode === null && c.signalCode === null) { try { c.kill('SIGKILL'); } catch (_) {} } }, 2000).unref();
+    } else { try { c.kill('SIGKILL'); } catch (_) {} }
+}
+const e2helper = (c) => c.spawnfile === HELPER_BIN;
+
+function reconcileVideo() {
+    for (const ws of videoViewers()) {
+        if (!ws.enc) {
+            if (encoders.size - (prewarm && prewarm.enc ? 1 : 0) >= MAX_ENCODERS) {
+                if (!ws.encRefused) {
+                    ws.encRefused = true;
+                    ws.send(JSON.stringify({ t: 'video-unavailable', message: `The Mac is already streaming to ${MAX_ENCODERS} screens.` }));
+                }
+                continue;
+            }
+            ws.enc = newEncoder(ws, ws);
+            continue;
+        }
+        reconcileEnc(ws.enc, ws);
+    }
+    if (prewarm) {
+        if (!prewarm.enc) { if (encoders.size < MAX_ENCODERS) prewarm.enc = newEncoder(null, prewarm); }
+        else reconcileEnc(prewarm.enc, prewarm);
+    }
+    // Nobody left to watch an encoder: stop it.
+    for (const e of [...encoders]) {
+        const needed = e.owner
+            ? viewers.has(e.owner) && e.owner.enc === e && e.owner.mode === 'h264' && e.owner.readyState === WebSocket.OPEN
+            : !!(prewarm && prewarm.enc === e);
+        if (!needed) stopEncoder(e);
+    }
+}
+function reconcileEnc(e, src) {
+    if (e.dead) return;
+    const t = targetFor(e, src);
+    e.auto = t.auto;
+    if (t.w !== e.w || t.h !== e.h) {
+        // Changing size restarts the encode; wait for the size to settle.
+        clearTimeout(e.resizeTimer);
+        e.resizeTimer = setTimeout(() => {
+            e.resizeTimer = null;
+            if (e.dead) return;
+            const n = targetFor(e, e.owner || src);
+            if (n.w !== e.w || n.h !== e.h) resizeVideo(e, n);
+        }, RESIZE_DEBOUNCE_MS);
+    }
+    if (t.bps !== e.bps) setVideoBitrate(e, t.bps);
+}
+
+function buildHelper() {
+    try {
+        if (!fs.existsSync(HELPER_BIN) || fs.statSync(HELPER_BIN).mtimeMs < fs.statSync(HELPER_SRC).mtimeMs) {
+            execFileSync('swiftc', ['-O', '-o', HELPER_BIN, HELPER_SRC], { stdio: 'inherit', timeout: 180000 });
+            log('built', HELPER_BIN);
+        }
+        return true;
+    } catch (e) { log('screen-stream build failed (video falls back to ffmpeg):', e.message); helperFailedAt = Date.now(); return false; }
+}
+function helperUsable() {
+    if (process.env.SOA_DESKTOP_VIDEO_HELPER === '0') return false;
+    if (Date.now() - helperFailedAt < 10 * 60 * 1000) return false;
+    return buildHelper();
+}
+let scaleVt = null;
+function hasScaleVt() {
+    if (scaleVt === null) {
+        try { scaleVt = /\bscale_vt\b/.test(execFileSync(FFMPEG, ['-hide_banner', '-filters'], { timeout: 5000 }).toString()); }
+        catch (_) { scaleVt = false; }
+    }
+    return scaleVt;
+}
+function ffmpegH264Args(t) {
+    const scale = hasScaleVt()
+        ? ['-init_hw_device', 'videotoolbox=vt', '-filter_hw_device', 'vt', '-vf', `hwupload,scale_vt=w=${t.w}:h=${t.h}`]
+        : ['-vf', `scale=${t.w}:${t.h}`];
+    return [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-f', 'avfoundation', '-pixel_format', 'nv12', '-framerate', String(VIDEO_FPS),
+        '-capture_cursor', '1', '-i', process.env.SOA_DESKTOP_CAPTURE_DEVICE || 'Capture screen 0:none',
+        '-fps_mode', 'passthrough', ...scale,
+        '-c:v', 'h264_videotoolbox', '-realtime', '1', '-prio_speed', '1', '-profile:v', 'high', '-bf', '0',
+        '-g', String(VIDEO_FPS), '-force_key_frames', 'expr:gte(t,n_forced*1)',
+        '-b:v', String(t.bps), '-maxrate', String(t.bps), '-bufsize', String(Math.round(t.bps / 2)),
+        '-f', 'h264', 'pipe:1',
+    ];
+}
+
+// Screen-capture streams of separate helper processes disturb each other at
+// the edges: two starting at the same moment, or one stopping, can end
+// another's capture. Starts are spaced out, and a helper that stops right
+// after such an event is restarted without counting against it.
+const HELPER_SPACING_MS = 1200;
+let lastHelperStartAt = 0;
+function startEncoder(e) {
+    if (e.dead) return;
+    clearTimeout(e.retryTimer); e.retryTimer = null;
+    const kind = helperUsable() ? 'helper' : 'ffmpeg';
+    const wait = kind === 'helper' ? lastHelperStartAt + HELPER_SPACING_MS - Date.now() : 0;
+    if (wait > 0) { e.retryTimer = setTimeout(() => { e.retryTimer = null; if (!e.dead && !e.child) startEncoder(e); }, wait); return; }
+    if (kind === 'helper') lastHelperStartAt = Date.now();
+    let child;
+    try {
+        child = kind === 'helper'
+            ? spawn(HELPER_BIN, [e.w, e.h, VIDEO_FPS, e.bps].map(String), { stdio: ['pipe', 'pipe', 'pipe'] })
+            : spawn(FFMPEG, ffmpegH264Args(e), { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) { videoFailed(e, kind, err.message); return; }
+    Object.assign(e, { kind, child, gotFrame: false, startedAt: Date.now(), config: null });
+    if (e.owner && e.owner.vs) { e.owner.vs.needKey = true; e.owner.vs.idrAsked = false; }
+    let stderr = '';
+    child.stderr.on('data', (c) => { stderr = (stderr + c).slice(-800); });
+    if (child.stdin) child.stdin.on('error', () => {});
+    if (kind === 'helper') child.stdout.on('data', recordParser((au, key, ts) => onAccessUnit(e, child, splitNals(au), key, ts)));
+    else child.stdout.on('data', annexBSplitter((nals, key) => onAccessUnit(e, child, nals, key, Date.now())));
+    child.on('error', (err) => { stderr += err.message; });
+    child.on('close', (code) => {
+        if (e.child !== child) return;
+        e.child = null; e.config = null;
+        log('video', kind, 'stopped', code, stderr.trim().slice(-300));
+        videoFailed(e, kind, stderr.trim() || `exit ${code}`, e.gotFrame);
+    });
+    log('video started', kind, `${e.w}x${e.h}`, `${Math.round(e.bps / 1000)} kb/s`, `${VIDEO_FPS} fps`, `(${encoders.size} running)`);
+}
+function videoFailed(e, kind, why, hadFrames = false) {
+    const now = Date.now();
+    // Another stream just started or stopped and took this capture with it:
+    // restart, and do not count it against the encoder.
+    e.knocks = (e.knocks || []).filter((x) => now - x < 30000);
+    const knockOn = kind === 'helper' && e.knocks.length < 3
+        && Math.max(lastStopAt, lastHelperStartAt) > e.startedAt && now - Math.max(lastStopAt, lastHelperStartAt) < 3000;
+    if (knockOn) e.knocks.push(now);
+    if (knockOn) log('video: capture interrupted by another stream starting or stopping — restarting it');
+    if (kind === 'helper' && !hadFrames && !knockOn) { helperFailedAt = Date.now(); log('screen-stream unavailable — using ffmpeg:', why.slice(-200)); }
+    if (!knockOn) videoFails = videoFails.filter((x) => now - x < 30000).concat(now);
+    if (e.dead) return;
+    if (videoFails.length >= 4) {
+        // Neither encoder holds up: hand this viewer the JPEG stream instead.
+        const ws = e.owner;
+        stopEncoder(e);
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'video-unavailable', message: 'The Mac could not start a video stream (' + why.slice(-160) + ').' }));
+        return;
+    }
+    clearTimeout(e.retryTimer);
+    e.retryTimer = setTimeout(() => { e.retryTimer = null; if (!e.dead && !e.child) startEncoder(e); }, hadFrames || knockOn ? 300 : 1000);
+}
+function resizeVideo(e, t) {
+    if (!e.child) { e.w = t.w; e.h = t.h; return; }                // (re)starting: it picks the size up then
+    log('video resize', `${e.w}x${e.h} → ${t.w}x${t.h}`);
+    if (e.kind === 'helper') {
+        e.child.stdin.write(`size ${t.w} ${t.h}\n`);
+        e.w = t.w; e.h = t.h;
+        // The helper restarts its encoder (with a keyframe) on the first frame
+        // of the new size; the viewer keeps decoding the old size until then.
+        if (t.bps !== e.bps) setVideoBitrate(e, t.bps);
+        if (e.owner) sendStatus(e.owner, 'live');
+    } else {
+        const c = e.child; e.child = null;
+        endChild(c);
+        Object.assign(e, { w: t.w, h: t.h, bps: t.bps });
+        startEncoder(e);
+    }
+}
+function setVideoBitrate(e, bps) {
+    if (e.dead || bps === e.bps) return;
+    if (!e.child) { e.bps = bps; return; }
+    if (e.kind === 'helper') { e.child.stdin.write(`bitrate ${bps}\n`); e.bps = bps; return; }
+    // ffmpeg cannot retarget live: restart only for a large, settled change.
+    if (Math.abs(bps - e.bps) / e.bps >= 0.3 && Date.now() - e.startedAt > 8000) {
+        const c = e.child; e.child = null;
+        endChild(c);
+        e.bps = bps;
+        startEncoder(e);
+    }
+}
+function requestIdr(e) {
+    if (!e || e.dead || !e.child || e.kind !== 'helper') return;    // ffmpeg: its next keyframe is ≤1 s away
+    const wait = e.lastIdrAt + 400 - Date.now();
+    if (wait > 0) { if (!e.idrTimer) e.idrTimer = setTimeout(() => { e.idrTimer = null; requestIdr(e); }, wait); return; }
+    e.lastIdrAt = Date.now();
+    e.child.stdin.write('idr\n');
+}
+
+// The helper's framing: u32 length · u8 flags · f64 time · Annex B access unit.
+function recordParser(onRecord) {
+    let buf = Buffer.alloc(0);
+    return (chunk) => {
+        buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+        while (buf.length >= 13) {
+            const len = buf.readUInt32BE(0);
+            if (len > 32 * 1024 * 1024) { buf = Buffer.alloc(0); return; }
+            if (buf.length < 13 + len) return;
+            onRecord(buf.subarray(13, 13 + len), (buf[4] & 1) === 1, buf.readDoubleBE(5));
+            buf = buf.subarray(13 + len);
+        }
+    };
+}
+const START3 = Buffer.from([0, 0, 1]);
+// Annex B → NAL units (start codes removed). The last NAL runs to the end.
+function splitNals(b) {
+    const out = [];
+    let i = b.indexOf(START3), start = -1;
+    while (i >= 0) {
+        const end = i > 0 && b[i - 1] === 0 ? i - 1 : i;
+        if (start >= 0 && end > start) out.push(b.subarray(start, end));
+        start = i + 3;
+        i = b.indexOf(START3, start);
+    }
+    if (start >= 0 && start < b.length) out.push(b.subarray(start));
+    return out;
+}
+// ffmpeg's raw byte stream → access units. A NAL is complete when the next
+// start code arrives; an access unit ends where the next one begins (an
+// AUD/SPS/PPS/SEI after a slice, or a slice with first_mb_in_slice == 0).
+function annexBSplitter(onAU) {
+    let buf = Buffer.alloc(0), cur = [], hasVcl = false, key = false;
+    const flush = () => { if (cur.length) onAU(cur, key); cur = []; hasVcl = false; key = false; };
+    const nal = (n) => {
+        const t = n[0] & 31, vcl = t >= 1 && t <= 5;
+        if (hasVcl && ((t >= 6 && t <= 9) || (vcl && (n[1] & 0x80)))) flush();
+        cur.push(Buffer.from(n));
+        if (vcl) hasVcl = true;
+        if (t === 5) key = true;
+    };
+    return (chunk) => {
+        buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+        let i = buf.indexOf(START3), start = -1, scAt = -1;
+        while (i >= 0) {
+            const end = i > 0 && buf[i - 1] === 0 ? i - 1 : i;
+            if (start >= 0 && end > start) nal(buf.subarray(start, end));
+            scAt = end; start = i + 3;
+            i = buf.indexOf(START3, start);
+        }
+        if (scAt > 0) buf = buf.subarray(scAt);          // keep the NAL still arriving, from its start code
+        if (buf.length > 32 * 1024 * 1024) buf = Buffer.alloc(0);
+    };
+}
+const hex2 = (n) => n.toString(16).padStart(2, '0');
+
+// ffmpeg's h264_videotoolbox writes an SPS whose VUI (when it has one at
+// all) carries no bitstream_restriction. Without it a decoder must assume
+// frames may be reordered and
+// holds a full DPB (~4 frames) before it shows anything — 130 ms at 30 fps,
+// 330 ms at ffmpeg's ~12. This rewrites such an SPS with a minimal VUI that
+// says max_num_reorder_frames = 0, so every frame is shown as it decodes.
+// Returns null when the SPS already says so, or uses anything not handled
+// (it is then used as is).
+let spsPatchedLogged = false;
+function spsNoReorder(sps) {
+    try {
+        // NAL → RBSP (drop emulation-prevention bytes)
+        const rb = [];
+        for (let i = 1, z = 0; i < sps.length; i++) {
+            if (z >= 2 && sps[i] === 3) { z = 0; continue; }
+            rb.push(sps[i]); z = sps[i] === 0 ? z + 1 : 0;
+        }
+        let pos = 0;
+        const u = (n) => { let v = 0; for (let k = 0; k < n; k++) { v = v * 2 + ((rb[pos >> 3] >> (7 - (pos & 7))) & 1); pos++; } return v; };
+        const ue = () => { let z = 0; while (u(1) === 0) { if (++z > 31) throw new Error('bad ue'); } return (2 ** z) - 1 + u(z); };
+        const profile = u(8); u(16); ue();
+        if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
+            if (ue() === 3) u(1);
+            ue(); ue(); u(1);
+            if (u(1)) return null;                            // scaling matrices: leave alone
+        }
+        ue();
+        const poc = ue();
+        if (poc === 0) ue();
+        else if (poc === 1) { u(1); ue(); ue(); const n = ue(); for (let k = 0; k < n; k++) ue(); }
+        const refs = ue(); u(1); ue(); ue();
+        if (!u(1)) u(1);
+        u(1);
+        if (u(1)) { ue(); ue(); ue(); ue(); }
+        let keep = pos;                                       // bits copied as they are
+        const hasVui = u(1);
+        if (hasVui) {
+            // Walk the VUI up to bitstream_restriction_flag; everything before it stays.
+            if (u(1) && u(8) === 255) u(32);                  // aspect ratio (+ extended SAR)
+            if (u(1)) u(1);                                   // overscan
+            if (u(1)) { u(4); if (u(1)) u(24); }              // video signal type (+ colour description)
+            if (u(1)) { ue(); ue(); }                         // chroma location
+            if (u(1)) { u(32); u(32); u(1); }                 // timing
+            const hrd = () => { const n = ue() + 1; u(8); for (let k = 0; k < n; k++) { ue(); ue(); u(1); } u(20); };
+            const nal = u(1); if (nal) hrd();
+            const vcl = u(1); if (vcl) hrd();
+            if (nal || vcl) u(1);                             // low_delay_hrd_flag
+            u(1);                                             // pic_struct_present_flag
+            keep = pos;
+            if (u(1)) return null;                            // already has bitstream_restriction
+        }
+        // Writer: the kept bits as they were, then the new tail.
+        const bits = [];
+        for (let k = 0; k < keep; k++) bits.push((rb[k >> 3] >> (7 - (k & 7))) & 1);
+        const w = (v, n) => { for (let k = n - 1; k >= 0; k--) bits.push((v >> k) & 1); };
+        const wue = (v) => { const x = v + 1, n = Math.floor(Math.log2(x)); w(0, n); w(x, n + 1); };
+        if (!hasVui) {
+            w(1, 1);                                          // vui_parameters_present_flag
+            w(0, 1); w(0, 1); w(0, 1); w(0, 1); w(0, 1);      // aspect, overscan, video signal, chroma loc, timing
+            w(0, 1); w(0, 1); w(0, 1);                        // nal hrd, vcl hrd, pic_struct
+        }
+        w(1, 1); w(1, 1);                                     // bitstream_restriction, mvs over pic boundaries
+        wue(2); wue(1); wue(16); wue(16);                     // max bytes/pic denom, bits/mb denom, log2 mv lengths
+        wue(0); wue(Math.max(1, refs));                       // max_num_reorder_frames = 0, max_dec_frame_buffering
+        w(1, 1); while (bits.length & 7) bits.push(0);        // rbsp trailing bits
+        const out = [sps[0]];
+        let zeros = 0;
+        for (let k = 0; k < bits.length; k += 8) {
+            let byte = 0; for (let j = 0; j < 8; j++) byte = byte * 2 + bits[k + j];
+            if (zeros >= 2 && byte <= 3) { out.push(3); zeros = 0; }
+            out.push(byte); zeros = byte === 0 ? zeros + 1 : 0;
+        }
+        return Buffer.from(out);
+    } catch (_) { return null; }
+}
+function avcC(sps, pps) {
+    const u16 = (n) => Buffer.from([n >> 8, n & 0xff]);
+    return Buffer.concat([Buffer.from([1, sps[1], sps[2], sps[3], 0xff, 0xe1]), u16(sps.length), sps, Buffer.from([1]), u16(pps.length), pps]);
+}
+
+// What may be in flight to a viewer before its link is taken to be slower
+// than the stream: one report interval of slack over the path's floor, plus
+// room for the newest keyframe (a keyframe burst alone is not congestion).
+function unackedCap(e, vs) {
+    return e.bps / 8 * (lagFloor(vs) + UNACKED_SLACK_MS) / 1000 + e.lastKeyLen / 2;
+}
+
+function onAccessUnit(e, child, nals, key, ts) {
+    if (e.dead || e.child !== child) return;
+    e.gotFrame = true;
+    let sps = null, pps = null;
+    const keep = [];
+    for (const n of nals) {
+        const t = n[0] & 31;
+        if (t === 7) sps = n; else if (t === 8) pps = n;
+        else if (t !== 9) { keep.push(n); if (t === 5) key = true; }
+    }
+    if (sps && pps && (!e.config || !sps.equals(e.config.sps) || !pps.equals(e.config.pps))) {
+        const sent = spsNoReorder(sps) || sps;
+        e.config = { gen: ++vgen, sps: Buffer.from(sps), pps: Buffer.from(pps),
+            codec: 'avc1.' + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]), description: avcC(sent, pps).toString('base64') };
+        if (sent !== sps && !spsPatchedLogged && (spsPatchedLogged = true)) log('video: SPS lacks bitstream_restriction — told the decoder not to wait for reordering');
+    }
+    if (!e.config || !keep.length) return;
+    let len = VIDEO_HDR;
+    for (const n of keep) len += 4 + n.length;
+    e.stat.frames++; e.stat.bytes += len;
+    if (key) e.lastKeyLen = len;
+    const ws = e.owner;
+    if (!ws || ws.readyState !== WebSocket.OPEN || ws.mode !== 'h264') return;   // prewarming: nobody to send to yet
+
+    const msg = Buffer.allocUnsafe(len);
+    msg[0] = VIDEO_MSG; msg[1] = key ? 1 : 0;
+    const seq = e.seq; e.seq = (e.seq + 1) >>> 0;
+    msg.writeUInt32BE(seq, 2); msg.writeDoubleBE(ts, 6);
+    let o = VIDEO_HDR;
+    for (const n of keep) { msg.writeUInt32BE(n.length, o); o += 4; n.copy(msg, o); o += n.length; }
+
+    const now = Date.now();
+    const vs = ws.vs;
+    const budget = Math.max(256 * 1024, e.bps / 8 * 0.5);          // ~half a second of video in the socket
+    const cap = unackedCap(e, vs);
+    const age = vs.inflight.length ? now - vs.inflight[0][1] : 0;
+    const over = age - lagFloor(vs);
+    // Early: more in flight than the link has been carrying (judged once the
+    // path's floor is known). Cut the bitrate, and stop adding to the backlog
+    // until the link has drained it: what is queued is already late, and the
+    // next keyframe starts the new, lower rate. (Twice the cap in flight
+    // without a cut — the last one is still draining — stops it the same way.)
+    // (Not in the first two seconds: a page still starting up reports late.)
+    const backlog = vs.unacked > cap && over > BACKLOG_OVER_MS && Number.isFinite(vs.minLag) && vs.sent >= 2 * VIDEO_FPS;
+    const cut = backlog && congested(e, vs, true);
+    if (ws.bufferedAmount > budget || over > LAG_MAX_MS || cut || (backlog && vs.unacked > 2 * cap)) {
+        vs.drops++;
+        if (!vs.needKey) { vs.needKey = true; vs.idrAsked = false; vs.dropEvents++; congested(e, vs, backlog); }
+        return;
+    }
+    if (vs.needKey && !key) {
+        // Never a P-frame after a gap: wait for a keyframe, and ask for one
+        // as soon as this viewer has drained.
+        vs.drops++;
+        if (!vs.idrAsked && ws.bufferedAmount < budget / 2 && over < LAG_OK_MS && vs.unacked < cap / 2) {
+            // Drained. The backlog just measured the link; resume at what it
+            // carried, not at a guess that would queue up all over again.
+            vs.idrAsked = true; settleRate(e, vs); requestIdr(e);
+        }
+        return;
+    }
+    if (key && vs.gen !== e.config.gen) {
+        ws.send(JSON.stringify({ t: 'vconfig', gen: e.config.gen, codec: e.config.codec, description: e.config.description, w: e.w, h: e.h }));
+        vs.gen = e.config.gen;
+    }
+    ws.send(msg, { binary: true });
+    if (key) { vs.needKey = false; vs.idrAsked = false; }
+    vs.inflight.push([seq, now, len]); vs.unacked += len;
+    if (vs.inflight.length > 900) vs.unacked -= vs.inflight.shift()[2];
+    vs.sent++;
+}
+// The viewer reports the newest frame it has received (every ~50 ms); that
+// is the only round trip, and nothing waits on it.
+function videoAck(ws, m) {
+    const vs = ws.vs;
+    if (!vs) return;
+    const seq = (+m.seq || 0) >>> 0, now = Date.now(), q = vs.inflight;
+    let sentAt = 0, bytes = 0;
+    while (q.length && ((seq - q[0][0]) >>> 0) < 0x80000000) { sentAt = q[0][1]; bytes += q[0][2]; q.shift(); }
+    vs.unacked = Math.max(0, vs.unacked - bytes);
+    if (!sentAt) return;
+    const prevAt = vs.lastAckAt; vs.lastAckAt = now;
+    vs.lag = now - sentAt;
+    // The floor is the smallest lag seen lately (re-learnt every 20 s, so a
+    // route that got slower is not judged against a faster past).
+    if (vs.lag < vs.minLag || now - vs.minLagAt > 20000) { vs.minLag = vs.lag; vs.minLagAt = now; }
+    // Still queued when this report left (its newest frame was already late,
+    // and more were waiting behind it): the interval was link-paced.
+    if (prevAt && vs.lag - lagFloor(vs) > 150 && q.length) vs.busy.push([now, bytes, now - prevAt]);
+    while (vs.busy.length && now - vs.busy[0][0] > 4000) vs.busy.shift();
+}
+// What this viewer's link carries (bits/s), measured only over intervals
+// where it was the bottleneck; 0 when there is too little to say. `quick`
+// accepts a shorter sample: used only when a backlog is already standing.
+function goodput(vs, quick = false) {
+    let b = 0, ms = 0;
+    const since = quick ? Date.now() - 1000 : 0;                    // quick: only what the link did just now
+    for (const [at, bytes, dt] of vs.busy) if (at >= since) { b += bytes; ms += dt; }
+    // A tunnel's jitter makes single intervals noisy: say nothing until the
+    // link has been the bottleneck for a good part of the window.
+    const enough = quick ? ms >= 600 && vs.busy.length >= 3 : ms >= 1500 && vs.busy.length >= 5;
+    return enough ? b * 8 / (ms / 1000) : 0;
+}
+function lagFloor(vs) { return Number.isFinite(vs.minLag) ? vs.minLag : 250; }
+// Step Auto's bitrate down: to what the link delivers (with headroom), or by
+// 30% when that is not yet measurable — 50% when a backlog is standing.
+function congested(e, vs, severe = false) {
+    const now = Date.now();
+    if (!e.auto || e.dead) return false;
+    if (now - e.lastCongestAt < (severe ? 1000 : 2000)) return false;
+    // Frames sent before the last cut are still draining: they show the old
+    // rate, not the new one, so they are no reason to cut again.
+    if (vs.inflight.length && ((vs.inflight[0][0] - e.cutSeq) >>> 0) >= 0x80000000) return false;
+    e.lastCongestAt = now; e.cutSeq = e.seq;
+    const gp = goodput(vs, severe);
+    const was = e.autoBps;
+    let next = Math.round(e.autoBps * (severe ? 0.5 : 0.7));
+    if (gp > 0) next = Math.min(next, Math.round(gp * 0.8));
+    // Below 2 Mbit/s only on evidence: a measured link that slow.
+    // (and never up: a rate already below that floor was set from a measurement)
+    e.autoBps = Math.min(was, Math.max(gp > 0 && gp < BPS_MIN / 0.8 ? BPS_FLOOR : BPS_MIN, next));
+    lastAutoBps = e.autoBps;
+    if (e.autoBps === was) return false;
+    log('video behind — bitrate', Math.round(e.autoBps / 1000), 'kb/s', gp ? `(link delivers ${Math.round(gp / 1000)} kb/s)` : '', severe ? '(backlog)' : '');
+    setVideoBitrate(e, e.autoBps);
+    return true;
+}
+// After a drop has drained: no more than the link delivered while it drained.
+function settleRate(e, vs) {
+    if (!e.auto) return;
+    const gp = goodput(vs, true);
+    if (!gp) return;
+    const next = Math.max(gp < BPS_MIN / 0.8 ? BPS_FLOOR : BPS_MIN, Math.round(gp * 0.8));
+    if (next >= e.autoBps) return;
+    e.autoBps = lastAutoBps = next; e.lastCongestAt = Date.now(); e.cutSeq = e.seq;
+    log('video drained — resuming at', Math.round(next / 1000), 'kb/s', `(link delivered ${Math.round(gp / 1000)} kb/s)`);
+    setVideoBitrate(e, next);
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const e of encoders) {
+        const st = e.stat;
+        st.fps = st.frames; st.kbps = Math.round(st.bytes * 8 / 1000);
+        st.frames = 0; st.bytes = 0;
+        const ws = e.owner;
+        if (!ws || ws.readyState !== WebSocket.OPEN || ws.mode !== 'h264' || !e.child) continue;
+        const vs = ws.vs, q = vs.inflight, age = q.length ? now - q[0][1] : 0;
+        vs.queue = Math.max(0, Math.max(age, vs.lag) - lagFloor(vs));
+        vs.slowTicks = vs.queue > QUEUE_SLOW_MS && vs.lag > 0 ? vs.slowTicks + 1 : 0;
+        vs.goodput = goodput(vs);
+        if (e.auto) {
+            // Down: a standing queue (frames arrive, but ever later) means the
+            // link carries less than we send — follow what it delivers, before
+            // it grows into a drop. (Two checks running: one late burst is jitter.)
+            if (vs.slowTicks >= 2) congested(e, vs);
+            else if (now - e.lastCongestAt > 6000 && now - e.lastRaiseAt > 4000 && e.autoBps < BPS_MAX
+                // Up: after a clean stretch, and only when the stream is actually
+                // spending its budget (a still screen proves nothing).
+                && st.kbps * 1000 > 0.4 * e.autoBps && vs.queue < QUEUE_OK_MS && !vs.needKey) {
+                e.lastRaiseAt = now;
+                e.autoBps = Math.min(BPS_MAX, Math.round(e.autoBps * 1.15));
+                lastAutoBps = e.autoBps;
+                setVideoBitrate(e, e.autoBps);
+            }
+        }
+        ws.send(JSON.stringify({ t: 'vstat', ...videoInfo(e), drops: vs.drops, dropEvents: vs.dropEvents, lag: vs.lag,
+            queue: Math.round(vs.queue), goodputKbps: Math.round(vs.goodput / 1000), linkLimited: e.autoBps < BPS_MIN && e.auto }));
+    }
+}, 1000);
+
+
 
 // ── tokens ───────────────────────────────────────────────────────────────
 const tokens = new Map(); // token → expiry
@@ -450,12 +1169,16 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === '/token') {
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-        res.end(JSON.stringify({ token: mintToken(), ttl: TOKEN_TTL_MS, screen: readScreen() }));
+        res.end(JSON.stringify({ token: mintToken(), ttl: TOKEN_TTL_MS, screen }));
+        refreshScreen();
+        if (url.searchParams.get('v') === '1' && url.searchParams.get('w')) setPrewarm(url.searchParams);
         return;
     }
     if (url.pathname === '/health') {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, viewers: viewers.size, capturing: !!ffmpeg, frames, screen, quality }));
+        const encs = [...encoders].map((e) => ({ ...videoInfo(e), owned: !!e.owner }));
+        res.end(JSON.stringify({ ok: true, viewers: viewers.size, capturing: !!ffmpeg, frames, screen, quality, video: encs[0] || null, encoders: encs,
+            modes: [...viewers].map((ws) => ws.mode || 'pending') }));
         return;
     }
     res.writeHead(404); res.end('not found');
@@ -468,17 +1191,24 @@ server.on('upgrade', (req, socket, head) => {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
+        // The viewer says which stream it can decode ({t:'mode'}) before any
+        // capture starts; one that never says gets the JPEG stream.
+        ws.mode = null; ws.pref = 'auto'; ws.display = null; ws.vs = newVideoState(); ws.enc = null;
         viewers.add(ws);
         refreshActivePid();
-        ws.send(JSON.stringify({ t: 'hello', screen: readScreen(), quality, dragPermitted: pointer.permitted }));
+        ws.send(JSON.stringify({ t: 'hello', screen, quality, dragPermitted: pointer.permitted, video: true }));
+        refreshScreen();
         pointerConnect();
         log('viewer joined', viewers.size);
-        ensureCapture();
-        broadcastStatus(ffmpeg ? 'live' : 'ready');
+        setTimeout(() => { if (!ws.mode && viewers.has(ws)) setMode(ws, 'jpeg'); }, 3000);
+        broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
         ws.on('message', (data, isBinary) => {
             if (isBinary) return;
             let m; try { m = JSON.parse(data); } catch (_) { return; }
-            if (m && typeof m === 'object') handleInput(m, ws);
+            if (!m || typeof m !== 'object' || Array.isArray(m)) return;
+            // One malformed message must never take the service (and every
+            // other viewer's session) down with it.
+            try { handleInput(m, ws); } catch (e) { log('bad message ignored:', String(m.t).slice(0, 20), e.message); }
         });
         ws.on('close', () => {
             if (ws.drag) {                       // never leave the Mac's button held when the viewer vanishes
@@ -487,16 +1217,27 @@ server.on('upgrade', (req, socket, head) => {
                 handleInput({ t: 'up', x, y });
             }
             viewers.delete(ws);
+            if (ws.enc) stopEncoder(ws.enc);
             log('viewer left', viewers.size);
-            if (!viewers.size) stopCapture();
-            else broadcastStatus(ffmpeg ? 'live' : 'ready');
+            if (!jpegViewers().length) stopCapture();
+            reconcileVideo();
+            if (viewers.size) broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
         });
         ws.on('error', () => {});
     });
 });
 
 startWindowAt();
+buildHelper();
 readScreen();
 setInterval(refreshActivePid, 2000);
+// A port already taken (an older copy still running) is one log line and a
+// slow retry, not a stack trace every few seconds under launchd's KeepAlive.
+server.on('error', (e) => {
+    log('cannot listen on', `${HOST}:${PORT}`, '—', e.code || e.message, '— exiting in 30 s');
+    setTimeout(() => process.exit(1), 30000).unref();
+    server.close();
+});
 server.listen(PORT, HOST, () => log(`soa-desktop-remote on http://${HOST}:${PORT} (screen ${screen.width}x${screen.height})`));
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); process.exit(0); });
+const stopAllVideo = () => { clearPrewarm(); for (const e of [...encoders]) stopEncoder(e); };
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); stopAllVideo(); process.exit(0); });

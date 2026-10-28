@@ -10,6 +10,7 @@
   :root { color-scheme: dark; --bg: #000; --bar: rgba(18,18,20,.92); --fg: #e8e8ea; --dim: #8a8a90; --acc: #3ea6ff; --on: #ffb000; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.3 -apple-system, system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; touch-action: none; }
+  /* bottom is set to the bar's height while the bar shows, so the bar never covers the picture */
   #stage { position: fixed; inset: 0; overflow: hidden; background: #000; }
   #frame { position: absolute; left: 0; top: 0; transform-origin: 0 0; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; pointer-events: none; image-rendering: auto; }
   #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 6px; align-items: center; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: var(--bar); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
@@ -29,13 +30,19 @@
   #handle.show { display: flex; }
   #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #000; color: var(--dim); text-align: center; padding: 24px; }
   #overlay[hidden] { display: none; }
+  /* where the last tap / drag / scroll landed on the Mac, drawn locally at once */
+  #mark { position: fixed; left: 0; top: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%; border: 2px solid var(--acc); box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6); pointer-events: none; opacity: 0; transform: scale(.6); transition: opacity .35s ease, transform .15s ease; }
+  #mark::after { content: ''; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: var(--acc); }
+  #mark.on { opacity: 1; transform: scale(1); transition: none; }
+  #mark.right { border-color: var(--on); } #mark.right::after { background: var(--on); }
   #overlay h1 { font-size: 18px; font-weight: 600; color: var(--fg); margin: 0; }
   @media (prefers-reduced-motion: reduce) { #bar, #tip { transition: none; } }
 </style>
 </head>
 <body>
-<div id="stage"><img id="frame" alt="Mac display" draggable="false"></div>
+<div id="stage"><canvas id="frame" role="img" aria-label="Mac display" width="1" height="1"></canvas></div>
 <div id="overlay"><h1>Connecting to your Mac…</h1><div id="ovmsg">Asking the desktop for a session.</div></div>
+<div id="mark" aria-hidden="true"></div>
 <div id="tip"></div>
 <input id="kb" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Keyboard input">
 <div id="bar">
@@ -56,9 +63,14 @@
   <button id="b-fit" title="Fit to screen">fit</button>
   <select id="q" title="Quality">
     <option value="auto" selected>Auto</option>
-    <option value="low">Low · 6 fps</option>
-    <option value="med">Medium · 10 fps</option>
-    <option value="high">High · 15 fps</option>
+    <option value="1440">1440p</option>
+    <option value="1080">1080p</option>
+    <option value="720">720p</option>
+    <optgroup label="Compatibility (JPEG)">
+      <option value="low">Low · 6 fps</option>
+      <option value="med">Medium · 10 fps</option>
+      <option value="high">High · 15 fps</option>
+    </optgroup>
   </select>
   <button id="b-full" title="Full screen">⤢</button>
   <button id="b-hide" title="Hide bar">▾</button>
@@ -75,20 +87,48 @@
   const base = new URL('.', document.baseURI);
   const query = location.search || '';            // keeps ?t=<pairing token> for the daemon's gate
   let ws = null, screen = { width: 1728, height: 1080 }, quality = null;
-  let fps = 0, frameCount = 0, lastUrl = null, backoff = 1000, mods = new Set(), rightNext = false;
+  let fps = 0, frameCount = 0, backoff = 1000, mods = new Set(), rightNext = false;
+  const ctx = frame.getContext('2d', { alpha: false, desynchronized: true });
+  // The canvas stands in for the old <img>: same transform, same natural size.
+  Object.defineProperty(frame, 'naturalWidth', { get: () => frame.width });
+  Object.defineProperty(frame, 'naturalHeight', { get: () => frame.height });
   let dragPermitted = null;                       // null = unknown; the service reports it in hello and on change
 
   // ── view transform (pinch-zoom + pan) ───────────────────────────────
-  const view = { s: 1, x: 0, y: 0, nat: { w: 1, h: 1 } };
+  // fitted: the whole Mac is on screen, and stays so through a rotation,
+  // a resize or a new stream size (until a pinch or a zoom takes it off fit).
+  const view = { s: 1, x: 0, y: 0, nat: { w: 1, h: 1 }, fitted: true };
   function fit() {
     const sw = stage.clientWidth, sh = stage.clientHeight;
     const s = Math.min(sw / view.nat.w, sh / view.nat.h);
-    view.s = s; view.x = (sw - view.nat.w * s) / 2; view.y = (sh - view.nat.h * s) / 2;
+    view.s = s; view.x = (sw - view.nat.w * s) / 2; view.y = (sh - view.nat.h * s) / 2; view.fitted = true;
     apply();
   }
   function apply() {
     frame.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
   }
+  // A new stream size keeps the picture where it was on screen: rescale the
+  // view so the displayed rect does not jump.
+  function setNat(w, h) {
+    if (view.nat.w === w && view.nat.h === h) return;
+    const first = view.nat.w === 1;
+    if (!first) view.s *= view.nat.w / w;
+    view.nat = { w, h };
+    if (first || view.fitted) fit(); else { clampView(); apply(); }
+  }
+  function sizeCanvas(w, h) { if (frame.width !== w || frame.height !== h) { frame.width = w; frame.height = h; setNat(w, h); } }
+  function zoomRel() {
+    if (view.nat.w <= 1) return 1;
+    return view.s / Math.min(stage.clientWidth / view.nat.w, stage.clientHeight / view.nat.h);
+  }
+  // What the stream should be sized for: this screen in physical pixels, and
+  // how far in the user has zoomed (the service decides the encode size).
+  function displayInfo() {
+    const dpr = window.devicePixelRatio || 1, w = Math.round(stage.clientWidth * dpr), h = Math.round(stage.clientHeight * dpr);
+    return { w, h, dpr, orient: w >= h ? 'landscape' : 'portrait', zoom: +zoomRel().toFixed(2) };
+  }
+  let dispT = 0;
+  function reportDisplay() { clearTimeout(dispT); dispT = setTimeout(() => send({ t: 'display', ...displayInfo() }), 300); }
   function clampView() {
     const sw = stage.clientWidth, sh = stage.clientHeight, w = view.nat.w * view.s, h = view.nat.h * view.s;
     view.x = w <= sw ? (sw - w) / 2 : Math.min(0, Math.max(sw - w, view.x));
@@ -106,23 +146,56 @@
 
   // ── socket ───────────────────────────────────────────────────────────
   function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+  // One socket at a time, and none while the page is hidden: `connecting`
+  // covers the token fetch, `sockGen` cancels a connect the page has since
+  // abandoned (hidden, or superseded), and a socket's handlers act only while
+  // it is still the current one.
+  let connecting = false, retryT = 0, sockGen = 0;
+  // An abandoned connect hands over to a fresh one if the page is showing again.
+  function resume() { if (!document.hidden && !ws && !connecting) connect(); }
   async function connect() {
+    if (ws || connecting || document.hidden) return;
+    clearTimeout(retryT); retryT = 0;
+    connecting = true;
+    const gen = ++sockGen;
+    if (!probeBroken) videoBroken = '';            // a new session tries the video stream again
     overlay.hidden = false; ovmsg.textContent = 'Asking the desktop for a session.';
     let tok;
     try {
-      const r = await fetch(new URL('token' + query, base), { cache: 'no-store', credentials: 'include' });
-      if (r.status === 401) { ovmsg.textContent = 'Not paired. Open this from the Son of Anton app (WEB → ⌨ CONTROL) so the link carries your pairing.'; return; }
+      // Telling the Mac this screen up front lets it start the capture while
+      // the socket opens (it lapses by itself if no socket follows).
+      const tq = new URLSearchParams(query);
+      if (wantMode() === 'h264') { const d = displayInfo(); tq.set('v', '1'); tq.set('pref', $('q').value); for (const k of ['w', 'h', 'dpr', 'zoom']) tq.set(k, d[k]); }
+      const tqs = tq.toString();
+      const r = await fetch(new URL('token' + (tqs ? '?' + tqs : ''), base), { cache: 'no-store', credentials: 'include' });
+      if (gen !== sockGen) { connecting = false; return resume(); }
+      if (r.status === 401) { connecting = false; ovmsg.textContent = 'Not paired. Open this from the Son of Anton app (WEB → ⌨ CONTROL) so the link carries your pairing.'; return; }
       if (!r.ok) throw new Error('token ' + r.status);
       const j = await r.json(); tok = j.token; if (j.screen) screen = j.screen;
-    } catch (e) { ovmsg.textContent = 'Desktop not reachable (' + e.message + '). Retrying…'; return retry(); }
+      marks.token = Math.round(performance.now());
+    } catch (e) {
+      connecting = false;
+      if (gen !== sockGen) return resume();
+      ovmsg.textContent = 'Desktop not reachable (' + e.message + '). Retrying…'; return retry();
+    }
+    connecting = false;
+    if (gen !== sockGen || document.hidden || ws) return resume();
     const wsUrl = new URL('ws', base); wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:'; wsUrl.searchParams.set('token', tok);
     // Over the tunnel the daemon gates this upgrade with the pairing token too
     // (a cookie is not guaranteed there — iOS drops it on a home-screen app),
     // so carry the page's own ?t= / ?u= along with the service token.
     for (const k of ['t', 'u']) { const v = new URLSearchParams(query).get(k); if (v && !wsUrl.searchParams.has(k)) wsUrl.searchParams.set(k, v); }
-    ws = new WebSocket(wsUrl); ws.binaryType = 'blob';
-    ws.onopen = () => { backoff = 1000; ovmsg.textContent = 'Starting the screen…'; applyQuality(); };
+    const sock = new WebSocket(wsUrl); sock.binaryType = 'arraybuffer';
+    ws = sock;
+    mode = null; vReset();
+    ws.onopen = () => {
+      if (ws !== sock) return;
+      backoff = 1000; ovmsg.textContent = 'Starting the screen…'; marks.open = Math.round(performance.now());
+      pingClock();
+      applyQuality();                              // declares the stream this browser can decode
+    };
     ws.onmessage = (ev) => {
+      if (ws !== sock) return;
       if (typeof ev.data === 'string') {
         let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
         if (m.t === 'hello') { if (m.screen) screen = m.screen; if (typeof m.dragPermitted === 'boolean') dragPermitted = m.dragPermitted; }
@@ -132,78 +205,313 @@
         }
         if (m.t === 'status') {
           if (m.screen) screen = m.screen; quality = m.quality || quality;
-          if (m.state === 'error') { overlay.hidden = false; ovmsg.textContent = m.message || 'Screen capture failed.'; }
+          if (m.state === 'error' && mode === 'jpeg') { overlay.hidden = false; ovmsg.textContent = m.message || 'Screen capture failed.'; }
         }
+        if (m.t === 'vconfig') onVConfig(m);
+        if (m.t === 'vstat') vstat = m;
+        if (m.t === 'pong') onPong(m);
+        if (m.t === 'video-unavailable') videoUnavailable(m.message || 'video unavailable');
         return;
       }
-      const url = URL.createObjectURL(ev.data);
-      frame.onload = () => {
-        if (frame.naturalWidth && (view.nat.w !== frame.naturalWidth || view.nat.h !== frame.naturalHeight)) {
-          const first = view.nat.w === 1; view.nat = { w: frame.naturalWidth, h: frame.naturalHeight }; if (first) fit(); else { clampView(); apply(); }
-        }
-        if (lastUrl) URL.revokeObjectURL(lastUrl); lastUrl = url; frameCount++;
-        if (!overlay.hidden) overlay.hidden = true;
-      };
-      frame.src = url;
+      bytes += ev.data.byteLength;
+      const kind = new Uint8Array(ev.data, 0, 1)[0];
+      if (kind === 0x01) onVideo(ev.data);
+      else if (kind === 0xff) onJpeg(ev.data);
     };
-    ws.onclose = () => { ws = null; dragging = false; overlay.hidden = false; ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry(); };
+    ws.onclose = () => {
+      if (ws !== sock) return;                       // an old socket, already let go
+      ws = null; dragging = false; vReset(); overlay.hidden = false;
+      if (document.hidden) return;                   // reconnects when the page shows again
+      ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry();
+    };
     ws.onerror = () => {};
   }
-  function retry() { setTimeout(connect, backoff); backoff = Math.min(15000, backoff * 1.7); }
+
+  // ── H.264 (WebCodecs) ────────────────────────────────────────────────
+  // Feature-detect once: no VideoDecoder, or no H.264 in it (older iOS), means
+  // the JPEG stream, and the status line says so.
+  const marks = {};                               // load-time milestones (ms since navigation), for diagnostics
+  let mode = null, h264ok = false, videoBroken = '', probeBroken = '', vstat = null, bytes = 0, latencies = [], firstPictureMs = null, recvCount = 0, recvFps = 0, decCount = 0, decFps = 0;
+  const h264Probe = (async () => {
+    if (typeof VideoDecoder !== 'function' || typeof EncodedVideoChunk !== 'function') { probeBroken = videoBroken = 'no WebCodecs'; return false; }
+    try {
+      const r = await VideoDecoder.isConfigSupported({ codec: 'avc1.640033', optimizeForLatency: true });
+      if (!r.supported) probeBroken = videoBroken = 'no H.264 decoder';
+      return !!r.supported;
+    } catch (_) { probeBroken = videoBroken = 'no H.264 decoder'; return false; }
+  })();
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const V = { setGen: 0, dec: null, setting: false, conf: null, next: null, pending: null, hold: [], needKey: true, lastSeq: -1, recvSeq: -1, ackedSeq: -1, errors: [], codec: '', total: 0, keyAskedAt: 0 };
+  // Frames waiting for the next vsync. A tunnel delivers in bursts, so two can
+  // decode inside one refresh; holding at most two shows both (one refresh
+  // apart) instead of discarding one, and never lets a backlog build.
+  const paintQ = []; let rafId = 0;
+  function vReset() {
+    if (V.dec) { try { V.dec.close(); } catch (_) {} }
+    V.setGen++;                                     // a decoder setup still in flight is abandoned
+    Object.assign(V, { dec: null, setting: false, conf: null, next: null, pending: null, hold: [], needKey: true, lastSeq: -1, recvSeq: -1, ackedSeq: -1 });
+    while (paintQ.length) paintQ.shift().close();
+  }
+  function b64(s) { const bin = atob(s), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+  function onVConfig(m) {
+    const conf = { codec: m.codec, description: b64(m.description), hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true };
+    V.codec = m.codec;
+    if (V.setting) { V.pending = conf; return; }
+    if (V.dec) { V.next = conf; return; }           // applied at the keyframe that follows
+    setupDecoder(conf);
+  }
+  async function setupDecoder(conf) {
+    V.setting = true;
+    const g = ++V.setGen;
+    let use = null;
+    for (const c of [conf, { ...conf, hardwareAcceleration: 'no-preference' }]) {
+      try { if ((await VideoDecoder.isConfigSupported(c)).supported) { use = c; break; } } catch (_) {}
+    }
+    if (!V.setting || g !== V.setGen) return;        // reset (or set up again) while we were asking
+    V.setting = false;
+    if (!use) { videoUnavailable('cannot decode ' + conf.codec); return; }
+    const dec = new VideoDecoder({ output: onDecoded, error: onDecodeError });
+    dec.configure(use); V.dec = dec; V.conf = use;
+    if (V.pending) { V.next = V.pending; V.pending = null; }
+    const held = V.hold; V.hold = [];
+    for (const c of held) decodeChunk(c);
+  }
+  function askKey() {
+    V.needKey = true;
+    const now = performance.now(); if (now - V.keyAskedAt < 400) return; V.keyAskedAt = now;
+    send({ t: 'keyframe' });
+  }
+  function onVideo(buf) {
+    if (mode !== 'h264') return;
+    const dv = new DataView(buf), key = (dv.getUint8(1) & 1) === 1, seq = dv.getUint32(2), ts = dv.getFloat64(6);
+    const gap = V.lastSeq >= 0 && seq !== ((V.lastSeq + 1) >>> 0);
+    V.lastSeq = seq; V.recvSeq = seq; recvCount++;
+    const c = { key, ts, data: new Uint8Array(buf, 14) };
+    if (!marks.video) marks.video = Math.round(performance.now());
+    if (!V.dec) {                                    // still configuring: hold from a keyframe on
+      if (key) V.hold = [c]; else if (V.hold.length && !gap && V.hold.length < 120) V.hold.push(c); else V.hold = [];
+      return;
+    }
+    if (gap && !key) { askKey(); return; }           // never decode across a hole
+    decodeChunk(c);
+  }
+  function decodeChunk(c) {
+    if (!V.dec || V.dec.state === 'closed') return;
+    if (c.key && V.next) { try { V.dec.configure(V.next); V.conf = V.next; } catch (e) { onDecodeError(e); return; } V.next = null; }
+    if (!c.key && (V.needKey || V.dec.decodeQueueSize > 6)) { askKey(); return; }   // a slow decoder catches up at a keyframe
+    try {
+      V.dec.decode(new EncodedVideoChunk({ type: c.key ? 'key' : 'delta', timestamp: Math.round(c.ts * 1000), data: c.data }));
+      V.needKey = false;
+    } catch (e) { onDecodeError(e); }
+  }
+  function onDecoded(f) {
+    decCount++;
+    paintQ.push(f);
+    while (paintQ.length > 2) paintQ.shift().close();
+    if (!rafId) rafId = requestAnimationFrame(paint);
+  }
+  function paint() {
+    rafId = 0;
+    const f = paintQ.shift();
+    if (!f) return;
+    if (paintQ.length) rafId = requestAnimationFrame(paint);
+    try {
+      sizeCanvas(f.displayWidth, f.displayHeight);
+      ctx.drawImage(f, 0, 0, f.displayWidth, f.displayHeight);
+      frameCount++; V.total++;
+      if (clock.ok) latencies.push(Date.now() + clock.offset - f.timestamp / 1000);
+    } finally { f.close(); }
+    firstPicture();
+  }
+  function onDecodeError(e) {
+    const now = performance.now();
+    V.errors = V.errors.filter((t) => now - t < 10000).concat(now);
+    // A config that arrived for the next keyframe is the one to rebuild with:
+    // the Mac will not send it again.
+    const conf = V.next || V.pending || V.conf;
+    console.warn('decoder error', e && e.message);
+    if (V.errors.length >= 3 || !conf) { videoUnavailable('decoder failed'); return; }
+    vReset(); V.codec = conf.codec;
+    setupDecoder(conf); askKey();
+  }
+  function videoUnavailable(why) {
+    videoBroken = why; vReset();
+    if (mode === 'h264') { showTip('Video unavailable (' + why + ') — using JPEG'); applyQuality(); }
+  }
+  // Tell the Mac what arrived (nothing waits on this). Often, because the
+  // Mac judges a slowing link by how much it has sent that has not been
+  // reported yet: a short report interval keeps that small on a healthy link,
+  // so a link that suddenly carries less shows up before seconds of video
+  // are queued in it. Only sent while frames arrive (~25 bytes each).
   setInterval(() => {
-    fps = frameCount; frameCount = 0;
-    status.innerHTML = ws ? `<b>${fps}</b> fps · ${screen.width}×${screen.height}${$('q').value === 'auto' ? ' · ' + level() : ''}` : 'offline';
+    if (mode === 'h264' && V.recvSeq >= 0 && V.recvSeq !== V.ackedSeq) { V.ackedSeq = V.recvSeq; send({ t: 'vack', seq: V.recvSeq }); }
+  }, 50);
+
+  // ── JPEG (Compatibility) ─────────────────────────────────────────────
+  let jpegSeq = 0, jpegShown = 0;
+  function onJpeg(buf) {
+    if (mode !== 'jpeg') return;
+    const my = ++jpegSeq, blob = new Blob([buf], { type: 'image/jpeg' });
+    const show = (img, w, h, done) => {
+      if (my > jpegShown) { jpegShown = my; sizeCanvas(w, h); ctx.drawImage(img, 0, 0, w, h); frameCount++; firstPicture(); }
+      done();
+    };
+    if (window.createImageBitmap) createImageBitmap(blob).then((b) => show(b, b.width, b.height, () => b.close())).catch(() => {});
+    else {
+      const url = URL.createObjectURL(blob), img = new Image();
+      img.onload = () => show(img, img.naturalWidth, img.naturalHeight, () => URL.revokeObjectURL(url));
+      img.onerror = () => URL.revokeObjectURL(url);
+      img.src = url;
+    }
+  }
+  function firstPicture() {
+    if (!overlay.hidden) overlay.hidden = true;
+    if (firstPictureMs == null) firstPictureMs = Math.round(performance.now());
+  }
+
+  // ── clock: the Mac stamps each frame; this offset turns it into latency ──
+  const clock = { ok: false, offset: 0, rtt: Infinity, at: 0 };
+  function pingClock() { send({ t: 'ping', c: Date.now() }); }
+  function onPong(m) {
+    const now = Date.now(), rtt = now - m.c;
+    // Keep the tightest sample (it bounds the error), refreshed now and then.
+    if (rtt <= clock.rtt * 1.2 || now - clock.at > 60000) { clock.offset = m.s - (m.c + now) / 2; clock.rtt = rtt; clock.at = now; clock.ok = true; }
+  }
+  let pings = 0;
+  setInterval(() => { if (ws && (pings++ < 5 || pings % 10 === 0)) pingClock(); }, 1000);
+  function retry() { clearTimeout(retryT); retryT = setTimeout(() => { retryT = 0; connect(); }, backoff); backoff = Math.min(15000, backoff * 1.7); }
+  setInterval(() => {
+    fps = frameCount; frameCount = 0; recvFps = recvCount; recvCount = 0; decFps = decCount; decCount = 0;
+    const kbps = Math.round(bytes * 8 / 1000); bytes = 0;
+    const mb = kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mb/s' : kbps + ' kb/s';
+    const lat = latencies.length ? latencies.sort((a, b) => a - b)[latencies.length >> 1] : null; latencies = [];
+    if (!ws) status.textContent = 'offline';
+    else if (mode === 'h264') {
+      const drops = vstat && vstat.drops ? ` · ${vstat.drops} dropped` : '';
+      const link = vstat && vstat.linkLimited ? ' · slow link' : '';
+      status.innerHTML = `<b>H.264</b> ${esc(V.codec || '')} ${frame.width}×${frame.height} · <b>${fps}</b> fps · ${mb}${lat != null ? ' · ~' + Math.round(lat) + ' ms' : ''}${drops}${link}`;
+    } else {
+      status.innerHTML = `<b>JPEG</b> · <b>${fps}</b> fps · ${mb}${QUAL[$('q').value] ? '' : ' · ' + level()}${videoBroken ? ' · ' + esc(videoBroken) : ''}`;
+    }
+    window.__soaRemote = { marks, mode, fps, recvFps, decFps, kbps, latency: lat, w: frame.width, h: frame.height, codec: V.codec, firstPictureMs, drops: vstat ? vstat.drops : 0, server: vstat, videoBroken, decoded: V.total };
     autoTune();
   }, 1000);
 
   // ── pointer handling ─────────────────────────────────────────────────
-  const pts = new Map(); let gesture = null, tapStart = null, longTimer = null, lastTap = 0;
+  const pts = new Map(); let gesture = null, longTimer = null, gesture2 = null;
   const isCoarse = matchMedia('(pointer: coarse)').matches;
   function showTip(t) { tip.textContent = t; tip.classList.add('show'); clearTimeout(showTip._t); showTip._t = setTimeout(() => tip.classList.remove('show'), 1400); }
-  function clickAt(cx, cy, button, count) {
+  // The marker shows where an input landed on the Mac, drawn from the Mac
+  // point that was sent (not from the finger), so what you see is what the
+  // Mac got — before the picture of it can come back over the link.
+  const mark = $('mark'); let markT = 0;
+  function macToStage(p) { return { x: view.x + p.x / screen.width * view.nat.w * view.s, y: view.y + p.y / screen.height * view.nat.h * view.s }; }
+  function showMark(p, kind, hold) {
+    const s = macToStage(p);
+    mark.style.left = s.x + 'px'; mark.style.top = s.y + 'px';
+    mark.classList.toggle('right', kind === 'right'); mark.classList.add('on');
+    clearTimeout(markT); if (!hold) markT = setTimeout(() => mark.classList.remove('on'), 140);
+  }
+  function hideMark() { clearTimeout(markT); markT = setTimeout(() => mark.classList.remove('on'), 140); }
+  function takeMods() { const l = [...mods]; if (mods.size) { mods.clear(); syncMods(); } return l; }
+  // Inputs leave in the order they happened: a tap still waiting to see
+  // whether it becomes a double click goes out before anything after it.
+  function sendInput(m) { flushTap(); send(m); }
+
+  // A tap waits DBL_MS for a second one so a double tap is ONE double click
+  // (the Mac sees press-release with clickCount 1 then 2). Sending the first
+  // at once and then a count-2 click would make the Mac count three.
+  const DBL_MS = 280;
+  let pendingTap = null;
+  function flushTap() { const t = pendingTap; if (!t) return; pendingTap = null; clearTimeout(t.timer); clickNow(t.p, 'left', 1, t.mods); }
+  function clickNow(p, button, count, modList) { send({ t: 'click', x: p.x, y: p.y, button, count, mods: modList || [] }); kbReset(); }
+  function tapAt(cx, cy, button, near) {
     if (!inFrame(cx, cy)) return;
     const p = toMac(cx, cy);
-    send({ t: 'click', x: p.x, y: p.y, button, count, mods: [...mods] });
-    if (mods.size) { mods.clear(); syncMods(); }
+    showMark(p, button);
+    if (button !== 'left' || mods.size) { flushTap(); clickNow(p, button, 1, takeMods()); return; }
+    const t = pendingTap;
+    if (t && performance.now() - t.at < DBL_MS && Math.hypot(cx - t.cx, cy - t.cy) <= near) {
+      pendingTap = null; clearTimeout(t.timer); clickNow(t.p, 'left', 2, t.mods); return;
+    }
+    flushTap();
+    pendingTap = { p, cx, cy, at: performance.now(), mods: [], timer: setTimeout(flushTap, DBL_MS) };
   }
+  // How close a second tap must land to make a double click: about 12 Mac
+  // points, but never under 8 px (a finger cannot do better) or over 12 px —
+  // two taps on neighbouring buttons stay two clicks.
+  const nearPx = () => Math.min(12, Math.max(8, 12 / ptPerPx()));
+  // A finger that rolls a little is still a tap when there was nothing to pan.
+  const TAP_SLOP = 20;
+  function rightNextUsed() { if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); } }
+
   // Drag = press, move with the button held, release. On touch it starts from a
   // long-press (lifting without moving is still a right-click); with a mouse it
   // is the ordinary button-held move. The service hands these to its pointer
   // helper, which needs an Accessibility grant on the Mac — until then the
   // Mac ignores them and the tip says why, while every other input keeps working.
-  let dragT = 0, dragging = false, dragLast = null, lastClick = { t: 0, x: 0, y: 0 };
+  let dragT = 0, dragging = false, dragLast = null;
   function dragStart(cx, cy) {
     if (!inFrame(cx, cy)) return false;
     const p = toMac(cx, cy), btn = rightNext ? 'right' : 'left';
-    send({ t: 'down', x: p.x, y: p.y, button: btn });
-    if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
-    dragging = true; dragT = 0; dragLast = p; lastClick.t = 0;
+    sendInput({ t: 'down', x: p.x, y: p.y, button: btn });
+    rightNextUsed();
+    dragging = true; dragT = 0; dragLast = p; showMark(p, btn, true);
     if (dragPermitted === false) showTip('Drag needs Accessibility for "SoA Pointer" on the Mac (System Settings → Privacy & Security)');
     else showTip(btn === 'right' ? 'right-drag' : 'drag');
     return true;
   }
   function dragMove(cx, cy) {
     if (!dragging) return;
+    const p = toMac(cx, cy); showMark(p, 'left', true);
     const now = performance.now(); if (now - dragT < 40) return; dragT = now;
-    const p = toMac(cx, cy); dragLast = p; send({ t: 'drag', x: p.x, y: p.y });
+    dragLast = p; send({ t: 'drag', x: p.x, y: p.y });
   }
   // Without coordinates it releases at the last drag point (page hidden, socket lost).
   function dragEnd(cx, cy) {
     if (!dragging) return;
-    dragging = false;
+    dragging = false; hideMark();
     const p = cx == null ? (dragLast || { x: 0, y: 0 }) : toMac(cx, cy);
     send({ t: 'up', x: p.x, y: p.y });
   }
+
+  // Scrolling: two-finger drags and wheel/trackpad deltas add up here and go
+  // out at most every SCROLL_MS, so a trackpad's stream of tiny deltas is one
+  // message per tick instead of one computeruse call each. Units are scroll
+  // lines; a finger travels PT_PER_LINE Mac points per line whatever the
+  // zoom, so the Mac content moves about as far as the finger did.
+  const SCROLL_MS = 33, PT_PER_LINE = 48, WHEEL_PX_PER_LINE = 40;
+  const sc = { x: 0, y: 0, at: null, last: 0, timer: 0 };
+  function addScroll(lx, ly, at) {             // +y scrolls down, +x right (the Mac's wheel sense)
+    sc.x += lx; sc.y += ly; sc.at = at;
+    const due = sc.last + SCROLL_MS - performance.now();
+    if (due <= 0) flushScroll(); else if (!sc.timer) sc.timer = setTimeout(flushScroll, due);
+  }
+  function flushScroll() {
+    clearTimeout(sc.timer); sc.timer = 0;
+    if (!sc.at) return;
+    for (const [axis, pos, neg] of [['y', 'down', 'up'], ['x', 'right', 'left']]) {
+      const n = Math.trunc(sc[axis]); if (!n) continue;
+      const amount = Math.min(30, Math.abs(n));
+      sendInput({ t: 'scroll', x: sc.at.x, y: sc.at.y, dir: n > 0 ? pos : neg, amount });
+      sc[axis] -= Math.sign(n) * amount;
+      sc.last = performance.now();
+    }
+    if (Math.abs(sc.x) >= 1 || Math.abs(sc.y) >= 1) sc.timer = setTimeout(flushScroll, SCROLL_MS);
+  }
+  function endScroll() { flushScroll(); clearTimeout(sc.timer); sc.timer = 0; sc.x = 0; sc.y = 0; sc.at = null; }
+  const ptPerPx = () => screen.width / (view.nat.w * view.s);   // Mac points per stage pixel at this zoom
+
   stage.addEventListener('pointerdown', (e) => {
-    stage.setPointerCapture(e.pointerId);
+    try { stage.setPointerCapture(e.pointerId); } catch (_) { /* a pointer the browser no longer tracks */ }
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), btn: e.button });
     if (e.pointerType === 'mouse') {
-      if (e.button === 2) clickAt(e.clientX, e.clientY, 'right', 1);
-      else if (e.button === 1) clickAt(e.clientX, e.clientY, 'middle', 1);
+      if (e.button === 2) tapAt(e.clientX, e.clientY, 'right');
+      else if (e.button === 1) tapAt(e.clientX, e.clientY, 'middle');
       return;
     }
     if (pts.size === 1) {
-      gesture = 'tap'; tapStart = { x: e.clientX, y: e.clientY };
+      gesture = 'tap';
       longTimer = setTimeout(() => {
         gesture = 'long';
         if (navigator.vibrate) navigator.vibrate(12);
@@ -213,15 +521,17 @@
       clearTimeout(longTimer);
       if (dragging) { const a = [...pts.values()][0]; dragEnd(a.x, a.y); }   // a pinch mid-drag releases the button
       gesture = 'two';
-      const [a, b] = [...pts.values()];
-      gesture2 = { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, s: view.s, vx: view.x, vy: view.y, moved: 0, scrolled: 0 };
-    }
+      const [a, b] = [...pts.values()], cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+      // Undecided until the fingers have moved 10 px: spreading → pinch
+      // (local zoom only), travelling together → scroll. It stays that for
+      // the rest of the gesture, so a pinch never scrolls and neither clicks.
+      gesture2 = { d: Math.hypot(a.x - b.x, a.y - b.y), cx, cy, s: view.s, vx: view.x, vy: view.y, kind: null, lx: cx, ly: cy, anchor: toMac(cx, cy), onPic: inFrame(cx, cy) };
+    } else gesture = 'two';
   });
-  let gesture2 = null;
   stage.addEventListener('pointermove', (e) => {
     const p = pts.get(e.pointerId);
     if (e.pointerType === 'mouse') {
-      if (!p) { if (inFrame(e.clientX, e.clientY)) throttledMove(e.clientX, e.clientY); return; }
+      if (!p) { if (inFrame(e.clientX, e.clientY) && !pendingTap) throttledMove(e.clientX, e.clientY); return; }
       if (p.btn !== 0) return;
       if (!p.drag && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) p.drag = dragStart(p.sx, p.sy);
       if (p.drag) dragMove(e.clientX, e.clientY);
@@ -240,24 +550,30 @@
       if (Math.hypot(dx, dy) > 8) {
         clearTimeout(longTimer); gesture = 'pan';
         // one finger drags the viewport when zoomed in; at fit it is a no-op
+        const ox = view.x, oy = view.y;
         view.x += e.clientX - (p.lx ?? p.sx); view.y += e.clientY - (p.ly ?? p.sy); clampView(); apply();
+        if (Math.abs(view.x - ox) > 0.5 || Math.abs(view.y - oy) > 0.5) p.panned = true;
       }
       p.lx = e.clientX; p.ly = e.clientY;
     } else if (pts.size === 2 && gesture2) {
-      const [a, b] = [...pts.values()];
+      const g = gesture2, [a, b] = [...pts.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y), cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
-      const ratio = d / gesture2.d;
-      if (Math.abs(ratio - 1) > 0.08 || gesture2.moved === 2) {
-        gesture2.moved = 2;                          // pinch → zoom about the midpoint
-        const s = Math.max(0.2, Math.min(6, gesture2.s * ratio));
-        view.x = cx - (gesture2.cx - gesture2.vx) * (s / gesture2.s); view.y = cy - (gesture2.cy - gesture2.vy) * (s / gesture2.s); view.s = s; clampView(); apply();
-      } else {                                       // two-finger drag → scroll at the point
-        const dy = cy - gesture2.cy - gesture2.scrolled;
-        if (Math.abs(dy) >= 24) {
-          const lines = Math.round(Math.abs(dy) / 24);
-          const m = toMac(cx, cy); send({ t: 'scroll', x: m.x, y: m.y, dir: dy > 0 ? 'up' : 'down', amount: lines });
-          gesture2.scrolled += Math.sign(dy) * lines * 24; gesture2.moved = 1;
-        }
+      if (!g.kind) {
+        const dd = Math.abs(d - g.d), dm = Math.hypot(cx - g.cx, cy - g.cy);
+        if (Math.max(dd, dm) < 10) return;
+        g.kind = dd > dm ? 'pinch' : 'scroll';
+        // Off the picture there is nothing to scroll: the Mac would get the
+        // nearest edge (its menu bar, say) instead.
+        if (g.kind === 'scroll' && !g.onPic) g.kind = 'none';
+        if (g.kind === 'scroll') showMark(g.anchor, 'left');
+      }
+      if (g.kind === 'pinch') {                      // zoom about the midpoint, which also pans
+        const s = Math.max(0.2, Math.min(6, g.s * d / g.d));
+        view.x = cx - (g.cx - g.vx) * (s / g.s); view.y = cy - (g.cy - g.vy) * (s / g.s); view.s = s; view.fitted = false; clampView(); apply();
+      } else if (g.kind === 'scroll') {              // natural: the content follows the fingers
+        const k = ptPerPx() / PT_PER_LINE;
+        addScroll(-(cx - g.lx) * k, -(cy - g.ly) * k, g.anchor);
+        g.lx = cx; g.ly = cy;
       }
     }
   });
@@ -265,33 +581,29 @@
     const p = pts.get(e.pointerId); pts.delete(e.pointerId);
     if (e.pointerType === 'mouse') {
       if (p && p.drag) dragEnd(e.clientX, e.clientY);
-      else if (e.button === 0 && p) {
-        // pointer events carry no click count (detail is 0), so pair clicks here
-        const now = performance.now();
-        const dbl = now - lastClick.t < 320 && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) <= 6;
-        lastClick = dbl ? { t: 0, x: 0, y: 0 } : { t: now, x: e.clientX, y: e.clientY };
-        clickAt(e.clientX, e.clientY, 'left', dbl ? 2 : 1);
-      }
+      else if (e.button === 0 && p) tapAt(e.clientX, e.clientY, 'left', 6);
       return;
     }
     clearTimeout(longTimer);
-    if (gesture === 'tap' && p) {
-      const now = performance.now(); const dbl = now - lastTap < 320; lastTap = dbl ? 0 : now;
-      clickAt(p.sx, p.sy, rightNext ? 'right' : 'left', dbl ? 2 : 1);
-      if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
+    const slightRoll = gesture === 'pan' && p && !p.panned && pts.size === 0 && Math.hypot(p.x - p.sx, p.y - p.sy) <= TAP_SLOP && performance.now() - p.t < 550;
+    if ((gesture === 'tap' || slightRoll) && p) {
+      tapAt(p.sx, p.sy, rightNext ? 'right' : 'left', nearPx()); rightNextUsed();
     } else if (gesture === 'long' && p) {
-      clickAt(p.sx, p.sy, 'right', 1); showTip('right-click');
-      if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
+      tapAt(p.sx, p.sy, 'right'); showTip('right-click'); rightNextUsed();
     } else if (dragging) {
       dragEnd(e.clientX, e.clientY);
     }
-    if (pts.size === 0) { gesture = null; gesture2 = null; }
+    if (pts.size === 0) {
+      if (gesture2 && gesture2.kind === 'pinch') reportDisplay();
+      if (gesture2 && gesture2.kind === 'scroll') endScroll();
+      gesture = null; gesture2 = null;
+    }
   }
   stage.addEventListener('pointerup', endPointer);
   stage.addEventListener('pointercancel', (e) => {
     pts.delete(e.pointerId); clearTimeout(longTimer);
     if (dragging) dragEnd(e.clientX, e.clientY);   // never leave the Mac's button held
-    if (!pts.size) { gesture = null; gesture2 = null; }
+    if (!pts.size) { if (gesture2 && gesture2.kind === 'scroll') endScroll(); gesture = null; gesture2 = null; }
   });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
   stage.addEventListener('dblclick', (e) => e.preventDefault());
@@ -299,45 +611,109 @@
   function throttledMove(cx, cy) { const now = performance.now(); if (now - moveT < 40) return; moveT = now; const m = toMac(cx, cy); send({ t: 'move', x: m.x, y: m.y }); }
   stage.addEventListener('wheel', (e) => {
     e.preventDefault();
-    if (e.ctrlKey) { const s = Math.max(0.2, Math.min(6, view.s * (e.deltaY < 0 ? 1.1 : 0.9))); view.x = e.clientX - (e.clientX - view.x) * (s / view.s); view.y = e.clientY - (e.clientY - view.y) * (s / view.s); view.s = s; clampView(); apply(); return; }
+    if (e.ctrlKey) { const s = Math.max(0.2, Math.min(6, view.s * (e.deltaY < 0 ? 1.1 : 0.9))); view.x = e.clientX - (e.clientX - view.x) * (s / view.s); view.y = e.clientY - (e.clientY - view.y) * (s / view.s); view.s = s; view.fitted = false; clampView(); apply(); reportDisplay(); return; }
     if (!inFrame(e.clientX, e.clientY)) return;
-    const m = toMac(e.clientX, e.clientY);
-    const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-    const amt = Math.max(1, Math.min(10, Math.round(Math.abs(horiz ? e.deltaX : e.deltaY) / 40)));
-    send({ t: 'scroll', x: m.x, y: m.y, dir: horiz ? (e.deltaX > 0 ? 'right' : 'left') : (e.deltaY > 0 ? 'down' : 'up'), amount: amt });
+    const unit = e.deltaMode === 1 ? 1 : e.deltaMode === 2 ? 10 : 1 / WHEEL_PX_PER_LINE;
+    addScroll(e.deltaX * unit, e.deltaY * unit, toMac(e.clientX, e.clientY));   // the browser's deltas already carry the OS's scroll direction
   }, { passive: false });
 
   // ── keyboard ─────────────────────────────────────────────────────────
+  // The hidden field keeps what was typed since the Mac's caret last moved,
+  // after a zero-width sentinel (so Backspace on an "empty" field is still an
+  // edit to see). Each edit is diffed against what was already sent: an
+  // autocorrect, predictive or dictation replacement becomes the right number
+  // of Deletes plus the new text; an IME composition goes once it commits; an
+  // emoji counts as one character, as it does on the Mac.
+  const SENT = '​';
+  let kbSent = '', composing = false;
+  const seg = typeof Intl === 'object' && Intl.Segmenter ? new Intl.Segmenter() : null;
+  const graphemes = (t) => (seg ? Array.from(seg.segment(t), (x) => x.segment) : Array.from(t));
+  function kbReset() {
+    if (composing) return;
+    kbSent = '';
+    if (kb.value !== SENT) kb.value = SENT;
+    try { kb.setSelectionRange(1, 1); } catch (_) {}
+  }
   function syncMods() { for (const [id, m] of [['m-cmd', 'cmd'], ['m-shift', 'shift'], ['m-opt', 'option'], ['m-ctrl', 'control']]) $(id).setAttribute('aria-pressed', mods.has(m) ? 'true' : 'false'); }
   for (const [id, m] of [['m-cmd', 'cmd'], ['m-shift', 'shift'], ['m-opt', 'option'], ['m-ctrl', 'control']]) {
     $(id).addEventListener('click', () => { if (mods.has(m)) mods.delete(m); else mods.add(m); syncMods(); });
   }
+  // A key or shortcut; the bar's armed modifiers join the hardware ones and are spent.
   function sendKey(key, extra) {
-    const list = [...mods, ...(extra || [])];
-    send({ t: 'key', key, mods: list });
-    if (mods.size) { mods.clear(); syncMods(); }
+    const list = [...new Set([...takeMods(), ...(extra || [])])];
+    sendInput({ t: 'key', key, mods: list });
   }
-  for (const b of bar.querySelectorAll('[data-key]')) b.addEventListener('click', () => sendKey(b.dataset.key));
+  function kbSync() {
+    if (composing) return;
+    const v = kb.value, hasSent = v.startsWith(SENT), cur = (hasSent ? v.slice(1) : v).replace(/​/g, '');
+    if (hasSent && cur === kbSent) return;
+    const a = graphemes(kbSent), b = graphemes(cur);
+    let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    const dels = a.length - i + (!hasSent && !cur && !a.length ? 1 : 0), ins = b.slice(i).join('');
+    if (mods.size) {                                 // ⌘/⌃/⌥ armed on the bar: a typed character is a shortcut
+      for (let k = 0; k < dels; k++) sendKey('delete');
+      for (const ch of b.slice(i)) sendKey(ch.length === 1 ? ch.toLowerCase() : ch, ch !== ch.toLowerCase() ? ['shift'] : []);
+      kbReset(); return;
+    }
+    for (let k = 0; k < Math.min(dels, 400); k++) sendInput({ t: 'key', key: 'delete', mods: [] });
+    if (ins) sendInput({ t: 'type', text: ins });
+    kbSent = cur;
+    if (!hasSent || b.length > 64) kbReset();
+  }
+  kb.addEventListener('input', (e) => { if (!e.isComposing) kbSync(); });
+  kb.addEventListener('compositionstart', () => { composing = true; });
+  kb.addEventListener('compositionend', () => { composing = false; setTimeout(kbSync, 0); });
+  kb.addEventListener('focus', kbReset);
+  kbReset();
+  const SPECIAL = { Enter: 'return', Tab: 'tab', Escape: 'escape', Backspace: 'delete', Delete: 'forwarddelete', ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Home: 'home', End: 'end', PageUp: 'pageup', PageDown: 'pagedown' };
+  const PUNCT = { Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backquote: '`', Space: ' ' };
+  // The key a shortcut names: from the physical key, because ⇧ and ⌥ change
+  // e.key (⌘⇧4 arrives as "$") but not e.code.
+  function comboKey(e) {
+    const c = e.code || '';
+    if (/^Key[A-Z]$/.test(c)) return c.slice(3).toLowerCase();
+    if (/^Digit[0-9]$/.test(c)) return c.slice(5);
+    if (PUNCT[c]) return PUNCT[c];
+    return e.key && e.key.length === 1 ? e.key.toLowerCase() : '';
+  }
+  function onKeyDown(e, inField) {
+    if (e.isComposing || e.keyCode === 229) return;          // the IME owns this key
+    const hw = [e.metaKey && 'cmd', e.ctrlKey && 'control', e.altKey && 'option', e.shiftKey && 'shift'].filter(Boolean);
+    const special = SPECIAL[e.key] || (/^F([1-9]|1[0-2])$/.test(e.key) ? e.key.toLowerCase() : '');
+    if (special) {
+      // plain Backspace edits the field and the diff sends it: that covers key
+      // repeat, a soft keyboard that sends no key code, and the word under autocorrect
+      if (special === 'delete' && inField && !hw.length && !mods.size) return;
+      e.preventDefault(); sendKey(special, hw);
+      if (special === 'delete' && !hw.length) kbDropLast(); else kbReset();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey) { const k = comboKey(e); if (k) { e.preventDefault(); sendKey(k, hw); kbReset(); } return; }
+    if (!inField && e.key && e.key.length === 1) {           // typed while the field was not focused
+      e.preventDefault();
+      if (mods.size) { sendKey(e.key.toLowerCase(), e.key !== e.key.toLowerCase() ? ['shift'] : []); return; }
+      sendInput({ t: 'type', text: e.key }); kbSent += e.key; kb.value = SENT + kbSent;
+    }
+  }
+  function kbDropLast() { const g = graphemes(kbSent); g.pop(); kbSent = g.join(''); kb.value = SENT + kbSent; }
+  kb.addEventListener('keydown', (e) => onKeyDown(e, true));
+  for (const b of bar.querySelectorAll('[data-key]')) b.addEventListener('click', () => {
+    const k = b.dataset.key, plain = !mods.size;
+    sendKey(k);
+    if (k === 'delete' && plain) kbDropLast(); else kbReset();
+  });
+  // Bar buttons must not take focus from the field, or the soft keyboard closes mid-shortcut.
+  bar.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
   $('b-right').addEventListener('click', () => { rightNext = !rightNext; $('b-right').setAttribute('aria-pressed', rightNext ? 'true' : 'false'); });
   $('b-kb').addEventListener('click', () => { if (document.activeElement === kb) kb.blur(); else kb.focus(); });
-  // Text typed on the soft keyboard: printable runs go as one `type`; specials as keys.
-  kb.addEventListener('input', () => {
-    const v = kb.value; kb.value = '';
-    if (!v) return;
-    if (mods.size) { for (const ch of v) sendKey(ch); return; }
-    send({ t: 'type', text: v });
-  });
-  kb.addEventListener('keydown', (e) => {
-    const k = e.key;
-    const special = { Enter: 'return', Backspace: 'delete', Tab: 'tab', Escape: 'escape', ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Delete: 'delete', ' ': 'space' }[k];
-    const hw = [e.metaKey && 'cmd', e.ctrlKey && 'control', e.altKey && 'option', e.shiftKey && special && 'shift'].filter(Boolean);
-    if (special) { e.preventDefault(); sendKey(special, hw); return; }
-    if ((e.metaKey || e.ctrlKey || e.altKey) && k.length === 1) { e.preventDefault(); sendKey(k.toLowerCase(), hw); return; }
-    if (/^F\d{1,2}$/.test(k)) { e.preventDefault(); sendKey(k.toLowerCase(), hw); }
-  });
   // Hardware keyboard on a laptop/iPad: keep the hidden field focused so keys flow.
-  stage.addEventListener('pointerup', () => { if (!isCoarse) kb.focus(); });
-  document.addEventListener('keydown', (e) => { if (document.activeElement !== kb && !e.target.closest('#bar')) { kb.focus(); } });
+  stage.addEventListener('pointerup', () => { if (!isCoarse && document.activeElement !== kb) kb.focus({ preventScroll: true }); });
+  document.addEventListener('keydown', (e) => {
+    if (e.target === kb || (e.target.closest && e.target.closest('select'))) return;
+    if (e.target.closest && e.target.closest('#bar') && (e.key === 'Enter' || e.key === ' ')) return;   // activating a bar button
+    onKeyDown(e, false);
+    kb.focus({ preventScroll: true });
+  });
 
   // ── bar / quality / fullscreen ───────────────────────────────────────
   const QUAL = { low: { fps: 6, width: 960, q: 9 }, med: { fps: 10, width: 1280, q: 6 }, high: { fps: 15, width: 1728, q: 4 } };
@@ -348,10 +724,19 @@
   // each time an upgrade has to be undone — so it settles, never oscillates.
   const LEVELS = ['low', 'med', 'high'];
   let autoLevel = 'med', starved = 0, healthy = 0, upWait = 30, lastUp = null;
-  function level() { const v = $('q').value; return v === 'auto' ? autoLevel : (QUAL[v] ? v : 'med'); }
-  function applyQuality() { send({ t: 'quality', ...QUAL[level()] }); }
+  // In video mode the menu picks the encode size (Auto: from this screen)
+  // and the service adapts the bitrate; the JPEG levels apply only to the
+  // Compatibility stream (chosen, or forced by a browser without H.264).
+  function level() { const v = $('q').value; return QUAL[v] ? v : autoLevel; }
+  function wantMode() { return !QUAL[$('q').value] && h264ok && !videoBroken ? 'h264' : 'jpeg'; }
+  function applyQuality() {
+    const m = wantMode();
+    if (m !== mode) { mode = m; vReset(); send({ t: 'mode', mode, pref: $('q').value, display: displayInfo() }); }
+    if (mode === 'jpeg') send({ t: 'quality', ...QUAL[level()] });
+    else send({ t: 'pref', pref: $('q').value });
+  }
   function autoTune() {
-    if ($('q').value !== 'auto' || !ws || !quality || !overlay.hidden) return;   // not before the first frame
+    if (mode !== 'jpeg' || QUAL[$('q').value] || !ws || !quality || !overlay.hidden) return;   // not before the first frame
     const i = LEVELS.indexOf(autoLevel), want = quality.fps;
     if (fps < want * 0.5) { starved++; healthy = 0; } else { starved = 0; if (fps >= want * 0.8) healthy++; }
     if (starved >= 3 && i > 0) {
@@ -362,18 +747,50 @@
     }
   }
   $('q').addEventListener('change', () => { starved = 0; healthy = 0; applyQuality(); });
-  try { const saved = localStorage.getItem('soa-desktop-remote:q'); if (saved && QUAL[saved]) $('q').value = saved; } catch (_) {}
+  try { const saved = localStorage.getItem('soa-desktop-remote:q'); if (saved && [...$('q').options].some((o) => o.value === saved)) $('q').value = saved; } catch (_) {}
   $('q').addEventListener('change', () => { try { localStorage.setItem('soa-desktop-remote:q', $('q').value); } catch (_) {} });
-  $('b-fit').addEventListener('click', fit);
+  $('b-fit').addEventListener('click', () => { fit(); reportDisplay(); });
   $('b-full').addEventListener('click', () => { const el = document.documentElement; if (document.fullscreenElement) document.exitFullscreen?.(); else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el); });
-  $('b-hide').addEventListener('click', () => { bar.classList.add('hidden'); $('handle').classList.add('show'); });
-  $('handle').addEventListener('click', () => { bar.classList.remove('hidden'); $('handle').classList.remove('show'); });
-  window.addEventListener('resize', () => { clampView(); apply(); });
+  // The picture lives above the bar: the stage ends where the bar begins, so
+  // every Mac row (the Dock included) can be seen and tapped with the bar up.
+  function layoutStage() {
+    const h = bar.classList.contains('hidden') ? 0 : Math.ceil(bar.getBoundingClientRect().height);
+    if (stage.style.bottom !== h + 'px') { stage.style.bottom = h + 'px'; onResize(); }
+  }
+  $('b-hide').addEventListener('click', () => { bar.classList.add('hidden'); $('handle').classList.add('show'); layoutStage(); });
+  $('handle').addEventListener('click', () => { bar.classList.remove('hidden'); $('handle').classList.remove('show'); layoutStage(); });
+  // A rotation keeps the picture fitted, or (zoomed in) keeps the same Mac
+  // point at the middle of the screen. iOS can report the old size in the
+  // first resize event, so it is settled again a moment later.
+  let stageW = stage.clientWidth, stageH = stage.clientHeight;
+  function onResize() {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    if (sw === stageW && sh === stageH) return;
+    if (view.fitted) fit();
+    else { view.x += (sw - stageW) / 2; view.y += (sh - stageH) / 2; clampView(); apply(); }
+    stageW = sw; stageH = sh; reportDisplay();
+  }
+  window.addEventListener('resize', () => { layoutStage(); onResize(); setTimeout(() => { layoutStage(); onResize(); }, 250); });
+  if (window.ResizeObserver) { new ResizeObserver(() => layoutStage()).observe(bar); new ResizeObserver(() => onResize()).observe(stage); }
+  layoutStage();
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && ws) { if (dragging) dragEnd(); ws.close(); }   // release before the socket goes (close() flushes what was sent)
-    else if (!document.hidden && !ws) connect();
+    if (document.hidden) {
+      // Hidden: nothing streams. A tap still waiting out the double-tap
+      // window and a held button go first (close() flushes what was sent).
+      clearTimeout(retryT); retryT = 0; sockGen++;
+      if (ws) {
+        flushTap(); if (dragging) dragEnd(); endScroll();
+        const s = ws; ws = null; dragging = false; vReset();
+        try { s.close(); } catch (_) {}
+        overlay.hidden = false; ovmsg.textContent = 'Paused while this page is hidden.';
+      }
+    } else if (!ws) { backoff = 1000; connect(); }
   });
-  connect();
+  h264Probe.then((ok) => {
+    h264ok = ok;
+    if (!ok) showTip('This browser cannot decode the video stream (' + videoBroken + ') — using JPEG');
+    connect();
+  });
 })();
 </script>
 </body>
