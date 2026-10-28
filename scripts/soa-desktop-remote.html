@@ -55,8 +55,9 @@
   <button id="b-right" aria-pressed="false" title="Next tap is a right-click">R-click</button>
   <button id="b-fit" title="Fit to screen">fit</button>
   <select id="q" title="Quality">
+    <option value="auto" selected>Auto</option>
     <option value="low">Low · 6 fps</option>
-    <option value="med" selected>Medium · 10 fps</option>
+    <option value="med">Medium · 10 fps</option>
     <option value="high">High · 15 fps</option>
   </select>
   <button id="b-full" title="Full screen">⤢</button>
@@ -75,6 +76,7 @@
   const query = location.search || '';            // keeps ?t=<pairing token> for the daemon's gate
   let ws = null, screen = { width: 1728, height: 1080 }, quality = null;
   let fps = 0, frameCount = 0, lastUrl = null, backoff = 1000, mods = new Set(), rightNext = false;
+  let dragPermitted = null;                       // null = unknown; the service reports it in hello and on change
 
   // ── view transform (pinch-zoom + pan) ───────────────────────────────
   const view = { s: 1, x: 0, y: 0, nat: { w: 1, h: 1 } };
@@ -114,12 +116,20 @@
       const j = await r.json(); tok = j.token; if (j.screen) screen = j.screen;
     } catch (e) { ovmsg.textContent = 'Desktop not reachable (' + e.message + '). Retrying…'; return retry(); }
     const wsUrl = new URL('ws', base); wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:'; wsUrl.searchParams.set('token', tok);
+    // Over the tunnel the daemon gates this upgrade with the pairing token too
+    // (a cookie is not guaranteed there — iOS drops it on a home-screen app),
+    // so carry the page's own ?t= / ?u= along with the service token.
+    for (const k of ['t', 'u']) { const v = new URLSearchParams(query).get(k); if (v && !wsUrl.searchParams.has(k)) wsUrl.searchParams.set(k, v); }
     ws = new WebSocket(wsUrl); ws.binaryType = 'blob';
     ws.onopen = () => { backoff = 1000; ovmsg.textContent = 'Starting the screen…'; applyQuality(); };
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
         let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
-        if (m.t === 'hello' && m.screen) screen = m.screen;
+        if (m.t === 'hello') { if (m.screen) screen = m.screen; if (typeof m.dragPermitted === 'boolean') dragPermitted = m.dragPermitted; }
+        if (m.t === 'drag-permission') {
+          const was = dragPermitted; dragPermitted = !!m.granted;
+          if (dragPermitted && was === false) showTip('Drag enabled');
+        }
         if (m.t === 'status') {
           if (m.screen) screen = m.screen; quality = m.quality || quality;
           if (m.state === 'error') { overlay.hidden = false; ovmsg.textContent = m.message || 'Screen capture failed.'; }
@@ -136,11 +146,15 @@
       };
       frame.src = url;
     };
-    ws.onclose = () => { ws = null; overlay.hidden = false; ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry(); };
+    ws.onclose = () => { ws = null; dragging = false; overlay.hidden = false; ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry(); };
     ws.onerror = () => {};
   }
   function retry() { setTimeout(connect, backoff); backoff = Math.min(15000, backoff * 1.7); }
-  setInterval(() => { fps = frameCount; frameCount = 0; status.innerHTML = ws ? `<b>${fps}</b> fps · ${screen.width}×${screen.height}` : 'offline'; }, 1000);
+  setInterval(() => {
+    fps = frameCount; frameCount = 0;
+    status.innerHTML = ws ? `<b>${fps}</b> fps · ${screen.width}×${screen.height}${$('q').value === 'auto' ? ' · ' + level() : ''}` : 'offline';
+    autoTune();
+  }, 1000);
 
   // ── pointer handling ─────────────────────────────────────────────────
   const pts = new Map(); let gesture = null, tapStart = null, longTimer = null, lastTap = 0;
@@ -152,9 +166,37 @@
     send({ t: 'click', x: p.x, y: p.y, button, count, mods: [...mods] });
     if (mods.size) { mods.clear(); syncMods(); }
   }
+  // Drag = press, move with the button held, release. On touch it starts from a
+  // long-press (lifting without moving is still a right-click); with a mouse it
+  // is the ordinary button-held move. The service hands these to its pointer
+  // helper, which needs an Accessibility grant on the Mac — until then the
+  // Mac ignores them and the tip says why, while every other input keeps working.
+  let dragT = 0, dragging = false, dragLast = null, lastClick = { t: 0, x: 0, y: 0 };
+  function dragStart(cx, cy) {
+    if (!inFrame(cx, cy)) return false;
+    const p = toMac(cx, cy), btn = rightNext ? 'right' : 'left';
+    send({ t: 'down', x: p.x, y: p.y, button: btn });
+    if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
+    dragging = true; dragT = 0; dragLast = p; lastClick.t = 0;
+    if (dragPermitted === false) showTip('Drag needs Accessibility for "SoA Pointer" on the Mac (System Settings → Privacy & Security)');
+    else showTip(btn === 'right' ? 'right-drag' : 'drag');
+    return true;
+  }
+  function dragMove(cx, cy) {
+    if (!dragging) return;
+    const now = performance.now(); if (now - dragT < 40) return; dragT = now;
+    const p = toMac(cx, cy); dragLast = p; send({ t: 'drag', x: p.x, y: p.y });
+  }
+  // Without coordinates it releases at the last drag point (page hidden, socket lost).
+  function dragEnd(cx, cy) {
+    if (!dragging) return;
+    dragging = false;
+    const p = cx == null ? (dragLast || { x: 0, y: 0 }) : toMac(cx, cy);
+    send({ t: 'up', x: p.x, y: p.y });
+  }
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
-    pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now() });
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), btn: e.button });
     if (e.pointerType === 'mouse') {
       if (e.button === 2) clickAt(e.clientX, e.clientY, 'right', 1);
       else if (e.button === 1) clickAt(e.clientX, e.clientY, 'middle', 1);
@@ -162,9 +204,15 @@
     }
     if (pts.size === 1) {
       gesture = 'tap'; tapStart = { x: e.clientX, y: e.clientY };
-      longTimer = setTimeout(() => { gesture = 'long'; clickAt(e.clientX, e.clientY, 'right', 1); showTip('right-click'); }, 550);
+      longTimer = setTimeout(() => {
+        gesture = 'long';
+        if (navigator.vibrate) navigator.vibrate(12);
+        showTip('move to drag · lift to right-click');
+      }, 550);
     } else if (pts.size === 2) {
-      clearTimeout(longTimer); gesture = 'two';
+      clearTimeout(longTimer);
+      if (dragging) { const a = [...pts.values()][0]; dragEnd(a.x, a.y); }   // a pinch mid-drag releases the button
+      gesture = 'two';
       const [a, b] = [...pts.values()];
       gesture2 = { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, s: view.s, vx: view.x, vy: view.y, moved: 0, scrolled: 0 };
     }
@@ -172,10 +220,22 @@
   let gesture2 = null;
   stage.addEventListener('pointermove', (e) => {
     const p = pts.get(e.pointerId);
-    if (e.pointerType === 'mouse') { if (!p && inFrame(e.clientX, e.clientY)) throttledMove(e.clientX, e.clientY); return; }
+    if (e.pointerType === 'mouse') {
+      if (!p) { if (inFrame(e.clientX, e.clientY)) throttledMove(e.clientX, e.clientY); return; }
+      if (p.btn !== 0) return;
+      if (!p.drag && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) p.drag = dragStart(p.sx, p.sy);
+      if (p.drag) dragMove(e.clientX, e.clientY);
+      return;
+    }
     if (!p) return;
     p.x = e.clientX; p.y = e.clientY;
-    if (pts.size === 1 && (gesture === 'tap' || gesture === 'pan')) {
+    if (pts.size === 1 && (gesture === 'long' || gesture === 'drag')) {
+      if (gesture === 'long') {
+        if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) <= 8) return;
+        gesture = dragStart(p.sx, p.sy) ? 'drag' : 'done';
+      }
+      if (gesture === 'drag') dragMove(e.clientX, e.clientY);
+    } else if (pts.size === 1 && (gesture === 'tap' || gesture === 'pan')) {
       const dx = e.clientX - p.sx, dy = e.clientY - p.sy;
       if (Math.hypot(dx, dy) > 8) {
         clearTimeout(longTimer); gesture = 'pan';
@@ -203,17 +263,36 @@
   });
   function endPointer(e) {
     const p = pts.get(e.pointerId); pts.delete(e.pointerId);
-    if (e.pointerType === 'mouse') { if (e.button === 0 && p) clickAt(e.clientX, e.clientY, 'left', e.detail >= 2 ? 2 : 1); return; }
+    if (e.pointerType === 'mouse') {
+      if (p && p.drag) dragEnd(e.clientX, e.clientY);
+      else if (e.button === 0 && p) {
+        // pointer events carry no click count (detail is 0), so pair clicks here
+        const now = performance.now();
+        const dbl = now - lastClick.t < 320 && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) <= 6;
+        lastClick = dbl ? { t: 0, x: 0, y: 0 } : { t: now, x: e.clientX, y: e.clientY };
+        clickAt(e.clientX, e.clientY, 'left', dbl ? 2 : 1);
+      }
+      return;
+    }
     clearTimeout(longTimer);
     if (gesture === 'tap' && p) {
       const now = performance.now(); const dbl = now - lastTap < 320; lastTap = dbl ? 0 : now;
       clickAt(p.sx, p.sy, rightNext ? 'right' : 'left', dbl ? 2 : 1);
       if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
+    } else if (gesture === 'long' && p) {
+      clickAt(p.sx, p.sy, 'right', 1); showTip('right-click');
+      if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
+    } else if (dragging) {
+      dragEnd(e.clientX, e.clientY);
     }
     if (pts.size === 0) { gesture = null; gesture2 = null; }
   }
   stage.addEventListener('pointerup', endPointer);
-  stage.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); clearTimeout(longTimer); if (!pts.size) { gesture = null; gesture2 = null; } });
+  stage.addEventListener('pointercancel', (e) => {
+    pts.delete(e.pointerId); clearTimeout(longTimer);
+    if (dragging) dragEnd(e.clientX, e.clientY);   // never leave the Mac's button held
+    if (!pts.size) { gesture = null; gesture2 = null; }
+  });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
   stage.addEventListener('dblclick', (e) => e.preventDefault());
   let moveT = 0;
@@ -262,8 +341,27 @@
 
   // ── bar / quality / fullscreen ───────────────────────────────────────
   const QUAL = { low: { fps: 6, width: 960, q: 9 }, med: { fps: 10, width: 1280, q: 6 }, high: { fps: 15, width: 1728, q: 4 } };
-  function applyQuality() { const q = QUAL[$('q').value] || QUAL.med; send({ t: 'quality', ...q }); }
-  $('q').addEventListener('change', applyQuality);
+  // Auto: the link decides. A quick tunnel from a home Mac carries ~2-3 fps of
+  // the medium preset, so the viewer watches the frame rate it actually gets
+  // and steps down when it is starved (3 s under half the request), then
+  // tries a step up only after a long healthy stretch, backing off further
+  // each time an upgrade has to be undone — so it settles, never oscillates.
+  const LEVELS = ['low', 'med', 'high'];
+  let autoLevel = 'med', starved = 0, healthy = 0, upWait = 30, lastUp = null;
+  function level() { const v = $('q').value; return v === 'auto' ? autoLevel : (QUAL[v] ? v : 'med'); }
+  function applyQuality() { send({ t: 'quality', ...QUAL[level()] }); }
+  function autoTune() {
+    if ($('q').value !== 'auto' || !ws || !quality || !overlay.hidden) return;   // not before the first frame
+    const i = LEVELS.indexOf(autoLevel), want = quality.fps;
+    if (fps < want * 0.5) { starved++; healthy = 0; } else { starved = 0; if (fps >= want * 0.8) healthy++; }
+    if (starved >= 3 && i > 0) {
+      if (lastUp === autoLevel) upWait = Math.min(600, upWait * 2);   // the last upgrade did not hold
+      autoLevel = LEVELS[i - 1]; starved = 0; healthy = 0; applyQuality(); showTip('Auto quality: ' + autoLevel);
+    } else if (healthy >= upWait && i < LEVELS.length - 1) {
+      autoLevel = LEVELS[i + 1]; lastUp = autoLevel; healthy = 0; applyQuality();
+    }
+  }
+  $('q').addEventListener('change', () => { starved = 0; healthy = 0; applyQuality(); });
   try { const saved = localStorage.getItem('soa-desktop-remote:q'); if (saved && QUAL[saved]) $('q').value = saved; } catch (_) {}
   $('q').addEventListener('change', () => { try { localStorage.setItem('soa-desktop-remote:q', $('q').value); } catch (_) {} });
   $('b-fit').addEventListener('click', fit);
@@ -271,7 +369,10 @@
   $('b-hide').addEventListener('click', () => { bar.classList.add('hidden'); $('handle').classList.add('show'); });
   $('handle').addEventListener('click', () => { bar.classList.remove('hidden'); $('handle').classList.remove('show'); });
   window.addEventListener('resize', () => { clampView(); apply(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden && ws) { ws.close(); } else if (!document.hidden && !ws) connect(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && ws) { if (dragging) dragEnd(); ws.close(); }   // release before the socket goes (close() flushes what was sent)
+    else if (!document.hidden && !ws) connect();
+  });
   connect();
 })();
 </script>

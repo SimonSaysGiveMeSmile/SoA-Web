@@ -337,16 +337,34 @@ streams the display and injects pointer + keyboard input for a paired device,
 reached through the daemon's `/preview/6081/` proxy — same tunnel, same pairing
 gate (token + password), **no daemon restart**. The phone opens it from
 **WEB → ⌨ CONTROL**; any browser can open `<daemon>/preview/6081/?t=<token>`.
-The HTTP side is behind `requireAuthed`; the WebSocket upgrade on `/preview/`
-is not, so the socket carries its own 10-minute token minted by `/token`
-(only reachable after the daemon's gate). Capture is ffmpeg (AVFoundation,
+The HTTP side is behind `requireAuthed`; the socket carries its own 10-minute
+token minted by `/token` (only reachable after the daemon's gate) AND the
+page's own `?t=` / `?u=`, because over the tunnel the daemon answers a
+`/preview/` upgrade without the pairing token with 401 and a cookie is not
+guaranteed there (measured 2026-10-28; the local desktop is exempt, so a
+loopback test never shows it). The quality menu defaults to **Auto**: the
+viewer steps a preset down after 3 s under half the requested frame rate and
+back up only after a long healthy stretch, with a doubling wait each time an
+upgrade had to be undone (a quick tunnel carries ~3 fps of Medium, ~6 of Low). Capture is ffmpeg (AVFoundation,
 mjpeg, `-fps_mode passthrough` — without it image2pipe pads the stream to
 hundreds of duplicate frames a second) and runs only while a viewer is
 connected. Input goes through the `computeruse` CLI → Sarea.app, which holds
 Accessibility + Screen Recording, so the service needs no permission grant and
 no sudo; a click is delivered to the process owning the window under the point
 (`scripts/soa-window-at.swift`, compiled on first start into the state dir).
-Known limit: no drag (the CLI has no mouse-down/up). Auto-start plist:
+If Sarea is not running, the next input relaunches it in the background.
+**Drag** (move a window, select text, a slider) is the one input the CLI cannot
+do — it has no mouse-down/up — so press / drag / release go to **SoA Pointer**
+(`scripts/soa-pointer.swift`), a background app bundle the service builds once
+into the state dir and launches through LaunchServices. macOS charges the
+Accessibility grant to the launching app, so it asks ONCE, for that tool
+alone (System Settings → Privacy & Security → Accessibility → SoA Pointer);
+until then drag is ignored, the viewer's tip says why, and every other input
+keeps working. The helper reports `ready 0|1` and the service forwards it as
+`dragPermitted` (hello) / `drag-permission` (on change). In the viewer a drag
+is a long-press then move on touch (lifting without moving is still a
+right-click) or the ordinary button-held move with a mouse; `pointercancel`
+always releases the button. Auto-start plist:
 `deploy/launchd/com.soa-web.desktop-remote.plist`. Log:
 `~/.soa-web-local/logs/desktop-remote.log`.
 

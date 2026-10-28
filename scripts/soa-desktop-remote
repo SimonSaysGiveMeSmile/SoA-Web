@@ -20,7 +20,14 @@
  *          app holds Accessibility + Screen Recording, so nothing here needs a
  *          permission grant or sudo. Clicks are delivered to the process that
  *          owns the window under the point (soa-window-at), so a tap lands on
- *          whatever is visible there, not just the frontmost app.
+ *          whatever is visible there, not just the frontmost app. If Sarea
+ *          quits, the next input relaunches it in the background.
+ * Drag:    the CLI cannot hold a button down, so press / drag / release go to
+ *          "SoA Pointer" (soa-pointer.swift), a background app bundle built
+ *          here once and launched through LaunchServices. macOS charges the
+ *          Accessibility grant to the launching app, so it is asked for once,
+ *          for that tool alone; until it is granted, drag reports "permission
+ *          needed" and every other input keeps working.
  */
 'use strict';
 
@@ -104,14 +111,138 @@ async function pidAt(x, y) {
 const queue = [];
 let pendingMove = null;
 let running = false;
+let sareaRelaunchAt = 0, sareaWake = null;
+function relaunchSarea() {
+    if (Date.now() - sareaRelaunchAt < 15000) return false;
+    sareaRelaunchAt = Date.now();
+    log('Sarea is not running — relaunching it in the background');
+    execFile('open', ['-gja', 'Sarea'], { timeout: 10000 }, (e) => { if (e) log('relaunch failed:', e.message); });
+    return true;
+}
+// Wait (in the background, never on the queue) for Sarea's socket to answer.
+function waitForSarea() {
+    if (sareaWake) return sareaWake;
+    sareaWake = (async () => {
+        for (let i = 0; i < 20; i++) {                  // up to ~10 s
+            await new Promise((r) => setTimeout(r, 500));
+            const up = await new Promise((r) => execFile(COMPUTERUSE, ['cursor'], { timeout: 2000 }, (e) => r(!e)));
+            if (up) break;
+        }
+        sareaWake = null;
+    })();
+    return sareaWake;
+}
 function run(args) {
+    // While Sarea is being woken, inputs fail fast instead of parking the
+    // queue: a drag held behind a 10 s wait would replay as a stale burst.
+    if (sareaWake) return Promise.resolve(false);
     return new Promise((resolve) => {
         execFile(COMPUTERUSE, args, { timeout: 5000 }, (err, out, errOut) => {
-            if (err) log('computeruse', args.slice(0, 3).join(' '), '→', (errOut || err.message).toString().trim().slice(0, 160));
+            const msg = (errOut || (err && err.message) || '').toString();
+            if (err && /Sarea is not running/i.test(msg) && relaunchSarea()) waitForSarea();
+            if (err) log('computeruse', args.slice(0, 3).join(' '), '→', msg.trim().slice(0, 160));
             resolve(!err);
         });
     });
 }
+
+// ── drag: the SoA Pointer helper app ─────────────────────────────────────
+const net = require('node:net');
+const POINTER_APP = path.join(WORK_DIR, 'SoA Pointer.app');
+const POINTER_SOCK = path.join(WORK_DIR, 'pointer.sock');
+// `connecting` holds the in-flight socket (not a flag) so a stale socket's
+// close can never clear a newer attempt; `retry` is the single pending
+// reconnect, with a capped backoff, and a failed build is not retried per event.
+let pointer = { sock: null, connecting: null, permitted: null, buf: '', retry: null, retryMs: 1500, buildFailedAt: 0 };
+function buildPointerApp() {
+    const src = path.join(__dirname, 'soa-pointer.swift');
+    const bin = path.join(POINTER_APP, 'Contents', 'MacOS', 'soa-pointer');
+    // Rebuild only when the source changed: a new binary is a new code
+    // signature, and macOS would ask for the permission again.
+    if (fs.existsSync(bin) && fs.statSync(bin).mtimeMs >= fs.statSync(src).mtimeMs) return true;
+    try {
+        fs.mkdirSync(path.dirname(bin), { recursive: true });
+        fs.writeFileSync(path.join(POINTER_APP, 'Contents', 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.s0a.pointer</string>
+<key>CFBundleName</key><string>SoA Pointer</string>
+<key>CFBundleDisplayName</key><string>SoA Pointer</string>
+<key>CFBundleExecutable</key><string>soa-pointer</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+`);
+        execFileSync('swiftc', ['-O', '-o', bin, src], { stdio: 'inherit', timeout: 180000 });
+        execFileSync('codesign', ['--force', '--sign', '-', '--identifier', 'app.s0a.pointer', POINTER_APP], { stdio: 'inherit', timeout: 30000 });
+        log('built', POINTER_APP);
+        return true;
+    } catch (e) { log('SoA Pointer build failed:', e.message); return false; }
+}
+function pointerConnect() {
+    if (pointer.sock || pointer.connecting || pointer.retry) return;     // a pending retry counts as in flight
+    if (Date.now() - pointer.buildFailedAt < 60000) return;
+    if (!pointer.checkedStale) {
+        // A helper from an older source is still serving its socket: quit it
+        // once so the connect fails, which rebuilds and relaunches the new one.
+        pointer.checkedStale = true;
+        const bin = path.join(POINTER_APP, 'Contents', 'MacOS', 'soa-pointer');
+        try {
+            if (fs.existsSync(bin) && fs.statSync(bin).mtimeMs < fs.statSync(path.join(__dirname, 'soa-pointer.swift')).mtimeMs) {
+                log('SoA Pointer source changed — replacing the running helper');
+                execFileSync('pkill', ['-f', bin], { timeout: 5000 });
+            }
+        } catch (_) { /* nothing running, or pkill found nothing */ }
+    }
+    const s = net.connect(POINTER_SOCK);
+    pointer.connecting = s;
+    s.setEncoding('utf8');
+    s.on('connect', () => {
+        if (pointer.connecting !== s || pointer.sock) { s.destroy(); return; }   // superseded
+        pointer.connecting = null; pointer.sock = s; pointer.buf = ''; pointer.retryMs = 1500;
+        pointerSend('status');
+    });
+    s.on('data', (d) => {
+        if (pointer.sock !== s) return;
+        pointer.buf += d;
+        let i;
+        while ((i = pointer.buf.indexOf('\n')) >= 0) {
+            const line = pointer.buf.slice(0, i); pointer.buf = pointer.buf.slice(i + 1);
+            if (line.startsWith('ready ')) setPermitted(line.endsWith('1'));
+            else if (line === 'err not permitted') setPermitted(false);
+        }
+    });
+    const mine = () => pointer.sock === s || pointer.connecting === s;
+    const drop = () => {
+        if (pointer.sock === s) { pointer.sock = null; pointer.buf = ''; }
+        if (pointer.connecting === s) pointer.connecting = null;
+    };
+    s.on('error', () => {
+        const wasMine = mine();
+        drop();
+        if (!wasMine || !viewers.size) return;                           // nobody needs the helper
+        if (!buildPointerApp()) { pointer.buildFailedAt = Date.now(); return; }
+        execFile('open', ['-gj', '-a', POINTER_APP, '--args', POINTER_SOCK], { timeout: 10000 },
+            (e) => { if (e) log('SoA Pointer launch failed:', e.message); });
+        pointer.retry = setTimeout(() => { pointer.retry = null; pointerConnect(); }, pointer.retryMs);
+        pointer.retryMs = Math.min(pointer.retryMs * 2, 30000);
+    });
+    s.on('close', drop);
+}
+function pointerSend(line) {
+    if (!pointer.sock) { pointerConnect(); return false; }
+    pointer.sock.write(line + '\n');
+    return true;
+}
+function setPermitted(v) {
+    if (pointer.permitted === v) return;
+    pointer.permitted = v;
+    log('SoA Pointer drag permission:', v ? 'granted' : 'NOT granted');
+    const msg = JSON.stringify({ t: 'drag-permission', granted: v });
+    for (const ws of viewers) if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+}
+setInterval(() => { if (pointer.sock && pointer.permitted !== true) pointerSend('status'); }, 3000);
 async function pump() {
     if (running) return;
     running = true;
@@ -137,7 +268,7 @@ function clampPoint(m) {
     return { x, y };
 }
 
-function handleInput(m) {
+function handleInput(m, from) {
     switch (m.t) {
         case 'move': {
             const { x, y } = clampPoint(m);
@@ -194,6 +325,23 @@ function handleInput(m) {
                 await run(args);
                 refreshActivePid();
             });
+            break;
+        }
+        case 'down': case 'drag': case 'up': {
+            const { x, y } = clampPoint(m);
+            const extra = m.t === 'down' && m.button === 'right' ? ' right' : '';
+            // Remember the press per viewer so a viewer that vanishes mid-drag
+            // (tunnel drop, phone lock) still gets its button released.
+            if (from) from.drag = m.t === 'up' ? null : { x, y };
+            // Drag events skip the computeruse queue but must not overtake a
+            // click still in it, so they wait for it to drain. A drag sample
+            // that waited too long is dropped (down and up always go), so a
+            // held queue degrades to press→release at the end point, never a
+            // replayed burst.
+            const at = Date.now();
+            const go = () => { if (m.t === 'drag' && Date.now() - at > 500) return; pointerSend(`${m.t} ${x} ${y}${extra}`); };
+            if (running || queue.length) enqueue(async () => { go(); }); else go();
+            if (m.t === 'up') refreshActivePid();
             break;
         }
         case 'quality': setQuality(m); break;
@@ -322,16 +470,22 @@ server.on('upgrade', (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (ws) => {
         viewers.add(ws);
         refreshActivePid();
-        ws.send(JSON.stringify({ t: 'hello', screen: readScreen(), quality }));
+        ws.send(JSON.stringify({ t: 'hello', screen: readScreen(), quality, dragPermitted: pointer.permitted }));
+        pointerConnect();
         log('viewer joined', viewers.size);
         ensureCapture();
         broadcastStatus(ffmpeg ? 'live' : 'ready');
         ws.on('message', (data, isBinary) => {
             if (isBinary) return;
             let m; try { m = JSON.parse(data); } catch (_) { return; }
-            if (m && typeof m === 'object') handleInput(m);
+            if (m && typeof m === 'object') handleInput(m, ws);
         });
         ws.on('close', () => {
+            if (ws.drag) {                       // never leave the Mac's button held when the viewer vanishes
+                const { x, y } = ws.drag; ws.drag = null;
+                log('viewer left mid-drag — releasing the button');
+                handleInput({ t: 'up', x, y });
+            }
             viewers.delete(ws);
             log('viewer left', viewers.size);
             if (!viewers.size) stopCapture();
