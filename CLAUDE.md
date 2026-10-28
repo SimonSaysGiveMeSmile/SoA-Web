@@ -342,13 +342,28 @@ token minted by `/token` (only reachable after the daemon's gate) AND the
 page's own `?t=` / `?u=`, because over the tunnel the daemon answers a
 `/preview/` upgrade without the pairing token with 401 and a cookie is not
 guaranteed there (measured 2026-10-28; the local desktop is exempt, so a
-loopback test never shows it). The quality menu defaults to **Auto**: the
-viewer steps a preset down after 3 s under half the requested frame rate and
-back up only after a long healthy stretch, with a doubling wait each time an
-upgrade had to be undone (a quick tunnel carries ~3 fps of Medium, ~6 of Low). Capture is ffmpeg (AVFoundation,
-mjpeg, `-fps_mode passthrough` — without it image2pipe pads the stream to
-hundreds of duplicate frames a second) and runs only while a viewer is
-connected. Input goes through the `computeruse` CLI → Sarea.app, which holds
+loopback test never shows it). The display is an **H.264 video stream** by default: `scripts/soa-screen-stream.swift`
+(compiled on first start into the state dir) captures the main display with
+ScreenCaptureKit, already scaled by the window server, and encodes it with
+VideoToolbox in low-latency mode (no B-frames, keyframe ≤2 s); ffmpeg +
+h264_videotoolbox is the fallback, since ffmpeg's AVFoundation input tops out
+near 12 fps. Each access unit is one binary WS message (`0x01`, flags, seq,
+capture time, AVCC) after a `vconfig` (codec string + avcC); the viewer
+decodes with WebCodecs onto a canvas and acks every 50 ms. The service never
+waits on a per-frame round trip (that is what held the old JPEG path to ~3 fps
+through a ~250 ms tunnel): a viewer that falls behind skips to the next
+keyframe, and **Auto** follows the measured link (2–12 Mbit/s, down to
+0.5 when the link really is that slow). One encoder per viewer, sized to that
+viewer's screen in physical pixels (1280–2560 wide, zoom raises it) and paced
+for its own link; presets 1440p / 1080p / 720p. A browser without WebCodecs
+H.264 falls back to the old JPEG path (ffmpeg AVFoundation mjpeg,
+`-fps_mode passthrough` — without it image2pipe pads the stream to hundreds
+of duplicate frames a second), shown as Compatibility. Capture runs only while
+a viewer is connected (a `/token` request pre-starts it for up to 6 s).
+Measured through a quick tunnel (2026-10-28): ~22–25 fps on a busy screen at
+1280×828 portrait / ~1600 wide landscape, ~70–125 ms median latency; the
+tunnel's WebSocket carried 2–6 Mbit/s, so it, not the encoder, sets quality.
+Input goes through the `computeruse` CLI → Sarea.app, which holds
 Accessibility + Screen Recording, so the service needs no permission grant and
 no sudo; a click is delivered to the process owning the window under the point
 (`scripts/soa-window-at.swift`, compiled on first start into the state dir).
