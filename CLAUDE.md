@@ -330,6 +330,26 @@ stalled. Make yourself event-driven on peers' claims with
 `soa-bus watch work-events --once` (never bare `watch`). The manager runs
 `soa-work conflicts` in its loop and heads off overlaps before assigning goals.
 
+## Using the Mac from a phone (soa-desktop-remote)
+
+`scripts/soa-desktop-remote` is a loopback service (`127.0.0.1:6081`) that
+streams the display and injects pointer + keyboard input for a paired device,
+reached through the daemon's `/preview/6081/` proxy — same tunnel, same pairing
+gate (token + password), **no daemon restart**. The phone opens it from
+**WEB → ⌨ CONTROL**; any browser can open `<daemon>/preview/6081/?t=<token>`.
+The HTTP side is behind `requireAuthed`; the WebSocket upgrade on `/preview/`
+is not, so the socket carries its own 10-minute token minted by `/token`
+(only reachable after the daemon's gate). Capture is ffmpeg (AVFoundation,
+mjpeg, `-fps_mode passthrough` — without it image2pipe pads the stream to
+hundreds of duplicate frames a second) and runs only while a viewer is
+connected. Input goes through the `computeruse` CLI → Sarea.app, which holds
+Accessibility + Screen Recording, so the service needs no permission grant and
+no sudo; a click is delivered to the process owning the window under the point
+(`scripts/soa-window-at.swift`, compiled on first start into the state dir).
+Known limit: no drag (the CLI has no mouse-down/up). Auto-start plist:
+`deploy/launchd/com.soa-web.desktop-remote.plist`. Log:
+`~/.soa-web-local/logs/desktop-remote.log`.
+
 ## Driving an isolated browser
 
 `soa-browser` controls a headless Chromium the server manages (separate from the

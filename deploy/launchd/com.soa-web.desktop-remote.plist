@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DESKTOP REMOTE — runs scripts/soa-desktop-remote: the loopback service
+  (127.0.0.1:6081) that streams the Mac display and injects pointer/keyboard
+  input for a paired device, reached through the daemon's /preview/6081/ proxy
+  (same tunnel, same pairing gate; no daemon restart needed).
+
+  Capture runs only while a viewer is connected. Input goes through the
+  `computeruse` CLI → Sarea.app, which holds the Accessibility and Screen
+  Recording permissions, so this job needs none of its own.
+
+  Load: cp deploy/launchd/com.soa-web.desktop-remote.plist ~/Library/LaunchAgents/ &&
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.desktop-remote.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.desktop-remote</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/test/.soa-web/scripts/soa-desktop-remote</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web-local/logs/desktop-remote.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web-local/logs/desktop-remote.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SOA_WEB_STATE_DIR</key>
+        <string>/Users/test/.soa-web-local</string>
+    </dict>
+</dict>
+</plist>

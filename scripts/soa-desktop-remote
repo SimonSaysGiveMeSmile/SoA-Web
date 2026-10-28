@@ -1,0 +1,348 @@
+#!/usr/bin/env node
+/**
+ * soa-desktop-remote — use the Mac from a paired phone, tablet or laptop.
+ *
+ * A loopback-only service (default 127.0.0.1:6081) that streams the display
+ * and injects pointer + keyboard input, reached through the daemon's
+ * /preview/<port>/ proxy, so it rides the SAME tunnel and the same pairing
+ * auth as the terminal and needs no daemon restart:
+ *
+ *     GET /           the viewer page            (daemon: requireAuthed)
+ *     GET /token      a short-lived WS token     (daemon: requireAuthed)
+ *     WS  /ws?token=  JPEG frames out, JSON input in
+ *
+ * The HTTP side is gated by the daemon (pairing token + password); the WS
+ * upgrade is not, so the socket carries its own token minted by /token —
+ * a bearer the viewer can only obtain after passing the daemon's gate.
+ *
+ * Capture: ffmpeg (AVFoundation, mjpeg) — only while someone is watching.
+ * Input:   the `computeruse` CLI, which hands every event to Sarea.app; that
+ *          app holds Accessibility + Screen Recording, so nothing here needs a
+ *          permission grant or sudo. Clicks are delivered to the process that
+ *          owns the window under the point (soa-window-at), so a tap lands on
+ *          whatever is visible there, not just the frontmost app.
+ */
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn, execFileSync, execFile } = require('node:child_process');
+const WebSocket = require('ws');
+
+const PORT = parseInt(process.env.SOA_DESKTOP_REMOTE_PORT || '6081', 10);
+const HOST = '127.0.0.1';
+const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
+const WORK_DIR = path.join(STATE_DIR, 'desktop-remote');
+const FFMPEG = process.env.SOA_FFMPEG || 'ffmpeg';
+const COMPUTERUSE = process.env.SOA_COMPUTERUSE || 'computeruse';
+const TOKEN_TTL_MS = 10 * 60 * 1000;
+const VIEWER_HTML = path.join(__dirname, 'soa-desktop-remote.html');
+const MAX_JPEG = 3 * 1024 * 1024;
+
+fs.mkdirSync(WORK_DIR, { recursive: true, mode: 0o700 });
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// ── screen geometry ──────────────────────────────────────────────────────
+let screen = { width: 1728, height: 1080, scale: 2 };
+function readScreen() {
+    try {
+        const j = JSON.parse(execFileSync(COMPUTERUSE, ['screen-info'], { timeout: 3000 }).toString());
+        if (j.width && j.height) screen = { width: j.width, height: j.height, scale: j.scale_factor || 1 };
+    } catch (e) { log('screen-info failed:', e.message); }
+    return screen;
+}
+
+// ── which pid owns the window under a point (persistent helper) ──────────
+let winAt = null;
+function startWindowAt() {
+    const src = path.join(__dirname, 'soa-window-at.swift');
+    const bin = path.join(WORK_DIR, 'window-at');
+    try {
+        if (!fs.existsSync(bin) || fs.statSync(bin).mtimeMs < fs.statSync(src).mtimeMs) {
+            execFileSync('swiftc', ['-O', '-o', bin, src], { stdio: 'inherit', timeout: 120000 });
+        }
+    } catch (e) { log('window-at build failed (clicks fall back to the active app):', e.message); return; }
+    const child = spawn(bin, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const waiters = [];
+    let buf = '';
+    child.stdout.on('data', (c) => {
+        buf += c;
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i); buf = buf.slice(i + 1);
+            const w = waiters.shift();
+            if (w) w(parseInt(line, 10) || 0);
+        }
+    });
+    child.on('exit', (code) => { log('window-at exited', code); winAt = null; setTimeout(startWindowAt, 2000); });
+    winAt = (x, y) => new Promise((resolve) => {
+        waiters.push(resolve);
+        child.stdin.write(`${x} ${y}\n`);
+        setTimeout(() => { const i = waiters.indexOf(resolve); if (i >= 0) { waiters.splice(i, 1); resolve(0); } }, 300);
+    });
+}
+
+let activePid = 0;
+function refreshActivePid() {
+    execFile(COMPUTERUSE, ['apps'], { timeout: 3000 }, (err, out) => {
+        if (err) return;
+        try {
+            const a = JSON.parse(out).find((x) => x.active && x.running);
+            if (a) activePid = a.pid;
+        } catch (_) {}
+    });
+}
+async function pidAt(x, y) {
+    const pid = winAt ? await winAt(x, y) : 0;
+    return pid || activePid;
+}
+
+// ── input queue: one computeruse call at a time, latest move wins ────────
+const queue = [];
+let pendingMove = null;
+let running = false;
+function run(args) {
+    return new Promise((resolve) => {
+        execFile(COMPUTERUSE, args, { timeout: 5000 }, (err, out, errOut) => {
+            if (err) log('computeruse', args.slice(0, 3).join(' '), '→', (errOut || err.message).toString().trim().slice(0, 160));
+            resolve(!err);
+        });
+    });
+}
+async function pump() {
+    if (running) return;
+    running = true;
+    while (queue.length || pendingMove) {
+        const job = queue.length ? queue.shift() : (() => { const m = pendingMove; pendingMove = null; return m; })();
+        try { await job(); } catch (e) { log('input job failed:', e.message); }
+    }
+    running = false;
+}
+function enqueue(job) { queue.push(job); pump(); }
+
+const MODS = { cmd: 'cmd', meta: 'cmd', shift: 'shift', alt: 'option', option: 'option', ctrl: 'control', control: 'control' };
+function modList(mods) {
+    return [...new Set((mods || []).map((m) => MODS[String(m).toLowerCase()]).filter(Boolean))];
+}
+const KEYS = new Set(['return', 'tab', 'escape', 'delete', 'space', 'up', 'down', 'left', 'right',
+    'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12']);
+const KEY_ALIAS = { enter: 'return', esc: 'escape', backspace: 'delete', arrowup: 'up', arrowdown: 'down', arrowleft: 'left', arrowright: 'right', ' ': 'space' };
+
+function clampPoint(m) {
+    const x = Math.max(0, Math.min(screen.width - 1, Math.round(+m.x || 0)));
+    const y = Math.max(0, Math.min(screen.height - 1, Math.round(+m.y || 0)));
+    return { x, y };
+}
+
+function handleInput(m) {
+    switch (m.t) {
+        case 'move': {
+            const { x, y } = clampPoint(m);
+            pendingMove = () => run(['cursor', '--move-to', `${x},${y}`]);
+            pump();
+            break;
+        }
+        case 'click': {
+            const { x, y } = clampPoint(m);
+            const button = ['left', 'right', 'middle'].includes(m.button) ? m.button : 'left';
+            const count = Math.max(1, Math.min(3, parseInt(m.count, 10) || 1));
+            const mods = modList(m.mods);
+            enqueue(async () => {
+                const pid = await pidAt(x, y);
+                if (!pid) return;
+                const args = ['click', '--pid', String(pid), '--x', String(x), '--y', String(y), '--button', button, '--count', String(count)];
+                if (mods.length) args.push('--modifiers', mods.join(','));
+                await run(args);
+                refreshActivePid();
+            });
+            break;
+        }
+        case 'scroll': {
+            const { x, y } = clampPoint(m);
+            const dir = ['up', 'down', 'left', 'right'].includes(m.dir) ? m.dir : 'down';
+            const amount = Math.max(1, Math.min(30, parseInt(m.amount, 10) || 3));
+            enqueue(async () => {
+                const pid = await pidAt(x, y);
+                if (!pid) return;
+                await run(['scroll', '--pid', String(pid), '--x', String(x), '--y', String(y), '--direction', dir, '--amount', String(amount)]);
+            });
+            break;
+        }
+        case 'type': {
+            const text = String(m.text || '').slice(0, 4000);
+            if (!text) break;
+            enqueue(async () => {
+                const args = ['type', '--text', text];
+                if (activePid) args.push('--pid', String(activePid));
+                await run(args);
+            });
+            break;
+        }
+        case 'key': {
+            let key = String(m.key || '').toLowerCase();
+            key = KEY_ALIAS[key] || key;
+            const mods = modList(m.mods);
+            if (!(KEYS.has(key) || key.length === 1)) break;
+            enqueue(async () => {
+                const args = mods.length && key.length === 1
+                    ? ['hotkey', '--keys', [...mods, key].join(',')]
+                    : ['key', '--key', key, ...(mods.length ? ['--modifiers', mods.join(',')] : [])];
+                if (activePid) args.push('--pid', String(activePid));
+                await run(args);
+                refreshActivePid();
+            });
+            break;
+        }
+        case 'quality': setQuality(m); break;
+        default: break;
+    }
+}
+
+// ── capture ───────────────────────────────────────────────────────────────
+const viewers = new Set();
+let ffmpeg = null;
+let fBuf = Buffer.alloc(0);
+let quality = { fps: 10, width: 1280, q: 6 };
+let frames = 0;
+let lastFrameAt = 0;
+
+function setQuality(m) {
+    const next = {
+        fps: Math.max(2, Math.min(30, parseInt(m.fps, 10) || quality.fps)),
+        width: Math.max(480, Math.min(2560, parseInt(m.width, 10) || quality.width)),
+        q: Math.max(2, Math.min(15, parseInt(m.q, 10) || quality.q)),
+    };
+    if (next.fps === quality.fps && next.width === quality.width && next.q === quality.q) return;
+    quality = next;
+    log('quality', JSON.stringify(quality));
+    if (ffmpeg) { stopCapture(); ensureCapture(); }
+}
+
+function ensureCapture() {
+    if (ffmpeg || !viewers.size) return;
+    const args = [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-f', 'avfoundation', '-pixel_format', 'nv12', '-framerate', String(quality.fps),
+        '-capture_cursor', '1', '-i', process.env.SOA_DESKTOP_CAPTURE_DEVICE || 'Capture screen 0:none',
+        // passthrough: never duplicate frames to fill timestamps — without it
+        // image2pipe pads the stream to hundreds of identical JPEGs a second.
+        '-fps_mode', 'passthrough',
+        '-vf', `scale=${quality.width}:-2`, '-q:v', String(quality.q), '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
+    ];
+    let child;
+    try { child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { broadcastStatus('error', e.message); return; }
+    ffmpeg = child;
+    fBuf = Buffer.alloc(0);
+    let stderr = '';
+    child.stdout.on('data', consume);
+    child.stderr.on('data', (c) => { stderr = (stderr + c).slice(-500); });
+    child.on('close', (code) => {
+        if (ffmpeg !== child) return;
+        ffmpeg = null; fBuf = Buffer.alloc(0);
+        log('capture died', code, stderr.trim().slice(-200));
+        broadcastStatus('error', stderr.trim() || `Screen capture stopped (${code}).`);
+    });
+    log('capture started', JSON.stringify(quality));
+    broadcastStatus('live');
+}
+function stopCapture() {
+    const c = ffmpeg; ffmpeg = null; fBuf = Buffer.alloc(0);
+    if (c) { try { c.kill('SIGKILL'); } catch (_) {} log('capture stopped'); }
+}
+// Split the mjpeg pipe on JPEG SOI/EOI markers and fan each frame out.
+function consume(chunk) {
+    fBuf = fBuf.length ? Buffer.concat([fBuf, chunk]) : chunk;
+    for (;;) {
+        const soi = fBuf.indexOf(Buffer.from([0xff, 0xd8]));
+        if (soi < 0) { fBuf = Buffer.alloc(0); return; }
+        const eoi = fBuf.indexOf(Buffer.from([0xff, 0xd9]), soi + 2);
+        if (eoi < 0) { if (fBuf.length > MAX_JPEG) fBuf = Buffer.alloc(0); return; }
+        const frame = fBuf.subarray(soi, eoi + 2);
+        fBuf = fBuf.subarray(eoi + 2);
+        // Belt and braces on top of passthrough: never fan out faster than the
+        // chosen rate, whatever the capture device decides to deliver.
+        const now = Date.now();
+        if (now - lastFrameAt < 1000 / quality.fps - 5) continue;
+        lastFrameAt = now;
+        frames++;
+        for (const ws of viewers) {
+            // Drop frames for a viewer that is behind instead of queueing a backlog.
+            if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 2 * frame.length) ws.send(frame, { binary: true });
+        }
+    }
+}
+function broadcastStatus(state, message = '') {
+    const msg = JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen, quality });
+    for (const ws of viewers) if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+}
+
+// ── tokens ───────────────────────────────────────────────────────────────
+const tokens = new Map(); // token → expiry
+function mintToken() {
+    const t = crypto.randomBytes(24).toString('base64url');
+    tokens.set(t, Date.now() + TOKEN_TTL_MS);
+    for (const [k, exp] of tokens) if (exp < Date.now()) tokens.delete(k);
+    return t;
+}
+function tokenOk(t) { return !!t && tokens.has(t) && tokens.get(t) > Date.now(); }
+
+// ── http + ws ────────────────────────────────────────────────────────────
+const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname === '/' || url.pathname === '') {
+        let html;
+        try { html = fs.readFileSync(VIEWER_HTML); } catch (e) { res.writeHead(500); res.end('viewer missing'); return; }
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(html);
+        return;
+    }
+    if (url.pathname === '/token') {
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ token: mintToken(), ttl: TOKEN_TTL_MS, screen: readScreen() }));
+        return;
+    }
+    if (url.pathname === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, viewers: viewers.size, capturing: !!ffmpeg, frames, screen, quality }));
+        return;
+    }
+    res.writeHead(404); res.end('not found');
+});
+
+const wss = new WebSocket.Server({ noServer: true, maxPayload: 64 * 1024 });
+server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname !== '/ws' || !tokenOk(url.searchParams.get('token'))) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+        viewers.add(ws);
+        refreshActivePid();
+        ws.send(JSON.stringify({ t: 'hello', screen: readScreen(), quality }));
+        log('viewer joined', viewers.size);
+        ensureCapture();
+        broadcastStatus(ffmpeg ? 'live' : 'ready');
+        ws.on('message', (data, isBinary) => {
+            if (isBinary) return;
+            let m; try { m = JSON.parse(data); } catch (_) { return; }
+            if (m && typeof m === 'object') handleInput(m);
+        });
+        ws.on('close', () => {
+            viewers.delete(ws);
+            log('viewer left', viewers.size);
+            if (!viewers.size) stopCapture();
+            else broadcastStatus(ffmpeg ? 'live' : 'ready');
+        });
+        ws.on('error', () => {});
+    });
+});
+
+startWindowAt();
+readScreen();
+setInterval(refreshActivePid, 2000);
+server.listen(PORT, HOST, () => log(`soa-desktop-remote on http://${HOST}:${PORT} (screen ${screen.width}x${screen.height})`));
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); process.exit(0); });

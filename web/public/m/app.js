@@ -3069,6 +3069,14 @@ class App {
         if (reload) reload.addEventListener('click', () => { if (!this._agentMode && this._webFrame.src) this._webFrame.src = this._webFrame.src; });
 
         if (this._agentToggle) this._agentToggle.addEventListener('click', () => this._setAgentMode(!this._agentMode));
+        // Full control of the Mac (tap, scroll, type) is a separate page served
+        // by the soa-desktop-remote service through the preview proxy, so it
+        // rides the same tunnel and pairing. Opened as its own tab: it wants the
+        // whole viewport and its own gesture handling.
+        const control = document.getElementById('desktop-control');
+        if (control) control.addEventListener('click', () => {
+            window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
+        });
 
         // Tap the live agent view → forward as a click at the page's coords.
         if (this._agentFrame) {
