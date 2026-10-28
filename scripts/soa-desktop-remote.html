@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Mac — Son of Anton</title>
+<style>
+  :root { color-scheme: dark; --bg: #000; --bar: rgba(18,18,20,.92); --fg: #e8e8ea; --dim: #8a8a90; --acc: #3ea6ff; --on: #ffb000; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.3 -apple-system, system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; touch-action: none; }
+  #stage { position: fixed; inset: 0; overflow: hidden; background: #000; }
+  #frame { position: absolute; left: 0; top: 0; transform-origin: 0 0; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; pointer-events: none; image-rendering: auto; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 6px; align-items: center; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: var(--bar); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+  #bar::-webkit-scrollbar { display: none; }
+  #bar.hidden { transform: translateY(100%); }
+  #bar, #tip { transition: transform .2s ease, opacity .2s ease; }
+  button, select { font: inherit; color: var(--fg); background: #2a2a2e; border: 0; border-radius: 8px; padding: 8px 11px; min-width: 40px; flex: 0 0 auto; }
+  button:active { background: #3a3a40; }
+  button[aria-pressed="true"] { background: var(--on); color: #000; font-weight: 600; }
+  button.go { background: var(--acc); color: #000; font-weight: 600; }
+  #status { color: var(--dim); font-size: 12px; margin-left: auto; padding-right: 4px; }
+  #status b { color: var(--fg); font-weight: 500; }
+  #tip { position: fixed; top: calc(10px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); background: var(--bar); padding: 8px 14px; border-radius: 10px; font-size: 13px; opacity: 0; pointer-events: none; max-width: 92vw; text-align: center; }
+  #tip.show { opacity: 1; }
+  #kb { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; font-size: 16px; }
+  #handle { position: fixed; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); width: 40px; height: 40px; border-radius: 20px; background: var(--bar); color: var(--fg); display: none; align-items: center; justify-content: center; font-size: 18px; }
+  #handle.show { display: flex; }
+  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #000; color: var(--dim); text-align: center; padding: 24px; }
+  #overlay[hidden] { display: none; }
+  #overlay h1 { font-size: 18px; font-weight: 600; color: var(--fg); margin: 0; }
+  @media (prefers-reduced-motion: reduce) { #bar, #tip { transition: none; } }
+</style>
+</head>
+<body>
+<div id="stage"><img id="frame" alt="Mac display" draggable="false"></div>
+<div id="overlay"><h1>Connecting to your Mac…</h1><div id="ovmsg">Asking the desktop for a session.</div></div>
+<div id="tip"></div>
+<input id="kb" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Keyboard input">
+<div id="bar">
+  <button id="b-kb" title="Keyboard">⌨</button>
+  <button id="m-cmd" aria-pressed="false" title="Command">⌘</button>
+  <button id="m-shift" aria-pressed="false" title="Shift">⇧</button>
+  <button id="m-opt" aria-pressed="false" title="Option">⌥</button>
+  <button id="m-ctrl" aria-pressed="false" title="Control">⌃</button>
+  <button data-key="escape">esc</button>
+  <button data-key="tab">tab</button>
+  <button data-key="return">↩</button>
+  <button data-key="delete">⌫</button>
+  <button data-key="up">↑</button>
+  <button data-key="down">↓</button>
+  <button data-key="left">←</button>
+  <button data-key="right">→</button>
+  <button id="b-right" aria-pressed="false" title="Next tap is a right-click">R-click</button>
+  <button id="b-fit" title="Fit to screen">fit</button>
+  <select id="q" title="Quality">
+    <option value="low">Low · 6 fps</option>
+    <option value="med" selected>Medium · 10 fps</option>
+    <option value="high">High · 15 fps</option>
+  </select>
+  <button id="b-full" title="Full screen">⤢</button>
+  <button id="b-hide" title="Hide bar">▾</button>
+  <span id="status">—</span>
+</div>
+<div id="handle">▴</div>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const frame = $('frame'), stage = $('stage'), overlay = $('overlay'), ovmsg = $('ovmsg'), tip = $('tip'), kb = $('kb'), bar = $('bar'), status = $('status');
+  // Everything is relative to document.baseURI: the daemon's preview proxy
+  // injects a base element pointing at /preview/<port>/ when it serves this page.
+  const base = new URL('.', document.baseURI);
+  const query = location.search || '';            // keeps ?t=<pairing token> for the daemon's gate
+  let ws = null, screen = { width: 1728, height: 1080 }, quality = null;
+  let fps = 0, frameCount = 0, lastUrl = null, backoff = 1000, mods = new Set(), rightNext = false;
+
+  // ── view transform (pinch-zoom + pan) ───────────────────────────────
+  const view = { s: 1, x: 0, y: 0, nat: { w: 1, h: 1 } };
+  function fit() {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    const s = Math.min(sw / view.nat.w, sh / view.nat.h);
+    view.s = s; view.x = (sw - view.nat.w * s) / 2; view.y = (sh - view.nat.h * s) / 2;
+    apply();
+  }
+  function apply() {
+    frame.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
+  }
+  function clampView() {
+    const sw = stage.clientWidth, sh = stage.clientHeight, w = view.nat.w * view.s, h = view.nat.h * view.s;
+    view.x = w <= sw ? (sw - w) / 2 : Math.min(0, Math.max(sw - w, view.x));
+    view.y = h <= sh ? (sh - h) / 2 : Math.min(0, Math.max(sh - h, view.y));
+  }
+  // stage pixel → Mac point
+  function toMac(cx, cy) {
+    const fx = (cx - view.x) / view.s, fy = (cy - view.y) / view.s;
+    return { x: Math.round(fx / view.nat.w * screen.width), y: Math.round(fy / view.nat.h * screen.height) };
+  }
+  function inFrame(cx, cy) {
+    const fx = (cx - view.x) / view.s, fy = (cy - view.y) / view.s;
+    return fx >= 0 && fy >= 0 && fx <= view.nat.w && fy <= view.nat.h;
+  }
+
+  // ── socket ───────────────────────────────────────────────────────────
+  function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+  async function connect() {
+    overlay.hidden = false; ovmsg.textContent = 'Asking the desktop for a session.';
+    let tok;
+    try {
+      const r = await fetch(new URL('token' + query, base), { cache: 'no-store', credentials: 'include' });
+      if (r.status === 401) { ovmsg.textContent = 'Not paired. Open this from the Son of Anton app (WEB → ⌨ CONTROL) so the link carries your pairing.'; return; }
+      if (!r.ok) throw new Error('token ' + r.status);
+      const j = await r.json(); tok = j.token; if (j.screen) screen = j.screen;
+    } catch (e) { ovmsg.textContent = 'Desktop not reachable (' + e.message + '). Retrying…'; return retry(); }
+    const wsUrl = new URL('ws', base); wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:'; wsUrl.searchParams.set('token', tok);
+    ws = new WebSocket(wsUrl); ws.binaryType = 'blob';
+    ws.onopen = () => { backoff = 1000; ovmsg.textContent = 'Starting the screen…'; applyQuality(); };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+        if (m.t === 'hello' && m.screen) screen = m.screen;
+        if (m.t === 'status') {
+          if (m.screen) screen = m.screen; quality = m.quality || quality;
+          if (m.state === 'error') { overlay.hidden = false; ovmsg.textContent = m.message || 'Screen capture failed.'; }
+        }
+        return;
+      }
+      const url = URL.createObjectURL(ev.data);
+      frame.onload = () => {
+        if (frame.naturalWidth && (view.nat.w !== frame.naturalWidth || view.nat.h !== frame.naturalHeight)) {
+          const first = view.nat.w === 1; view.nat = { w: frame.naturalWidth, h: frame.naturalHeight }; if (first) fit(); else { clampView(); apply(); }
+        }
+        if (lastUrl) URL.revokeObjectURL(lastUrl); lastUrl = url; frameCount++;
+        if (!overlay.hidden) overlay.hidden = true;
+      };
+      frame.src = url;
+    };
+    ws.onclose = () => { ws = null; overlay.hidden = false; ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry(); };
+    ws.onerror = () => {};
+  }
+  function retry() { setTimeout(connect, backoff); backoff = Math.min(15000, backoff * 1.7); }
+  setInterval(() => { fps = frameCount; frameCount = 0; status.innerHTML = ws ? `<b>${fps}</b> fps · ${screen.width}×${screen.height}` : 'offline'; }, 1000);
+
+  // ── pointer handling ─────────────────────────────────────────────────
+  const pts = new Map(); let gesture = null, tapStart = null, longTimer = null, lastTap = 0;
+  const isCoarse = matchMedia('(pointer: coarse)').matches;
+  function showTip(t) { tip.textContent = t; tip.classList.add('show'); clearTimeout(showTip._t); showTip._t = setTimeout(() => tip.classList.remove('show'), 1400); }
+  function clickAt(cx, cy, button, count) {
+    if (!inFrame(cx, cy)) return;
+    const p = toMac(cx, cy);
+    send({ t: 'click', x: p.x, y: p.y, button, count, mods: [...mods] });
+    if (mods.size) { mods.clear(); syncMods(); }
+  }
+  stage.addEventListener('pointerdown', (e) => {
+    stage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now() });
+    if (e.pointerType === 'mouse') {
+      if (e.button === 2) clickAt(e.clientX, e.clientY, 'right', 1);
+      else if (e.button === 1) clickAt(e.clientX, e.clientY, 'middle', 1);
+      return;
+    }
+    if (pts.size === 1) {
+      gesture = 'tap'; tapStart = { x: e.clientX, y: e.clientY };
+      longTimer = setTimeout(() => { gesture = 'long'; clickAt(e.clientX, e.clientY, 'right', 1); showTip('right-click'); }, 550);
+    } else if (pts.size === 2) {
+      clearTimeout(longTimer); gesture = 'two';
+      const [a, b] = [...pts.values()];
+      gesture2 = { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, s: view.s, vx: view.x, vy: view.y, moved: 0, scrolled: 0 };
+    }
+  });
+  let gesture2 = null;
+  stage.addEventListener('pointermove', (e) => {
+    const p = pts.get(e.pointerId);
+    if (e.pointerType === 'mouse') { if (!p && inFrame(e.clientX, e.clientY)) throttledMove(e.clientX, e.clientY); return; }
+    if (!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    if (pts.size === 1 && (gesture === 'tap' || gesture === 'pan')) {
+      const dx = e.clientX - p.sx, dy = e.clientY - p.sy;
+      if (Math.hypot(dx, dy) > 8) {
+        clearTimeout(longTimer); gesture = 'pan';
+        // one finger drags the viewport when zoomed in; at fit it is a no-op
+        view.x += e.clientX - (p.lx ?? p.sx); view.y += e.clientY - (p.ly ?? p.sy); clampView(); apply();
+      }
+      p.lx = e.clientX; p.ly = e.clientY;
+    } else if (pts.size === 2 && gesture2) {
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y), cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+      const ratio = d / gesture2.d;
+      if (Math.abs(ratio - 1) > 0.08 || gesture2.moved === 2) {
+        gesture2.moved = 2;                          // pinch → zoom about the midpoint
+        const s = Math.max(0.2, Math.min(6, gesture2.s * ratio));
+        view.x = cx - (gesture2.cx - gesture2.vx) * (s / gesture2.s); view.y = cy - (gesture2.cy - gesture2.vy) * (s / gesture2.s); view.s = s; clampView(); apply();
+      } else {                                       // two-finger drag → scroll at the point
+        const dy = cy - gesture2.cy - gesture2.scrolled;
+        if (Math.abs(dy) >= 24) {
+          const lines = Math.round(Math.abs(dy) / 24);
+          const m = toMac(cx, cy); send({ t: 'scroll', x: m.x, y: m.y, dir: dy > 0 ? 'up' : 'down', amount: lines });
+          gesture2.scrolled += Math.sign(dy) * lines * 24; gesture2.moved = 1;
+        }
+      }
+    }
+  });
+  function endPointer(e) {
+    const p = pts.get(e.pointerId); pts.delete(e.pointerId);
+    if (e.pointerType === 'mouse') { if (e.button === 0 && p) clickAt(e.clientX, e.clientY, 'left', e.detail >= 2 ? 2 : 1); return; }
+    clearTimeout(longTimer);
+    if (gesture === 'tap' && p) {
+      const now = performance.now(); const dbl = now - lastTap < 320; lastTap = dbl ? 0 : now;
+      clickAt(p.sx, p.sy, rightNext ? 'right' : 'left', dbl ? 2 : 1);
+      if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); }
+    }
+    if (pts.size === 0) { gesture = null; gesture2 = null; }
+  }
+  stage.addEventListener('pointerup', endPointer);
+  stage.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); clearTimeout(longTimer); if (!pts.size) { gesture = null; gesture2 = null; } });
+  stage.addEventListener('contextmenu', (e) => e.preventDefault());
+  stage.addEventListener('dblclick', (e) => e.preventDefault());
+  let moveT = 0;
+  function throttledMove(cx, cy) { const now = performance.now(); if (now - moveT < 40) return; moveT = now; const m = toMac(cx, cy); send({ t: 'move', x: m.x, y: m.y }); }
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey) { const s = Math.max(0.2, Math.min(6, view.s * (e.deltaY < 0 ? 1.1 : 0.9))); view.x = e.clientX - (e.clientX - view.x) * (s / view.s); view.y = e.clientY - (e.clientY - view.y) * (s / view.s); view.s = s; clampView(); apply(); return; }
+    if (!inFrame(e.clientX, e.clientY)) return;
+    const m = toMac(e.clientX, e.clientY);
+    const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    const amt = Math.max(1, Math.min(10, Math.round(Math.abs(horiz ? e.deltaX : e.deltaY) / 40)));
+    send({ t: 'scroll', x: m.x, y: m.y, dir: horiz ? (e.deltaX > 0 ? 'right' : 'left') : (e.deltaY > 0 ? 'down' : 'up'), amount: amt });
+  }, { passive: false });
+
+  // ── keyboard ─────────────────────────────────────────────────────────
+  function syncMods() { for (const [id, m] of [['m-cmd', 'cmd'], ['m-shift', 'shift'], ['m-opt', 'option'], ['m-ctrl', 'control']]) $(id).setAttribute('aria-pressed', mods.has(m) ? 'true' : 'false'); }
+  for (const [id, m] of [['m-cmd', 'cmd'], ['m-shift', 'shift'], ['m-opt', 'option'], ['m-ctrl', 'control']]) {
+    $(id).addEventListener('click', () => { if (mods.has(m)) mods.delete(m); else mods.add(m); syncMods(); });
+  }
+  function sendKey(key, extra) {
+    const list = [...mods, ...(extra || [])];
+    send({ t: 'key', key, mods: list });
+    if (mods.size) { mods.clear(); syncMods(); }
+  }
+  for (const b of bar.querySelectorAll('[data-key]')) b.addEventListener('click', () => sendKey(b.dataset.key));
+  $('b-right').addEventListener('click', () => { rightNext = !rightNext; $('b-right').setAttribute('aria-pressed', rightNext ? 'true' : 'false'); });
+  $('b-kb').addEventListener('click', () => { if (document.activeElement === kb) kb.blur(); else kb.focus(); });
+  // Text typed on the soft keyboard: printable runs go as one `type`; specials as keys.
+  kb.addEventListener('input', () => {
+    const v = kb.value; kb.value = '';
+    if (!v) return;
+    if (mods.size) { for (const ch of v) sendKey(ch); return; }
+    send({ t: 'type', text: v });
+  });
+  kb.addEventListener('keydown', (e) => {
+    const k = e.key;
+    const special = { Enter: 'return', Backspace: 'delete', Tab: 'tab', Escape: 'escape', ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Delete: 'delete', ' ': 'space' }[k];
+    const hw = [e.metaKey && 'cmd', e.ctrlKey && 'control', e.altKey && 'option', e.shiftKey && special && 'shift'].filter(Boolean);
+    if (special) { e.preventDefault(); sendKey(special, hw); return; }
+    if ((e.metaKey || e.ctrlKey || e.altKey) && k.length === 1) { e.preventDefault(); sendKey(k.toLowerCase(), hw); return; }
+    if (/^F\d{1,2}$/.test(k)) { e.preventDefault(); sendKey(k.toLowerCase(), hw); }
+  });
+  // Hardware keyboard on a laptop/iPad: keep the hidden field focused so keys flow.
+  stage.addEventListener('pointerup', () => { if (!isCoarse) kb.focus(); });
+  document.addEventListener('keydown', (e) => { if (document.activeElement !== kb && !e.target.closest('#bar')) { kb.focus(); } });
+
+  // ── bar / quality / fullscreen ───────────────────────────────────────
+  const QUAL = { low: { fps: 6, width: 960, q: 9 }, med: { fps: 10, width: 1280, q: 6 }, high: { fps: 15, width: 1728, q: 4 } };
+  function applyQuality() { const q = QUAL[$('q').value] || QUAL.med; send({ t: 'quality', ...q }); }
+  $('q').addEventListener('change', applyQuality);
+  try { const saved = localStorage.getItem('soa-desktop-remote:q'); if (saved && QUAL[saved]) $('q').value = saved; } catch (_) {}
+  $('q').addEventListener('change', () => { try { localStorage.setItem('soa-desktop-remote:q', $('q').value); } catch (_) {} });
+  $('b-fit').addEventListener('click', fit);
+  $('b-full').addEventListener('click', () => { const el = document.documentElement; if (document.fullscreenElement) document.exitFullscreen?.(); else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el); });
+  $('b-hide').addEventListener('click', () => { bar.classList.add('hidden'); $('handle').classList.add('show'); });
+  $('handle').addEventListener('click', () => { bar.classList.remove('hidden'); $('handle').classList.remove('show'); });
+  window.addEventListener('resize', () => { clampView(); apply(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && ws) { ws.close(); } else if (!document.hidden && !ws) connect(); });
+  connect();
+})();
+</script>
+</body>
+</html>
