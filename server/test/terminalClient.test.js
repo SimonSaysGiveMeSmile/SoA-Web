@@ -73,7 +73,7 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 },
         onData() {}
         onResize(listener) { this.resizeListener = listener; }
         onTitleChange() {}
-        write(data) { this.writes.push(data); }
+        write(data, done) { if (data) this.writes.push(data); if (done) done(); }
         reset() { this.resetCount++; }
         resize(cols, rows) {
             this.cols = cols;
@@ -154,7 +154,7 @@ test('terminal client: reconnect drops obsolete app queues and orders RIS after 
     assert.ok(h.scheduledCount > 0);
 
     rt.resetReplay('replacement snapshot');
-    assert.equal(h.scheduledCount, 0, 'cancel callbacks belonging to obsolete output');
+    assert.equal(h.scheduledCount, 1, 'only the new snapshot drain remains scheduled');
     assert.equal(rt.term.resetCount, 0, 'never reset synchronously ahead of queued xterm parsing');
     assert.deepEqual(rt.term.writes, ['already accepted by xterm']);
     assert.equal(rt.flushPendingReplay(), true);
@@ -178,26 +178,33 @@ test('terminal client: an empty reconnect snapshot still clears the previous scr
     assert.equal(rt.flushPendingReplay(), false);
 });
 
-test('terminal client: one oversized replay is bounded and resumes at a complete ANSI boundary', () => {
+test('terminal client: oversized replay is drained without discarding its beginning', () => {
     const { rt, Runtime } = harness();
     rt.fitNow();
-    rt.queueReplay('old queued history');
-    const suffix = '\x1b[32mretained\x1b[0m';
-    rt.queueReplay('x'.repeat(Runtime.REPLAY_CAP + 20) + suffix);
-    assert.ok(rt._replayLen <= Runtime.REPLAY_CAP, 'single-frame history respects the cap');
-    assert.ok(rt._replayChunks.join('').length <= Runtime.REPLAY_CAP);
-    rt.flushPendingReplay();
-    assert.deepEqual(rt.term.writes, ['\x18\x1b[0m' + suffix]);
+    const data = 'FIRST MESSAGE\r\n' + 'x'.repeat(Runtime.REPLAY_CAP + 20) + '\x1b[32mlast\x1b[0m';
+    rt.queueReplay(data);
+    assert.equal(rt._replayLen, 0);
+    assert.equal(rt.term.writes.join(''), data);
 });
 
-test('terminal client: chunk eviction repairs a partial command even when retained bytes are below the cap', () => {
+test('terminal client: ANSI split at the former eviction boundary is preserved', () => {
     const { rt, Runtime } = harness();
     rt.fitNow();
-    rt.queueReplay('x'.repeat(Runtime.REPLAY_CAP - 20) + '\x1b[');
-    rt.queueReplay('31mBROKEN\n' + '\x1b[34mkept\x1b[0m' + 'z'.repeat(32));
-    assert.ok(rt._replayLen < Runtime.REPLAY_CAP, 'eviction can leave less than a full buffer');
+    const chunks = ['x'.repeat(Runtime.REPLAY_CAP - 20) + '\x1b[', '31mRED\n' + '\x1b[34mkept\x1b[0m' + 'z'.repeat(32)];
+    chunks.forEach(data => rt.queueReplay(data));
     rt.flushPendingReplay();
-    assert.deepEqual(rt.term.writes, ['\x18\x1b[0m\x1b[34mkept\x1b[0m' + 'z'.repeat(32)]);
+    assert.equal(rt.term.writes.join(''), chunks.join(''));
+});
+
+test('terminal client: a never-opened tab parses in the authoritative server grid', () => {
+    const h = harness({ width: 0, height: 0 });
+    h.rt.adoptGrid(129, 53);
+    h.rt.resetReplay('old message\r\n');
+    h.rt.queueReplay('new message');
+    h.drain();
+    assert.equal(h.rt.term.openCount, 0);
+    assert.equal(h.rt.term.cols, 129);
+    assert.equal(h.rt.term.writes.join(''), '\x18\x1bcold message\r\nnew message');
 });
 
 test('terminal client: intact ANSI sequences split across small chunks are preserved byte-for-byte', () => {

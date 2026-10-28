@@ -412,11 +412,11 @@ class VoiceCommands {
   }
 
   async do_help() {
+    if (this.onShowHelp) this.onShowHelp();
     this._say(
-      'Say the wake word, then a command. Terminal: read output, what is happening, run npm test, ' +
-      'change model to opus, how is my usage, stop. Navigation: go to the iPlan project, next tab, fleet view. ' +
-      'The app: hide the sidebar, dark mode, open settings, time machine. ' +
-      'Open the commands list in the voice widget to see all of them.'
+      'I can read your terminal, switch tabs, run commands, and change views or settings. ' +
+      'Try “read output”, “next tab”, or “open settings”. ' +
+      'Say “go to sleep” to pause commands. The command list has more examples.'
     );
   }
 }

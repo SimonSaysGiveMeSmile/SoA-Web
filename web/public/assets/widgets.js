@@ -10,8 +10,9 @@
  * without coordinating an extra channel.
  */
 
-import { t as tr } from '/assets/i18n.js?v=32';
-import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=27';
+import { t as tr } from '/assets/i18n.js?v=35';
+import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=design-packs-20260927';
+import { AnimatedWorldView } from '/assets/animated-world-view.js?v=world-view-animated-20260928';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
 
 const $el = (tag, props = {}, children = []) => {
@@ -51,11 +52,21 @@ function currentBackend() {
 function currentToken() {
     return (window.__SOA_WEB__ || {})._resolvedToken || '';
 }
+const MQR_SCAN_LABEL = {
+    en: 'SCAN A DESKTOP QR', zh: '扫描桌面二维码', fr: 'SCANNER UN QR DE BUREAU',
+    de: 'DESKTOP-QR SCANNEN', es: 'ESCANEAR QR DE ESCRITORIO',
+};
+function _mqrLang() { try { return localStorage.getItem('soa-web:lang') || (navigator.language || 'en').slice(0, 2).toLowerCase(); } catch (_) { return 'en'; } }
+
 function api(path) {
     if (path.startsWith('http')) return path;
     const u = new URL(currentBackend() + path);
     const t = currentToken();
     if (t) u.searchParams.set('t', t);
+    // The pairing-password unlock, for clients whose cookies are dropped
+    // (home-screen PWAs, cross-site dashboards). app.js publishes it.
+    const un = (window.__SOA_WEB__ || {})._resolvedUnlock;
+    if (un) u.searchParams.set('u', un);
     return u.toString();
 }
 // Live accent for canvas paints (sparklines, charts, globe). Canvases can't
@@ -438,22 +449,8 @@ class ClockWidget extends Widget {
 // Live token usage for whichever agent is running here — read from the local
 // transcripts by /api/claude-usage and /api/codex-usage.
 //
-// The two agents can be shown in the same shape (two limit gauges, a per-minute
-// sparkline, burn / today / model, and the sessions doing the spending) but
-// they know different things about themselves, and the widget does not pretend
-// otherwise:
-//
-//   CLAUDE  leads with the 5-hour rolling usage-limit block and a reset
-//           countdown. The weekly ceiling is not in the transcripts, so it is
-//           estimated against WEEK_LIMIT_USD below. Cost is an API-equivalent
-//           estimate, labelled "≈" — a Max/Pro seat is flat-rate.
-//   CODEX   leads with the limit windows the API reports back to the client,
-//           so the percentages and the reset countdown are MEASURED, not
-//           estimated. There is no published rate for the model it runs, so
-//           there are no dollars at all rather than invented ones.
-//
-// The source pills only appear once there is something to switch to; an install
-// with no codex sessions looks exactly as it did before.
+// Account quotas come from official CLI integrations. Local transcript activity
+// stays in the detail panel. Polling never changes the age of a provider report.
 const _fmtTok = n => {
     n = n || 0;
     if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
@@ -466,16 +463,18 @@ const _fmtUsd = n => {
     if (n >= 100) return '$' + n.toFixed(0);
     return '$' + n.toFixed(2);
 };
+// Money for the CARD: three figures share ~100px, so cents go once the number
+// is in dollars and thousands collapse to k. Tooltips keep _fmtUsd's precision.
+const _fmtUsdTight = n => {
+    if (!Number.isFinite(n)) return '—';
+    if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
+    if (n >= 10) return '$' + Math.round(n).toLocaleString();
+    return '$' + n.toFixed(2);
+};
 // Per-session "leaning hard on the model" thresholds (est. USD) — mirror the
 // soa-usage-alert push watchdog's defaults so the dashboard highlight and the
 // phone alert agree. block = the active 5h usage-limit window, today = midnight.
 const HOT_COST = { block: 20, today: 60 };
-// Estimated weekly usage-limit ceiling (USD-equiv) for the WEEKLY bar's 100%.
-// The local transcript engine can't read Claude's real weekly cap, so we
-// approximate it from an observed calibration point: ≈82% ⇔ ≈$3002 → 100% ≈
-// $3660. Only affects the bar's fill %/label; the tok+cost figures are exact.
-// Tune if the ceiling drifts (or the plan changes).
-const WEEK_LIMIT_USD = 3660;
 // Claude's window is five hours, so hours+minutes was always enough. codex
 // reports a WEEKLY one, and "resets in 126h 6m" is not a thing anyone reads.
 const _fmtDur = ms => {
@@ -485,40 +484,65 @@ const _fmtDur = ms => {
     return h ? `${h}h ${m}m` : `${m}m`;
 };
 
+let usagePanelSequence = 0;
+
 class ClaudeUsageWidget extends Widget {
     constructor({ parent }) {
         // 2.5s poll: the server memoizes compute() for 1.2s and tails only
         // appended bytes, so the fast cadence is cheap — the remaining lag is
         // transcript flush timing (a record lands when its message completes).
         super({ titleKey: 'widget.claude', title: 'TOKEN USAGE', parent, intervalMs: 2500 });
-        // Which agent is on screen. Remembered, because a fleet that is mostly
-        // one of them should not have to re-pick on every load.
-        this._source = 'claude';
+        // Two matching, independently labeled windows per provider.
+        // Missing windows remain unknown; reset time is text, never a ring.
+        // Which one is open is remembered: a fleet that is mostly one agent
+        // should not have to re-pick on every load.
+        this._open = null;
         try {
-            const saved = localStorage.getItem('soa_usage_source');
-            if (saved === 'codex' || saved === 'claude') this._source = saved;
+            const saved = localStorage.getItem('soa_usage_open');
+            if (saved === 'codex' || saved === 'claude') this._open = saved;
         } catch (_) {}
-        this._codexSeen = false;
-        this._srcBtns = {};
-        this._srcRow = $el('div', { class: 'usage-src' }, ['claude', 'codex'].map(k => {
-            const b = $el('button', {
-                class: 'usage-src-btn', type: 'button',
-                text: tr('widget.usage.src_' + k),
-                onclick: (e) => { e.stopPropagation(); this._setSource(k); },
-            });
-            this._srcBtns[k] = b;
-            return b;
-        }));
-        this._srcRow.style.display = 'none';
-        // Persistent DOM — tick() only updates text/width/canvas so the
-        // sparkline never flickers on refresh.
-        this._reset = $el('span', { class: 'claude-reset', text: '—' });
-        this._fill = $el('span', { class: 'bar-fill' });
+        this._codexSeen = true;
+        this._quota = {};
+        this._quotaFresh = false;
+        this._quotaAt = null;
+        this._claude = null;
+        this._codex = null;
+        this._codexAt = null;
+        this._claudeAt = null;
+        this._requests = {};
+        this._failures = {};
+        this._controllers = new Set();
+        this._codexFresh = false;
+        this._claudeFresh = false;
+        this._codexChecked = false;
+        this._fetching = null;
+        this._health = $el('span', { class: 'usage-health', text: 'Connecting', role: 'status',
+            title: 'Claude updates after API responses; Codex quota is checked every 15 seconds.' });
+        this._headCtl.prepend(this._health);
+        this.root.dataset.usageStatus = 'waiting';
+        this._online = () => {
+            this._claudeAt = this._codexAt = this._quotaAt = null;
+            if (_widgetsActive()) this.tick();
+        };
+        window.addEventListener('online', this._online);
+        this._cards = { claude: this._makeCard('claude'), codex: this._makeCard('codex') };
+        this._dials = $el('div', { class: 'usage-dials' }, [this._cards.claude.el, this._cards.codex.el]);
+
+        // ── detail panel (persistent DOM — tick() only updates text/width/
+        // canvas so the sparkline never flickers on refresh) ──
+        const leg = (k) => {
+            // Doubled class names on purpose: the minimal/liquid themes
+            // already restyle .claude-reset / .claude-head-l, and the legend
+            // is the same thing in a new place.
+            const v = $el('span', { class: 'usage-leg-v claude-reset' });
+            const l = $el('span', { class: 'usage-leg-l claude-head-l' });
+            const row = $el('div', { class: `usage-leg usage-leg-${k}` }, [$el('i', { class: 'usage-leg-dot' }), l, v]);
+            return { row, l, v };
+        };
+        this._legA = leg('a'); this._legB = leg('b'); this._legC = leg('c');
+        this._reset = this._legA.v;        // kept under their old names: the
+        this._weekPct = this._legB.v;      // session/spark code reads them
         this._sub = $el('div', { class: 'claude-sub', text: '—' });
-        // Weekly usage-limit window (mirrors the 5H block above it). The weekly
-        // is the constraint that resets slowest, so surface it alongside the 5H.
-        this._weekPct = $el('span', { class: 'claude-reset', text: '—' });
-        this._weekFill = $el('span', { class: 'bar-fill' });
         this._weekSub = $el('div', { class: 'claude-sub', text: '—' });
         this._spark = $el('canvas', { class: 'claude-spark', width: 240, height: 34 });
         this._series = new Array(30).fill(0);
@@ -536,136 +560,562 @@ class ClaudeUsageWidget extends Widget {
         this._sessList = $el('div', { class: 'claude-sess-list' });
         this._sessHead.style.display = 'none';
         this._sessList.style.display = 'none';
-        this._mountStructure();
-        // Kept so a source switch can relabel the gauges without rebuilding
-        // the subtree the sparkline lives in.
-        this._headL = this.body.querySelector('.claude-head .claude-head-l');
         // The widget is the teaser; the full usage dashboard lives in the
         // manager view's USAGE pane. app.js listens for this event.
-        this.body.classList.add('claude-clickable');
-        this.body.title = 'Open the usage dashboard';
-        this.body.addEventListener('click', () =>
-            window.dispatchEvent(new CustomEvent('soa:open-usage')));
-    }
-
-    // Assemble the persistent DOM. Re-callable: a 404/sandbox tick swaps in a
-    // note (detaching these nodes), so _render re-mounts before updating them.
-    _mountStructure() {
-        this._headL = $el('span', { class: 'claude-head-l', text: '5H WINDOW' });
-        this._weekHeadL = $el('span', { class: 'claude-head-l', text: 'WEEKLY' });
-        this._weekHead = $el('div', { class: 'claude-head claude-head-week' }, [this._weekHeadL, this._weekPct]);
-        this._weekBar = $el('div', { class: 'bar claude-bar' }, [this._weekFill]);
-        this.body.replaceChildren(
-            this._srcRow,
-            $el('div', { class: 'claude-head' }, [this._headL, this._reset]),
-            $el('div', { class: 'bar claude-bar' }, [this._fill]),
-            this._sub,
-            this._weekHead,
-            this._weekBar,
-            this._weekSub,
+        this._more = $el('button', {
+            class: 'usage-more', type: 'button', text: 'OPEN DASHBOARD ↗',
+            onclick: (e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('soa:open-usage')); },
+        });
+        this._status = $el('div', { class: 'usage-status', role: 'status' });
+        this._quotaDetails = $el('div', { class: 'usage-quota-details' });
+        this._detailInner = $el('div', { class: 'usage-detail-in' }, [
+            this._status, this._quotaDetails,
+            this._legA.row, this._legB.row, this._legC.row,
+            this._sub, this._weekSub,
             this._spark,
             this._burn.row, this._today.row, this._model.row,
             this._sessHead, this._sessList,
-        );
+            this._more,
+        ]);
+        this._detail = $el('div', { class: 'usage-detail' }, [this._detailInner]);
+        this._detail.id = `usage-detail-${++usagePanelSequence}`;
+        for (const c of Object.values(this._cards)) c.el.setAttribute('aria-controls', this._detail.id);
+        this._mountStructure();
+        this._paintCodexPresence();
+        this._paintOpen();
     }
 
-    /** Show or hide the second gauge — codex plans do not all have one. */
-    _setSecondGauge(on) {
-        for (const n of [this._weekHead, this._weekBar, this._weekSub]) {
-            if (n) n.style.display = on ? '' : 'none';
+    _makeCard(src) {
+        const NS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 100 100');
+        svg.setAttribute('class', 'usage-ring');
+        svg.setAttribute('aria-hidden', 'true');
+        const metrics = {};
+        for (const [key, label, radius] of [['session', '5h', 44], ['weekly', '7d', 31]]) {
+            const g = document.createElementNS(NS, 'g');
+            g.setAttribute('class', `ring none ${key === 'weekly' ? 'weekly' : ''}`);
+            g.setAttribute('data-ring', key);
+            const C = 2 * Math.PI * radius;
+            let val, proj;
+            // proj: where the session window lands at its reset if the recent
+            // pace holds. Drawn under the value arc so the arc stays the reading.
+            for (const cls of key === 'session' ? ['track', 'proj', 'val'] : ['track', 'val']) {
+                const circle = document.createElementNS(NS, 'circle');
+                for (const [k, v] of Object.entries({ cx: 50, cy: 50, r: radius, class: cls })) circle.setAttribute(k, v);
+                if (cls === 'val') {
+                    val = circle;
+                    val.setAttribute('stroke-dasharray', C);
+                    val.setAttribute('stroke-dashoffset', C);
+                }
+                if (cls === 'proj') { proj = circle; proj.setAttribute('stroke-dasharray', `0 ${C}`); }
+                g.appendChild(circle);
+            }
+            svg.appendChild(g);
+            const big = $el('span', { class: 'usage-card-big', text: '—' });
+            const period = $el('div', { class: 'usage-card-period', text: label });
+            const cap = $el('div', { class: 'usage-card-cap', text: 'Connecting' });
+            const sample = $el('div', { class: 'usage-sample' });
+            const el = $el('div', { class: 'usage-metric unknown', 'data-window': key }, [
+                $el('i', { class: 'usage-metric-dot', 'aria-hidden': 'true' }), period, big]);
+            const detailLabel = $el('span', { class: 'usage-quota-label' });
+            const detailValue = $el('span', { class: 'usage-quota-value' });
+            const detail = $el('div', { class: 'usage-quota-row', 'data-quota-window': key }, [detailLabel, detailValue, cap, sample]);
+            metrics[key] = { el, big, period, cap, sample, detail, detailLabel, detailValue, rings: { a: { g, val, proj, C } } };
+        }
+        const legend = $el('div', { class: 'usage-metrics usage-legend' }, Object.values(metrics).map(m => m.el));
+        const gauge = $el('div', { class: 'usage-gauge usage-gauge-dual' }, [svg, legend]);
+        const resetValue = $el('span', { text: '—' });
+        const resetWindow = $el('span', { class: 'usage-reset-window' });
+        const reset = $el('div', { class: 'usage-next-reset' }, [$el('span', { text: '↻', 'aria-hidden': 'true' }), resetWindow, resetValue]);
+        const name = $el('div', { class: 'usage-card-name', text: tr('widget.usage.src_' + src) });
+        const sample = $el('span', { class: 'usage-provider-status' });
+        const chevron = $el('span', { class: 'usage-chevron', text: '›', 'aria-hidden': 'true' });
+        const readout = (key, label) => {
+            const heading = $el('span', { class: 'usage-drive-label', text: label });
+            const value = $el('span', { class: 'usage-drive-value', text: '—' });
+            const unit = $el('span', { class: 'usage-drive-unit' });
+            const el = $el('div', { class: `usage-drive-${key}` }, [heading,
+                $el('div', { class: 'usage-drive-reading' }, [value, unit])]);
+            return { el, heading, value, unit };
+        };
+        const burn = readout('burn', 'Burn');
+        burn.chart = document.createElementNS(NS, 'svg');
+        for (const [key, value] of Object.entries({ class: 'usage-burn-chart', viewBox: '0 0 120 24', preserveAspectRatio: 'none', role: 'img' })) {
+            burn.chart.setAttribute(key, value);
+        }
+        burn.chartTitle = document.createElementNS(NS, 'title');
+        burn.chart.style.visibility = 'hidden';
+        burn.chart.appendChild(burn.chartTitle);
+        const baseline = document.createElementNS(NS, 'path');
+        baseline.setAttribute('d', 'M0 23.5H120');
+        baseline.setAttribute('class', 'usage-burn-baseline');
+        burn.chart.appendChild(baseline);
+        burn.bars = Array.from({ length: 12 }, (_, i) => {
+            const bar = document.createElementNS(NS, 'rect');
+            for (const [key, value] of Object.entries({ x: i * 10 + 1, y: 23, width: 7, height: 0, rx: 1, class: i === 11 ? 'current' : '' })) {
+                bar.setAttribute(key, value);
+            }
+            burn.chart.appendChild(bar);
+            return bar;
+        });
+        burn.el.appendChild(burn.chart);
+        const range = readout('range', 'Range');
+        // One row per window would triple the drive's height; three captioned
+        // columns cost a single line and keep the window names the rings use.
+        const costCell = (key, label) => {
+            const l = $el('span', { class: 'usage-cost-l usage-drive-label', text: label });
+            const v = $el('span', { class: 'usage-cost-v', text: '—' });
+            const el = $el('div', { class: 'usage-cost-cell', 'data-cost-window': key }, [l, v]);
+            return { el, l, v };
+        };
+        const costCells = { block: costCell('block', 'Cost 5h'), today: costCell('today', 'Today'), week: costCell('week', '7d') };
+        const cost = {
+            heading: $el('span', { class: 'usage-drive-label', text: 'Cost' }),
+            grid: $el('div', { class: 'usage-cost-grid' }, Object.values(costCells).map(c => c.el)),
+            single: $el('div', { class: 'usage-cost-single', text: '—' }),
+            cells: costCells,
+        };
+        cost.el = $el('div', { class: 'usage-drive-cost' }, [cost.heading, cost.grid, cost.single]);
+        const drive = $el('div', { class: 'usage-drive' }, [burn.el, range.el, cost.el]);
+        const el = $el('div', {
+            class: 'usage-card', 'data-src': src, role: 'button', tabindex: '0', 'aria-expanded': 'false',
+            title: 'Show details', onclick: () => this._toggle(src),
+            onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) this._toggle(src); } },
+        }, [$el('div', { class: 'usage-card-heading' }, [name, sample, chevron]),
+            gauge, reset, drive]);
+        return { el, name, sample, metrics, burn, range, cost, reset, resetValue, resetWindow };
+    }
+
+    _setRing(metric, pct, weekly = true) {
+        const r = metric.rings.a;
+        r.g.classList.toggle('weekly', weekly);
+        const known = Number.isFinite(pct) && pct >= 0 && pct <= 100;
+        metric.el.classList.toggle('unknown', !known);
+        r.g.classList.toggle('none', !known);
+        r.val.setAttribute('stroke-dashoffset', String(r.C * (1 - (known ? pct / 100 : 0))));
+        r.val.style.visibility = known && pct > 0 ? '' : 'hidden';
+        for (const el of [r.g, metric.el]) {
+            el.classList.toggle('hot', known && pct >= 80 && pct < 95);
+            el.classList.toggle('crit', known && pct >= 95);
         }
     }
 
-    _setSource(src) {
-        if (this._source === src) return;
-        this._source = src;
-        try { localStorage.setItem('soa_usage_source', src); } catch (_) {}
-        this._paintSrc();
+    // The session ring's faint arc runs from the current reading to where the
+    // window lands at its reset if the recent official pace holds. Past 100%
+    // it goes .over: the limit will stop the work before the window resets,
+    // the same fact Range states in time.
+    _paintProjection(card, data) {
+        const metric = card.metrics.session, r = metric.rings.a, w = data?.windows?.session;
+        const pace = data?.pace?.session, now = Date.now();
+        const ok = this._quotaFresh && data?.status !== 'unavailable' && this._limitCurrent(w) && Number.isFinite(w.resetsAt) &&
+            pace?.updatedAt === w.updatedAt && now - w.updatedAt <= 300000 && Number.isFinite(pace?.percentPerHour) &&
+            pace.percentPerHour > 0 && ['estimated', 'reset-first'].includes(pace.state);
+        const from = ok ? w.usedPercent : 0;
+        const to = ok ? Math.min(100, from + pace.percentPerHour * (w.resetsAt - now) / 3600000) : 0;
+        const len = r.C * Math.max(0, to - from) / 100;
+        r.proj.setAttribute('stroke-dasharray', `0 ${r.C * from / 100} ${len} ${r.C}`);
+        r.proj.style.visibility = len >= 1 ? '' : 'hidden';
+        r.g.classList.toggle('over', ok && from + pace.percentPerHour * (w.resetsAt - now) / 3600000 >= 100);
+        metric.el.dataset.projected = ok ? String(Math.round(to)) : '';
+    }
+
+    _mountStructure() {
+        this.body.replaceChildren(this._dials, this._detail);
+    }
+
+    _toggle(src) {
+        this._open = this._open === src ? null : src;
+        try {
+            if (this._open) localStorage.setItem('soa_usage_open', this._open);
+            else localStorage.removeItem('soa_usage_open');
+        } catch (_) {}
+        this._paintOpen();
+        // A freshly opened codex panel requests current numbers immediately.
+        if (this._open === 'codex') this._codexAt = null;
         this._series = new Array(30).fill(0);
+        this._paintDetail();
         this.tick();
     }
 
-    // The pills appear only once there is a second source to switch to, so an
-    // install that has never run codex is unchanged.
-    _paintSrc() {
-        this._srcRow.style.display = this._codexSeen ? '' : 'none';
-        for (const [k, b] of Object.entries(this._srcBtns)) b.classList.toggle('on', k === this._source);
-        if (!this._codexSeen && this._source === 'codex') this._source = 'claude';
+    _paintOpen() {
+        const open = !!this._open && (this._open !== 'codex' || this._codexSeen);
+        if (!open && this._detail.contains(document.activeElement)) {
+            this._cards[this._detail.dataset.src || 'claude'].el.focus();
+        }
+        for (const [k, c] of Object.entries(this._cards)) {
+            const on = open && this._open === k;
+            c.el.classList.toggle('open', on);
+            c.el.setAttribute('aria-expanded', on ? 'true' : 'false');
+            c.el.title = on ? 'Hide details' : 'Show details';
+        }
+        this._detail.classList.toggle('open', open);
+        this._detail.inert = !open;
+        this._detail.setAttribute('aria-hidden', String(!open));
+        this._more.tabIndex = open ? 0 : -1;
+        this._more.hidden = !window.__SOA_WEB__?._shell?._managerEnabled?.();
+        this._detail.dataset.src = this._open || '';
+        if (open) this._quotaDetails.replaceChildren(...Object.values(this._cards[this._open].metrics).map(m => m.detail));
+    }
+
+    // The codex dial appears only once there is codex to show, so an install
+    // that has never run it sees a single, wider CLAUDE dial and nothing else.
+    _paintCodexPresence() {
+        if (!this._codexSeen && (document.activeElement === this._cards.codex.el ||
+            (this._detail.dataset.src === 'codex' && this._detail.contains(document.activeElement)))) {
+            this._cards.claude.el.focus();
+        }
+        this._cards.codex.el.hidden = !this._codexSeen;
+        this._dials.classList.toggle('solo', !this._codexSeen);
+        if (this._codexChecked && !this._codexSeen && this._open === 'codex') this._open = null;
+        this._paintOpen();
     }
 
     async tick() {
+        if (this._destroyed) return;
         if (isSandbox()) { this._note(tr('widget.claude.sandbox')); return; }
-        // Ask codex once a minute while CLAUDE is on screen: it is what decides
-        // whether the switch exists at all, and a 2.5s poll of a source nobody
-        // is looking at would be work for nothing. The minute applies to the
-        // FAILING case too — on a daemon old enough not to have the endpoint
-        // this would otherwise 404 every 2.5s forever, which is the shape of
-        // background noise that makes a real error impossible to spot.
-        const now = Date.now();
-        if (this._source === 'codex' || (now - (this._codexAt || 0)) > 60000) {
-            this._codexAt = now;
-            try {
-                const { data } = await jget('/api/codex-usage');
-                this._codex = data;
-                this._codexSeen = !!(data && data.available);
-            } catch (_) { /* older backend, or no codex on this machine */ }
-        }
-        this._paintSrc();
-        if (this._source === 'codex') { this._renderCodex(this._codex); return; }
-        let data;
-        try {
-            ({ data } = await jget('/api/claude-usage'));
-        } catch (e) {
-            // The endpoint ships in a server build; before the backend restarts
-            // it 404s — show a hint rather than a scary ERR.
-            if (/\b404\b/.test(e.message)) this._note(tr('widget.claude.restart'));
-            return;
-        }
-        this._render(data);
+        // Concurrent ticks share each provider's pending request.
+        const pending = this._refreshUsage();
+        this._fetching = pending;
+        try { await pending; } finally { if (this._fetching === pending) this._fetching = null; }
     }
 
-    // A note replaces the gauges, but never the source pills: "no codex
-    // sessions yet" with no way back to CLAUDE is a dead end.
-    _note(text) {
-        this.body.replaceChildren(this._srcRow, $el('div', { class: 'widget-note', text }));
-        this._paintSrc();
+    async _refreshUsage() {
+        const now = Date.now();
+        // Coalesce per provider: a slow request must not stop the other provider
+        // from refreshing. Failures back off; successful sources poll at 2.5s.
+        await Promise.all([this._refreshQuota(), ...['claude', 'codex'].map(src => {
+            if (this._requests[src]) return this._requests[src];
+            if (this[`_${src}At`] != null && !this[`_${src}Fresh`] && now - this[`_${src}At`] < 20000) return;
+            this[`_${src}At`] = now;
+            const pending = this._readUsage(src);
+            this._requests[src] = pending;
+            return pending.finally(() => { if (this._requests[src] === pending) delete this._requests[src]; });
+        })]);
+    }
+
+    async _readUsage(src) {
+        const controller = new AbortController();
+        this._controllers.add(controller);
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        try {
+            const response = await fetch(api(`/api/${src}-usage`), {
+                credentials: 'include', cache: 'no-store', signal: controller.signal,
+            });
+            if (!response.ok) throw new Error('Usage unavailable');
+            const { data } = await response.json();
+            if (!data || typeof data !== 'object') throw new Error('Invalid usage data');
+            if (this._destroyed) return;
+            this[`_${src}`] = data;
+            this[`_${src}Fresh`] = true;
+            this._failures[src] = false;
+            if (src === 'codex') {
+                this._codexSeen = true;
+                this._codexChecked = true;
+            }
+        } catch (_) {
+            if (!this._destroyed) { this[`_${src}Fresh`] = false; this._failures[src] = true; }
+        } finally {
+            clearTimeout(timeout);
+            this._controllers.delete(controller);
+            if (!this._destroyed) this._paintUsage();
+        }
+    }
+
+    async _refreshQuota() {
+        if (this._requests.quota) return this._requests.quota;
+        if (this._quotaAt != null && !this._quotaFresh && Date.now() - this._quotaAt < 20000) return;
+        this._quotaAt = Date.now();
+        const controller = new AbortController();
+        this._controllers.add(controller);
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const pending = (async () => {
+            try {
+                const response = await fetch(api('/preview/4011/api/usage-quota'), {
+                    credentials: 'include', cache: 'no-store', signal: controller.signal,
+                });
+                if (!response.ok) throw new Error('Quota connection unavailable');
+                const body = await response.json();
+                if (body.service !== 'soa-usage-quota' || body.version !== 1 || !body.data?.claude || !body.data?.codex) {
+                    throw new Error('Invalid quota service response');
+                }
+                if (!this._destroyed) {
+                    this._quota = body.data; this._quotaFresh = true;
+                    this._codexCosts = body.costs?.codex || null;
+                }
+            } catch (_) { if (!this._destroyed) this._quotaFresh = false; }
+            finally {
+                clearTimeout(timeout); this._controllers.delete(controller);
+                if (!this._destroyed) this._paintUsage();
+            }
+        })();
+        this._requests.quota = pending;
+        try { await pending; } finally { if (this._requests.quota === pending) delete this._requests.quota; }
+    }
+
+    _paintUsage() {
+        if (!this.body.contains(this._dials)) this._mountStructure();
+        this._paintCodexPresence();
+        this._paintClaudeCard(); this._paintCodexCard(); this._paintDetail();
+        this._health.hidden = this._quotaFresh;
+        this._health.textContent = this._quotaAt == null ? 'Connecting' : 'Retrying';
+        this._pulseEl.title = 'Claude: latest API response. Codex: checked every 15 seconds. Screen refreshes every 2.5 seconds.';
+        this.root.dataset.usageStatus = this._quotaFresh ? 'ok' : 'waiting';
+    }
+
+    destroy() {
+        super.destroy();
+        for (const controller of this._controllers) controller.abort();
+        window.removeEventListener('online', this._online);
+    }
+
+    _resetText(w) {
+        if (!Number.isFinite(w?.resetsAt) || w.resetsAt <= 0) return 'Reset not reported';
+        const left = w.resetsAt - Date.now();
+        return left > 0 ? `Resets in ${_fmtDur(left)}` : 'Awaiting reset update';
+    }
+
+    _age(ts) {
+        if (!Number.isFinite(ts) || ts <= 0 || ts > Date.now() + 5000) return null;
+        const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+        return seconds < 5 ? 'just now' : seconds < 60 ? `${seconds}s ago` : `${_fmtDur(seconds * 1000)} ago`;
+    }
+
+    _limitCurrent(w) {
+        // resetsAt null = the provider reports the window with nothing in it yet.
+        return Number.isFinite(w?.usedPercent) && w.usedPercent >= 0 && w.usedPercent <= 100 &&
+            (w.resetsAt == null || w.resetsAt > Date.now());
+    }
+
+    _note(text) { this.body.replaceChildren($el('div', { class: 'widget-note', text })); }
+
+    _paintClaudeCard() { this._paintQuotaCard('claude'); }
+    _paintCodexCard() { this._paintQuotaCard('codex'); }
+
+    _paintQuotaCard(src) {
+        const card = this._cards[src], data = this._quota[src];
+        const labels = [];
+        const connected = this._quotaFresh;
+        const unavailable = !connected || data?.status === 'unavailable';
+        let anyStale = false;
+        for (const [key, metric] of Object.entries(card.metrics)) {
+            const w = data?.windows?.[key], known = this._limitCurrent(w);
+            const minutes = w?.windowMinutes;
+            const label = key === 'weekly' ? (minutes && minutes !== 10080 ? `${minutes / 1440}-day` : 'Weekly') :
+                (minutes && minutes !== 300 ? (minutes % 60 === 0 ? `${minutes / 60}-hour` : `${minutes}-minute`) : 'Session · 5h');
+            const age = this._age(w?.updatedAt || data?.updatedAt);
+            const stale = known && (unavailable || !age || Date.now() - (w.updatedAt || data.updatedAt) > 300000);
+            anyStale ||= stale;
+            const duration = minutes || (key === 'weekly' ? 10080 : 300);
+            metric.period.textContent = duration % 1440 === 0 ? `${duration / 1440}d` : duration % 60 === 0 ? `${duration / 60}h` : `${duration}m`;
+            metric.big.textContent = known ? `${Math.round(w.usedPercent)}%` : '—';
+            metric.detailLabel.textContent = label;
+            metric.detailValue.textContent = metric.big.textContent;
+            metric.cap.textContent = known ? this._resetText(w) : unavailable ? 'Unavailable' :
+                data?.status === 'waiting' ? 'Awaiting report' : data?.windowStatus?.[key] === 'expired' ? 'Awaiting update' : 'Not reported';
+            metric.sample.textContent = stale ? `Cached · ${age || 'age unknown'}` : '';
+            metric.sample.hidden = !stale;
+            metric.el.classList.toggle('stale', stale);
+            metric.rings.a.g.classList.toggle('stale', stale);
+            const via = w?.source === 'claude-oauth-usage' ? 'from Anthropic' : w?.source === 'claude-code-statusline' ? 'from Claude Code' : '';
+            metric.el.title = known ? `${label} (${key === 'session' ? 'outer' : 'inner'} ring): ${w.usedPercent.toFixed(1).replace(/\.0$/, '')}% used${via ? ', ' + via : ''}. Reported ${age || 'at an unknown time'}. ` +
+                (w.resetsAt ? `Resets ${new Date(w.resetsAt).toLocaleString()}` : 'Reset time not reported.') :
+                `${src === 'codex' ? 'Codex' : 'Claude'} does not report a current ${key === 'session' ? 'session' : 'weekly'} quota on this plan, ` +
+                `so the ${key === 'session' ? 'outer' : 'inner'} ring is empty. That is not zero usage or unlimited capacity.`;
+            this._setRing(metric, known ? w.usedPercent : null, key === 'weekly');
+            labels.push(`${label}: ${known ? Math.round(w.usedPercent) + ' percent used, ' + metric.cap.textContent : metric.cap.textContent}${stale ? ', ' + metric.sample.textContent : ''}`);
+        }
+        card.sample.textContent = !connected ? 'Offline' : data?.status === 'waiting' ? 'Waiting' : anyStale ? 'Cached' : '';
+        card.sample.hidden = !card.sample.textContent;
+        const next = Object.entries(data?.windows || {}).filter(([, w]) => this._limitCurrent(w) && Number.isFinite(w.resetsAt))
+            .sort((a, b) => a[1].resetsAt - b[1].resetsAt)[0];
+        card.resetValue.textContent = next ? _fmtDur(next[1].resetsAt - Date.now()) : '—';
+        card.resetWindow.textContent = next ? card.metrics[next[0]].period.textContent : '';
+        this._paintProjection(card, data);
+        card.reset.dataset.resetWindow = next?.[0] || '';
+        card.reset.title = next ? `Next reset: ${next[0] === 'session' ? 'session' : 'weekly'} quota in ${card.resetValue.textContent}. ${new Date(next[1].resetsAt).toLocaleString()}` : 'Next reset time not reported.';
+        card.reset.setAttribute('aria-label', card.reset.title);
+        this._paintDrive(src);
+        card.el.setAttribute('aria-label', `${card.name.textContent}. ${labels.join('. ')}. ` +
+            `${card.burn.heading.textContent}: ${card.burn.value.textContent}${card.burn.unit.textContent}. ` +
+            `${card.burn.chartTitle.textContent} ` +
+            `${card.range.heading.textContent}: ${card.range.value.textContent}. ` +
+            `${card.cost.heading.textContent}, estimated: ` +
+            Object.entries(card.cost.cells).map(([k, c]) =>
+                `${k === 'block' ? 'five hours' : k === 'today' ? 'today' : 'seven days'} ${c.v.textContent.replace('≈', 'about ')}`).join(', ') + '. ' +
+            'Show usage details.');
+    }
+
+    _burnHistory(src) {
+        const activity = this[`_${src}`];
+        const series = activity?.series;
+        const fresh = this[`_${src}Fresh`] && activity?.available !== false && activity?.hasData &&
+            Number.isFinite(activity?.updatedAt) && Math.abs(Date.now() - activity.updatedAt) < 15000;
+        const valid = fresh && Array.isArray(series) && series.length >= 1 && activity.seriesMinutes === series.length &&
+            Number.isFinite(series.at(-1)) && series.at(-1) >= 0;
+        return valid ? series.slice(-12).map(n => Number.isFinite(n) && n >= 0 ? n : null) : null;
+    }
+
+    // Both providers price local records. Account quota remains a separate,
+    // official reading; API-equivalent dollars are never subscription charges.
+    _costFor(src, activity) {
+        const NONE = { block: null, today: null, week: null };
+        if (src === 'codex') {
+            const data = this._codexCosts, age = Date.now() - data?.updatedAt;
+            const fresh = this._quotaFresh && data?.available && data.status === 'ready' &&
+                data.basis === 'standard-api-equivalent' && Number.isFinite(age) && age >= -5000 && age <= 15000;
+            const cells = { ...NONE }, partial = {}, details = {};
+            const basis = 'Estimated USD at Standard API prices for tokens recorded on this device; not subscription charges.';
+            const labels = { block: data?.blockBasis === 'quota-window' ? 'Current 5-hour quota window' : 'Last 5 hours',
+                today: 'Today, since local midnight', week: 'Last 7 days' };
+            for (const key of Object.keys(cells)) {
+                const w = data?.windows?.[key];
+                if (fresh && Number.isFinite(w?.cost) && w.cost >= 0) cells[key] = w.cost;
+                partial[key] = !!w?.partial;
+                details[key] = `${labels[key]}: ${cells[key] === null ? 'unavailable' : `≈${_fmtUsd(cells[key])}`}. ${basis}` +
+                    (w?.unpriced ? ` ${w.unpriced} responses have no published rate or usable token count and are excluded (*).` : '') +
+                    (data?.unreadableFiles ? ' Some local records could not be read (*).' : '');
+            }
+            return { heading: 'Cost', mode: 'grid', cells, partial, details,
+                hot: cells.block !== null && cells.block >= HOT_COST.block,
+                title: fresh ? basis : data?.status === 'indexing' ? 'Reading local Codex usage records…' : 'Codex cost data unavailable. Retrying.' };
+        }
+        const b = activity?.block, today = activity?.today, week = activity?.week;
+        const live = !!(b && b.active && Number.isFinite(b.cost));
+        const cells = {
+            // Outside a live block the 5-hour figure is stale, not zero — say
+            // nothing rather than imply the window was free.
+            block: live ? b.cost : null,
+            today: Number.isFinite(today?.cost) ? today.cost : null,
+            week: Number.isFinite(week?.cost) ? week.cost : null,
+        };
+        if (cells.block === null && cells.today === null && cells.week === null) {
+            return { heading: 'Cost', mode: 'grid', cells: NONE, hot: false,
+                title: 'No usage records on this device yet, so there is nothing to price.' };
+        }
+        return {
+            heading: 'Cost', mode: 'grid', cells, hot: live && b.cost >= HOT_COST.block,
+            title: [
+                'Estimated from the token records on this device at API list prices. This is NOT a bill — a subscription does not charge these amounts, and other devices are not counted.',
+                live ? `This 5-hour block: ≈${_fmtUsd(b.cost)}${Number.isFinite(b.projectedCost) ? `, on track for ≈${_fmtUsd(b.projectedCost)} by its reset` : ''}.`
+                     : 'No 5-hour block is active right now, so 5H is blank.',
+                Number.isFinite(today?.cost) ? `Today, since midnight: ≈${_fmtUsd(today.cost)}.` : '',
+                Number.isFinite(week?.cost) ? `Last 7 days: ≈${_fmtUsd(week.cost)}.` : '',
+            ].filter(Boolean).join(' '),
+        };
+    }
+
+    _paintDrive(src) {
+        const card = this._cards[src], activity = this[`_${src}`], quota = this._quota[src];
+        // Each collector bucket covers one minute. The last bucket is the
+        // live sixty-second rate, never a lifetime/block-average fallback.
+        const history = this._burnHistory(src);
+        const burn = history?.at(-1) ?? null;
+        card.burn.value.textContent = burn === null ? '—' : `${activity.partialHistory && burn > 0 ? '≈' : ''}${_fmtTok(burn)}`;
+        card.burn.unit.textContent = burn === null ? '' : ' tok/min';
+        card.burn.el.title = burn === null ? 'Current token activity is unavailable.' :
+            'Burn, 1-minute average: recorded tokens in the last 60 seconds on this device. Includes input, output and cache tokens. Refreshes every 2.5 seconds as usage records arrive.' +
+            (activity.partialHistory ? ' Some local history is incomplete; this rate is approximate.' : '');
+
+        // A shared, zero-based scale makes equal-height bars comparable
+        // across providers. Missing buckets remain gaps, never made-up zeros.
+        const all = [this._burnHistory('claude'), this._burnHistory('codex')].flatMap(h => h || []).filter(n => n !== null);
+        const peak = Math.max(0, ...all);
+        const magnitude = 10 ** Math.floor(Math.log10(peak || 1));
+        const ceiling = [1, 2, 5, 10].map(n => n * magnitude).find(n => n >= peak) || magnitude * 10;
+        card.burn.chart.dataset.scale = String(ceiling);
+        card.burn.chart.style.visibility = history ? '' : 'hidden';
+        card.burn.chartTitle.textContent = history ? `${history.length} min · 1-min bars · shared scale 0–${_fmtTok(ceiling)} tok/min` : 'Burn history unavailable';
+        card.burn.chart.setAttribute('aria-label', card.burn.chartTitle.textContent);
+        card.burn.bars.forEach((bar, i) => {
+            const n = history?.[i - (12 - history.length)] ?? null;
+            const height = n === null ? 0 : 22 * n / ceiling;
+            bar.setAttribute('height', String(height));
+            bar.setAttribute('y', String(23 - height));
+            bar.dataset.tokens = n === null ? '' : String(n);
+        });
+
+        const windows = this._quotaFresh && quota?.status !== 'unavailable' ? Object.entries(quota?.windows || {})
+            .filter(([, w]) => this._limitCurrent(w) && this._age(w.updatedAt) && Date.now() - w.updatedAt <= 300000)
+            .map(([key, w]) => ({ key, w, pace: quota.pace?.[key] })) : [];
+        const usable = windows.filter(({ w, pace }) => pace?.updatedAt === w.updatedAt && Number.isFinite(pace?.remainingMs) && pace.remainingMs >= 0 &&
+            ['limited', 'estimated', 'reset-first'].includes(pace.state));
+        const beforeReset = usable.filter(({ pace }) => pace.state !== 'reset-first');
+        const choice = (beforeReset.length ? beforeReset : usable).sort((a, b) => a.pace.remainingMs - b.pace.remainingMs)[0];
+        const trend = !windows.length ? 'unknown' : windows.every(({ pace }) => pace?.state === 'steady') ? 'steady' : 'warming';
+        card.range.heading.textContent = 'Range';
+        card.range.value.textContent = '—';
+        card.range.el.title = !windows.length ? 'No current quota reading is available to estimate range.' :
+            trend === 'steady' ? 'The reported percentage has not moved. An unchanged percentage cannot establish unlimited range.' :
+            'Range uses up to 10 minutes of official quota changes, with at least 2 minutes of observations.';
+        card.range.el.dataset.state = choice?.pace.state || trend;
+        card.range.el.dataset.rangeWindow = choice?.key || '';
+        if (choice) {
+            const { key, w, pace } = choice;
+            const windowName = key === 'weekly' ? 'Weekly' : w.windowMinutes === 300 ? '5h' : `${w.windowMinutes / 60}h`;
+            card.range.value.textContent = pace.state === 'limited' ? 'At limit' : pace.state === 'reset-first' ? 'Reset first' :
+                pace.remainingMs < 60000 ? '≈ <1m' : `≈ ${_fmtDur(pace.remainingMs)}`;
+            card.range.el.title = pace.state === 'limited' ? `${windowName} quota is at 100% in the latest report.` :
+                `${windowName} quota only. Estimated time to 100% at the recent pace, based on ${Math.round(pace.sampledMs / 60000)} minutes of official account readings. ` +
+                (pace.state === 'reset-first' ? 'This quota resets before the projected limit.' : 'The estimate changes with your usage.') +
+                (Number.isFinite(pace.percentPerHour) ? ` Recent consumption: ${pace.percentPerHour.toFixed(1)} percentage points/hour.` : '');
+        }
+
+        const money = this._costFor(src, activity);
+        card.cost.heading.textContent = money.heading;
+        card.cost.el.title = money.title;
+        card.cost.el.dataset.cost = money.mode;
+        card.cost.single.textContent = money.single || '—';
+        for (const [key, cell] of Object.entries(card.cost.cells)) {
+            const n = money.cells[key];
+            cell.v.textContent = n === null || n === undefined ? '—' : `≈${_fmtUsdTight(n)}${money.partial?.[key] ? '*' : ''}`;
+            cell.el.title = money.details?.[key] || money.title;
+            cell.el.classList.toggle('unknown', n === null || n === undefined);
+            // Same threshold the push watchdog and the TOP SESSIONS highlight
+            // use, so all three agree on "leaning hard on the model".
+            cell.el.dataset.state = key === 'block' && money.hot ? 'hot' : '';
+        }
+    }
+
+    // ── the detail panel (one source at a time) ────────────────────────
+    _paintDetail() {
+        if (!this._open || this._detail.inert) return;
+        const fresh = this._open === 'codex' ? this._codexFresh : this._claudeFresh;
+        this._status.textContent = fresh ? '' : 'Offline · cached data';
+        if (this._open === 'codex') { this._renderCodex(this._codex); return; }
+        if (this._claude) this._render(this._claude);
     }
 
     _render(d) {
-        // A prior note tick may have detached the structure — re-mount it.
-        if (!this.body.contains(this._reset)) this._mountStructure();
-        this._headL.textContent = '5H WINDOW';
-        this._weekHeadL.textContent = 'WEEKLY';
-        this._setSecondGauge(true);
         const b = d.block || {};
+        this._legA.l.textContent = 'QUOTA SOURCE';
+        this._legB.l.textContent = '7-DAY TOKENS';
+        this._legC.l.textContent = 'LOCAL WINDOW';
+        this._legC.row.style.display = '';
+        this._legB.row.style.display = '';
+        this._reset.textContent = 'Claude Code · official';
+        this._reset.classList.remove('warn');
         if (b.active) {
-            this._reset.textContent = tr('widget.claude.resets', { t: _fmtDur(b.remainingMs) });
-            this._reset.classList.toggle('warn', b.remainingMs < 20 * 60000);
-            this._fill.style.width = `${Math.min(100, b.pct || 0)}%`;
-            this._sub.textContent = `${_fmtTok(b.tokens.total)} ${tr('widget.claude.tok')} · ${b.requests} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
-            this._burn.v.textContent = `${_fmtTok(b.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
+            this._legC.v.textContent = `Ends in ${_fmtDur(b.remainingMs)}`;
+            this._sub.textContent = `Local 5h activity: ${_fmtTok(b.tokens?.total)} ${tr('widget.claude.tok')} · ${b.requests || 0} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
+            const recent = Date.now() - (b.lastTs || 0) < 10 * 60000;
+            this._burn.v.textContent = `${_fmtTok(recent ? b.burnRatePerMin : 0)} ${tr('widget.claude.tokmin')}`;
         } else {
-            this._reset.textContent = tr('widget.claude.idle');
-            this._reset.classList.remove('warn');
-            this._fill.style.width = '0%';
+            this._legC.v.textContent = '—';
             this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
             this._burn.v.textContent = '0 ' + tr('widget.claude.tokmin');
         }
-        // Weekly window — the slow-reset ceiling. No server-side pct (the local
-        // engine has no cap), so estimate against WEEK_LIMIT_USD; tok+cost exact.
         const wk = d.week || {};
         const wkCost = wk.cost || 0;
-        const wkTok = (wk.tokens && wk.tokens.total) || 0;
-        const wkPct = Math.min(100, Math.round((wkCost / WEEK_LIMIT_USD) * 100));
-        this._weekPct.textContent = `${wkPct}% used`;
-        this._weekPct.classList.toggle('warn', wkPct >= 80);
-        this._weekFill.style.width = `${wkPct}%`;
-        this._weekFill.classList.toggle('hot', wkPct >= 80);
-        this._weekSub.textContent = `${_fmtTok(wkTok)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(wkCost)}`;
+        const wkTok = wk.tokens?.total;
+        this._weekPct.textContent = Number.isFinite(wkTok) ? wkTok.toLocaleString('en-US') : 'Not reported';
+        this._weekPct.classList.remove('warn');
+        this._weekSub.textContent = `7-day API estimate: ≈${_fmtUsd(wkCost)}`;
+        this._weekSub.style.display = '';
         const today = d.today || { tokens: { total: 0 }, cost: 0 };
-        this._today.v.textContent = `${_fmtTok(today.tokens.total)} · ≈${_fmtUsd(today.cost)}`;
+        this._today.v.textContent = `${_fmtTok(today.tokens?.total)} · ≈${_fmtUsd(today.cost)}`;
         const top = (d.models || [])[0];
-        if (top) {
+        if (top && top.tokens > 0) {
             const totAll = (d.models || []).reduce((s, m) => s + m.tokens, 0) || 1;
             const share = Math.round((top.tokens / totAll) * 100);
             this._model.v.textContent = `${top.tier} ${share}%`;
@@ -721,40 +1171,34 @@ class ClaudeUsageWidget extends Widget {
 
     // ── CODEX ───────────────────────────────────────────────────────────
     //
-    // The shape is the CLAUDE view's, but almost nothing here is inferred. The
-    // gauges are the limit windows the API reports back to codex — used
-    // percent, window length and reset time — so they are the real ceiling
-    // rather than a calibration guess, and a plan with only one window simply
-    // shows one gauge. TODAY is exact too: the transcripts carry a running
-    // per-thread total, so a day is one subtraction rather than a sum over
-    // records nobody read. What is missing is money, deliberately: there is no
-    // published rate for the model this runs, and a made-up one in a column
-    // labelled "≈" would be worse than an empty column.
+    // The limit windows are those reported by Codex. A plan with one window
+    // only shows that window; an absent limit is never drawn as zero. The transcripts
+    // carry a running per-thread total, so a day is one subtraction rather
+    // than a sum over records nobody read. What is missing is money,
+    // deliberately: there is no published rate for the model this runs, and a
+    // made-up one in a column labelled "≈" would be worse than an empty column.
     _renderCodex(d) {
-        if (!this.body.contains(this._reset)) this._mountStructure();
-        this._paintSrc();
-        if (!d || !d.available) { this._note(tr('widget.usage.codex_none')); return; }
-        const lim = d.limits || {};
-        const gauge = (headL, pctEl, fillEl, subEl, l, sub) => {
-            headL.textContent = l ? l.label : 'LIMIT';
-            pctEl.textContent = l && l.remainingMs
-                ? tr('widget.claude.resets', { t: _fmtDur(l.remainingMs) })
-                : (l ? `${Math.round(l.usedPercent)}%` : '—');
-            pctEl.classList.toggle('warn', !!l && l.usedPercent >= 80);
-            fillEl.style.width = `${l ? Math.min(100, l.usedPercent) : 0}%`;
-            fillEl.classList.toggle('hot', !!l && l.usedPercent >= 80);
-            subEl.textContent = sub;
-        };
-        const plan = (d.planType || '').replace(/_/g, ' ');
-        gauge(this._headL, this._reset, this._fill, this._sub, lim.primary,
-            lim.primary
-                ? `${Math.round(lim.primary.usedPercent)}% used · ${plan || tr('widget.usage.codex_limit')}`
-                : tr('widget.usage.codex_limit'));
-        this._setSecondGauge(!!lim.secondary);
-        if (lim.secondary) {
-            gauge(this._weekHeadL, this._weekPct, this._weekFill, this._weekSub, lim.secondary,
-                `${Math.round(lim.secondary.usedPercent)}% used`);
+        if (!d || !d.available) {
+            this._legA.l.textContent = 'CODEX'; this._reset.textContent = tr('widget.usage.codex_none');
+            this._legB.row.style.display = 'none';
+            this._legC.row.style.display = 'none';
+            this._legC.v.textContent = '—';
+            this._sub.textContent = '—'; this._weekSub.style.display = 'none';
+            this._burn.v.textContent = '—'; this._today.v.textContent = '—'; this._model.v.textContent = '—';
+            this._renderCodexSessions({ sessions: [] });
+            this._series = new Array(30).fill(0); this._paintSpark();
+            return;
         }
+        this._legA.l.textContent = 'QUOTA SOURCE';
+        this._reset.textContent = 'Codex · official';
+        this._reset.classList.remove('warn');
+        this._legB.row.style.display = 'none';
+        this._legC.row.style.display = 'none';
+        const cq = this._quota.codex;
+        this._sub.textContent = (this._quotaFresh && cq?.available && !cq.windows?.session && cq.windows?.weekly)
+            ? 'Codex has supplied only weekly usage. Its five-hour quota is not currently available. This does not mean zero usage or unlimited capacity.'
+            : 'Account quotas refresh every 15 seconds through Codex. Token activity below comes from local logs.';
+        this._weekSub.style.display = 'none';
         this._burn.v.textContent = `${_fmtTok(d.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
         // Tokens in, tokens out — both exact, both from the cumulative
         // counters. Not a request count: see requestsSeen in codexUsage.js for
@@ -804,14 +1248,19 @@ class ClaudeUsageWidget extends Widget {
         }));
     }
 
-    onLangChange() { /* labels refresh on next tick */ }
+    onLangChange() {
+        for (const [k, c] of Object.entries(this._cards)) c.name.textContent = tr('widget.usage.src_' + k);
+        if (this._claudeFresh) this._paintClaudeCard(this._claude);
+        if (this._codexFresh && this._codexSeen) this._paintCodexCard(this._codex);
+        this._paintDetail();
+    }
 
     _paintSpark() {
         const c = this._spark, ctx = c.getContext('2d');
         const w = c.width, h = c.height;
         ctx.clearRect(0, 0, w, h);
         const n = this._series.length;
-        if (!n) return;
+        if (n < 2) return;
         const max = Math.max(1, ...this._series);
         // Filled area + line, Tron accent.
         ctx.beginPath();
@@ -1453,22 +1902,142 @@ class MobileQRWidget extends Widget {
                     : [],
             ),
             $el('div', { class: 'mqr-actions' }, actions),
+            this._passwordRow(),
             snap && snap.error ? $el('div', { class: 'mqr-err', text: snap.error }) : '',
         );
     }
 
+    /**
+     * The pairing password, right under the QR that hands out the token.
+     *
+     * The QR encodes a bearer URL: whoever ends up holding it holds the shell.
+     * A password is the one thing that URL cannot carry, so a screenshot, a
+     * stale bookmark or a phone that changed hands stops being enough on its
+     * own. Off by default; the desktop on this machine is never asked for it.
+     */
+    _passwordRow() {
+        const pw = this._pw;
+        // Absent until the first poll — and on a backend too old to have the
+        // endpoint, absent for good. Render nothing rather than a dead control.
+        if (!pw) return '';
+
+        const err = (msg) => {
+            this._pwError = msg;
+            const box = this.body.querySelector('.mqr-pw-err');
+            if (box) { box.textContent = msg || ''; box.hidden = !msg; }
+        };
+
+        if (this._pwEditing) {
+            const input = $el('input', {
+                class: 'mqr-pw-input', type: 'password', placeholder: 'new password (4+ characters)',
+                autocomplete: 'new-password', spellcheck: 'false',
+                onkeydown: (e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); save(); }
+                    if (e.key === 'Escape') { this._pwEditing = false; this._pwError = null; this._render(this._lastState, this._lastSnap); }
+                },
+            });
+            const save = async () => {
+                const value = input.value;
+                try {
+                    const { data } = await jpost('/api/pair/password', { password: value });
+                    this._pw = { enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login };
+                    this._pwEditing = false;
+                    this._pwError = null;
+                    this._render(this._lastState, this._lastSnap);
+                } catch (e) {
+                    // 400 = the server's own rule (too short). Anything else is
+                    // a transport problem, and saying "wrong" would be a lie.
+                    err(/^400/.test(e.message) ? 'Too short — use at least 4 characters.' : 'Could not reach the daemon.');
+                }
+            };
+            // The widget re-renders every 6s; that would wipe what is being
+            // typed, so tick() holds off while _pwEditing is set.
+            setTimeout(() => { try { input.focus(); } catch (_) {} }, 0);
+            return $el('div', { class: 'mqr-pw mqr-pw-editing' }, [
+                $el('div', { class: 'mqr-pw-label', text: 'PAIRING PASSWORD' }),
+                input,
+                $el('div', { class: 'mqr-pw-actions' }, [
+                    $el('button', { class: 'mqr-toggle', text: 'SAVE', onclick: save }),
+                    $el('button', {
+                        class: 'mqr-toggle', text: 'CANCEL',
+                        onclick: () => { this._pwEditing = false; this._pwError = null; this._render(this._lastState, this._lastSnap); },
+                    }),
+                ]),
+                $el('div', { class: 'mqr-pw-err', text: this._pwError || '', hidden: this._pwError ? null : '' }),
+                $el('div', { class: 'mqr-note', text: 'Asked once per device on any remote (tunnel) connection. This desktop is never asked. Changing it signs every other device out.' }),
+            ]);
+        }
+
+        const remove = async () => {
+            try {
+                const { data } = await jpost('/api/pair/password', { clear: true });
+                this._pw = { enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login };
+                this._render(this._lastState, this._lastSnap);
+            } catch (_) { err('Could not reach the daemon.'); }
+        };
+
+        return $el('div', { class: `mqr-pw ${pw.enabled ? 'mqr-pw-on' : 'mqr-pw-off'}` }, [
+            $el('span', { class: 'mqr-pw-state', text: pw.enabled ? 'PASSWORD ON' : 'PASSWORD OFF' }),
+            // Carried here too, not just in the editor: a REMOVE that fails to
+            // reach the daemon must say so rather than look like it worked.
+            $el('div', { class: 'mqr-pw-err', text: '', hidden: '' }),
+            $el('button', {
+                class: 'mqr-toggle',
+                text: pw.enabled ? 'CHANGE' : 'SET',
+                onclick: () => { this._pwEditing = true; this._pwError = null; this._render(this._lastState, this._lastSnap); },
+            }),
+            pw.enabled ? $el('button', { class: 'mqr-toggle mqr-off', text: 'REMOVE', onclick: remove }) : '',
+            // Login mode: the way back in after a dropped link with no QR at
+            // hand — the desktop's link + this password fetch the pairing token.
+            // Off by default; it trades the second factor for that convenience.
+            pw.enabled ? $el('div', { class: 'mqr-pw mqr-pw-login' }, [
+                $el('span', { class: 'mqr-pw-state', text: pw.login ? 'PASSWORD CAN REPLACE THE QR' : 'QR + PASSWORD REQUIRED' }),
+                $el('button', {
+                    class: `mqr-toggle${pw.login ? ' mqr-off' : ''}`,
+                    text: pw.login ? 'REQUIRE QR' : 'ALLOW PASSWORD LOGIN',
+                    title: pw.login
+                        ? 'Devices will again need a QR scan (or its link) to get a pairing token.'
+                        : 'Let a phone or tablet reconnect with this desktop\'s link + the password alone — no QR re-scan after a dropped link.',
+                    onclick: async () => {
+                        try {
+                            const { data } = await jpost('/api/pair/password', { login: !pw.login });
+                            this._pw = { enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login };
+                            this._render(this._lastState, this._lastSnap);
+                        } catch (_) { err('Could not reach the daemon.'); }
+                    },
+                }),
+            ]) : '',
+        ]);
+    }
+
     async tick() {
         if (isSandbox()) { this._renderBackendNeeded(); return; }
+        // Never repaint over a half-typed password (the poll is every 6s).
+        if (this._pwEditing) return;
         try {
-            const { data } = await jget('/api/pair/status');
-            this._render(data.state, data);
+            const [status, pw] = await Promise.all([
+                jget('/api/pair/status'),
+                jget('/api/pair/password').catch(() => null),   // older backend: just hide the row
+            ]);
+            if (pw && pw.data) this._pw = { enabled: !!pw.data.enabled, updatedAt: pw.data.updatedAt || null, login: !!pw.data.login };
+            this._render(status.data.state, status.data);
         } catch (e) { /* ignore polling failures */ }
     }
 
     _renderBackendNeeded() {
+        // No backend to show a QR FOR — but this browser can still scan one.
+        const scan = $el('button', {
+            class: 'widget-btn',
+            text: MQR_SCAN_LABEL[_mqrLang()] || MQR_SCAN_LABEL.en,
+            onclick: () => import('/assets/pairScan.js?v=pair-scan-20260930').then(m => m.openPairSheet()).catch(() => {}),
+        });
         this.body.replaceChildren(
             $el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') }),
+            scan,
         );
+        import('/assets/pairScan.js?v=pair-scan-20260930')
+            .then((m) => { if (!m.cameraLikely()) scan.remove(); })
+            .catch(() => scan.remove());
     }
 
     async _start() {
@@ -1510,44 +2079,171 @@ class MobileQRWidget extends Widget {
 }
 
 // ── WORLD VIEW (globe) ───────────────────────────────────────────────────
-// Ports desktop/src/classes/locationGlobe.class.js to the browser. The
-// encom-globe bundle is ~1MB and needs THREE + a ~1MB grid.json tile mesh,
-// so we load all three lazily the first time this widget mounts and share
-// them across any future mounts. Polls /api/geo for the server's public
-// lat/lon and drops a single pin there.
-let _globeAssetsPromise = null;
-function _loadScript(src) {
-    return new Promise((resolve, reject) => {
-        const existing = document.querySelector(`script[data-src="${src}"]`);
-        if (existing) { existing.addEventListener('load', resolve); existing.addEventListener('error', reject); return; }
-        const s = document.createElement('script');
-        s.src = src; s.async = false;
-        s.dataset.src = src;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error('failed to load ' + src));
-        document.head.appendChild(s);
+// Original ENCOM animation with owned WebGL resources and a static fallback.
+
+// ── ACCOUNT: the optional cloud account ("find my desktop") ───────────────
+// Off until a Supabase project is configured; then a sign-in; then the daemon
+// keeps ONE row per install current with its doors (tunnel URL, LAN URLs,
+// pairing token) so a phone signed in to the same account can find this
+// desktop when the QR and the tunnel are both gone. The pairing PASSWORD is
+// never published. Server: server/src/cloudAccount.js · schema:
+// deploy/supabase/soa_instances.sql · design: docs/cloud-account.md.
+async function postJson(url, body) {
+    const r = await fetch(api(url), {
+        method: 'POST', credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body || {}),
     });
+    const j = await r.json().catch(() => null);
+    return j || { ok: false, error: `HTTP ${r.status}` };
 }
-async function _loadGlobeAssets() {
-    if (_globeAssetsPromise) return _globeAssetsPromise;
-    _globeAssetsPromise = (async () => {
-        // three.js first (encom expects window.THREE). Pinned to r77 — the
-        // last version whose API surface encom-globe targets (the fork predates
-        // three's ES-modules transition and expects the globals namespace).
-        // Hosted locally under /assets/vendor/ so COEP: credentialless doesn't
-        // need a CORP header from a CDN — one less failure mode in production.
-        if (!window.THREE) {
-            await _loadScript('/assets/vendor/three.min.js?v=12');
+
+class CloudAccountWidget extends Widget {
+    constructor({ parent }) {
+        super({ titleKey: 'widget.account', helpKey: 'acct.help', parent, intervalMs: 15000 });
+        this._st = null;
+        this._mode = null;
+        this._authMode = 'signin';
+        this._draft = {};
+        this._err = null;
+        this._busy = false;
+        this._render();
+    }
+
+    onLangChange() { this._render(); }
+
+    async tick() {
+        if (this._destroyed || this._busy || this._mode) return;
+        if (isSandbox()) { this.body.replaceChildren($el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') })); return; }
+        try {
+            const st = await jget('/api/cloud/status');
+            if (this._destroyed || this._busy || this._mode) return;
+            const formUnchanged = this.body.querySelector('form') && st.configured === this._st?.configured
+                && st.signedIn === this._st?.signedIn && st.url === this._st?.url;
+            this._st = st;
+            if (!formUnchanged) this._render();
+        } catch (e) {
+            if (this._destroyed || this._st) return;
+            this._err = String(e.message).startsWith('404')
+                ? 'Update or restart your desktop backend to enable accounts.'
+                : 'Cannot reach your desktop. Retry when it is online.';
+            this._render();
         }
-        if (!window.ENCOM || !window.ENCOM.Globe) {
-            await _loadScript('/assets/vendor/encom-globe.js?v=12');
+    }
+
+    async _do(url, body) {
+        if (this._busy || this._destroyed) return;
+        this._busy = true; this._err = null;
+        this.body.setAttribute('aria-busy', 'true');
+        this.body.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        try {
+            const j = await postJson(url, body);
+            if (!j.ok) this._err = j.error || 'Please try again.';
+            else {
+                this._st = j; this._mode = null;
+                if (url === '/api/cloud/config') this._draft = {};
+                if (j.signedIn || j.pending) this._draft.password = '';
+                if (j.pending) this._authMode = 'signin';
+                if (j.message) this._err = 'Check your email to confirm your account, then sign in.';
+            }
+        } catch (_) { this._err = 'Could not reach your desktop. Try again.'; }
+        this._busy = false;
+        this.body.removeAttribute('aria-busy');
+        if (this._destroyed) return;
+        this._render();
+        clearTimeout(this._afterAction);
+        this._afterAction = setTimeout(() => this.tick(), 1500);
+    }
+
+    destroy() {
+        clearTimeout(this._afterAction);
+        this._draft = {};
+        super.destroy();
+    }
+
+    _input(name, attrs) {
+        return $el('input', { class: 'mqr-pw-input acct-input', name, value: this._draft[name] || '',
+            spellcheck: 'false', autocapitalize: 'off', 'aria-label': attrs.placeholder,
+            oninput: e => { this._draft[name] = e.target.value; }, ...attrs });
+    }
+
+    _render() {
+        const st = this._st;
+        const focused = this.body.contains(document.activeElement) ? document.activeElement.name : null;
+        const err = this._err ? $el('div', { class: 'mqr-pw-err acct-err', role: 'status', 'aria-live': 'polite', text: this._err }) : '';
+        const btn = (text, onclick, extra = '', attrs = {}) => $el('button', {
+            type: 'button', class: `mqr-toggle ${extra}`, text, onclick, disabled: this._busy ? true : null, ...attrs });
+        const status = (cls, text) => $el('div', { class: `mqr-status acct-status ${cls}` }, [$el('span', { class: 'mqr-dot' }), $el('span', { text })]);
+        const paint = (...children) => {
+            this.body.replaceChildren(...children.filter(Boolean));
+            if (focused) this.body.querySelector(`[name="${focused}"]`)?.focus({ preventScroll: true });
+        };
+        if (!st) {
+            paint($el('div', { class: 'widget-note', text: this._err ? 'ACCOUNT UNAVAILABLE' : 'Connecting…' }), err,
+                this._err && btn('RETRY', () => this.tick()));
+            return;
         }
-        const gridResp = await fetch('/assets/vendor/grid.json?v=12', { credentials: 'same-origin' });
-        if (!gridResp.ok) throw new Error('grid.json ' + gridResp.status);
-        const grid = await gridResp.json();
-        return { grid };
-    })();
-    return _globeAssetsPromise;
+
+        if (!st.configured || this._mode === 'project') {
+            if (this._mode !== 'project') {
+                paint(status('mqr-idle', 'SET UP ACCOUNT LOGIN'),
+                    $el('div', { class: 'mqr-note acct-note', text: 'Find this desktop from your other devices.' }),
+                    $el('div', { class: 'mqr-pw-actions' }, [btn('SET UP', () => {
+                        this._mode = 'project'; this._err = null; this._draft.url = st.url || ''; this._render();
+                    })]), err);
+                return;
+            }
+            const url = this._input('url', { type: 'url', placeholder: 'Project URL', required: true });
+            const key = this._input('anonKey', { type: 'text', placeholder: 'Publishable or anon key', autocomplete: 'off', required: true });
+            const save = e => { e.preventDefault(); this._do('/api/cloud/config', { url: url.value.trim(), anonKey: key.value.trim() }); };
+            paint($el('form', { class: 'mqr-pw mqr-pw-editing acct-form', onsubmit: save }, [
+                url, key,
+                $el('div', { class: 'mqr-pw-actions' }, [btn('SAVE', null, '', { type: 'submit' }), btn('CANCEL', () => {
+                    this._mode = null; this._err = null; this._draft.anonKey = ''; this._render();
+                })]), err,
+                $el('details', { class: 'mqr-note acct-note' }, [
+                    $el('summary', { text: 'Setup help' }),
+                    $el('p', { text: 'Create a Supabase project, run deploy/supabase/soa_instances.sql, then enter the project URL and public key. Keep email confirmation enabled.' }),
+                ]),
+            ]));
+            return;
+        }
+
+        if (!st.signedIn) {
+            const signup = this._authMode === 'signup';
+            const email = this._input('email', { type: 'email', placeholder: 'Email', autocomplete: 'username', inputmode: 'email', required: true });
+            const pw = this._input('password', { type: 'password', placeholder: 'Password', autocomplete: signup ? 'new-password' : 'current-password', minlength: signup ? 6 : 1, required: true });
+            const go = e => { e.preventDefault(); this._do('/api/cloud/signin', { email: email.value.trim(), password: pw.value, signup }); };
+            paint(status('mqr-idle', signup ? 'CREATE ACCOUNT' : 'SIGN IN'),
+                $el('form', { class: 'mqr-pw mqr-pw-editing acct-form', onsubmit: go }, [
+                    email, pw,
+                    $el('div', { class: 'mqr-pw-actions' }, [btn(signup ? 'CREATE ACCOUNT' : 'SIGN IN', null, '', { type: 'submit' }),
+                        btn(signup ? 'BACK TO SIGN IN' : 'CREATE ACCOUNT', () => { this._authMode = signup ? 'signin' : 'signup'; this._err = null; this._render(); })]),
+                    err,
+                    st.source === 'file' ? $el('details', { class: 'mqr-note acct-note' }, [
+                        $el('summary', { text: 'Account settings' }),
+                        btn('CHANGE PROJECT', () => { this._mode = 'project'; this._draft.url = st.url; this._draft.anonKey = ''; this._render(); }),
+                    ]) : '',
+                ]));
+            return;
+        }
+
+        this._draft.password = ''; this._draft.anonKey = '';
+        const lp = st.lastPublish;
+        const ago = lp ? Math.max(0, Math.round((Date.now() - lp.at) / 60000)) : null;
+        const pubText = !lp ? 'Connecting your desktop…'
+            : lp.ok ? `Synced ${ago === 0 ? 'just now' : ago + 'm ago'}` : `Sync failed: ${lp.error}`;
+        paint(status(lp && !lp.ok ? 'mqr-error' : 'mqr-online', 'SIGNED IN'),
+            $el('div', { class: 'acct-row', text: st.email || '' }),
+            $el('div', { class: `acct-row ${lp && !lp.ok ? 'acct-bad' : ''}`, text: pubText }),
+            $el('div', { class: 'mqr-pw acct-toggle' }, [
+                $el('span', { class: 'mqr-pw-state', text: 'QUICK CONNECT' }),
+                btn(st.publishToken ? 'ON' : 'OFF', () => this._do('/api/cloud/settings', { publishToken: !st.publishToken }), '',
+                    { role: 'switch', 'aria-checked': String(st.publishToken), 'aria-label': 'Connect from other devices' }),
+            ]),
+            $el('div', { class: 'mqr-pw-actions' }, [btn('SYNC', () => this._do('/api/cloud/publish', {})),
+                btn('SIGN OUT', () => this._do('/api/cloud/signout', {}), 'mqr-off')]), err);
+    }
 }
 
 class LocationGlobeWidget extends Widget {
@@ -1560,175 +2256,32 @@ class LocationGlobeWidget extends Widget {
         this._userPin = null;
         this._lastLoc = null;
         this._lastUserLoc = null;
-        this._offscreen = false;  // set by IntersectionObserver in _boot
         this._geoFails = 0;       // consecutive /api/geo failures (backoff)
         this._geoNextAt = 0;      // epoch ms before which tick() skips the fetch
         this._peerPins = new Map(); // "lat,lon" -> globe pin for each connected client
         this._peerCount = null;   // total connected clients (null until first poll)
         this._onUserLocation = e => this.setUserLocation(e.detail.lat, e.detail.lon, e.detail.name || 'You');
         window.addEventListener('soa:user-location', this._onUserLocation);
-        this._bootPromise = this._boot();
+        if (LocationGlobeWidget.disabled()) {
+            this._canvasHost.appendChild($el('div', { class: 'globe-meta', text: 'World View is turned off.' }));
+        } else {
+            this.globe = new AnimatedWorldView(tr('widget.globe'));
+            this._canvasHost.appendChild(this.globe.domElement);
+            this.globe.setActive(_widgetsActive());
+        }
     }
 
     onLangChange() { this._refreshMeta(this._lastGeo || null); }
 
-    async _boot() {
-        try {
-            const { grid } = await _loadGlobeAssets();
-            if (this._destroyed) return;
-            // Encom measures the host by offsetWidth/Height synchronously, so
-            // it must be in the DOM and painted before we instantiate.
-            await new Promise(r => requestAnimationFrame(r));
-            // destroy() can land during the await above (tab-switch / WS
-            // reconnect re-mounts the sidebar); bail before wiring up the globe,
-            // resize listener and IntersectionObserver onto a dead widget.
-            if (this._destroyed) return;
-            const w = this._canvasHost.offsetWidth || 240;
-            const h = this._canvasHost.offsetHeight || 200;
-            const tron = `rgb(${accentRGB()})`;
-            this.globe = new window.ENCOM.Globe(w, h, {
-                font: 'Fira Mono, ui-monospace, Menlo, monospace',
-                data: [],
-                tiles: grid.tiles,
-                baseColor: tron,
-                markerColor: tron,
-                pinColor: tron,
-                satelliteColor: tron,
-                scale: 1.1,
-                viewAngle: 0.630,
-                dayLength: 1000 * 45,
-                introLinesDuration: 2000,
-                introLinesColor: tron,
-                maxPins: 32,
-                maxMarkers: 32,
-            });
-            this._canvasHost.appendChild(this.globe.domElement);
-            // Clear color follows the active UI language's surface token.
-            const clearBg = (getComputedStyle(document.documentElement).getPropertyValue('--soa-bg') || '#05080d').trim() || '#05080d';
-            this.globe.init(clearBg, () => { this._tickAnim(); });
-            this._onResize = () => {
-                if (!this.globe || !this.globe.camera || !this.globe.renderer) return;
-                const c = this._canvasHost;
-                this.globe.camera.aspect = c.offsetWidth / c.offsetHeight;
-                this.globe.camera.updateProjectionMatrix();
-                this.globe.renderer.setSize(c.offsetWidth, c.offsetHeight);
-            };
-            window.addEventListener('resize', this._onResize);
-            // Decorative satellites so the globe isn't empty before /api/geo
-            // answers. Mirrors the 6-satellite constellation from the desktop
-            // app, but deterministic — no RNG so every reload looks identical.
-            const sats = [];
-            for (let i = 0; i < 2; i++) {
-                for (let j = 0; j < 3; j++) {
-                    sats.push({ lat: 50 * i - 15, lon: 120 * j - 120, altitude: 1.5 });
-                }
-            }
-            this.globe.addConstellation(sats);
-            // Pause the render loop when the globe scrolls out of the sidebar
-            // viewport (the heaviest continuous cost shouldn't run unseen).
-            try {
-                this._io = new IntersectionObserver((entries) => {
-                    const e = entries[entries.length - 1];
-                    this._offscreen = !(e && e.isIntersecting);
-                    if (!this._offscreen) this._kickAnim();
-                }, { threshold: 0.01 });
-                this._io.observe(this._canvasHost);
-            } catch (_) { this._offscreen = false; }
-        } catch (e) {
-            this._canvasHost.replaceChildren($el('div', { class: 'globe-err', text: tr('widget.globe.unavailable') + ': ' + e.message }));
-        }
-    }
-
-    // Decoration runs at decoration's frame rate. A slowly turning globe is
-    // indistinguishable at 24fps and at 60, and the terminal shares both the
-    // main thread and the GPU with it.
-    static ANIM_MS = 42;          // ~24fps
-    // And it stops entirely while the terminal is being scrolled or typed in.
-    // Nothing decorative is worth a dropped frame in the thing you are reading.
-    static YIELD_MS = 300;
-    // And it SETTLES. Measured on this install: the daemon at 2% of a core
-    // pushing 10 KB/s, and the dashboard's renderer at 26% and 736 MB — the page
-    // was spending a quarter of a core with almost nothing arriving. A three.js
-    // scene at 24fps is the largest standing cost in it, and it was running
-    // forever, by design: it yields to a gesture and then spins the entire time
-    // you are simply reading. Decoration is worth frames while you are here and
-    // nothing at all once you are not, so after this long with no interaction
-    // the loop STOPS — not a cheaper frame, no frame, and no rAF callback
-    // either. Any interaction brings it back.
-    static SETTLE_MS = 20_000;
-    // Escape hatch, matching the renderer's: localStorage.setItem('soa.globe',
-    // 'off') and reload, for anyone who would rather have the core back.
     static disabled() {
         try { return localStorage.getItem('soa.globe') === 'off'; } catch (_) { return false; }
     }
 
-    _tickAnim() {
-        this._rafId = null;
-        if (this._destroyed) return;
-        // The globe is pure decoration — don't spin a WebGL loop while the page
-        // is backgrounded or the canvas is scrolled out of view. _kickAnim
-        // restarts it when it becomes visible again.
-        if (document.hidden || this._offscreen) return;
-        // A spinning globe is the clearest thing on the page to give up when the
-        // page is not getting frames. app.js's LoadGuard publishes that as a
-        // one-word global rather than wiring an event bus through a decoration.
-        if (window.__soaLoad === 'high') { this._rafId = requestAnimationFrame(() => this._tickAnim()); return; }
-        const now = performance.now();
-        const idleFor = now - (window.__soaLastInteract || 0);
-        // Settled: stop the loop entirely and wait to be woken. _armWake costs
-        // one passive listener, against a WebGL draw every 42ms forever.
-        if (idleFor > LocationGlobeWidget.SETTLE_MS) { this._armWake(); return; }
-        const busy = idleFor < LocationGlobeWidget.YIELD_MS;
-        if (!busy && now - (this._lastFrame || 0) >= LocationGlobeWidget.ANIM_MS) {
-            this._lastFrame = now;
-            try { this.globe.tick(); } catch (_) {}
-        }
-        this._rafId = requestAnimationFrame(() => this._tickAnim());
-    }
-
-    // One-shot listeners that restart the animation on the next sign of life.
-    // Registered only while settled, removed the moment they fire, so the page
-    // is not carrying input handlers for a decoration it is not drawing.
-    _armWake() {
-        if (this._wake || this._destroyed) return;
-        const wake = () => {
-            this._disarmWake();
-            this._kickAnim();
-        };
-        this._wake = wake;
-        for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
-            window.addEventListener(ev, wake, { passive: true, capture: true, once: true });
-        }
-    }
-
-    _disarmWake() {
-        if (!this._wake) return;
-        for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
-            window.removeEventListener(ev, this._wake, { capture: true });
-        }
-        this._wake = null;
-    }
-
-    _kickAnim() {
-        if (this._destroyed || this._rafId || !this.globe) return;
-        if (document.hidden || this._offscreen) return;
-        if (LocationGlobeWidget.disabled()) return;
-        this._disarmWake();
-        this._tickAnim();
-    }
-
-    _suspend() {
-        super._suspend();
-        this._disarmWake();
-        if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
-    }
-
-    _resume() {
-        super._resume();
-        this._kickAnim();
-    }
+    _suspend() { super._suspend(); this.globe?.setActive(false); }
+    _resume() { super._resume(); this.globe?.setActive(true); }
 
     async tick() {
+        if (this._destroyed) return;
         if (isSandbox()) { this._renderSandbox(); return; }
         // Multiuser peer pins refresh every tick (~30s), independent of the geo
         // throttle below — clients connect/disconnect far more often than the
@@ -1741,6 +2294,7 @@ class LocationGlobeWidget extends Widget {
         if (this._geoNextAt && now < this._geoNextAt) return;
         try {
             const { data } = await jget('/api/geo');
+            if (this._destroyed) return;
             this._lastGeo = data;
             this._placePin(data);
             this._refreshMeta(data);
@@ -1758,8 +2312,7 @@ class LocationGlobeWidget extends Widget {
     _renderSandbox() {
         // Browser geolocation is user-gated. Don't prompt silently — render
         // a "show my location" button once, and on click request a single
-        // position, then pin it. The globe keeps spinning meanwhile so the
-        // widget looks alive even if the user never grants permission.
+        // position, then pin it. The map also works without a location grant.
         if (this._geoAttempted) return;
         if (!navigator.geolocation) { this._meta.textContent = tr('widget.globe.geo_unsupported'); return; }
         if (this._lastGeo) { this._refreshMeta(this._lastGeo); return; }
@@ -1777,6 +2330,7 @@ class LocationGlobeWidget extends Widget {
         this._geoAttempted = true;
         this._meta.textContent = tr('widget.globe.geo_pending');
         navigator.geolocation.getCurrentPosition(pos => {
+            if (this._destroyed) return;
             const geo = {
                 ip: null, city: null, region: null, country: null, org: null,
                 lat: pos.coords.latitude, lon: pos.coords.longitude,
@@ -1785,6 +2339,7 @@ class LocationGlobeWidget extends Widget {
             this._placePin(geo);
             this._refreshMeta(geo);
         }, err => {
+            if (this._destroyed) return;
             this._meta.textContent = tr('widget.globe.geo_denied');
         }, { timeout: 10_000, maximumAge: 10 * 60_000 });
     }
@@ -1795,24 +2350,19 @@ class LocationGlobeWidget extends Widget {
         if (this._lastLoc === key) return;
         try {
             if (this._pin && typeof this._pin.remove === 'function') this._pin.remove();
+            if (!this._lastUserLoc) this.globe.setFocus(geo.lat, geo.lon);
             this._pin = this.globe.addPin(geo.lat, geo.lon, geo.city || '', 1.2);
             this._lastLoc = key;
         } catch (_) { /* globe not fully ready yet */ }
     }
 
     setUserLocation(lat, lon, name) {
-        if (lat == null || lon == null || !isFinite(lat) || !isFinite(lon)) return;
+        if (lat == null || lon == null || this._destroyed) return;
+        lat = Number(lat); lon = Number(lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90) return;
         const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
         if (this._lastUserLoc === key) return;
         this._lastUserLoc = key;
-        // Update meta text below the globe with user location
-        const coord = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
-        const label = name ? `${name}  ·  ${coord}` : coord;
-        if (!this.globe) {
-            // Globe still booting — place the pin once boot resolves
-            this._bootPromise.then(() => this._placeUserPin(lat, lon, name)).catch(() => {});
-            return;
-        }
         this._placeUserPin(lat, lon, name);
     }
 
@@ -1821,6 +2371,7 @@ class LocationGlobeWidget extends Widget {
         try {
             if (this._userPin && typeof this._userPin.remove === 'function') this._userPin.remove();
             // Slightly larger pin than server location so it's visually distinct
+            this.globe.setFocus(lat, lon);
             this._userPin = this.globe.addPin(lat, lon, `▲ ${name || 'You'}`, 1.8);
         } catch (_) {}
     }
@@ -1831,10 +2382,11 @@ class LocationGlobeWidget extends Widget {
     // already marks, so we skip drawing it here). Pins are diffed by rounded
     // coord so unchanged peers aren't churned each poll.
     async _refreshPeers() {
-        if (!this.globe || this._destroyed) return;
+        if (this._destroyed) return;
         let data;
         try { ({ data } = await jget('/api/geo/peers')); }
         catch (_) { return; }
+        if (this._destroyed) return;
         const peers = (data && data.peers) || [];
         const want = new Map();
         for (const p of peers) {
@@ -1847,7 +2399,7 @@ class LocationGlobeWidget extends Widget {
             this._peerPins.delete(k);
         }
         for (const [k, p] of want) {
-            if (this._peerPins.has(k)) continue;
+            if (!this.globe || this._peerPins.has(k)) continue;
             try {
                 const label = (p.city || p.country || 'peer') + (p.count > 1 ? ` ×${p.count}` : '');
                 this._peerPins.set(k, this.globe.addPin(p.lat, p.lon, label, 1.0));
@@ -1872,19 +2424,14 @@ class LocationGlobeWidget extends Widget {
             ? `  ·  ${this._peerCount} ${tr('widget.globe.online')}`
             : '';
         this._meta.textContent = base + online;
+        this.globe?.setLabel(`${tr('widget.globe')}: ${base}${online}`);
     }
 
     destroy() {
-        if (this._rafId) cancelAnimationFrame(this._rafId);
-        // A settled globe is holding wake listeners rather than a rAF loop, so
-        // cancelling the frame alone would leave them on window forever.
-        this._disarmWake();
-        if (this._io) { try { this._io.disconnect(); } catch (_) {} this._io = null; }
-        if (this._onResize) window.removeEventListener('resize', this._onResize);
         if (this._onUserLocation) window.removeEventListener('soa:user-location', this._onUserLocation);
-        for (const pin of this._peerPins.values()) { try { if (pin && pin.remove) pin.remove(); } catch (_) {} }
         this._peerPins.clear();
-        try { if (this.globe && this.globe.domElement) this.globe.domElement.remove(); } catch (_) {}
+        this.globe?.destroy();
+        this.globe = null;
         super.destroy();
     }
 }
@@ -2281,17 +2828,19 @@ class VoiceControlWidget extends Widget {
         this.voice = new VoiceControl();
 
         if (!this.voice.supported) {
-            // Say which browsers work rather than a bare "unsupported" — iOS
-            // Safari is the common case and it genuinely has no SpeechRecognition.
             this.body.innerHTML =
                 '<div class="voice-hint voice-hint--warn">This browser has no speech recognition. ' +
-                'Chrome, Edge or desktop Safari work; iOS Safari does not.</div>';
+                'Try a browser with speech recognition, or use keyboard dictation in the terminal.</div>';
             return;
         }
 
         if (typeof VoiceCommands !== 'undefined') {
             this.cmd = new VoiceCommands({ voice: this.voice, api });
             this.cmd.onLog = (line) => this._log(line);
+            this.cmd.onShowHelp = () => {
+                if (!this._phrasesReady) this._renderPhrases();
+                if (this._phrasesSection) this._phrasesSection.open = true;
+            };
         }
 
         // Route anything the local parser can't place through the daemon's
@@ -2309,7 +2858,7 @@ class VoiceControlWidget extends Widget {
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ transcript, tabs, controls }),
             });
-            if (!r.ok) return null;
+            if (!r.ok) throw new Error('Voice interpretation unavailable: ' + r.status);
             return r.json();
         };
 
@@ -2348,7 +2897,7 @@ class VoiceControlWidget extends Widget {
 
         this._indicator = $el('div', { class: 'voice-indicator voice-indicator--off' });
         this._statusText = $el('span', { class: 'voice-status-text', text: 'Off' });
-        const status = $el('div', { class: 'voice-status' }, [this._indicator, this._statusText]);
+        const status = $el('div', { class: 'voice-status', role: 'status', 'aria-live': 'polite' }, [this._indicator, this._statusText]);
 
         this._startBtn = $el('button', { class: 'voice-btn voice-btn--start', type: 'button', text: '🎤 Listen' });
         this._stopBtn = $el('button', { class: 'voice-btn voice-btn--stop', type: 'button', text: '⏹ Stop' });
@@ -2375,6 +2924,8 @@ class VoiceControlWidget extends Widget {
         this._rateVal = $el('span', { class: 'voice-rate-value', text: Number(s.rate).toFixed(1) + '×' });
         this._modelChk = $el('input', { type: 'checkbox', class: 'voice-check' });
         this._modelChk.checked = !!s.useModel;
+        this._confirmChk = $el('input', { type: 'checkbox', class: 'voice-check' });
+        this._confirmChk.checked = s.speakConfirmations !== false;
 
         const settings = $el('details', { class: 'voice-settings' }, [
             $el('summary', { text: 'Voice settings' }),
@@ -2383,6 +2934,7 @@ class VoiceControlWidget extends Widget {
                 row('Mode', this._modeSel),
                 row('Read back', this._verbSel),
                 row('Speed', $el('div', { class: 'voice-row' }, [this._rateInput, this._rateVal])),
+                row('Confirm out loud', this._confirmChk),
                 row('Understand free speech', this._modelChk),
                 $el('div', { class: 'voice-hint' },
                     'Free speech that matches no built-in phrase is sent to Claude (Haiku) through your Claude Code login, with your open tab names and project names, to be turned into a command. Turn it off to stay on the built-in phrase list and send nothing.'),
@@ -2415,6 +2967,7 @@ class VoiceControlWidget extends Widget {
             $el('summary', { text: 'What can I say' }),
             this._phrasesBody,
         ]);
+        this._phrasesSection = phrasesSec;
         phrasesSec.addEventListener('toggle', () => {
             if (phrasesSec.open && !this._phrasesReady) this._renderPhrases();
         });
@@ -2445,8 +2998,9 @@ class VoiceControlWidget extends Widget {
     _wire() {
         this._startBtn.addEventListener('click', () => {
             if (this.voice.start()) {
-                this._startBtn.style.display = 'none';
-                this._stopBtn.style.display = '';
+                this._log(this.voice.settings.wakeMode === 'wake'
+                    ? 'Say “' + this.voice.settings.wakeWord + ', next tab” or open “What can I say”.'
+                    : 'Listening for commands. Open “What can I say” for examples.');
             }
         });
         this._stopBtn.addEventListener('click', () => {
@@ -2472,12 +3026,18 @@ class VoiceControlWidget extends Widget {
             this.voice.setRate(r);
             this._rateVal.textContent = r.toFixed(1) + '×';
         });
+        // Off → a control still runs and still logs, it just stops announcing
+        // itself. Answers you asked for ("read the output") keep speaking.
+        this._confirmChk.addEventListener('change', () => {
+            this.voice.setSpeakConfirmations(this._confirmChk.checked);
+        });
         this._modelChk.addEventListener('change', () => {
             this.voice.set('useModel', this._modelChk.checked);
             this._pushConfig({ interpret: this._modelChk.checked });
         });
 
         this.voice.onStatusChange = (st) => this._paintStatus(st);
+        this.voice.onFeedback = (line) => this._log(line);
         this.voice.onTranscript = (text, m) => {
             if (m.final) this._log('“' + text + '”');
             else this._log('… ' + text, true);
@@ -2496,6 +3056,7 @@ class VoiceControlWidget extends Widget {
         this._wakeInput.value = s.wakeWord;
         this._modeSel.value = s.wakeMode;
         this._modelChk.checked = !!s.useModel;
+        if (this._confirmChk) this._confirmChk.checked = s.speakConfirmations !== false;
     }
 
     _paintStatus(st) {
@@ -2515,6 +3076,7 @@ class VoiceControlWidget extends Widget {
         else if (st.enabled) { cls = 'ready'; text = 'Starting…'; }
         this._indicator.className = 'voice-indicator voice-indicator--' + cls;
         this._statusText.textContent = text;
+        if (this.ctx.onVoiceStatus) this.ctx.onVoiceStatus(st, text);
     }
 
     _log(line, interim, warn) {
@@ -2645,13 +3207,112 @@ class VoiceControlWidget extends Widget {
     }
 }
 
+// One voice session for the page, independent of sidebar layout/rebuilds.
+// Opening the panel only reveals controls; Listen requests the microphone.
+let _voiceToolbar = null;
+export function mountVoiceToolbar(ctx = {}) {
+    const button = document.getElementById('toggle-voice');
+    if (!button) return null;
+    if (_voiceToolbar) return _voiceToolbar;
+
+    let widget = null;
+    const panel = $el('section', {
+        id: 'voice-panel', class: 'voice-panel', role: 'dialog',
+        'aria-label': 'Voice controls', tabindex: '-1',
+    });
+    panel.hidden = true;
+    const closeBtn = $el('button', {
+        type: 'button', class: 'voice-panel-close', text: '×',
+        'aria-label': 'Close voice controls', title: 'Close voice controls (Escape)',
+    });
+    panel.appendChild(closeBtn);
+    const host = $el('div', { class: 'voice-panel-body' });
+    panel.appendChild(host);
+    panel.appendChild($el('p', { class: 'voice-hint voice-panel-hint',
+        text: 'Closing this panel keeps the mic on. Choose Stop to end listening.' }));
+    (document.getElementById('shell') || document.body).appendChild(panel);
+
+    const activity = () => {
+        if (!widget) return;
+        if (panel.hidden || document.hidden) widget._suspend();
+        else widget._resume();
+    };
+    const close = (restoreFocus = false) => {
+        panel.hidden = true;
+        button.setAttribute('aria-expanded', 'false');
+        activity();
+        if (restoreFocus) button.focus();
+    };
+    const open = () => {
+        if (!widget && !isSandbox()) {
+            widget = new VoiceControlWidget({ parent: host, ctx: { ...ctx,
+                onVoiceStatus: (st, status) => {
+                    button.dataset.state = st.enabled ? 'on' : 'off';
+                    const label = 'Voice controls — ' + (st.enabled ? status : 'microphone off');
+                    button.title = label;
+                    button.setAttribute('aria-label', label);
+                    button.querySelector('.voice-toggle-label').textContent = st.enabled ? 'VOICE ON' : 'VOICE';
+                },
+            } });
+        } else if (isSandbox()) {
+            host.textContent = 'Connect to your terminal server to use voice controls.';
+        }
+        panel.hidden = false;
+        button.setAttribute('aria-expanded', 'true');
+        activity();
+        const primary = widget?.voice?.isEnabled ? widget._stopBtn : widget?._startBtn;
+        (primary || closeBtn).focus();
+    };
+    const toggle = () => panel.hidden ? open() : close(true);
+    const outside = e => {
+        if (!panel.hidden && !panel.contains(e.target) && !button.contains(e.target)) close();
+    };
+    const keydown = e => {
+        if (!panel.hidden && e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            close(true);
+        }
+    };
+    const focusout = e => {
+        if (e.relatedTarget && !panel.contains(e.relatedTarget) && !button.contains(e.relatedTarget)) close();
+    };
+    button.addEventListener('click', toggle);
+    closeBtn.addEventListener('click', () => close(true));
+    panel.addEventListener('focusout', focusout);
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', keydown, true);
+    document.addEventListener('visibilitychange', activity);
+    _voiceToolbar = { open, close, destroy() {
+        close();
+        widget?.destroy();
+        panel.remove();
+        button.removeEventListener('click', toggle);
+        document.removeEventListener('pointerdown', outside, true);
+        document.removeEventListener('keydown', keydown, true);
+        document.removeEventListener('visibilitychange', activity);
+        _voiceToolbar = null;
+    } };
+    return _voiceToolbar;
+}
+
+class VoiceLauncherWidget extends Widget {
+    constructor({ parent, ctx }) {
+        super({ titleKey: 'widget.voice', parent, intervalMs: 0 });
+        this.body.appendChild($el('button', { type: 'button', class: 'voice-btn',
+            text: 'Open voice controls', onclick: () => ctx.voiceToolbar?.open() }));
+        this.body.appendChild($el('div', { class: 'voice-hint',
+            text: 'Also available from the microphone button at the top right.' }));
+    }
+}
+
 function _widgetRegistry() {
     return [
         { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
         { id: 'claude',    titleKey: 'widget.claude',      make: p => new ClaudeUsageWidget({ parent: p }) },
-        { id: 'installer', titleKey: 'widget.installer',   make: p => new InstallerWidget({ parent: p }) },
         { id: 'globe',     titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
         { id: 'mobile',    titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
+        { id: 'account',  titleKey: 'widget.account',     make: p => new CloudAccountWidget({ parent: p }) },
         { id: 'sysinfo',   titleKey: 'widget.system',      make: p => new SysInfoWidget({ parent: p }) },
         { id: 'device',    titleKey: 'widget.device',      make: p => new DeviceStatusWidget({ parent: p }) },
         { id: 'cpu',       titleKey: 'widget.cpu',         make: p => new CpuInfoWidget({ parent: p }) },
@@ -2664,7 +3325,9 @@ function _widgetRegistry() {
         { id: 'commits',   titleKey: 'widget.commits',     make: p => new GitCommitsWidget({ parent: p }) },
         { id: 'contribute', titleKey: 'widget.contribute', make: p => new ContributeWidget({ parent: p }) },
         { id: 'perf',      titleKey: 'widget.perf',        make: p => new PerfWidget({ parent: p }) },
-        { id: 'voice',     titleKey: 'widget.voice',       make: (p, c) => new VoiceControlWidget({ parent: p, ctx: c }) },
+        { id: 'voice',     titleKey: 'widget.voice',       make: (p, c) => new VoiceLauncherWidget({ parent: p, ctx: c }) },
+        // Last by default (2026-09-29): a setup tool, not something watched.
+        { id: 'installer', titleKey: 'widget.installer',   make: p => new InstallerWidget({ parent: p }) },
     ];
 }
 
@@ -2681,7 +3344,27 @@ function _loadLayout(key, ids) {
         if (e && known.has(e.id) && !seen.has(e.id)) { out.push({ id: e.id, on: e.on !== false }); seen.add(e.id); }
     }
     for (const id of ids) if (!seen.has(id)) out.push({ id, on: true });
-    return out;
+    return _migrateLayout(key, out);
+}
+// Default-order changes reach saved layouts once, then the user's own
+// arrangement is respected again. Each migration runs a single time per key.
+const LAYOUT_MIGRATIONS = [
+    { id: 'installer-last-20260929', apply: (l) => { const i = l.findIndex(e => e.id === 'installer'); if (i !== -1) l.push(...l.splice(i, 1)); } },
+];
+function _migrateLayout(key, layout) {
+    let done = [];
+    try { done = JSON.parse(localStorage.getItem(key + ':migrations')) || []; } catch (_) {}
+    let changed = false;
+    for (const m of LAYOUT_MIGRATIONS) {
+        if (done.includes(m.id)) continue;
+        try { m.apply(layout); } catch (_) {}
+        done.push(m.id); changed = true;
+    }
+    if (changed) {
+        try { localStorage.setItem(key + ':migrations', JSON.stringify(done)); } catch (_) {}
+        _saveLayout(key, layout);
+    }
+    return layout;
 }
 function _saveLayout(key, layout) { try { localStorage.setItem(key, JSON.stringify(layout)); } catch (_) {} }
 
@@ -2735,7 +3418,9 @@ function _composeSidebar(parent, reg, layoutKey, ctx) {
 }
 
 export function mountSidebar(parent, ctx = {}) {
-    return _composeSidebar(parent, _widgetRegistry(), SIDEBAR_LAYOUT_KEY, ctx);
+    const voiceToolbar = mountVoiceToolbar(ctx);
+    const sidebar = _composeSidebar(parent, _widgetRegistry(), SIDEBAR_LAYOUT_KEY, { ...ctx, voiceToolbar });
+    return { ...sidebar, destroy() { sidebar.destroy(); voiceToolbar?.destroy(); } };
 }
 
 // CUSTOMIZE panel — reorder (↑/↓) + show/hide each widget, applied live so the
@@ -2868,6 +3553,7 @@ function _sandboxRegistry() {
         { id: 'local',    titleKey: 'widget.local',       make: (p, c) => new LocalSetupWidget({ parent: p, onInstall: c.onInstall, onConnect: c.onConnect }) },
         { id: 'globe',    titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
         { id: 'mobile',   titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
+        { id: 'account',  titleKey: 'widget.account',     make: p => new CloudAccountWidget({ parent: p }) },
         { id: 'sysinfo',  titleKey: 'widget.system',      make: p => new SysInfoWidget({ parent: p }) },
         { id: 'device',   titleKey: 'widget.device',      make: p => new DeviceStatusWidget({ parent: p }) },
         { id: 'cpu',      titleKey: 'widget.cpu',         make: p => new CpuInfoWidget({ parent: p }) },
@@ -2884,5 +3570,7 @@ export function mountSandboxSidebar(parent, ctx = {}) {
     // path and never pokes /api/*. Same customize/reorder/hide + ⓘ machinery as
     // server mode, under its own layout key.
     (window.__SOA_WEB__ = window.__SOA_WEB__ || {})._sandbox = true;
-    return _composeSidebar(parent, _sandboxRegistry(), SANDBOX_LAYOUT_KEY, ctx);
+    const voiceToolbar = mountVoiceToolbar(ctx);
+    const sidebar = _composeSidebar(parent, _sandboxRegistry(), SANDBOX_LAYOUT_KEY, ctx);
+    return { ...sidebar, destroy() { sidebar.destroy(); voiceToolbar?.destroy(); } };
 }

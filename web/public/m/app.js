@@ -14,17 +14,22 @@
  */
 
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
-import { ansiToHtml, newState } from './ansi.js';
 import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
 import { VirtualKeyboard } from './keyboard.js';
+import { PhoneSizeClaim, colsThatFit } from './sizeClaim.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
+import { QrScanner, parsePairingPayload } from './qrscan.js';
+import { VoiceChat } from './voice-chat.js';
+import { ChatAttachments } from './chat-attachments.js';
+import { MobileFullscreen } from './fullscreen.js';
+import { SessionHistory, openHistory } from './session-history.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v57 · MEET · agent group meetings · 2026-08-20';
+const MOBILE_BUILD = 'v93.2 · android perf 2 · 2026-10-24';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -508,12 +513,11 @@ class App {
         this.kbdEl       = document.getElementById('kbd');
         this.viewEls     = Array.from(document.querySelectorAll('.view'));
         this.viewBtns    = Array.from(document.querySelectorAll('.bb-btn[data-view]'));
-        this._initHelpLongPress();   // press-and-hold any control → help overlay
         this.btnNewTab   = document.getElementById('btn-newtab');
         this.btnMic      = document.getElementById('btn-mic');
         this.btnSpeak    = document.getElementById('btn-speak');
         this.btnCamera   = document.getElementById('btn-camera');
-        this.btnFullscreen = document.getElementById('btn-fullscreen');
+        this.btnFocus = document.getElementById('btn-focus');
         this.cameraInput = document.getElementById('camera-input');
         this.btnSettings = document.getElementById('btn-settings');
         // Tab jump: a persistent chip in the top bar shows the CURRENT tab (which
@@ -650,9 +654,32 @@ class App {
         this._wireTabSheet();
         this._wireOverflow();
         this._wireIdleHide();
+        this.fullscreen = new MobileFullscreen();
 
         const { token, backend, altOrigin } = readToken();
         const primaryOrigin = backend || location.origin;
+        this._historySource = primaryOrigin;
+        let historyStorage;
+        try { historyStorage = localStorage; } catch (_) {}
+        this._history = new SessionHistory(historyStorage);
+        this._historyKeys = new Map();
+        this._chatDrafts = new Map();
+        for (const id of ['chat-history', 'reconnect-history'])
+            document.getElementById(id)?.addEventListener('click', () => this._openHistory());
+        // Saving serialises the whole on-device archive (up to ~1.4M chars) into
+        // localStorage; doing it on every typed character stalled typing on
+        // slower phones. Save shortly after typing pauses; pagehide, hidden and
+        // send still save at once.
+        this.chatInput?.addEventListener('input', () => {
+            clearTimeout(this._draftSaveT);
+            this._draftSaveT = setTimeout(() => this._saveHistory(), 600);
+        });
+        window.addEventListener('pagehide', () => this._saveHistory());
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this._saveHistory();
+            else { this._renderActive(); this._pollReplies(); }
+        });
+        this._replyTimer = setInterval(() => this._pollReplies(), 3000);
 
         if (!token) {
             // The QR/link arrived without a token. That's only fine if the
@@ -669,7 +696,7 @@ class App {
     async _bootWithoutToken(primaryOrigin, altOrigin) {
         let tokenRequired = true;
         try {
-            const res = await fetch(primaryOrigin + '/api/ping', { cache: 'no-store' });
+            const res = await fetch(primaryOrigin + '/api/ping', { cache: 'no-store', signal: AbortSignal.timeout(4000) });
             if (res.ok) {
                 const body = await res.json().catch(() => null);
                 if (body && body.tokenRequired === false) tokenRequired = false;
@@ -677,73 +704,195 @@ class App {
         } catch (_) { /* network failure → fall through to fatal */ }
 
         if (tokenRequired) {
-            this._showFatal('No session token. Re-scan the QR code on the desktop.');
+            // Not a dead end any more: the phone can re-pair from here without
+            // leaving the app. _showFatal stays for genuinely unrecoverable
+            // states; a missing token is recoverable with the camera.
+            this._showWelcome();
             return;
         }
         this._boot(primaryOrigin, altOrigin, '');
     }
 
-    // ── Full screen means "installed" ─────────────────────────────────────
-    // A web page cannot hide Safari's or Chrome's own bars, and an in-app
-    // browser (a link opened from a notification or a chat) cannot even be
-    // added to the home screen. The only route to a chromeless terminal is a
-    // one-time install, so say so — in flow under the tab strip, dismissable,
-    // and remembered. `force` re-shows it briefly (without re-arming the
-    // permanent dismissal) when the user taps fullscreen on a phone that
-    // cannot fullscreen a page, so that tap is never silent.
-    _installHint(force) {
-        const el = document.getElementById('install-hint');
-        if (!el) return;
-        // The App Store shell is already chromeless; never tell it to open Safari.
-        if (window.Capacitor) return;
+
+    // ── Pairing by camera ─────────────────────────────────────────────────
+    // The phone loses its session more often than anything else here: the
+    // tunnel rotates, the token expires, or the PWA cold-starts with storage
+    // the browser has since evicted. The old answer was "re-scan the QR on the
+    // desktop", which meant leaving the app for the system camera — and on iOS
+    // that hands the URL to Safari, a DIFFERENT storage context from the
+    // home-screen PWA, so the token landed where this app could never read it.
+    // Scanning in-app fixes both halves: same storage, and no trip outside.
+
+    /** Welcome / re-pair screen. An overlay, not an innerHTML replacement, so
+     *  the app shell underneath survives and we can connect in place. */
+    _showWelcome(message) {
+        if (this._welcomeEl) this._welcomeEl.remove();
+        const auto = this._autoScanPref();
+        const el = document.createElement('div');
+        el.className = 'welcome-overlay';
+        el.innerHTML = `
+            <div class="welcome-card">
+                <div class="welcome-title">SON OF ANTON</div>
+                <div class="welcome-sub">${escapeHtml(message || 'Scan the QR code on your desktop to connect this phone.')}</div>
+                <button class="welcome-scan" type="button">Scan QR code</button>
+                <button class="welcome-history welcome-scan" type="button">Read saved history</button>
+                <label class="welcome-auto">
+                    <input type="checkbox" ${auto ? 'checked' : ''}>
+                    <span>Open the camera automatically</span>
+                </label>
+                <details class="welcome-manual">
+                    <summary>Paste a pairing link instead</summary>
+                    <input class="welcome-url" type="url" inputmode="url" autocapitalize="off"
+                           autocorrect="off" spellcheck="false" placeholder="https://…/m/?t=…">
+                    <button class="welcome-go" type="button">Connect</button>
+                </details>
+                <div class="welcome-err" hidden></div>
+            </div>`;
+        document.body.appendChild(el);
+        this._welcomeEl = el;
+
+        const err = el.querySelector('.welcome-err');
+        this._welcomeError = (m) => {
+            err.textContent = m;
+            err.hidden = !m;
+        };
+
+        el.querySelector('.welcome-scan').addEventListener('click', () => this._openScanner());
+        el.querySelector('.welcome-history').addEventListener('click', () => this._openHistory());
+        el.querySelector('.welcome-auto input').addEventListener('change', (e) => {
+            this._autoScanPref(e.target.checked);
+        });
+        const go = () => {
+            const v = el.querySelector('.welcome-url').value.trim();
+            if (v) this._connectFromScan(v);
+        };
+        el.querySelector('.welcome-go').addEventListener('click', go);
+        el.querySelector('.welcome-url').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); go(); }
+        });
+
+        // The opt-in the user sets once: land here, camera already open. Only
+        // on a genuine cold start — never when we got here from an error, or
+        // the camera would reopen in a loop the user can't escape.
+        if (auto && !message && QrScanner.supported) {
+            setTimeout(() => this._openScanner(), 150);
+        }
+        return el;
+    }
+
+    _dismissWelcome() {
+        if (this._welcomeEl) { this._welcomeEl.remove(); this._welcomeEl = null; }
+        this._welcomeError = null;
+    }
+
+    /** Preference accessor: read with no argument, write with a boolean. */
+    _autoScanPref(next) {
+        const KEY = 'soa.m.autoscan';
+        if (next === undefined) {
+            try { return localStorage.getItem(KEY) === '1'; } catch (_) { return false; }
+        }
+        try { localStorage.setItem(KEY, next ? '1' : '0'); } catch (_) {}
+        return next;
+    }
+
+    _openScanner() {
+        if (this._scanner) this._scanner.stop();
+        this._scanner = new QrScanner({
+            onResult: (value) => this._connectFromScan(value),
+            onError: (e) => {
+                if (this._welcomeError) this._welcomeError(e.message);
+                // A camera that can't open must not leave the user stuck
+                // behind a black overlay with no way back to the paste field.
+                if (this._scanner) { this._scanner.stop(); this._scanner = null; }
+            },
+        });
+        this._scanner.start();
+    }
+
+    /**
+     * Connect to a scanned (or pasted) pairing payload WITHOUT navigating.
+     *
+     * Navigating would work, but it reloads the document — and from a
+     * home-screen PWA a cross-origin URL opens the system browser instead,
+     * which is the exact jump-out this feature exists to avoid. BridgeSocket
+     * already takes an arbitrary origin, so the honest fix is to persist the
+     * token the way readToken() would and boot the socket in place.
+     */
+    _connectFromScan(raw) {
+        const p = parsePairingPayload(raw);
+        if (!p) {
+            if (this._welcomeError) this._welcomeError('That is not a pairing code.');
+            return false;
+        }
+        if (!p.token) {
+            if (this._welcomeError) this._welcomeError('That QR has no session token in it.');
+            return false;
+        }
+
+        const backend = (p.backend || p.origin || location.origin).replace(/\/+$/, '');
         try {
-            const standalone = window.navigator.standalone === true
-                || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)
-                || (window.matchMedia && matchMedia('(display-mode: fullscreen)').matches);
-            if (standalone) return;
-            if (!force && localStorage.getItem('soa.m.installHint') === 'dismissed') return;
-        } catch (_) { /* private mode: show it, it can still be dismissed */ }
-        const ua = navigator.userAgent || '';
-        const iOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-        // Heuristic for an in-app browser: iOS WebViews lack Safari's version
-        // token (the Google app keeps it but announces GSA); most Android
-        // in-app browsers announce "wv" or the host app.
-        const inApp = (iOS && !/Safari\//.test(ua)) || /\bwv\b|FBAN|FBAV|Instagram|Line\/|ntfy|GSA\//i.test(ua);
-        const text = el.querySelector('.ih-text');
-        if (inApp) {
-            text.innerHTML = 'For full screen, open this link in <b>Safari</b> (⋯ → Open in Safari), then <b>Share → Add to Home Screen</b>.';
-        } else if (iOS) {
-            text.innerHTML = 'Full screen: tap <b>Share</b> then <b>Add to Home Screen</b>, and launch it from there.';
-        } else {
-            text.innerHTML = 'Full screen: use your browser menu’s <b>Install app</b> / <b>Add to Home screen</b>, then launch it from there.';
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                token: p.token,
+                origin: location.origin,
+                // Same-origin pairing stores no backend, matching what
+                // readToken() writes — otherwise a later reload would pin the
+                // app to an absolute origin it doesn't need.
+                backend: backend === location.origin.replace(/\/+$/, '') ? null : backend,
+                altOrigin: p.altOrigin || null,
+                ts: Date.now(),
+            }));
+        } catch (_) { /* private mode — the session still works, just not across reloads */ }
+
+        if (this._scanner) { this._scanner.stop(); this._scanner = null; }
+        this._dismissWelcome();
+
+        // Re-pairing mid-session: drop the old socket before opening the new one.
+        if (this.socket) { try { this.socket.close(); } catch (_) {} this.socket = null; }
+        if (this._booted) {
+            // Everything downstream (keyboard, views, widget polls) is wired to
+            // the socket instance, so a full re-boot is the safe path here.
+            location.reload();
+            return true;
         }
-        el.hidden = false;
-        clearTimeout(this._installHintTimer);
-        // Out of the way on its own after a while; ✕ makes it permanent.
-        this._installHintTimer = setTimeout(() => { el.hidden = true; }, force ? 8000 : 20000);
-        if (!el._ihWired) {
-            el._ihWired = true;
-            el.querySelector('.ih-close').addEventListener('click', () => {
-                el.hidden = true;
-                clearTimeout(this._installHintTimer);
-                try { localStorage.setItem('soa.m.installHint', 'dismissed'); } catch (_) {}
-            });
-        }
+
+        this._boot(backend, p.altOrigin || null, p.token);
+        return true;
+    }
+
+    // The browser bars need native fullscreen or a Home Screen launch.
+    _installHint(force) {
+        this.fullscreen.showHint(force);
     }
 
     _boot(primaryOrigin, altOrigin, token) {
-        setTimeout(() => this._installHint(), 1500);
+        this._historySource = primaryOrigin;
+        this._booted = true;
+        // Fullscreen setup is always available from the top-right control.
+        try {
+            if (localStorage.getItem('soa.m.installHint') === 'auto')
+                setTimeout(() => this._installHint(), 1500);
+        } catch (_) {}
         this.socket = new BridgeSocket({
             url: wsBaseFromHttp(primaryOrigin),
             altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
             token,
         });
 
+        // Typing or dictating here makes this phone the device that sizes the
+        // terminal, so the agent wraps what you write at phone width instead
+        // of running it off the right edge. See sizeClaim.js.
+        this._sizeClaim = new PhoneSizeClaim({
+            send: d => this.socket.sendInput('term-resize', d),
+        });
+        setInterval(() => this._sizeClaim.tick(), 15000);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) this._sizeClaim.release(); });
+
         this.kbd = new VirtualKeyboard(this.kbdEl, {
             onInput: (kind, payload) => {
                 sounds.play('key');
                 if (kind === 'term-keys' || kind === 'hotkey') {
                     payload.id = this._activeTabId;
+                    this._claimSize();
                 }
                 this.socket.sendInput(kind, payload);
             },
@@ -771,17 +920,46 @@ class App {
             this._showView(INITIAL_VIEW);
         }
 
-        window.addEventListener('resize', () => this._fitTerminalFont());
+        // Drop the cached metrics FIRST: this listener runs before the cache's
+        // own invalidators (and before any ResizeObserver delivery), so a
+        // refit here would otherwise size the font for the old width.
+        window.addEventListener('resize', () => { this._metricCache = null; this._fitTerminalFont(); });
 
         this.termEl.addEventListener('scroll', () => {
             this._userScrolledUp = !this._isAtBottom();
             this._updateTermJump();
         }, { passive: true });
+        // Paints are held while a finger is down on a scrolled-up terminal (see
+        // _renderActive); release always clears the hold — touchcancel too, or
+        // the terminal would freeze until the next touch. touchend goes to the
+        // element the touch STARTED on; when that row is rewritten or removed
+        // mid-gesture it no longer bubbles to termEl, so the release is also
+        // listened for on the touch's own target, which still receives it.
+        const touchUp = (e) => {
+            if (e && e.touches && e.touches.length) return;   // another finger still down
+            if (!this._termTouch) return;                       // already released
+            this._termTouch = false;
+            if (this._paintHeld) { this._paintHeld = false; this._renderActive(); }
+        };
+        const touchDown = (e) => {
+            this._termTouch = true;
+            const t = e.target;
+            if (t && t !== this.termEl) {
+                t.addEventListener('touchend', touchUp, { once: true, passive: true });
+                t.addEventListener('touchcancel', touchUp, { once: true, passive: true });
+            }
+        };
+        this.termEl.addEventListener('touchstart', touchDown, { passive: true });
+        this.termEl.addEventListener('touchend', touchUp, { passive: true });
+        this.termEl.addEventListener('touchcancel', touchUp, { passive: true });
 
         // "Jump to latest" pill: when the user has scrolled up in the terminal
         // and new output is streaming below, tap to snap back to the live tail.
         if (this.termJump) {
             this.termJump.addEventListener('click', () => {
+                // Also a way out of any paint hold, whatever caused it.
+                this._termTouch = false;
+                if (this._paintHeld) { this._paintHeld = false; this._renderActive(); }
                 this._userScrolledUp = false;
                 this._scrollTermBottom();
                 this._updateTermJump();
@@ -814,6 +992,7 @@ class App {
     }
 
     _selectTheme(id) {
+        this._metricCache = null;   // a theme can change #term's padding or font
         if (!THEMES[id]) return;
         this._currentTheme = id;
         applyTheme(id);
@@ -888,7 +1067,8 @@ class App {
         // Reset local render state so the next snapshot rebuilds from scratch
         // rather than diffing against stale data from before the hang.
         this._snapshot = null;
-        this._tabStates = new Map();
+        for (const ts of this._tabStates.values()) ts.term.dispose();
+        this._tabStates.clear();
         this._hasReceivedSnapshot = false;
         if (this.termEl) this.termEl.innerHTML = '';
         try { this.socket && this.socket.connect(); } catch (_) {}
@@ -924,20 +1104,31 @@ class App {
         this._refreshModelAccess();
     }
 
-    // Authed JSON call against the backend (cookie + ?t= token like _refreshWidgets).
-    async _api(path, body) {
+    // Use the same credentials as the socket, even when third-party cookies are blocked.
+    _apiUrl(path) {
         const base = (this.socket && this.socket.baseUrl)
             ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
         const tok = this.socket && this.socket.token;
-        const url = base + path + (tok ? (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(tok) : '');
-        const res = await fetch(url, {
+        const url = new URL(base + path, location.origin);
+        if (tok) url.searchParams.set('t', tok);
+        let unlock = this.socket?.unlock || '';
+        try { unlock = unlock || localStorage.getItem('soa.m.unlock') || ''; } catch (_) {}
+        if (unlock) url.searchParams.set('u', unlock);
+        return url.toString();
+    }
+
+    async _api(path, body, { signal } = {}) {
+        const res = await fetch(this._apiUrl(path), {
             method: body ? 'POST' : 'GET',
             credentials: 'include',
             cache: 'no-store',
+            signal,
             headers: body ? { 'content-type': 'application/json' } : undefined,
             body: body ? JSON.stringify(body) : undefined,
         });
-        return res.json();
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data) throw new Error(data?.passwordRequired ? 'Unlock this desktop again to send messages.' : data?.error || 'Desktop request failed (' + res.status + '). Your draft is kept.');
+        return data;
     }
 
     /* ── Model Access (provider profiles) + Auto-Resume settings ── */
@@ -1402,12 +1593,19 @@ class App {
                     if (attempt > 1) this._scheduleReconnect(`attempt ${attempt}`);
                     break;
                 case SocketState.CONNECTED:
+                    // One TERM_BATCH frame per server tick instead of one frame
+                    // per tab per flush (server/src/termBatch.js). The server
+                    // keeps caps per socket, so this is sent on every connect;
+                    // a server that predates it ignores the unknown input kind
+                    // and keeps sending term-data, which is still handled.
+                    this.socket.sendInput('client-caps', { caps: { termBatch: true } });
                     this._setStatus('connected', 'paired');
                     this._hideReconnect();
                     this._acquireWakeLock();        // keep the screen on while streaming
                     if (this._prevSocketState !== SocketState.CONNECTED) sounds.play('connect');
                     break;
                 case SocketState.DISCONNECTED:
+                    this._saveHistory();
                     this._setStatus('disconnected', `link lost${code ? ` (${code})` : ''}`);
                     this._scheduleReconnect('link lost · retrying');
                     this._releaseWakeLock();
@@ -1433,26 +1631,37 @@ class App {
             this._lastMsgAt = Date.now();
             this._msgCounts[msg.t] = (this._msgCounts[msg.t] || 0) + 1;
             switch (msg.t) {
-                case 'hello':    this._applyHello(msg.d); break;
+                case 'hello':    this._sizeClaim.reset(); this._applyHello(msg.d); break;
                 case 'snapshot': this._applySnapshot(msg.d); break;
                 // Background tabs' scrollback, streamed one frame per tab after
                 // HELLO (active tab ships inline with HELLO). Same handling as a
                 // live term-data chunk: write the off-screen buffer + classify.
-                case 'replay':    this._applyTerminalChunk(msg.d); break;
+                case 'replay':
+                    if (msg.d && msg.d.id != null) this._getTabState(msg.d.id).term.reset();
+                    this._applyTerminalChunk(msg.d); break;
                 case 'term-data': this._applyTerminalChunk(msg.d); break;
+                case 'term-batch': {
+                    const items = msg.d?.items || [];
+                    // Keep the diagnostics panel's term-data count truthful.
+                    this._msgCounts['term-data'] += items.length;
+                    for (const item of items) this._applyTerminalChunk(item);
+                    break;
+                }
                 case 'term-exit': break;
                 // The daemon now announces a tab's real PTY geometry the moment
                 // it changes, instead of it only riding along on the next
-                // snapshot. This client never resizes the shared PTY — it fits
-                // its own font to whatever `cols` the desktop is drawing at — so
-                // acting on this promptly is what keeps the wrapping identical.
+                // snapshot. This client fits its own font to whatever `cols` the
+                // PTY is drawing at (and only resizes it while you type here, see
+                // sizeClaim.js), so acting on this promptly keeps wrapping identical.
                 case 'term-size':
-                    if (msg.d && msg.d.id === this._activeTabId && msg.d.cols > 1) {
-                        this._fitTerminalFont(msg.d.cols);
+                    if (msg.d && msg.d.id != null) {
+                        this._getTabState(msg.d.id).term.setSize(msg.d.cols, msg.d.rows);
+                        this._sizeClaim.observe(msg.d.id, msg.d.cols, msg.d.rows);
+                        if (msg.d.id === this._activeTabId) this._fitTerminalFont(msg.d.cols);
                     }
                     break;
                 case 'notice':    this._showNotice(msg.d); break;
-                case 'tts':       this._onTTS(msg.d); this._onAgentMessage(msg.d); break;
+                case 'tts':       if (this._onAgentMessage(msg.d)) this._onTTS(msg.d); break;
                 case 'browser-frame': this._onBrowserFrame(msg.d); break;
                 case 'manager':   this._onManager(msg.d); break;
                 // MSG.MEETING — pushed the instant a line is said, ahead of the
@@ -1484,11 +1693,14 @@ class App {
         });
 
         this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
-        this.btnMic.addEventListener('click', () => this.socket.sendInput('voice-toggle'));
+        this._wireVoiceChat();
+        this.btnMic.addEventListener('click', () => this._openVoiceManager());
 
         // Chat composer: send a message to the active tab's PTY (exactly like
         // typing it in the terminal) and echo it as an outgoing bubble.
         if (this.chatComposer && this.chatInput) {
+            this._chatAttachments = new ChatAttachments({ currentTab: () => this._activeTabId,
+                status: text => this._voiceStatus(text), composer: this.chatComposer, input: this.chatInput });
             const autosize = () => {
                 this.chatInput.style.height = 'auto';
                 this.chatInput.style.height = Math.min(120, this.chatInput.scrollHeight) + 'px';
@@ -1497,7 +1709,7 @@ class App {
             this.chatComposer.addEventListener('submit', (e) => { e.preventDefault(); this._sendChat(); });
             // Enter sends; Shift+Enter inserts a newline (desktop keyboards).
             this.chatInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
+                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); this._sendChat(); }
             });
         }
 
@@ -1523,9 +1735,9 @@ class App {
             });
         }
 
-        // Focus / fullscreen toggle.
-        if (this.btnFullscreen) {
-            this.btnFullscreen.addEventListener('click', () => this._toggleFocus());
+        // Focus hides only app controls; browser fullscreen has its own button.
+        if (this.btnFocus) {
+            this.btnFocus.addEventListener('click', () => this._toggleFocus());
         }
         const focusExit = document.getElementById('focus-exit');
         if (focusExit) focusExit.addEventListener('click', () => this._toggleFocus(false));
@@ -1550,8 +1762,31 @@ class App {
                 // open/close/scroll event is the classic mobile-terminal fight.
                 if (!this._userScrolledUp) this._scrollTermBottom();
             };
-            window.visualViewport.addEventListener('resize', fit);
-            window.visualViewport.addEventListener('scroll', fit);
+            // Android resizes the layout viewport on every step of the keyboard
+            // animation and fires resize + scroll + window resize for each, so
+            // fit() (a layout write plus a scroll) ran several times a frame.
+            // There, run it at most once per frame and only when the visual
+            // viewport actually changed. iOS keeps the per-event path, which
+            // its keyboard tracking (the offsetTop fix above) depends on.
+            let onViewport = fit;
+            if (document.documentElement.classList.contains('soa-android')) {
+                let pending = false, lastH = -1, lastT = -1;
+                onViewport = () => {
+                    if (pending) return;
+                    pending = true;
+                    requestAnimationFrame(() => {
+                        pending = false;
+                        const vv = window.visualViewport;
+                        if (vv.height === lastH && vv.offsetTop === lastT) return;
+                        lastH = vv.height; lastT = vv.offsetTop;
+                        fit();
+                    });
+                };
+            }
+            window.visualViewport.addEventListener('resize', onViewport);
+            window.visualViewport.addEventListener('scroll', onViewport);
+            window.addEventListener('resize', onViewport);
+            fit();
         }
 
         // Tapping the terminal is the explicit "I want to type" gesture — this
@@ -1573,64 +1808,8 @@ class App {
         });
     }
 
-    // Long-press (~500ms) any button/control → a bottom-sheet explaining it,
-    // sourced from the element's help text (data-help → title → aria-label).
-    // Touch-based; swallows the tap that would otherwise follow the hold.
-    _initHelpLongPress() {
-        const HOLD = 500, MOVE = 10;
-        let timer = null, sx = 0, sy = 0, fired = false;
-        const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
-        const helpFor = (target) => {
-            const t = target && target.closest && target.closest('[data-help],[title],[aria-label]');
-            if (!t || t.closest('#help-overlay')) return null;
-            const txt = (t.dataset && t.dataset.help) || t.getAttribute('title') || t.getAttribute('aria-label');
-            if (!txt || !txt.trim()) return null;
-            const label = (t.getAttribute('aria-label') || t.textContent || '').replace(/\s+/g, ' ').trim();
-            return { text: txt.trim(), label: (label && label !== txt.trim()) ? label : 'What this does' };
-        };
-        document.addEventListener('touchstart', (e) => {
-            clear(); fired = false;
-            if (e.touches.length !== 1) return;
-            const hit = helpFor(e.target);
-            if (!hit) return;
-            sx = e.touches[0].clientX; sy = e.touches[0].clientY;
-            timer = setTimeout(() => {
-                timer = null; fired = true;
-                try { navigator.vibrate && navigator.vibrate(10); } catch (_) {}
-                this._showHelp(hit.label, hit.text);
-            }, HOLD);
-        }, { passive: true });
-        document.addEventListener('touchmove', (e) => {
-            if (timer && e.touches[0] &&
-                (Math.abs(e.touches[0].clientX - sx) > MOVE || Math.abs(e.touches[0].clientY - sy) > MOVE)) clear();
-        }, { passive: true });
-        document.addEventListener('touchend', clear, { passive: true });
-        document.addEventListener('touchcancel', clear, { passive: true });
-        document.addEventListener('click', (e) => {
-            if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); }
-        }, true);
-        const ov = document.getElementById('help-overlay');
-        if (ov) {
-            ov.addEventListener('click', (e) => { if (e.target === ov) this._closeHelp(); });
-            const cb = ov.querySelector('.help-close');
-            if (cb) cb.addEventListener('click', () => this._closeHelp());
-        }
-    }
-
-    _showHelp(label, text) {
-        const ov = document.getElementById('help-overlay');
-        if (!ov) return;
-        const t = ov.querySelector('.help-title'); if (t) t.textContent = label || 'Help';
-        const b = ov.querySelector('.help-body');  if (b) b.textContent = text;
-        ov.classList.add('open');
-    }
-
-    _closeHelp() {
-        const ov = document.getElementById('help-overlay');
-        if (ov) ov.classList.remove('open');
-    }
-
     _showView(target) {
+        if (target !== 'chat-view') this._voiceChat?.cancel();
         // Premium-feature gate: the DASH/FLEET and MEET views are manager-only.
         // On a free/unlicensed install (`capabilities.manager` false) navigating
         // to one is a no-op that falls back to the terminal — /api/manager and
@@ -1651,6 +1830,7 @@ class App {
         }
         this._updateTermJump();
         if (target === 'terminal-view') {
+            this._renderActiveTerminal();
             // Don't auto-raise the keyboard on entry (e.g. tapping a dashboard
             // tile). It appears only when the user taps the terminal to type.
         } else {
@@ -1659,6 +1839,7 @@ class App {
         }
         // Chat: render the active tab's thread and clear the unread badge.
         if (target === 'chat-view') {
+            this._pollReplies();
             this._chatUnread = 0;
             this._updateChatBadge();
             this._renderChat();
@@ -1686,7 +1867,7 @@ class App {
         if (target === 'tiles-view') {
             this._pullManager();          // freshen the server fleet view on open
             this._renderFleet();
-            if (!this._tilesTimer) this._tilesTimer = setInterval(() => this._renderFleet(), 1200);
+            if (!this._tilesTimer) this._tilesTimer = setInterval(() => { if (!document.hidden) this._renderFleet(); }, 1200);
         } else if (this._tilesTimer) {
             clearInterval(this._tilesTimer);
             this._tilesTimer = null;
@@ -1895,7 +2076,7 @@ class App {
         const mgrBadge = d.managerActive
             ? `<span class="mgr-chip mgr-active${d.closeInactive ? ' mgr-active-reaping' : ''}">${d.closeInactive ? '◉ MGR · closing ON' : '◉ MGR'}</span>`
             : '';
-        bar.innerHTML =
+        const html =
             `<div class="mgr-row">` +
             `<span class="mgr-title">FLEET · ${c.total}</span>` +
             mgrBadge +
@@ -1907,6 +2088,9 @@ class App {
             chip('limited', c.limited, 'mgr-limited') +
             `</div>` +
             (callout.length ? `<div class="mgr-callout">${escapeHtml(callout.join('  ·  '))}</div>` : '');
+        // Rebuilt every 1.2 s while FLEET is open; rewriting identical markup
+        // restarted the chips' pulse and cost a style + layout pass each time.
+        if (html !== this._mgrBarHtml || bar.hidden) { bar.innerHTML = html; this._mgrBarHtml = html; }
         bar.hidden = false;
     }
 
@@ -1924,6 +2108,7 @@ class App {
             ? sup.map(s => ({ sup: s, tab: byId.get(s.id) }))
             : tabs.map(t => ({ sup: null, tab: t }));
         if (!rows.length) {
+            this._tilesHtml = null;   // so the next real rows always repaint over this
             this.tilesEl.innerHTML = '<div class="m-tile-empty">No sessions yet — tap + to open one.</div>';
             return;
         }
@@ -1997,6 +2182,12 @@ class App {
                 `</div>`;
             frag.appendChild(row);
         });
+        // Same rows as last time (nothing changed in 1.2 s): keep the live DOM,
+        // so an open row menu and the dots' animations are not reset. Compared
+        // against what was last BUILT, not the live DOM, which menus mutate.
+        const html = Array.from(frag.childNodes, n => n.outerHTML ?? n.textContent).join('');
+        if (html === this._tilesHtml && this.tilesEl.childNodes.length === frag.childNodes.length) return;
+        this._tilesHtml = html;
         this.tilesEl.replaceChildren(frag);
         if (!this._fleetDelegated) {
             this._fleetDelegated = true;
@@ -2254,11 +2445,13 @@ class App {
     // The agent's clean final message for a turn (same feed that drives TTS)
     // becomes an incoming bubble on that tab's thread. Raw terminal output never
     // enters here, so the conversation stays readable.
-    _onAgentMessage(d) {
+    _onAgentMessage(d, { replay = false } = {}) {
         const text = d && d.text;
         if (!text) return;
         const tab = (d.tab != null) ? d.tab : this._activeTabId;
-        this._pushChat(tab, { from: 'agent', full: String(text), t: Date.now() });
+        if (d.id && this._chatThreads.get(tab)?.some(m => m.id === d.id)) return false;
+        this._pushChat(tab, { from: 'agent', full: String(text), t: d.at || Date.now(), ...(d.id ? { id: d.id } : {}) }, !replay);
+        if (replay) return true;
         const onChat = this._currentView === 'chat-view';
         const onThisTab = tab === this._activeTabId;
         if (onChat && onThisTab) {
@@ -2270,32 +2463,160 @@ class App {
             this._chatUnread++;
             this._updateChatBadge();
         }
+        return true;
     }
 
-    _pushChat(tabId, msg) {
+    async _pollReplies() {
+        if (document.hidden || this._currentView !== 'chat-view' || this.socket?.state !== SocketState.CONNECTED || this._replyFetching) return;
+        const id = this._activeTabId, key = this._historyKeys.get(id);
+        if (id == null) return;
+        this._replyFetching = true;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        try {
+            const data = await this._api('/api/voice/chat/replies?id=' + encodeURIComponent(id), undefined, { signal: controller.signal });
+            if (this._historyKeys.get(id) !== key) return;
+            let changed = false;
+            for (const reply of data.replies || []) if (reply.tab === id) changed = this._onAgentMessage(reply, { replay: true }) || changed;
+            if (changed) { this._saveHistory(id); if (this._activeTabId === id) this._renderChat(); }
+        } catch (_) { /* The socket owns connectivity feedback; retry on the next tick. */ }
+        finally { clearTimeout(timeout); this._replyFetching = false; }
+    }
+
+    _pushChat(tabId, msg, persist = true) {
         if (tabId == null) return;
         if (!this._chatThreads.has(tabId)) this._chatThreads.set(tabId, []);
         const thread = this._chatThreads.get(tabId);
         thread.push(msg);
         if (thread.length > 200) thread.shift();   // cap memory per tab
+        if (persist) this._saveHistory(tabId);
     }
 
-    _sendChat() {
+    _saveHistory(id = this._activeTabId) {
+        const tab = this._snapshot?.tabs?.find(t => t.id === id);
+        if (!tab || !this._history) return;
+        if (id !== this._activeTabId && !this._history.get(this._historySource, tab)) return;
+        const terminal = this._tabStates.get(id)?.term.recentText(250);
+        this._history.update(this._historySource, tab, {
+            messages: this._chatThreads.get(id) || [],
+            draft: id === this._activeTabId ? this.chatInput.value : this._chatDrafts.get(id) || '',
+            ...(terminal?.trim() ? { terminal } : {}),
+        });
+        if (!this._history.available) this._voiceStatus('Browser storage is full or unavailable; new history may not survive closing this page.');
+    }
+
+    _openHistory() {
+        this._saveHistory();
+        this._voiceChat?.cancel();
+        openHistory(this._history, { connected: this.socket?.state === SocketState.CONNECTED,
+            onClear: () => { this._chatThreads.clear(); this._chatDrafts.clear(); this.chatInput.value = ''; this._renderChat(); },
+        });
+    }
+
+    async _sendChat() {
+        if (this._chatSending) return;
         const raw = (this.chatInput && this.chatInput.value || '').trim();
-        if (!raw) return;
         const id = this._activeTabId;
+        const attachments = this._chatAttachments.get(id).slice();
+        const targetKey = this._historyKeys.get(id);
+        if (!raw && !attachments.length) return;
+        if (this.socket?.state !== SocketState.CONNECTED) {
+            this._saveHistory();
+            this._voiceStatus(attachments.length ? 'Offline. Keep this page open to retain your images. Reconnect, then Send.' : this._history.available ? 'Offline. Your draft is saved on this device. Reconnect, then Send.' : 'Offline. Browser storage is unavailable; keep this page open to retain your draft.');
+            return;
+        }
         if (id == null) return;
         // Chat-mode verbosity commands (/brief, /verbose, /details) rewrite to a
         // plain instruction so the agent adjusts how it replies — the terminal
         // stays clean and the bubble still shows what you typed.
-        const text = this._chatCommand(raw) || raw;
+        let text = this._chatCommand(raw) || raw;
         // Type it into the PTY (newline submits, like pressing Enter in terminal).
-        this.socket.sendInput('term-keys', { id, text: text + '\r' });
-        this._pushChat(id, { from: 'you', full: raw, t: Date.now() });
-        this.chatInput.value = '';
+        this._claimSize();
+        this._voiceChat?.cancel();
+        this._chatSending = true;
+        this._chatAttachments.setBusy(true);
+        const send = document.getElementById('chat-send');
+        send.disabled = true;
+        this._voiceStatus(attachments.length ? 'Uploading images…' : 'Sending…');
+        try {
+            const paths = [];
+            for (const a of attachments) paths.push(await this._uploadImage(a.file));
+            if (this.socket?.state !== SocketState.CONNECTED || this._historyKeys.get(id) !== targetKey || !this._snapshot?.tabs?.some(t => t.id === id && !t.exited))
+                throw new Error('That terminal disconnected or changed. Check TERM before sending again.');
+            if (paths.length) text = [text || 'Please look at these images.', ...paths.map(p => this._quotePath(p))].join('\n');
+            const r = await this._api('/api/voice/chat/send', { id, text });
+            if (!r?.ok) throw new Error(r?.error || 'Could not send. Your draft is kept.');
+        } catch (err) {
+            this._voiceStatus(err.message);
+            return;
+        } finally {
+            this._chatSending = false;
+            this._chatAttachments.setBusy(false);
+            send.disabled = false;
+        }
+        this._pushChat(id, { from: 'you', full: [raw, ...attachments.map(a => 'Image: ' + a.file.name)].filter(Boolean).join('\n'), t: Date.now() });
+        this._chatAttachments.remove(id, attachments);
+        if (this._activeTabId === id && this.chatInput.value.trim() === raw) this.chatInput.value = '';
+        if (this._chatDrafts.get(id)?.trim() === raw) this._chatDrafts.set(id, '');
+        this._saveHistory(id);
         this.chatInput.style.height = 'auto';
         this._renderChat();
         sounds.play('tabSwitch');
+        this._voiceStatus('Sent.');
+    }
+
+    _voiceStatus(text) {
+        const el = document.getElementById('voice-chat-status');
+        if (el) el.textContent = text;
+    }
+
+    _wireVoiceChat() {
+        const mic = document.getElementById('chat-mic');
+        this._voiceChat = new VoiceChat({
+            onDraft: text => { this.chatInput.value = text; this.chatInput.dispatchEvent(new Event('input')); },
+            onState: state => {
+                const active = this._voiceChat.active;
+                mic.textContent = active ? 'Done' : 'Talk';
+                mic.setAttribute('aria-pressed', String(active));
+                this._voiceStatus(({ starting: 'Opening microphone…', listening: 'Listening… Tap Done when finished.',
+                    finishing: 'Finishing…', review: 'Review your message, then Send.', idle: 'Tap Talk, review your message, then Send.' })[state]);
+            },
+            onError: text => this._voiceStatus(text),
+        });
+        mic.addEventListener('click', () => {
+            if (this._voiceChat.active) this._voiceChat.stop();
+            else {
+                this._stopMicMonitor();
+                this.chatInput.blur();
+                this._voiceChat.start(this.chatInput.value);
+            }
+        });
+        document.getElementById('chat-manager').addEventListener('click', () => this._openVoiceManager());
+        document.getElementById('chat-read').addEventListener('click', () => {
+            this.btnSpeak.click();
+            document.getElementById('chat-read').setAttribute('aria-pressed', String(this._ttsEnabled));
+        });
+        document.getElementById('chat-read').setAttribute('aria-pressed', String(this._ttsEnabled));
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) { this._voiceChat.cancel(); window.speechSynthesis?.cancel(); }
+        });
+        if (!this._voiceChat.supported) this._voiceStatus('Use your keyboard’s dictation microphone to speak a message.');
+    }
+
+    async _openVoiceManager() {
+        if (this._openingVoiceManager) return;
+        this._openingVoiceManager = true;
+        this._showView('chat-view');
+        this._voiceStatus('Connecting to your voice manager…');
+        try {
+            const r = await this._api('/api/voice/chat/session', {});
+            if (!r?.ok) throw new Error(r?.error || 'Could not open the manager.');
+            this._voiceManagerId = r.tab.id;
+            this._applySnapshot({ ...this._snapshot, tabs: r.tabs });
+            this._switchTabLocal(r.tab.id);
+            this._voiceStatus(r.created ? 'Manager terminal opened. Finish any sign-in or approval in TERM, then Talk.' : 'Ready. Tap Talk, review, then Send.');
+        } catch (err) { this._voiceStatus(err.message); }
+        finally { this._openingVoiceManager = false; }
     }
 
     // Chat-mode quick commands: map a typed slash-command to a plain-English
@@ -2319,7 +2640,12 @@ class App {
     }
 
     _renderChat() {
+        this._chatAttachments?.render();
+        this._syncVoiceDraft?.();
+        this._renderChatFeedback();
         if (!this.chatLog) return;
+        const target = document.getElementById('chat-target');
+        if (target) target.textContent = this._tabName(this._activeTabId);
         const thread = this._chatThreads.get(this._activeTabId) || [];
         if (!thread.length) {
             this.chatLog.innerHTML =
@@ -2394,6 +2720,7 @@ class App {
     // Live status strip: reflects the active tab's detected agent state so you
     // can see it's thinking / waiting on you even between final messages.
     _renderChatStatus() {
+        this._renderChatFeedback();
         if (!this.chatStatus) return;
         const status = (this._mobileStatus && this._mobileStatus.get(this._activeTabId)) || 'idle';
         const css = cssStatus(status);   // working→running, attention→input, done→completed
@@ -2416,6 +2743,39 @@ class App {
         }
         this.chatStatus.setAttribute('data-state', m.state);
         if (textEl) textEl.textContent = m.text + ctxSuffix;
+    }
+
+    _renderChatFeedback() {
+        if (this._currentView !== 'chat-view') return;
+        if (!this._chatFeedback) {
+            const panel = document.createElement('details');
+            panel.id = 'chat-feedback';
+            const summary = document.createElement('summary');
+            const preview = document.createElement('pre');
+            const open = document.createElement('button');
+            open.type = 'button'; open.textContent = 'Open terminal to respond';
+            open.onclick = () => this._showView('terminal-view');
+            const play = document.createElement('button');
+            play.type = 'button'; play.textContent = 'Play latest reply';
+            play.onclick = () => {
+                const reply = this._chatThreads.get(this._activeTabId)?.filter(m => m.from === 'agent').at(-1);
+                if (reply) this._speak(reply.full);
+            };
+            panel.append(summary, preview, open, play);
+            this.chatLog.before(panel);
+            this._chatFeedback = { panel, summary, preview, play };
+        }
+        const { panel, summary, preview, play } = this._chatFeedback;
+        const text = this._tabStates.get(this._activeTabId)?.term.recentText(24).trim() || '';
+        const status = this._mobileStatus?.get(this._activeTabId);
+        const needsInput = status === 'attention' || /\?\s*\d+\s+questions?|approval required|would you like to proceed|allow this/i.test(text);
+        const label = needsInput ? 'Agent needs your input — view question' : status === 'working' ? 'Agent working — view activity' : 'View terminal activity / play reply';
+        if (summary.textContent !== label) summary.textContent = label;
+        const value = text || 'Waiting for terminal output…';
+        if (preview.textContent !== value) preview.textContent = value;
+        if (needsInput && !this._chatNeedsInput) panel.open = true;
+        this._chatNeedsInput = needsInput;
+        play.hidden = !this._chatThreads.get(this._activeTabId)?.some(m => m.from === 'agent');
     }
 
     _updateChatBadge() {
@@ -2947,12 +3307,14 @@ class App {
     }
 
     _speak(text) {
+        if (this._voiceChat?.active) return;
         try {
             const synth = window.speechSynthesis;
             if (!synth) return;
             if (!this._ttsVoice) this._ttsVoice = this._pickVoice();
             synth.cancel();
             const u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+            u.onerror = () => this._voiceStatus('Reply received. Tap Play latest reply to hear it.');
             u.rate = 1.05; u.pitch = 1.0;
             if (this._ttsVoice) u.voice = this._ttsVoice;
             synth.speak(u);
@@ -2971,12 +3333,18 @@ class App {
 
     // ── Camera / photo → prompt ──────────────────────────────────────────
     async _sendPhoto(file) {
+        if (this._currentView === 'chat-view') {
+            this._chatAttachments.add([file]);
+            return;
+        }
+        const id = this._activeTabId;
+        if (id == null || this.socket?.state !== SocketState.CONNECTED) return;
         try {
             const path = await this._uploadImage(file);
-            if (path && this._activeTabId != null) {
+            if (path && this.socket?.state === SocketState.CONNECTED) {
                 // Bracketed paste (ESC[200~ … ESC[201~) so Claude Code treats the
                 // path like a drag-drop and attaches the image, not as typed text.
-                this.socket.sendInput('term-keys', { id: this._activeTabId, text: '\x1b[200~' + path + '\x1b[201~' });
+                this.socket.sendInput('term-keys', { id, text: '\x1b[200~' + this._quotePath(path) + '\x1b[201~' });
                 if ('vibrate' in navigator) try { navigator.vibrate(12); } catch (_) {}
             }
         } catch (_) {
@@ -2985,16 +3353,12 @@ class App {
     }
 
     async _uploadImage(blob) {
-        const base = (this.socket && this.socket.baseUrl)
-            ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : location.origin;
-        const tok = this.socket && this.socket.token;
-        const url = base + '/api/paste-image' + (tok ? '?t=' + encodeURIComponent(tok) : '');
-        const res = await fetch(url, {
+        const res = await fetch(this._apiUrl('/api/paste-image'), {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob,
         });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(data?.passwordRequired ? 'Unlock this desktop again to upload images.' : data?.error || 'Image upload failed (' + res.status + ').');
         if (!data || !data.ok || !data.path) throw new Error('bad response');
         return data.path;
     }
@@ -3004,22 +3368,13 @@ class App {
         return "'" + String(p).replace(/'/g, "'\\''") + "'";
     }
 
-    // ── Focus / fullscreen ───────────────────────────────────────────────
+    // ── Focus: app controls only ─────────────────────────────────────────
     _toggleFocus(force) {
+        this._metricCache = null;   // focus mode changes #term's padding
         const app = document.getElementById('app');
         const on = force != null ? force : !app.classList.contains('focus-mode');
         app.classList.toggle('focus-mode', on);
-        if (this.btnFullscreen) this.btnFullscreen.setAttribute('aria-pressed', on ? 'true' : 'false');
-        try {
-            if (on && document.documentElement.requestFullscreen) {
-                document.documentElement.requestFullscreen().catch(() => {});
-            } else if (!on && document.fullscreenElement && document.exitFullscreen) {
-                document.exitFullscreen().catch(() => {});
-            }
-        } catch (_) {}
-        // iPhone Safari can't fullscreen a page: say so, briefly, every time
-        // the button is used — even after the standing hint was dismissed.
-        if (on && !document.documentElement.requestFullscreen) this._installHint(true);
+        if (this.btnFocus) this.btnFocus.setAttribute('aria-pressed', String(on));
         setTimeout(() => this._scrollTermBottom(), 120);
     }
 
@@ -3077,6 +3432,11 @@ class App {
         if (control) control.addEventListener('click', () => {
             window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
         });
+        // The same page from the ⋯ sheet, so it is reachable without finding WEB.
+        const macTile = document.getElementById('btn-mac');
+        if (macTile) macTile.addEventListener('click', () => {
+            window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
+        });
 
         // Tap the live agent view → forward as a click at the page's coords.
         if (this._agentFrame) {
@@ -3107,10 +3467,9 @@ class App {
 
     async _agentCmd(action, args) {
         try {
-            const base = (this.socket && this.socket.baseUrl)
-                ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '') : '';
-            const tok = this.socket && this.socket.token;
-            const res = await fetch(base + '/api/agent-browser' + (tok ? '?t=' + encodeURIComponent(tok) : ''), {
+            // _apiUrl carries the token AND the password unlock: the endpoint
+            // is authenticated now, and home-screen PWAs drop the cookie.
+            const res = await fetch(this._apiUrl('/api/agent-browser'), {
                 method: 'POST', credentials: 'include',
                 headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...args }),
             });
@@ -3325,7 +3684,8 @@ class App {
         const ctrl = (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'yes' : 'no';
         const tabs = d.tabStates.map(t =>
             `#${t.tab}${t.tab === d.activeTabId ? '*' : ''} ln=${t.lines}`).join('  ') || '(none)';
-        const allLines = (this.termEl.textContent || '').split('\n');
+        // One <div> per row (see _paintRows), so count rows, not newlines.
+        const allLines = Array.from(this.termEl.children, r => r.textContent || '');
         const blank = allLines.filter(l => l.trim() === '').length;
         this._diagSummaryEl.textContent =
             `BUILD     ${MOBILE_BUILD}\n` +
@@ -3415,6 +3775,12 @@ class App {
 
     _applyHello(data) {
         if (!data) return;
+        for (const ts of this._tabStates.values()) ts.term.reset();
+        this._agentRecent?.clear();
+        this._mobileStatus?.clear();
+        // The detector writes data-status straight into the tab buttons, which
+        // the strip's skip signature never sees; a full-state HELLO always rebuilds.
+        this._tabsSig = null;
         // HELLO carries the full initial state: tabs, activeId, replay (scrollback)
         this._applySnapshot(data);
         // Replay scrollback for each tab so the terminal shows existing output
@@ -3457,6 +3823,13 @@ class App {
     // repaints tabs + terminal. Output for every tab is already buffered, so the
     // switched-to tab shows correct content immediately.
     _switchTabLocal(id) {
+        this._saveHistory();
+        this._voiceChat?.cancel();
+        if (id !== this._activeTabId && this.chatInput) {
+            if (!this._chatDrafts) this._chatDrafts = new Map();
+            this._chatDrafts.set(this._activeTabId, this.chatInput.value);
+            this.chatInput.value = this._chatDrafts.get(id) || '';
+        }
         if (id == null) return;
         if (this._activeTabId !== id && this._snapshot) {
             this._activeTabId = id;
@@ -3472,6 +3845,19 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
+        for (const [id, images] of this._chatAttachments?.drafts || []) {
+            if (!rawTabs.some(t => t.id === id)) this._chatAttachments.remove(id, images);
+        }
+        for (const tab of rawTabs) {
+            const key = this._history.key(this._historySource, tab);
+            if (this._historyKeys.get(tab.id) === key) continue;
+            if (this._historyKeys.has(tab.id)) this._chatAttachments?.remove(tab.id, this._chatAttachments.get(tab.id));
+            const saved = this._history.get(this._historySource, tab);
+            this._historyKeys.set(tab.id, key);
+            this._chatThreads.set(tab.id, saved?.messages || []);
+            this._chatDrafts.set(tab.id, saved?.draft || '');
+            if (tab.id === this._activeTabId && this.chatInput) this.chatInput.value = saved?.draft || '';
+        }
         // Per-device active-tab resolution.
         //
         // "Which tab this phone is viewing" is a CLIENT-LOCAL concept. The server
@@ -3505,7 +3891,9 @@ class App {
         let activeId;
         if (!this._hasReceivedSnapshot) {
             this._adoptNewTabIds = null;
-            activeId = idList.includes(snap.activeId) ? snap.activeId
+            const recent = this._history.records.find(r => rawTabs.some(t => this._history.key(this._historySource, t) === r.key));
+            const savedTab = recent && rawTabs.find(t => this._history.key(this._historySource, t) === recent.key);
+            activeId = savedTab ? savedTab.id : idList.includes(snap.activeId) ? snap.activeId
                 : (idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0));
         } else if (this._adoptNewTabIds && idList.includes(snap.activeId) && !this._adoptNewTabIds.has(snap.activeId)) {
             this._adoptNewTabIds = null;
@@ -3522,6 +3910,7 @@ class App {
             active: t.id === activeId,
             status: t.exited ? 'exited' : null,
             cols: t.cols,
+            rows: t.rows,
         }));
 
         const activeTab = tabs.find(t => t.active);
@@ -3530,17 +3919,25 @@ class App {
             sounds.play('tabSwitch');
         }
         this._hasReceivedSnapshot = true;
+        if (this._activeTabId !== activeId && this.chatInput) {
+            // Persist the outgoing tab's draft now: a debounced save still
+            // pending would otherwise run after the swap, for the new tab.
+            clearTimeout(this._draftSaveT);
+            this._saveHistory();
+            this._chatDrafts.set(this._activeTabId, this.chatInput.value);
+            this.chatInput.value = this._chatDrafts.get(activeId) || '';
+        }
         this._activeTab = newActiveTab;
         this._activeTabId = activeId;
         pushLog(`snapshot: raw=${JSON.stringify(snap.activeId)} → resolved activeId=${activeId} tabs=[${idList.join(',')}]`);
         console.log('%c[app] snapshot activeId=' + activeId + ' (type: ' + typeof activeId + ')', 'color:#ff9');
 
         for (const t of tabs) {
-            if (!this._tabStates.has(t.id)) {
-                this._tabStates.set(t.id, { term: new TermBuffer({ rows: t.rows || 24 }) });
-            } else if (t.rows) {
-                this._tabStates.get(t.id).term.setRows(t.rows);
-            }
+            this._getTabState(t.id).term.setSize(t.cols, t.rows);
+            this._sizeClaim.observe(t.id, t.cols, t.rows);
+        }
+        for (const [id, ts] of this._tabStates) {
+            if (!tabs.some(t => t.id === id)) { ts.term.dispose(); this._tabStates.delete(id); }
         }
 
         this._connectedDevices = snap.connectedDevices || 0;
@@ -3588,6 +3985,18 @@ class App {
         addBtn.addEventListener('click', () => this._showNewTabChooser());
         frag.appendChild(addBtn);
 
+        // Skip a rebuild that would produce the same strip — every snapshot
+        // used to rebuild it, restarting each tab's status pulse. The live DOM
+        // must still match (a cancelled drag can leave tabs reordered), so
+        // its order and active tab are checked too.
+        const sig = tabs.map(t => [t.id, t.index, t.name, t.active ? 1 : 0,
+            (this._mobileStatus && this._mobileStatus.get(t.id)) || t.status || ''].join('\u0001')).join('\u0002');
+        const live = Array.from(this.tabsEl.children, el => el.dataset.tabId || '+').join(',');
+        const want = tabs.map(t => String(t.id)).concat('+').join(',');
+        const liveActive = this.tabsEl.querySelector('.tab.active')?.dataset.tabId;
+        const wantActive = tabs.find(t => t.active)?.id;
+        if (sig === this._tabsSig && live === want && String(liveActive ?? '') === String(wantActive ?? '')) return;
+        this._tabsSig = sig;
         this.tabsEl.innerHTML = '';
         this.tabsEl.appendChild(frag);
     }
@@ -3596,6 +4005,14 @@ class App {
 
     _wireOverflow() {
         if (this.btnOverflow) this.btnOverflow.addEventListener('click', () => this._openOverflow());
+        // Re-pair mid-session: the tunnel rotated or the token aged out, and
+        // the terminal is there but dead. Same in-app camera as the welcome
+        // screen, so it never bounces out to the system browser.
+        const scanBtn = document.getElementById('btn-scan');
+        if (scanBtn) scanBtn.addEventListener('click', () => {
+            this._showWelcome('Scan the desktop QR code to reconnect this phone.');
+            this._openScanner();
+        });
         if (this.overflowOverlay) {
             this.overflowOverlay.addEventListener('click', (e) => {
                 if (e.target === this.overflowOverlay) this._closeOverflow();
@@ -3697,6 +4114,7 @@ class App {
     }
 
     _renderActiveTerminal() {
+        if (this._currentView !== 'terminal-view' || document.hidden) return;
         // Repaint the active tab's grid buffer (e.g. after a tab switch or a
         // snapshot). Content lives in each tab's TermBuffer; here we just render
         // whichever is active and fit the font.
@@ -3706,8 +4124,7 @@ class App {
         if (activeTab && activeTab.cols) this._fitTerminalFont(activeTab.cols);
         const ts = this._getTabState(this._activeTabId);
         if (activeTab && activeTab.rows) ts.term.setRows(activeTab.rows);
-        this.termEl.innerHTML = ts.term.toHtml();
-        this._scrollTermBottom();
+        this._renderActive();
     }
 
     _updateDeviceCount() {
@@ -3951,6 +4368,7 @@ class App {
     }
 
     _resync() {
+        for (const ts of this._tabStates.values()) ts.term.dispose();
         this._tabStates.clear();
         this._hasReceivedSnapshot = false;
         this._adoptNewTabIds = null;
@@ -3961,9 +4379,9 @@ class App {
     _renderTerminalSnapshot(term) {
         const ts = this._getTabState(this._activeTabId);
         ts.term.reset();
-        if (term.rows) ts.term.setRows(term.rows);
+        ts.term.setSize(term.cols, term.rows);
         ts.term.write(term.screen || term.recent || '');
-        this.termEl.innerHTML = ts.term.toHtml();
+        this._renderActive();
         this._fitTerminalFont(term.cols);
         this._scrollTermBottom();
     }
@@ -3976,11 +4394,35 @@ class App {
         const tabId = payload.id ?? this._activeTabId;
         const ts = this._getTabState(tabId);
         ts.term.write(payload.data);
-        this._detectTabAgent(tabId, payload.data);
-        if (tabId === this._activeTabId && !this._flushScheduled) {
-            this._flushScheduled = true;
-            requestAnimationFrame(() => this._renderActive());
+    }
+
+    // Classify a tab's current screen at most every 250 ms (500 ms for tabs
+    // that are not on screen), with one trailing pass so the final state is
+    // never missed. onChange used to delete the tab's _agentRecent entry before
+    // every call, which reset _detectTabAgent's own 250 ms throttle — so with a
+    // busy fleet every tab was classified on every 50 ms change.
+    _queueDetect(id) {
+        if (!this._detectAt) { this._detectAt = new Map(); this._detectTimers = new Map(); }
+        const gap = id === this._activeTabId ? 250 : 500;
+        const wait = gap - (Date.now() - (this._detectAt.get(id) || 0));
+        if (wait > 0) {
+            if (!this._detectTimers.has(id)) {
+                this._detectTimers.set(id, setTimeout(() => {
+                    this._detectTimers.delete(id);
+                    this._runDetect(id);
+                }, wait));
+            }
+            return;
         }
+        this._runDetect(id);
+    }
+
+    _runDetect(id) {
+        const ts = this._tabStates.get(id);
+        if (!ts) return;                          // tab closed meanwhile
+        this._detectAt.set(id, Date.now());
+        if (this._agentRecent) this._agentRecent.delete(id);
+        this._detectTabAgent(id, ts.term.recentText(40));
     }
 
     // Watch each tab's stream for agent-status patterns (green=working,
@@ -4039,7 +4481,22 @@ class App {
 
     _getTabState(id) {
         if (!this._tabStates.has(id)) {
-            this._tabStates.set(id, { term: new TermBuffer({ rows: this._screenRows || 24 }) });
+            this._tabStates.set(id, { term: new TermBuffer({ rows: this._screenRows || 24,
+                onChange: () => {
+                    const ts = this._tabStates.get(id);
+                    if (!ts) return;
+                    if (id === this._activeTabId && !this._historyTimer) {
+                        this._historyTimer = setTimeout(() => { this._historyTimer = null; this._saveHistory(); }, 1000);
+                    }
+                    // Classify the current screen, not stale redraw bytes.
+                    this._queueDetect(id);
+                    if (id === this._activeTabId) this._renderChatFeedback();
+                    if (id === this._activeTabId && !this._flushScheduled) {
+                        this._flushScheduled = true;
+                        requestAnimationFrame(() => this._renderActive());
+                    }
+                },
+            }) });
         }
         return this._tabStates.get(id);
     }
@@ -4048,15 +4505,66 @@ class App {
     // a burst of frames produces at most one paint per animation frame.
     _renderActive() {
         this._flushScheduled = false;
+        if (this._activeTabId == null || this._currentView !== 'terminal-view' || document.hidden) return;
+        // A finger is on a terminal the user has scrolled up to read: replacing
+        // rows under it steals the drag. Hold, and catch up on touchend.
+        if (this._termTouch && this._userScrolledUp) { this._paintHeld = true; return; }
         const ts = this._getTabState(this._activeTabId);
         const stayBottom = !this._userScrolledUp;
-        const prevTop = this.termEl.scrollTop;
-        this.termEl.innerHTML = ts.term.toHtml();
-        this.termEl.scrollTop = stayBottom ? this.termEl.scrollHeight : prevTop;
+        const el = this.termEl;
+        const prevTop = el.scrollTop;
+        this._paintRows(el, ts.term.toHtml().split('\n'));
+        // scrollTop tops out at scrollHeight - clientHeight, so compare against
+        // that, or every paint while following the tail would still write it.
+        const top = stayBottom ? Math.max(0, el.scrollHeight - el.clientHeight) : prevTop;
+        if (Math.abs(el.scrollTop - top) > 1) el.scrollTop = top;
+    }
+
+    // One <div> per terminal row, and only the rows whose HTML changed are
+    // rewritten. Replacing all 400 rows of innerHTML for every spinner tick was
+    // the single biggest cost on a phone (measured at 4x CPU throttle: frames
+    // over 33 ms while streaming 35/s -> 1-5/s). A row that scrolled off the
+    // top is a shift, so the rows below are moved, not re-parsed. Any other
+    // writer of termEl (a reset, a resync) empties it, and the length check
+    // then rebuilds from scratch, so the cache can never paint stale rows.
+    // A blank row is a <br>: exactly one line tall, as a blank line in the old
+    // <pre> text was, so spacing and copied text are unchanged.
+    _paintRows(el, rows) {
+        let prev = this._termRows;
+        if (!prev || el.childElementCount !== prev.length) {
+            el.textContent = '';
+            prev = [];
+        }
+        if (prev.length === rows.length && prev.length > 8 && prev[0] !== rows[0]) {
+            for (let k = 1; k < 64 && k + 2 < prev.length; k++) {
+                if (prev[k] === rows[0] && prev[k + 1] === rows[1] && prev[k + 2] === rows[2]) {
+                    for (let i = 0; i < k; i++) el.firstElementChild.remove();
+                    prev = prev.slice(k);
+                    break;
+                }
+            }
+        }
+        const kids = el.children;
+        for (let i = 0; i < rows.length; i++) {
+            const html = rows[i] || '<br>';
+            if (i < prev.length) {
+                if (prev[i] !== rows[i]) kids[i].innerHTML = html;
+            } else {
+                const d = document.createElement('div');
+                d.innerHTML = html;
+                el.appendChild(d);
+            }
+        }
+        while (el.childElementCount > rows.length) el.lastElementChild.remove();
+        this._termRows = rows;
     }
 
     _scrollTermBottom() {
+        // One pending scroll is enough: every caller wants the same end state.
+        if (this._scrollBottomPending) return;
+        this._scrollBottomPending = true;
         requestAnimationFrame(() => {
+            this._scrollBottomPending = false;
             this.termEl.scrollTop = this.termEl.scrollHeight;
         });
     }
@@ -4074,15 +4582,20 @@ class App {
         return (el.scrollHeight - el.scrollTop - el.clientHeight) < 10;
     }
 
-    _fitTerminalFont(cols) {
-        if (cols && cols > 0) this._termCols = cols;
-
+    // The terminal's text width and the monospace advance per px of font size
+    // (monospace ⇒ width scales linearly with font-size), or null.
+    _termMetrics() {
         const cs = getComputedStyle(this.termEl);
+        // Every keystroke calls this (_claimSize), and the probe below forces a
+        // full layout — while streaming, a layout of the whole dirty terminal.
+        // The answer only changes when the terminal's box or its font does, so
+        // it is cached and dropped by a ResizeObserver on #term, a web-font
+        // load, or a different font family (a theme switch).
+        const font = cs.fontFamily;
+        const c = this._metricCache;
+        if (c && c.font === font) return c.m;
         const availW = this.termEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-        if (availW <= 0) return;
-
-        // Measure character width at a known reference size, then derive the
-        // per-pixel advance (monospace ⇒ width scales linearly with font-size).
+        if (availW <= 0) return null;
         const REF = 16;
         const probe = document.createElement('span');
         probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:' + REF + 'px/' + 1.45 + ' ' + cs.fontFamily;
@@ -4090,14 +4603,49 @@ class App {
         document.body.appendChild(probe);
         const charWAtRef = probe.offsetWidth;
         document.body.removeChild(probe);
-        if (charWAtRef <= 0) return;
+        if (charWAtRef <= 0) return null;
+        const m = { availW, charWPerPx: charWAtRef / REF };
+        if (this._metricWatch()) this._metricCache = { font, m };
+        return m;
+    }
 
-        // Mobile is a VIEWER of the desktop's terminal. We do NOT resize the
-        // shared PTY (that SIGWINCHes the desktop and corrupts its layout).
-        // Instead we shrink our own font so the desktop's `cols` columns fit
-        // the phone width, preserving the exact wrapping the desktop renders.
+    // Arms the invalidators for _termMetrics' cache once; false (no caching)
+    // where ResizeObserver is missing, so such a browser measures every time
+    // exactly as before.
+    _metricWatch() {
+        if (this._metricWatching != null) return this._metricWatching;
+        if (typeof ResizeObserver !== 'function') return (this._metricWatching = false);
+        const drop = () => { this._metricCache = null; };
+        try {
+            new ResizeObserver(drop).observe(this.termEl);
+            document.fonts?.addEventListener?.('loadingdone', drop);
+            window.addEventListener('resize', drop);
+            this._metricWatching = true;
+        } catch (_) { this._metricWatching = false; }
+        return this._metricWatching;
+    }
+
+    // Input is going into the active tab: ask for the columns this screen can
+    // show at its readable font size (the floor × the user's font scale).
+    _claimSize() {
+        if (!this._sizeClaim || this._activeTabId == null) return;
+        const m = this._termMetrics();
+        const cols = m ? colsThatFit(m.availW, m.charWPerPx, this._minFontSize * (this._fontScale || 1)) : 0;
+        this._sizeClaim.activity(this._activeTabId, cols);
+    }
+
+    _fitTerminalFont(cols) {
+        if (cols && cols > 0) this._termCols = cols;
+
+        const m = this._termMetrics();
+        if (!m) return;
+        const { availW, charWPerPx } = m;
+
+        // The phone mostly VIEWS the desktop's grid: it shrinks its own font so
+        // the desktop's `cols` fit, down to a readable floor (wider content pans).
+        // While you type here it claims a grid of its own (_claimSize), and the
+        // daemon's term-size brings `cols` down to what this screen shows.
         const targetCols = this._termCols || 80;
-        const charWPerPx = charWAtRef / REF;
         let fontSize = availW / (targetCols * charWPerPx);
         fontSize = Math.max(this._minFontSize, Math.min(this._maxFontSize, fontSize));
         // Apply the user's font preference on top of the auto-fit, then clamp to
@@ -4238,17 +4786,21 @@ function formatRate(bps) {
 
 window.addEventListener('DOMContentLoaded', () => {
     window._app = new App();
-    // Only register the service worker when served at the root scope (i.e.
-    // same-origin as the backend). On Vercel we live under /m/ which would
-    // give the SW the wrong scope and cache stale assets.
+    // Cache the shell relative to its own root, including the /m/ deployment.
     // Skip the SW inside the native shell: Capacitor already serves the assets
     // from the app bundle (offline works without it) and registering a SW on the
     // capacitor:// scheme is unreliable. window.Capacitor is injected by the
     // native runtime and is undefined on the plain web build.
-    if ('serviceWorker' in navigator && location.pathname === '/' && !window.Capacitor) {
-        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    if ('serviceWorker' in navigator && !window.Capacitor) {
+        const hadController = !!navigator.serviceWorker.controller;
+        const scope = location.pathname.startsWith('/m') ? '/m/' : '/';
+        navigator.serviceWorker.register(scope + 'sw.js', { scope }).catch(() => {});
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-            location.reload();
+            if (window._app?._chatSending || window._app?._chatAttachments?.drafts.size) {
+                window._app._voiceStatus('Update ready. Finish sending your message and images, then reload.');
+                return;
+            }
+            if (hadController) { window._app?._saveHistory(); location.reload(); }
         });
     }
     checkVersionMatch();
