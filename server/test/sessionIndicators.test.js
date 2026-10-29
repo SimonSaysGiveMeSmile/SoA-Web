@@ -61,13 +61,23 @@ test('provider guard rejects legacy Claude metadata on Codex while displaying ac
         { id: 2, agent: 'codex', model: 'gpt-6-astra', effort: 'max', modelSource: 'codex-thread' },
     ] });
     const badge = shell._makeModelBadge(2);
-    assert.equal(badge.attrs.text, 'Codex');
+    assert.equal(badge.attrs.text, 'GPT-6 Astra');
     assert.equal(badge.attrs.title, 'Codex · gpt-6-astra');
     assert.equal(shell._makeEffortBadge(2).attrs.text, 'max');
-    assert.equal(shell._makeModelBadge(1).attrs.text, 'opus');
+    assert.equal(shell._makeModelBadge(1).attrs.text, 'Opus 5.5');
+    assert.equal(shell._makeEffortBadge(1).attrs.text, 'ultracode');
     shell._onManager({ sessions: [{ id: 2, agent: 'codex', model: null, effort: null }] });
     assert.equal(shell._makeModelBadge(2).attrs.text, 'Codex');
     assert.equal(shell._makeEffortBadge(2), null, 'missing current telemetry clears stale effort');
+});
+
+test('model labels expose the version and variant, including future unknown model IDs', () => {
+    const { context } = harness();
+    for (const [model, label] of [['gpt-6.1-sol', 'GPT-6.1 Sol'], ['gpt-5.3-codex-spark', 'GPT-5.3 Codex Spark'], ['custom-model-v2', 'custom-model-v2']]) {
+        assert.equal(context.modelBadge({ agent: 'codex', model }).label, label);
+    }
+    assert.equal(context.modelBadge({ agent: 'claude', model: 'claude-opus-4-8[1m]' }).label, 'Opus 4.8');
+    assert.equal(context.modelBadge({ agent: 'claude', model: 'claude-fable-5' }).label, 'Fable 5');
 });
 
 for (const mode of ['tabs', 'tiles', 'chat', 'manager', 'monitor', 'meeting']) {

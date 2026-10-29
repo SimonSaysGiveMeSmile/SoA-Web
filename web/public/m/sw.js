@@ -7,7 +7,7 @@
  */
 
 // Scope-relative shell cache supports both standalone / and hosted /m/ apps.
-const VERSION = 'soa-mobile-session-status-20261029-' + new URL(self.registration.scope).pathname;
+const VERSION = 'soa-mobile-session-models-20261029-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
     '/index.html',

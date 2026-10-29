@@ -2668,17 +2668,17 @@ class Shell {
         }
     }
 
-    // Short, colored effort badge. ultracode is the fleet default (xhigh + dynamic
-    // workflows); the shorter labels keep the tab compact next to the model tier.
+    // Keep the reported effort spelling so max, ultra and ultracode remain
+    // distinguishable and match the originating CLI session.
     _makeEffortBadge(id) {
         const eff = this._agentEffort.get(id);
         if (!eff) return null;
-        const label = { ultracode: 'ultra', xhigh: 'xhigh', high: 'high', medium: 'med', low: 'low', minimal: 'min' }[eff] || eff;
         return el('span', {
             class: 'tab-effort',
             'data-effort': eff,
             title: `Effort: ${eff}`,
-            text: label,
+            'aria-label': `Effort: ${eff}`,
+            text: eff,
         });
     }
 
