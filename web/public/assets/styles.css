@@ -368,11 +368,11 @@ html[data-load="high"] .set-row { transition: none !important; }
    STATUS is still carried by the tab border + ctx-bar, so the two never clash. */
 .tab-model {
   flex: 0 0 auto; font-family: var(--font-mono); font-size: 9px;
-  letter-spacing: 0.04em; line-height: 1; text-transform: lowercase;
+  letter-spacing: 0.04em; line-height: 1; text-transform: none;
   padding: 2px 5px; border-radius: 8px;
   border: 1px solid var(--soa-line-soft); background: rgba(255,255,255,0.03);
   color: var(--soa-accent-dim); white-space: nowrap;
-  max-width: 66px; overflow: hidden; text-overflow: ellipsis;
+  max-width: none;
 }
 .tab-model[data-tier="opus"]   { color: #bd93f9; border-color: rgba(189,147,249,0.42); }
 .tab-model[data-tier="sonnet"] { color: #8be9fd; border-color: rgba(139,233,253,0.42); }
@@ -392,7 +392,7 @@ html[data-load="high"] .set-row { transition: none !important; }
   padding: 2px 5px; border-radius: 8px;
   border: 1px solid var(--soa-line-soft); background: rgba(255,255,255,0.03);
   color: var(--soa-accent-dim); white-space: nowrap;
-  max-width: 60px; overflow: hidden; text-overflow: ellipsis;
+  max-width: none;
 }
 .tab-effort[data-effort="ultracode"] { color: #ff5555; border-color: rgba(255,85,85,0.5); }   /* hottest */
 .tab-effort[data-effort="xhigh"]     { color: #ffb86c; border-color: rgba(255,184,108,0.5); }

@@ -2310,11 +2310,11 @@ button:active { background: var(--accent-bg-hover); }
     font-size: 13px; letter-spacing: 0.04em; color: var(--fg);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55vw;
 }
-.fleet-line2 { display: flex; align-items: center; gap: 10px; }
+.fleet-line2 { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
 .fleet-meta { font-size: 10px; letter-spacing: 0.06em; color: var(--fg-dim); white-space: nowrap; }
 /* Provider/model chip. Color describes the model, not activity state. */
 .fleet-model {
-  font-size: 8px; letter-spacing: 0.05em; text-transform: lowercase;
+  font-size: 8px; letter-spacing: 0.05em; text-transform: none;
   padding: 1px 5px; border-radius: 7px; margin-left: 6px; white-space: nowrap;
   border: 1px solid rgba(255,255,255,0.12); color: var(--fg-dim);
 }
@@ -2323,6 +2323,7 @@ button:active { background: var(--accent-bg-hover); }
 .fleet-model[data-tier="haiku"]  { color: #f1fa8c; border-color: rgba(241,250,140,0.42); }
 .fleet-model[data-tier="fable"]  { color: #ff79c6; border-color: rgba(255,121,198,0.46); }
 .fleet-model[data-tier="codex"]  { color: var(--accent, #8be9fd); border-color: currentColor; text-transform: none; }
+.fleet-effort { font-size: 8px; letter-spacing: 0; padding: 1px 5px; border: 1px solid currentColor; border-radius: 7px; color: var(--fg-dim); white-space: nowrap; }
 .fleet-ctx { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 .fleet-ctx-bar { width: 54px; height: 4px; border-radius: 3px; background: rgba(255,255,255,0.12); overflow: hidden; }
 .fleet-ctx-bar > span { display: block; height: 100%; border-radius: 3px; }

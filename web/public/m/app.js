@@ -30,7 +30,7 @@ import { SessionHistory, openHistory } from './session-history.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'session status · 2026-10-29';
+const MOBILE_BUILD = 'session models · 2026-10-29';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -2151,6 +2151,7 @@ class App {
 
             const badge = modelBadge(s || t || {});
             const modelHtml = badge ? `<span class="fleet-model" data-tier="${badge.tier}" data-agent="${badge.agent}" title="${escapeHtml(badge.title)}" aria-label="${escapeHtml(badge.title)}">${escapeHtml(badge.label)}</span>` : '';
+            const effortHtml = badge?.effort ? `<span class="fleet-effort" title="Effort: ${escapeHtml(badge.effort)}" aria-label="Effort: ${escapeHtml(badge.effort)}">${escapeHtml(badge.effort)}</span>` : '';
 
             const row = document.createElement('div');
             row.className = 'fleet-row' + (id === this._activeTabId ? ' active' : '');
@@ -2161,7 +2162,7 @@ class App {
                     `<span class="fleet-dot"></span>` +
                     `<div class="fleet-body">` +
                         `<div class="fleet-line1"><span class="fleet-name">${escapeHtml(name)}</span>${flags.join('')}</div>` +
-                        `<div class="fleet-line2"><span class="fleet-meta">${escapeHtml(meta)}</span>${modelHtml}${ctxHtml}</div>` +
+                        `<div class="fleet-line2"><span class="fleet-meta">${escapeHtml(meta)}</span>${modelHtml}${effortHtml}${ctxHtml}</div>` +
                     `</div>` +
                 `</div>` +
                 `<button class="fleet-act" data-act-toggle="${id}" aria-label="Session actions">⋯</button>` +
