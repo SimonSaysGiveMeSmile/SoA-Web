@@ -1799,6 +1799,7 @@ class SessionManager {
         const sessions = order.map(id => {
             const tab = mgr.get(id);
             const s = this._state(id);
+            const metadata = sessionModel.forTab(tab, s);
             if (managerTabId == null && tab && typeof tab.title === 'string' && tab.title.trim().toLowerCase() === 'manager') { managerTabId = id; managerStatus = s.status; }
             const stuck = s.status === 'working' && s.lastOutputAt > 0 && (now - s.lastOutputAt) > STUCK_MS && !looksDone(s.recent);
             // Match the schedule the way _fireDue resolves it (prefer the exact id
@@ -1825,11 +1826,12 @@ class SessionManager {
                 // `meeting:<room>` cohort selector filters on, so the CLI and both
                 // UIs read one field instead of three lookups.
                 meeting: this._meetingFor(id, rooms),
-                // Current model (raw id, e.g. "claude-opus-4-8"), read from the
-                // live transcript so it tracks in-session /model switches. The
-                // client renders it as a tier-colored badge on the tab/tile.
-                model: sessionModel.modelFor(tab && tab.cwd),
-                effort: s.effort || null,   // effort level from the /effort footer (all tabs, server-detected)
+                // Exact provider/session metadata; never another conversation
+                // that happens to share this directory.
+                model: metadata.model,
+                effort: metadata.effort,
+                modelSource: metadata.modelSource,
+                modelObservedAt: metadata.modelObservedAt,
                 status: s.status,
                 ctxPct: s.ctxPct,
                 attention: s.status === 'attention',
@@ -1837,7 +1839,7 @@ class SessionManager {
                 stuck,
                 highContext: s.ctxPct != null && s.ctxPct >= HIGH_CTX,
                 idleMs: s.lastOutputAt ? now - s.lastOutputAt : null,
-                agent: s.agent || null,               // 'claude' | 'codex' | null (unknown / plain shell)
+                agent: metadata.agent,
                 limited: !!s.limit,
                 limitResetAt: s.limit ? s.limit.resetAt : null,
                 limitAgent: s.limit ? s.limit.agent : null,
@@ -1940,7 +1942,8 @@ function mount(app, requireAuthed, sessions) {
             ok: true,
             sessions: (snap.sessions || []).map(t => ({
                 id: t.id, status: t.status, ctxPct: t.ctxPct,
-                model: t.model, effort: t.effort, lifecycle: t.lifecycle,
+                agent: t.agent, model: t.model, effort: t.effort, lifecycle: t.lifecycle,
+                modelSource: t.modelSource, modelObservedAt: t.modelObservedAt,
                 attention: t.attention, stuck: t.stuck, limited: t.limited,
             })),
         });

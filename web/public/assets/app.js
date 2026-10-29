@@ -25,6 +25,7 @@ import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-20261005b';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=desktop-packs-20260930';
+import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -1509,6 +1510,7 @@ class Shell {
         this._ctxPct = new Map();      // tabId → 0-100 context usage %
         this._agentGroup = new Map();  // tabId → group name (from the manager snapshot)
         this._agentModel = new Map();  // tabId → raw model id (from the manager snapshot)
+        this._agentKind = new Map();   // tabId → provider; never infer Codex from Claude history
         this._agentEffort = new Map(); // tabId → effort level (ultracode/xhigh/…) parsed client-side from the /effort footer
         this._collapsedGroups = new Set(); // group names collapsed in the tiles view
         this._tabMem = new Map();      // tabId → process-tree RSS bytes (hover tooltip; ~10s refresh)
@@ -2424,6 +2426,8 @@ class Shell {
         this._agentBuf.delete(id);
         this._agentStatus.delete(id);
         this._agentModel.delete(id);
+        this._agentKind.delete(id);
+        this._agentEffort.delete(id);
         this._lastStdoutCue.delete(id);
         this._ctxPct.delete(id);
         this._previewUrls.delete(id);
@@ -2502,7 +2506,7 @@ class Shell {
         // _setStatus, so including it here would rebuild all N tab buttons on
         // every working↔done flip. Only structural changes (set/title/active)
         // bust the row cache.
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentModel.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentKind.get(t.id) || ''}:${this._agentModel.get(t.id) || ''}:${this._agentEffort.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
         if (signature === this._tabsUISig) return;
         // Rebuilding the row is the biggest single task this page runs: every
         // tab button torn down and rebuilt, twenty-two of them. That is fine
@@ -2623,30 +2627,19 @@ class Shell {
         node.replaceWith(this._makeCtxBar(pct, id));
     }
 
-    // Collapse a raw model id ("claude-opus-4-8[1m]") to its tier for the badge
-    // label + color. Fable is the odd-one-out (unstick model), so it gets its
-    // own color and stands out in the row.
-    _modelTier(raw) {
-        const m = String(raw || '').toLowerCase();
-        if (m.includes('opus')) return 'opus';
-        if (m.includes('sonnet')) return 'sonnet';
-        if (m.includes('haiku')) return 'haiku';
-        if (m.includes('fable') || m.includes('mythos')) return 'fable';
-        return m ? 'other' : '';
-    }
-
     // A compact, tier-colored pill showing which model a session runs — for
     // at-a-glance fleet management. Color encodes the model TIER only; session
     // STATUS stays on the tab border + ctx-bar, so the two never collide.
     _makeModelBadge(id) {
-        const raw = this._agentModel.get(id);
-        const tier = this._modelTier(raw);
-        if (!tier) return null;
+        const badge = modelBadge({ agent: this._agentKind.get(id), model: this._agentModel.get(id) });
+        if (!badge) return null;
         return el('span', {
             class: 'tab-model',
-            'data-tier': tier,
-            title: `Model: ${raw}\n(live — reflects in-session /model switches)`,
-            text: tier,
+            'data-tier': badge.tier,
+            'data-agent': badge.agent,
+            title: badge.title,
+            'aria-label': badge.title,
+            text: badge.label,
         });
     }
 
@@ -2657,6 +2650,7 @@ class Shell {
     // strips to no spaces ("◉xhigh·/effort"), so match without relying on gaps.
     _detectEffort(id, recent) {
         if (!recent) return;
+        if (this._agentKind.get(id) !== 'claude') return;
         const t = recent.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').slice(-900);
         const LV = 'ultracode|xhigh|high|medium|low|minimal';
         let m, eff = null;
@@ -2683,7 +2677,7 @@ class Shell {
         return el('span', {
             class: 'tab-effort',
             'data-effort': eff,
-            title: `Effort: ${eff}\n(live — from the /effort footer)`,
+            title: `Effort: ${eff}`,
             text: label,
         });
     }
@@ -3314,22 +3308,17 @@ class Shell {
             const id = sess.id;
             const rt = this.tabs.get(id);
             if (!rt) continue;
-            // The tab you're actively viewing is owned by live (sub-second)
-            // client-side detection — don't let the 4s pull fight it.
+            const metadata = sessionMetadata(sess, this._agentKind.get(id));
+            for (const [map, value] of [[this._agentKind, metadata.agent], [this._agentModel, metadata.model], [this._agentEffort, metadata.effort]]) {
+                if ((map.get(id) || null) !== value) {
+                    if (value) map.set(id, value); else map.delete(id);
+                    tabsDirty = true;
+                }
+            }
+            // Live terminal parsing owns the active tab's activity state, but
+            // provider/model changes still apply to that tab immediately.
             if (id === this.activeId && rt._opened && this.viewMode !== 'tiles') continue;
             if (sess.status) this._setStatus(id, sess.status);
-            if (sess.model && sess.model !== this._agentModel.get(id)) {
-                this._agentModel.set(id, sess.model);
-                tabsDirty = true;   // model badge changed → rebuild the tab row below
-            }
-            // Effort badge — server-detected effort covers EVERY tab (client-side
-            // footer parsing only covers tabs whose stream is buffered). Only set
-            // when the server actually has a value, so it never wipes a
-            // client-detected effort before the server ships the field.
-            if (sess.effort && sess.effort !== this._agentEffort.get(id)) {
-                this._agentEffort.set(id, sess.effort);
-                tabsDirty = true;
-            }
             if (sess.ctxPct != null && sess.ctxPct !== this._ctxPct.get(id)) {
                 this._ctxPct.set(id, sess.ctxPct);
                 this._updateCtxBar(id, sess.ctxPct);
@@ -3951,25 +3940,38 @@ class Shell {
         const focused = (typeof document.hasFocus === 'function') ? document.hasFocus() : !document.hidden;
         const lookingRightAtIt = focused && this.activeId === id && this.viewMode !== 'tiles';
         if (!lookingRightAtIt) this._osNotify(msg, id);
-        if (status === 'attention' || status === 'error') this._showStatusToast(msg);
+        if (status === 'attention' || status === 'error') this._showStatusToast(msg, id);
+    }
+
+    // Notification navigation selects a session; the user's current view is
+    // independent. A closed/replaced tab must not open an unrelated session.
+    _openNotificationTab(id, expectedTab) {
+        id = Number(id);
+        const tab = this.tabs.get(id);
+        if (!tab || (expectedTab && tab !== expectedTab)) return false;
+        this._activate(id);
+        return true;
     }
 
     // Fire an OS-level (browser) notification. tag+renotify so repeated alerts
     // for the same tab replace rather than stack; click focuses + opens the tab.
     _osNotify(body, id) {
         if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+        const tab = this.tabs.get(id);
+        if (!tab) return;
         try {
             const n = new Notification('Son of Anton', {
                 body, tag: 'soa-tab-' + id, renotify: true, silent: false,
             });
-            n.onclick = () => { try { window.focus(); } catch (_) {} this._activate(id); n.close(); };
+            n.onclick = () => { try { window.focus(); } catch (_) {} this._openNotificationTab(id, tab); n.close(); };
         } catch (_) {}
     }
 
-    _showStatusToast(text) {
+    _showStatusToast(text, tabId) {
+        const tab = this.tabs.get(tabId);
         const existing = document.getElementById('soa-agent-toast');
         if (existing) existing.remove();
-        const toast = el('div', { id: 'soa-agent-toast', class: 'soa-toast soa-toast--agent', role: 'alert', 'aria-live': 'assertive' }, [
+        const toast = el('div', { id: 'soa-agent-toast', class: 'soa-toast soa-toast--agent', role: tab ? 'button' : 'alert', tabindex: tab ? '0' : '-1', 'aria-live': 'assertive' }, [
             el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '!' }),
             el('div', { class: 'soa-toast-body' }, [
                 el('p', { class: 'soa-toast-title', text }),
@@ -3978,7 +3980,11 @@ class Shell {
         document.body.appendChild(toast);
         requestAnimationFrame(() => toast.setAttribute('data-show', '1'));
         const dismiss = () => { toast.removeAttribute('data-show'); setTimeout(() => toast.remove(), 320); };
-        toast.addEventListener('click', dismiss);
+        const open = () => { if (tab) this._openNotificationTab(tabId, tab); dismiss(); };
+        toast.addEventListener('click', open);
+        toast.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+        });
         setTimeout(dismiss, 4000);
     }
 
@@ -5266,9 +5272,10 @@ class Shell {
     // shared .soa-toast (fixed, top, safe-area-aware, width-capped) so it can never
     // clip the way the in-tray corner badge does. Tap → open that agent's thread.
     _showImBanner(tabId, text) {
+        const tab = this.tabs.get(tabId);
         const existing = document.getElementById('soa-im-banner');
         if (existing) existing.remove();
-        const banner = el('div', { id: 'soa-im-banner', class: 'soa-toast soa-toast--im', role: 'alert', 'aria-live': 'polite' }, [
+        const banner = el('div', { id: 'soa-im-banner', class: 'soa-toast soa-toast--im', role: 'button', tabindex: '0', 'aria-live': 'polite' }, [
             el('div', { class: 'soa-toast-icon', 'aria-hidden': 'true', text: '🗨︎' }),
             el('div', { class: 'soa-toast-body' }, [
                 el('p', { class: 'soa-toast-title', text: '#' + tabId + ' ' + this._chatTitleFor(tabId) }),
@@ -5282,10 +5289,13 @@ class Shell {
             clearTimeout(this._imBannerTimer);
             setTimeout(() => banner.remove(), 320);
         };
-        banner.addEventListener('click', () => {
-            if (this.viewMode !== 'chat') this._toggleChat();
-            this._activate(tabId);
+        const open = () => {
+            if (tab) this._openNotificationTab(tabId, tab);
             dismiss();
+        };
+        banner.addEventListener('click', open);
+        banner.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
         });
         clearTimeout(this._imBannerTimer);
         this._imBannerTimer = setTimeout(dismiss, 5000);
@@ -7603,18 +7613,23 @@ class Shell {
         // mapping actually changes — status-only manager frames must stay cheap.
         const groups = new Map();
         const models = new Map();
+        const agents = new Map();
         let sig = '';
         for (const s of (d.sessions || [])) {
             const g = s.group || 'ungrouped';
             groups.set(s.id, g);
-            if (s.model) models.set(s.id, s.model);
-            if (s.effort) this._agentEffort.set(s.id, s.effort);   // server-detected effort (all tabs)
+            const metadata = sessionMetadata(s, this._agentKind.get(s.id));
+            if (metadata.agent) agents.set(s.id, metadata.agent);
+            if (metadata.model) models.set(s.id, metadata.model);
+            if (metadata.effort) this._agentEffort.set(s.id, metadata.effort);
+            else this._agentEffort.delete(s.id);
             // Model + effort fold into the signature too: a /model or /effort
             // switch is rare but must rebuild the tab row so the badge updates.
-            sig += s.id + ':' + g + ':' + (s.model || '') + ':' + (this._agentEffort.get(s.id) || '') + ';';
+            sig += s.id + ':' + g + ':' + (metadata.agent || '') + ':' + (metadata.model || '') + ':' + (metadata.effort || '') + ';';
         }
         this._agentGroup = groups;
         this._agentModel = models;
+        this._agentKind = agents;
         if (this.viewMode === 'tiles') this._renderFleetBar();
         if (this.viewMode === 'manager') this._renderManagerView();
         if (this.viewMode === 'chat') { this._renderChatHead(); this._renderChatStatus(); }

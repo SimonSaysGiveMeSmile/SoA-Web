@@ -16,6 +16,7 @@
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
 import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
+import { modelBadge } from './sessionMetadata.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { PhoneSizeClaim, colsThatFit } from './sizeClaim.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
@@ -29,7 +30,7 @@ import { SessionHistory, openHistory } from './session-history.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'v93.2 · android perf 2 · 2026-10-24';
+const MOBILE_BUILD = 'session status · 2026-10-29';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -2148,18 +2149,8 @@ class App {
                 ? `<span class="fleet-ctx" title="Context ${pct}% used"><span class="fleet-ctx-bar"><span style="width:${pct}%;background:${ctxColor(pct)}"></span></span><span class="fleet-ctx-pct">${pct}%</span></span>`
                 : '';
 
-            // Model tier chip — which Claude model this session runs, from the
-            // supervisor snapshot (live, tracks /model switches). Color-coded so
-            // the odd one out (e.g. a Fable unstick) is spottable in the list.
-            const mt = (function (r) {
-                r = String(r || '').toLowerCase();
-                if (r.includes('opus')) return 'opus';
-                if (r.includes('sonnet')) return 'sonnet';
-                if (r.includes('haiku')) return 'haiku';
-                if (r.includes('fable') || r.includes('mythos')) return 'fable';
-                return '';
-            })(s && s.model);
-            const modelHtml = mt ? `<span class="fleet-model" data-tier="${mt}">${mt}</span>` : '';
+            const badge = modelBadge(s || t || {});
+            const modelHtml = badge ? `<span class="fleet-model" data-tier="${badge.tier}" data-agent="${badge.agent}" title="${escapeHtml(badge.title)}" aria-label="${escapeHtml(badge.title)}">${escapeHtml(badge.label)}</span>` : '';
 
             const row = document.createElement('div');
             row.className = 'fleet-row' + (id === this._activeTabId ? ' active' : '');

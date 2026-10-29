@@ -362,7 +362,7 @@ html[data-load="high"] .set-row { transition: none !important; }
 }
 .tab .x:hover { opacity: 1; color: var(--soa-red); }
 
-/* Model badge — which Claude model each session runs, for at-a-glance fleet
+/* Model badge — which provider/model each session runs, for at-a-glance fleet
    management. Tier-colored text in a subtle pill, tucked between the title
    stack and the close button. The color encodes the MODEL TIER only; session
    STATUS is still carried by the tab border + ctx-bar, so the two never clash. */
@@ -378,6 +378,7 @@ html[data-load="high"] .set-row { transition: none !important; }
 .tab-model[data-tier="sonnet"] { color: #8be9fd; border-color: rgba(139,233,253,0.42); }
 .tab-model[data-tier="haiku"]  { color: #f1fa8c; border-color: rgba(241,250,140,0.42); }
 .tab-model[data-tier="fable"]  { color: #ff79c6; border-color: rgba(255,121,198,0.46); }
+.tab-model[data-tier="codex"]  { color: var(--soa-accent, #8be9fd); border-color: currentColor; text-transform: none; }
 /* On the filled active tab the tier tint turns illegible — flip to deep-bg ink. */
 .tab.active .tab-model {
   color: var(--soa-bg); border-color: rgba(0,0,0,0.25); background: rgba(0,0,0,0.12);
