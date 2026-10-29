@@ -379,9 +379,10 @@ html[data-load="high"] .set-row { transition: none !important; }
 .tab-model[data-tier="haiku"]  { color: #f1fa8c; border-color: rgba(241,250,140,0.42); }
 .tab-model[data-tier="fable"]  { color: #ff79c6; border-color: rgba(255,121,198,0.46); }
 .tab-model[data-tier="codex"]  { color: var(--soa-accent, #8be9fd); border-color: currentColor; text-transform: none; }
-/* On the filled active tab the tier tint turns illegible — flip to deep-bg ink. */
+/* Follow the active tab's foreground: design packs can use either a filled
+   light tab or a dark inset surface. Background-colored ink disappears on it. */
 .tab.active .tab-model {
-  color: var(--soa-bg); border-color: rgba(0,0,0,0.25); background: rgba(0,0,0,0.12);
+  color: inherit; border-color: currentColor; background: rgba(0,0,0,0.12);
 }
 
 /* Effort badge — sits beside the model tier. Parsed live from the /effort footer. */
@@ -400,7 +401,7 @@ html[data-load="high"] .set-row { transition: none !important; }
 .tab-effort[data-effort="low"]       { color: #8be9fd; border-color: rgba(139,233,253,0.4); }
 .tab-effort[data-effort="minimal"]   { color: var(--soa-accent-dim); }
 .tab.active .tab-effort {
-  color: var(--soa-bg); border-color: rgba(0,0,0,0.25); background: rgba(0,0,0,0.12);
+  color: inherit; border-color: currentColor; background: rgba(0,0,0,0.12);
 }
 
 /* Drag-to-reorder: the tab being dragged fades, and the drop target shows a
@@ -727,6 +728,20 @@ html[data-load="high"] .set-row { transition: none !important; }
 /* Country flag (egress IP) — sits between avatar and name; hidden until known. */
 .user-chip-flag { font-size: 13px; line-height: 1; flex: 0 0 auto; }
 .user-chip-flag:empty { display: none; }
+/* Top bar kept slim: the chip is just the avatar (it still opens profile +
+   settings); name, region flag and gear stay in the profile pane. */
+.topbar .user-chip { padding: 3px !important; gap: 0 !important; }
+.topbar .user-chip :is(.user-chip-name, .user-chip-flag, .user-chip-gear) { display: none !important; }
+/* Voice control lives in the more menu; while the mic is on, a dot on the
+   more button says so without opening the menu. */
+#more-menu .mi-voice { --mi-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><rect x='9' y='2' width='6' height='12' rx='3'/><path d='M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8'/></svg>"); }
+#more-menu .mi-voice[data-state="on"] { color: var(--soa-green, #5dbd5a); }
+#toggle-more { position: relative; }
+.topbar-actions:has(#toggle-voice[data-state="on"]) #toggle-more::after {
+    content: ""; position: absolute; top: 3px; right: 3px;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--soa-green, #5dbd5a);
+}
 
 /* Profile settings pane */
 .profile-stats {
