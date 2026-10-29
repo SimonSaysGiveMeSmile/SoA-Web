@@ -163,7 +163,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=fullscreen-20261014">
+  <link rel="stylesheet" href="/assets/styles.css?v=session-status-20261029">
   <link rel="stylesheet" href="/assets/sidebar.css?v=usage-pace-20261014">
   <link rel="stylesheet" href="/assets/minimal.css?v=usage-burn-range-20260929">
   <link rel="stylesheet" href="/assets/liquid.css?v=14">
@@ -1015,6 +1015,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <a id="release-link" class="more-item mi-download" role="menuitem" href="https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases" target="_blank" rel="noopener" aria-label="Download desktop app" data-i18n-title="topbar.release_title" data-label="Download desktop app" title="Download the desktop app">DOWNLOAD APP</a>
           <button id="toggle-audio" class="more-item mi-audio" role="menuitem" data-state="on" data-label="Mute sound FX" data-label-off="Unmute sound FX" data-i18n="topbar.audio_on" data-i18n-title="topbar.audio_title" title="Mute / unmute sound FX">♬ FX</button>
           <button id="toggle-tts" class="more-item mi-tts" role="menuitem" data-state="off" data-label="Stop speaking replies" data-label-off="Speak replies aloud" title="Speak Claude's replies aloud (text-to-speech)">🔊 SPEAK</button>
+          <button id="toggle-voice" class="more-item mi-voice voice-toggle" role="menuitem" type="button" data-state="off" data-label="Voice control: on" data-label-off="Voice control" aria-haspopup="dialog" aria-expanded="false" aria-controls="voice-panel" aria-label="Voice controls — microphone off" title="Voice controls — microphone off"><span class="voice-toggle-label">VOICE</span></button>
           <button id="timemachine" class="more-item mi-clock" role="menuitem" data-label="Time machine" title="Time machine — restore a prior IDE snapshot" aria-label="Time machine">TIME</button>
           <button id="desktop-remote" class="more-item mi-monitor" role="menuitem" data-label="Use the Mac desktop" title="Open the Mac's screen to view and control it" aria-label="Use the Mac desktop">MAC</button>
           <button id="restart-daemon" class="more-item mi-restart" role="menuitem" data-label="Restart server" title="Restart the SoA server — flushes tabs + scrollback, re-adopts the tunnel, and auto-resumes every Claude session on boot" aria-label="Restart server">↻ RESTART</button>
@@ -1022,10 +1023,6 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <!-- Always visible, whether the tray is collapsed or open. -->
         <button id="toggle-theme" data-icon="☀" title="Switch light / dark theme (full options in Settings)" aria-pressed="false" aria-label="Toggle light or dark theme">☀ THEME</button>
         <button id="toggle-more" class="more-toggle" data-icon="⋯" title="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" aria-label="More actions">⋯ MORE</button>
-        <button id="toggle-voice" class="voice-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="voice-panel" aria-label="Voice controls — microphone off" title="Voice controls — microphone off">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg>
-          <span class="voice-toggle-label">VOICE</span><span class="voice-toggle-dot" aria-hidden="true"></span>
-        </button>
         <button id="user-chip" class="user-chip" title="Profile &amp; settings (Ctrl+Shift+S)" aria-label="Profile and settings">
           <span class="user-avatar" data-initial="U"></span>
           <span class="user-chip-flag" aria-hidden="true"></span>
@@ -1164,7 +1161,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="/assets/voice-commands.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-audio.js?v=2"></script>
   <script src="/assets/voice-vision.js?v=2"></script>
-  <script type="module" src="/assets/app.js?v=toolbar-20261028"></script>
+  <script type="module" src="/assets/app.js?v=session-status-20261029"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost
