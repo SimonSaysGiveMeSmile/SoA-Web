@@ -341,7 +341,26 @@ ch_cloudflare() {
     # tunnel (e.g. an ngrok url); adopting that as "cloudflare" mislabels channels.json
     # and tells the user "works on s0a.app" for a host whose free interstitial blocks
     # the cross-origin call. Fail here so failover adopts it under the CORRECT channel.
-    case "$url" in *trycloudflare.com*) ;; *) return 1;; esac
+    # The daemon can be holding a DEAD tunnel it adopted earlier (an ngrok url
+    # that is over quota, say): /api/pair/start then keeps answering with that
+    # url and no fresh cloudflared is ever minted, so the Mac stays offline.
+    # Drop it and start over, at most once per 10 minutes.
+    case "$url" in
+        *trycloudflare.com*) ;;
+        *)
+            local stamp="$STATE_DIR/channels-reset.stamp" now last
+            now="$(date +%s)"; last="$(cat "$stamp" 2>/dev/null || echo 0)"
+            if [ $((now - last)) -ge 600 ] && ! verify "$url" "$(skip_hdr_for ngrok)"; then
+                echo "$now" > "$stamp"
+                log "daemon holds a dead non-cloudflare tunnel ($url) — resetting it for a fresh quick tunnel"
+                curl -fsS --max-time 6 -X POST "http://127.0.0.1:${PORT}/api/pair/stop" >/dev/null 2>&1
+                # /api/pair/start answers {ok,data:{publicUrl}} — read it from data.
+                url="$(curl -fsS --max-time 45 -X POST "http://127.0.0.1:${PORT}/api/pair/start" 2>/dev/null \
+                      | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('publicUrl',''))" 2>/dev/null)"
+            fi
+            case "$url" in *trycloudflare.com*) ;; *) return 1;; esac
+            ;;
+    esac
     for i in 1 2 3 4 5 6 7 8; do
         verify "$url" && { echo "$url"; return 0; }
         sleep 4

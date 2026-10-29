@@ -379,9 +379,69 @@ keeps working. The helper reports `ready 0|1` and the service forwards it as
 `dragPermitted` (hello) / `drag-permission` (on change). In the viewer a drag
 is a long-press then move on touch (lifting without moving is still a
 right-click) or the ordinary button-held move with a mouse; `pointercancel`
-always releases the button. Auto-start plist:
+always releases the button.
+
+Once SoA Pointer holds the grant it carries **all** input, not only drag:
+move, click, scroll, key, text and modifier state go straight to CGEvent over
+its stdin (`status` / `where` / `ping` for health), so a tap lands in one
+frame instead of the ~2 s a `computeruse` round trip took; the CLI path is the
+fallback while the grant is missing. `SOA_POINTER_DRY=1` logs commands instead
+of posting them (tests never drive the real Mac). The bundle is rebuilt only
+when the source hash changes, and must keep the name `SoA Pointer.app` — a
+renamed or re-signed bundle loses the grant.
+
+The viewer is a MacBook-style deck: the screen on top, a Mac keyboard and a
+trackpad (one-finger move, tap / two-finger tap, two-finger scroll) below,
+re-laid for portrait, landscape and narrow screens. **Display** (in the sheet)
+switches the Mac's own resolution through `scripts/soa-display.swift`
+(`CGDisplayCopyAllDisplayModes`), restored when the last viewer leaves.
+Encoder size changes are damped so the picture does not churn: a change under
+12% at the same aspect keeps the running encoder, zoom is reported in steps
+(1 / 1.5 / 2 / 3 / 4), the viewer de-duplicates and debounces its screen
+report (600 ms), and a size held by a zoom lasts `SCALE_HOLD_MS` (15 s).
+
+**Fit the Mac to this screen** (off by default) creates a virtual display
+shaped like the viewer's area (`scripts/soa-virtual-display.swift`, the
+private `CGVirtualDisplay` API) and mirrors the built-in screen to it. One
+viewer owns the fit — the one that turned it on or tapped **Fit here** (a
+per-device id survives a reconnect); only the owner's area re-shapes it,
+after 1.5 s and only for a >8% change (an address bar never re-fits); other
+viewers see it letterboxed with a "fitted to another screen" bar, and a
+page's automatic request is refused while someone else is watching. When the
+owner leaves it has 30 s to return, then the fit passes to the latest asker or
+the Mac is restored (unless "Keep after I leave"). A marker file with the
+helper pid is written before create and the helper exits with its parent, so
+a killed service never leaves a stray display; the start-up guard restores
+from the marker. Test it with the helper's DRY mode on a spare port, never
+on the live display.
+
+Auto-start plist:
 `deploy/launchd/com.soa-web.desktop-remote.plist`. Log:
 `~/.soa-web-local/logs/desktop-remote.log`.
+
+## Backup doors (soa-doors)
+
+The primary tunnel can die (a free ngrok over its monthly quota, a quick
+tunnel that rotated), so `scripts/soa-doors` (launchd `com.soa-web.doors`,
+KeepAlive; plist in `deploy/launchd/`) keeps up to three free backup links to
+`:4010` beside it: a second cloudflared quick tunnel, localhost.run and pinggy
+(both over plain `ssh -R`, no account). Each door is verified through public
+resolvers (a fresh hostname is often negative-cached locally) by asking
+`/api/ping` for `name: "soa-web"`; three failed checks restart it with
+backoff (5 s → 5 min). The live list is written to `doors.json` in the state
+dir and published, encrypted, to ntfy.sh on change and every 10 min so a
+phone can find a working door when the one it holds is gone: topic =
+`soa-` + HMAC-SHA256(pairing token, "soa-doors-topic-v1") hex[0:32], key =
+HKDF-SHA256(token, salt "soa-doors", info "v1"), body = base64url(nonce ‖
+AES-256-GCM ciphertext) of `{v:1, ts, doors:[{url, provider, primary}]}`.
+Without the token the topic and the body mean nothing; the token itself is
+never sent. Every door is the same pairing gate, so set a pairing password.
+Log: `~/.soa-web-local/logs/doors.log`.
+
+`scripts/soa-channels` also resets a dead adopted tunnel: when the daemon
+holds a non-cloudflare URL that fails verification it calls
+`/api/pair/stop` then `/api/pair/start` (at most once per 10 min) instead of
+re-reporting the dead URL forever.
 
 ## Driving an isolated browser
 

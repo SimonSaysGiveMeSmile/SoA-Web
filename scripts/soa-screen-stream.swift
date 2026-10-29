@@ -1,13 +1,19 @@
 // soa-screen-stream — the Mac display as a low-latency H.264 stream.
 //
-// ScreenCaptureKit captures the main display, already scaled to the output
+// ScreenCaptureKit captures one display (the main one unless told otherwise),
+// already scaled to the output
 // size by the window server, and VideoToolbox encodes it in its low-latency
 // rate-control mode (no B-frames, no frame delay, a keyframe at least every
 // 2 s). Used by soa-desktop-remote; ffmpeg's AVFoundation screen input tops
 // out near 12 fps on current macOS, this path keeps up with 30-60.
 //
-//   soa-screen-stream <width> <height> <fps> <bitrate-bps>
-//   soa-screen-stream --info        main display size + scale as JSON
+//   soa-screen-stream <width> <height> <fps> <bitrate-bps> [display-id]
+//   soa-screen-stream --info [display-id]   a display's size + scale as JSON
+//
+// display-id is a CGDirectDisplayID (0 or absent = the main display). A
+// display that ScreenCaptureKit does not list yet (one created a moment ago)
+// is waited for briefly; one that never shows up falls back to the main
+// display, and stderr says so.
 //
 // stdout, one record per encoded frame (access unit):
 //   u32 BE  payload length
@@ -31,7 +37,8 @@ let argv = CommandLine.arguments
 // --info: the main display's size in points and its backing scale, as JSON
 // (no capture, no permission) — the service's fallback when Sarea is down.
 if argv.count > 1 && argv[1] == "--info" {
-    let id = CGMainDisplayID(), b = CGDisplayBounds(id)
+    let asked = argv.count > 2 ? UInt32(argv[2]) ?? 0 : 0
+    let id = asked != 0 ? CGDirectDisplayID(asked) : CGMainDisplayID(), b = CGDisplayBounds(id)
     var scale = 1.0
     if let m = CGDisplayCopyDisplayMode(id), m.width > 0 { scale = Double(m.pixelWidth) / Double(m.width) }
     print("{\"width\":\(Int(b.width)),\"height\":\(Int(b.height)),\"scale_factor\":\(scale)}")
@@ -41,6 +48,7 @@ var outW = argv.count > 1 ? Int(argv[1]) ?? 1920 : 1920
 var outH = argv.count > 2 ? Int(argv[2]) ?? 1200 : 1200
 let fps = max(5, min(60, argv.count > 3 ? Int(argv[3]) ?? 30 : 30))
 var bitrate = max(500_000, argv.count > 4 ? Int(argv[4]) ?? 6_000_000 : 6_000_000)
+let wantDisplay = CGDirectDisplayID(argv.count > 5 ? UInt32(argv[5]) ?? 0 : 0)
 
 let encQ = DispatchQueue(label: "encode")      // owns every encoder variable below
 let outQ = DispatchQueue(label: "stdout")
@@ -175,15 +183,24 @@ func config(_ w: Int, _ h: Int) -> SCStreamConfiguration {
 
 Task {
     do {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        if wantDisplay != 0 {
+            // A display that was just created or reconfigured can take a moment to be listed.
+            for _ in 0..<15 where !content.displays.contains(where: { $0.displayID == wantDisplay }) {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            }
+            if !content.displays.contains(where: { $0.displayID == wantDisplay }) { say("display \(wantDisplay) not available — capturing the main display") }
+        }
         let mainID = CGMainDisplayID()
-        guard let display = content.displays.first(where: { $0.displayID == mainID }) ?? content.displays.first else { say("no display"); exit(2) }
+        guard let display = content.displays.first(where: { wantDisplay != 0 && $0.displayID == wantDisplay })
+            ?? content.displays.first(where: { $0.displayID == mainID }) ?? content.displays.first else { say("no display"); exit(2) }
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let s = SCStream(filter: filter, configuration: config(outW, outH), delegate: capture)
         try s.addStreamOutput(capture, type: .screen, sampleHandlerQueue: DispatchQueue(label: "capture"))
         try await s.startCapture()
         capture.stream = s
-        say("capturing display \(display.width)x\(display.height) → \(outW)x\(outH)")
+        say("capturing display \(display.displayID) \(display.width)x\(display.height) → \(outW)x\(outH)")
     } catch {
         say("error: \(error.localizedDescription)")
         exit(2)

@@ -1,0 +1,240 @@
+#!/usr/bin/env node
+// soa-doors — keep extra free tunnels ("doors") to the daemon alive, and tell
+// paired devices where they are.
+//
+// The primary public door is the daemon's own Cloudflare quick tunnel, healed by
+// soa-channels. Quick tunnels rotate and sometimes die outright, and a phone
+// holding only that URL is then cut off. This supervisor runs independent
+// BACKUP doors next to it — a second Cloudflare quick tunnel and two free
+// SSH-based providers (localhost.run, pinggy), none of which needs an account —
+// restarts any that die, and publishes the live list so a paired device can
+// switch to whichever still answers.
+//
+// The list goes to ntfy.sh (free, no account) ENCRYPTED with a key derived from
+// the pairing token, on a topic name derived from it too, so only a device that
+// already holds the token can find or read it. The token itself never leaves
+// this machine. Format (the client in web/public/m/doors.js must match):
+//   topic = "soa-" + hex(HMAC-SHA256(token, "soa-doors-topic-v1"))[0:32]
+//   key   = HKDF-SHA256(token, salt "soa-doors", info "v1", 32 bytes)
+//   body  = base64url(nonce12 || AES-256-GCM(JSON {v:1, ts, doors:[{url, provider, primary}]}))
+//
+// It never touches the primary tunnel or the daemon. State: doors.json in the
+// state dir. Log: logs/doors.log (state changes only).
+//   SOA_DOORS_ENABLE=0   idle (kill switch)       SOA_DOORS_DRY=1   no ntfy publish
+//   SOA_DOORS_PROVIDERS=cf2,lhr,pinggy             which backups to run
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const https = require('https');
+const dns = require('dns');
+const { spawn } = require('child_process');
+
+const HOME = os.homedir();
+const STATE = process.env.SOA_WEB_STATE_DIR || path.join(HOME, '.soa-web-local');
+const PORT = parseInt(process.env.SOA_WEB_PORT || '4010', 10);
+const LOG = path.join(STATE, 'logs', 'doors.log');
+const DOORS_JSON = path.join(STATE, 'doors.json');
+const NTFY = (process.env.SOA_DOORS_NTFY || 'https://ntfy.sh').replace(/\/$/, '');
+const DRY = process.env.SOA_DOORS_DRY === '1';
+const VERIFY_MS = 60e3;
+const PUBLISH_MS = 10 * 60e3;           // ntfy keeps messages ~12 h; refresh well inside that
+const FAILS_BEFORE_RESTART = 3;
+const BACKOFF_MIN = 5e3, BACKOFF_MAX = 5 * 60e3, HEALTHY_RESET_MS = 10 * 60e3;
+const ORIGIN = `http://127.0.0.1:${PORT}`;
+const SSH_OPTS = ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30',
+    '-o', 'ServerAliveCountMax=3', '-o', 'ExitOnForwardFailure=yes', '-o', 'BatchMode=yes'];
+
+const PROVIDERS = {
+    cf2: { cmd: 'cloudflared', args: ['tunnel', '--url', ORIGIN, '--no-autoupdate'],
+        re: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/g },
+    lhr: { cmd: 'ssh', args: [...SSH_OPTS, '-R', `80:127.0.0.1:${PORT}`, 'nokey@localhost.run'],
+        re: /https:\/\/[a-z0-9]+\.lhr\.life/g },
+    // Free pinggy sessions end after 60 minutes; the restart loop renews them.
+    pinggy: { cmd: 'ssh', args: ['-p', '443', ...SSH_OPTS, '-tt', `-R0:127.0.0.1:${PORT}`, 'a.pinggy.io'],
+        re: /https:\/\/[a-z0-9-]+\.free\.pinggy\.net/g },
+};
+
+function log(...a) {
+    const line = `${new Date().toISOString()} ${a.join(' ')}\n`;
+    try { fs.mkdirSync(path.dirname(LOG), { recursive: true }); fs.appendFileSync(LOG, line); } catch (_) {}
+}
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return null; } };
+
+// A fresh quick-tunnel host is often looked up before it exists, and the
+// system resolver then caches "not found" for minutes. Resolve door hosts
+// through public resolvers instead so a new door is verified as soon as it is up.
+const resolver = new dns.Resolver(); resolver.setServers(['1.1.1.1', '8.8.8.8']);
+function lookup(host, opts, cb) {
+    resolver.resolve4(host, (err, addrs) => {
+        if (!err && addrs.length) return opts && opts.all ? cb(null, addrs.map(a => ({ address: a, family: 4 }))) : cb(null, addrs[0], 4);
+        dns.lookup(host, opts, cb);
+    });
+}
+// The door answers /api/ping with the daemon's own JSON → it reaches this daemon.
+function verify(url) {
+    return new Promise((resolve) => {
+        const t0 = Date.now();
+        const req = https.get(url + '/api/ping', { lookup, timeout: 10e3,
+            headers: { 'ngrok-skip-browser-warning': '1', 'user-agent': 'soa-doors' } }, (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (c) => { if (body.length < 4096) body += c; });
+            res.on('end', () => {
+                let ok = false;
+                try { ok = res.statusCode === 200 && JSON.parse(body).name === 'soa-web'; } catch (_) {}
+                resolve({ ok, rttMs: Date.now() - t0 });
+            });
+        });
+        req.on('timeout', () => req.destroy(new Error('timeout')));
+        req.on('error', () => resolve({ ok: false, rttMs: -1 }));
+    });
+}
+
+// ── one supervised door ─────────────────────────────────────────────────────
+class Door {
+    constructor(name, spec) {
+        Object.assign(this, { name, spec, child: null, url: '', ok: false, rttMs: -1, verifiedAt: 0,
+            fails: 0, backoff: BACKOFF_MIN, upSince: 0, timer: null, stopped: false });
+    }
+    start() {
+        if (this.stopped || this.child) return;
+        this.url = ''; this.ok = false; this.fails = 0;
+        let child;
+        try {
+            child = spawn(this.spec.cmd, this.spec.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+        } catch (e) { log(this.name, 'spawn failed:', e.message); return this.retry(); }
+        this.child = child;
+        const scan = (chunk) => {
+            const m = String(chunk).match(this.spec.re);
+            if (!m) return;
+            const url = m[m.length - 1];
+            if (url !== this.url) {
+                this.url = url; this.ok = false; this.fails = 0;
+                // Give the provider's DNS and edge a moment before the first check.
+                setTimeout(() => this.check(), 6e3);
+            }
+        };
+        child.stdout.on('data', scan);
+        child.stderr.on('data', scan);
+        child.on('error', (e) => log(this.name, 'error:', e.message));
+        child.on('exit', (code, sig) => {
+            if (this.child !== child) return;
+            this.child = null;
+            const was = this.url;
+            this.url = ''; this.ok = false;
+            changed();
+            if (!this.stopped) { log(this.name, `exited (${sig || code})${was ? ' — was ' + was : ''}`); this.retry(); }
+        });
+    }
+    retry() {
+        clearTimeout(this.timer);
+        const wait = this.backoff;
+        this.backoff = Math.min(BACKOFF_MAX, this.backoff * 2);
+        this.timer = setTimeout(() => this.start(), wait);
+    }
+    kill() { if (this.child) { try { this.child.kill('SIGTERM'); } catch (_) {} } }
+    stop() { this.stopped = true; clearTimeout(this.timer); this.kill(); }
+    async check() {
+        if (!this.url || !this.child) return;
+        const url = this.url;
+        const r = await verify(url);
+        if (url !== this.url) return;
+        const wasOk = this.ok;
+        this.ok = r.ok; this.rttMs = r.rttMs;
+        if (r.ok) {
+            this.fails = 0; this.verifiedAt = Date.now();
+            if (!wasOk) { this.upSince = Date.now(); log(this.name, 'up:', url, `${r.rttMs} ms`); changed(); }
+            if (this.upSince && Date.now() - this.upSince > HEALTHY_RESET_MS) this.backoff = BACKOFF_MIN;
+        } else {
+            if (wasOk) { log(this.name, 'not answering:', url); changed(); }
+            if (++this.fails >= FAILS_BEFORE_RESTART) { log(this.name, 'restarting after', this.fails, 'failed checks'); this.kill(); }
+        }
+    }
+}
+
+// ── the published list ──────────────────────────────────────────────────────
+function pairingToken() {
+    const s = readJson(path.join(STATE, 'session.json'));
+    return s && typeof s.token === 'string' && s.token ? s.token : '';
+}
+function derive(token) {
+    const topic = 'soa-' + crypto.createHmac('sha256', token).update('soa-doors-topic-v1').digest('hex').slice(0, 32);
+    const key = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(token, 'utf8'), Buffer.from('soa-doors'), Buffer.from('v1'), 32));
+    return { topic, key };
+}
+function seal(key, obj) {
+    const nonce = crypto.randomBytes(12);
+    const c = crypto.createCipheriv('aes-256-gcm', key, nonce);
+    const ct = Buffer.concat([c.update(JSON.stringify(obj), 'utf8'), c.final(), c.getAuthTag()]);
+    return Buffer.concat([nonce, ct]).toString('base64url');
+}
+function post(url, body) {
+    return new Promise((resolve) => {
+        const req = https.request(url, { method: 'POST', timeout: 15e3, headers: { 'content-type': 'text/plain' } }, (res) => {
+            res.resume(); res.on('end', () => resolve(res.statusCode));
+        });
+        req.on('timeout', () => req.destroy(new Error('timeout')));
+        req.on('error', () => resolve(0));
+        req.end(body);
+    });
+}
+
+const doors = [];
+let primary = { url: '', ok: false, rttMs: -1, verifiedAt: 0 };
+let lastPublished = '', lastPublishAt = 0, publishTimer = null;
+
+function liveList() {
+    const list = [];
+    if (primary.url && primary.ok) list.push({ url: primary.url, provider: 'cloudflare', primary: true });
+    for (const d of doors) if (d.url && d.ok) list.push({ url: d.url, provider: d.name, primary: false });
+    return list;
+}
+function writeState() {
+    const rows = [{ provider: 'cloudflare', url: primary.url, ok: primary.ok, verifiedAt: primary.verifiedAt, rttMs: primary.rttMs, primary: true },
+        ...doors.map(d => ({ provider: d.name, url: d.url, ok: d.ok, verifiedAt: d.verifiedAt, rttMs: d.rttMs, primary: false }))];
+    try { fs.writeFileSync(DOORS_JSON + '.tmp', JSON.stringify(rows, null, 2)); fs.renameSync(DOORS_JSON + '.tmp', DOORS_JSON); } catch (_) {}
+}
+function changed() { writeState(); clearTimeout(publishTimer); publishTimer = setTimeout(() => publish(false), 2e3); }
+async function publish(periodic) {
+    const list = liveList();
+    const sig = JSON.stringify(list.map(d => d.url).sort());
+    if (!list.length) return;                       // never publish "nothing" over a list that may still help
+    if (!periodic && sig === lastPublished) return;
+    const token = pairingToken();
+    if (!token) return;
+    if (DRY) { lastPublished = sig; lastPublishAt = Date.now(); log('dry: would publish', list.length, 'doors'); return; }
+    const { topic, key } = derive(token);
+    const status = await post(`${NTFY}/${topic}`, seal(key, { v: 1, ts: Date.now(), doors: list }));
+    if (status >= 200 && status < 300) {
+        if (sig !== lastPublished) log('published', list.length, 'doors:', list.map(d => d.provider).join(', '));
+        lastPublished = sig; lastPublishAt = Date.now();
+    } else log('publish failed:', status || 'network');
+}
+
+async function checkPrimary() {
+    const t = readJson(path.join(STATE, 'tunnel.json'));
+    const url = t && typeof t.url === 'string' ? t.url.replace(/\/$/, '') : '';
+    if (url !== primary.url) { primary = { url, ok: false, rttMs: -1, verifiedAt: 0 }; }
+    if (!url) { changed(); return; }
+    const r = await verify(url);
+    const wasOk = primary.ok;
+    primary.ok = r.ok; primary.rttMs = r.rttMs; if (r.ok) primary.verifiedAt = Date.now();
+    if (wasOk !== r.ok) { log('primary', r.ok ? 'up:' : 'not answering:', url); changed(); }
+}
+
+function main() {
+    if (process.env.SOA_DOORS_ENABLE === '0') { log('disabled (SOA_DOORS_ENABLE=0)'); setInterval(() => {}, 1 << 30); return; }
+    const want = (process.env.SOA_DOORS_PROVIDERS || 'cf2,lhr,pinggy').split(',').map(s => s.trim()).filter(n => PROVIDERS[n]);
+    log('starting:', want.join(', '), DRY ? '(dry)' : '');
+    for (const n of want) { const d = new Door(n, PROVIDERS[n]); doors.push(d); d.start(); }
+    checkPrimary();
+    setInterval(() => { checkPrimary(); for (const d of doors) d.check(); }, VERIFY_MS);
+    setInterval(() => { if (Date.now() - lastPublishAt >= PUBLISH_MS - 5e3) publish(true); }, 60e3);
+    const quit = () => { for (const d of doors) d.stop(); setTimeout(() => process.exit(0), 300); };
+    process.on('SIGTERM', quit); process.on('SIGINT', quit);
+}
+
+if (require.main === module) main();
+module.exports = { derive, seal };
