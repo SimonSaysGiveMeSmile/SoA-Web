@@ -31,6 +31,32 @@ const ANSI_LIGHT = {
     brightCyan: '#0891b2', brightWhite: '#ffffff',
 };
 
+// Terminal.app's "Basic" profile ANSI table (the same in light and dark).
+const TERMINAL_APP_BASIC = {
+    black: '#000000', red: '#990000', green: '#00a600', yellow: '#999900',
+    blue: '#0000b2', magenta: '#b200b2', cyan: '#00a6b2', white: '#bfbfbf',
+    brightBlack: '#666666', brightRed: '#e50000', brightGreen: '#00d900',
+    brightYellow: '#e5e500', brightBlue: '#0000ff', brightMagenta: '#e500e5',
+    brightCyan: '#00e5e5', brightWhite: '#e5e5e5',
+};
+// Windows Terminal "Campbell" (its default) and "One Half Light" (bundled). One Half
+// Light's white is #FAFAFA — its own background — so plain-white output would vanish;
+// it is the one value nudged, to the scheme's bright-black.
+const WT_CAMPBELL = {
+    black: '#0c0c0c', red: '#c50f1f', green: '#13a10e', yellow: '#c19c00',
+    blue: '#0037da', magenta: '#881798', cyan: '#3a96dd', white: '#cccccc',
+    brightBlack: '#767676', brightRed: '#e74856', brightGreen: '#16c60c',
+    brightYellow: '#f9f1a5', brightBlue: '#3b78ff', brightMagenta: '#b4009e',
+    brightCyan: '#61d6d6', brightWhite: '#f2f2f2',
+};
+const WT_ONE_HALF_LIGHT = {
+    black: '#383a42', red: '#e45649', green: '#50a14f', yellow: '#c18401',
+    blue: '#0184bc', magenta: '#a626a4', cyan: '#0997b3', white: '#4f525d',
+    brightBlack: '#4f525d', brightRed: '#df6c75', brightGreen: '#98c379',
+    brightYellow: '#e4c07a', brightBlue: '#61afef', brightMagenta: '#c577dd',
+    brightCyan: '#56b5c1', brightWhite: '#ffffff',
+};
+
 // MINIMAL UI language: terminals are dark graphite "slate cards" floating on
 // the porcelain chrome, whatever the theme setting says — the inversion is the
 // language's signature. Calmer, desaturated ANSI to match.
@@ -68,8 +94,49 @@ export function isLiquidUi() {
 // xterm theme object for a RESOLVED theme. Surface + ink + cursor + selection are
 // swapped to match the CSS palette; ANSI follows the surface brightness.
 export function xtermTheme(resolved) {
+    const pack = document.documentElement.dataset.ui;
+    // Desktop packs ship their platform's real terminal: Terminal.app "Basic"
+    // (white / #1E1E1E and its ANSI table), Windows Terminal ("Campbell" in the
+    // dark, "One Half Light" in the light), and for Soft UI the slab itself.
+    const desktop = {
+        macos27: { light: '#ffffff', dim: '#f5f5f7', dark: '#1e1e1e', ink: '#000000', inkDark: '#ffffff',
+            cursor: '#7f7f7f', cursorDark: '#8c8c8c', sel: 'rgba(179,215,255,.6)', selDark: 'rgba(90,110,140,.55)',
+            ansi: TERMINAL_APP_BASIC, ansiDark: TERMINAL_APP_BASIC },
+        windows11: { light: '#fafafa', dim: '#f0f0f0', dark: '#0c0c0c', ink: '#383a42', inkDark: '#cccccc',
+            cursor: '#383a42', cursorDark: '#ffffff', sel: 'rgba(56,58,66,.2)', selDark: 'rgba(255,255,255,.3)',
+            ansi: WT_ONE_HALF_LIGHT, ansiDark: WT_CAMPBELL },
+        neumorphism: { light: '#e0e5ec', dim: '#d4dae3', dark: '#2c3038', ink: '#3b4a60', inkDark: '#dfe5ef',
+            cursor: '#4a67f0', cursorDark: '#7f95ff', sel: 'rgba(74,103,240,.2)', selDark: 'rgba(127,149,255,.3)',
+            ansi: ANSI_LIGHT, ansiDark: ANSI_DARK },
+    }[pack];
+    if (desktop) {
+        const dark = resolved === 'dark', background = desktop[resolved] || desktop.dark;
+        return {
+            ...(dark ? desktop.ansiDark : desktop.ansi),
+            foreground: dark ? desktop.inkDark : desktop.ink, background,
+            cursor: dark ? desktop.cursorDark : desktop.cursor, cursorAccent: background,
+            selectionBackground: dark ? desktop.selDark : desktop.sel,
+        };
+    }
+    if (pack === 'brutalist') return {
+        ...ANSI_DARK, foreground: '#eeedda', background: '#181916', cursor: '#ffed43',
+        cursorAccent: '#181916', selectionBackground: 'rgba(255,237,67,0.25)',
+    };
+    if (pack === 'classic') return {
+        ...ANSI_LIGHT, foreground: '#202737', background: '#fffef8', cursor: '#164b9b',
+        white: '#4d5a68', brightWhite: '#1e2938',
+        cursorAccent: '#fffef8', selectionBackground: 'rgba(49,106,197,0.24)',
+    };
+    if (pack === 'dos') return {
+        ...ANSI_DARK, foreground: '#e5e9c7', background: '#050b18', cursor: '#fff697',
+        cursorAccent: '#050b18', selectionBackground: 'rgba(185,198,208,0.32)',
+    };
     if (isMinimalUi()) return { ...MINIMAL_XTERM };
-    if (isLiquidUi()) return { ...LIQUID_XTERM };
+    if (isLiquidUi()) return resolved === 'dark' ? { ...LIQUID_XTERM } : {
+        ...ANSI_LIGHT, foreground: '#1b354b', background: '#f4f8fc', cursor: '#1265ad',
+        white: '#4d6576', brightWhite: '#1b354b',
+        cursorAccent: '#f4f8fc', selectionBackground: 'rgba(18,101,173,0.22)',
+    };
     if (resolved === 'light') return {
         foreground: '#15302e', background: '#f7f9fa', cursor: '#0e6b73',
         cursorAccent: '#f7f9fa', selectionBackground: 'rgba(14,107,115,0.25)', ...ANSI_LIGHT,
@@ -79,8 +146,8 @@ export function xtermTheme(resolved) {
         cursorAccent: '#dde3e5', selectionBackground: 'rgba(17,89,95,0.25)', ...ANSI_LIGHT,
     };
     return { // dark (default)
-        foreground: '#aacfd1', background: '#05080d', cursor: '#aacfd1',
-        cursorAccent: '#aacfd1', selectionBackground: 'rgba(170,207,209,0.3)', ...ANSI_DARK,
+        foreground: '#c4e6ec', background: '#060f16', cursor: '#79e5ee',
+        cursorAccent: '#060f16', selectionBackground: 'rgba(121,229,238,0.25)', ...ANSI_DARK,
     };
 }
 

@@ -17,12 +17,14 @@
 
 import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=32';
 
+import { DESIGN_PACKS, designPackPicker } from '/assets/design-packs.js?v=desktop-packs-20260930';
+
 const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
     theme: 'dark',   // default to dark regardless of system preference
-    uiLang: 'tron',  // UI language: 'tron' (terminal classic) | 'minimal' (porcelain modern) | 'liquid' (liquid glass / iOS)
+    uiLang: 'tron',  // Design pack ID; choices are defined in DESIGN_PACKS.
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,
@@ -74,7 +76,7 @@ function asZones(v) {
 const THEMES = ['auto', 'dark', 'light', 'dim'];
 function asTheme(v) { return THEMES.includes(v) ? v : DEFAULTS.theme; }
 
-const UILANGS = ['tron', 'minimal', 'liquid'];
+const UILANGS = DESIGN_PACKS.map(pack => pack.id);
 function asUiLang(v) { return UILANGS.includes(v) ? v : DEFAULTS.uiLang; }
 
 // Reflect the UI language onto <html data-ui> so minimal.css activates.
@@ -206,7 +208,7 @@ function resolvedModeLabel() {
 // explanation sits underneath in the quiet tone, and the control is pinned
 // right where the eye can run down a column of them.
 const SET_LABELS = {
-    uiLang: 'Interface skin',
+    uiLang: 'Design pack',
     theme: 'Colour theme',
     termFontSize: 'Terminal text size',
     cursorBlink: 'Blinking cursor',
@@ -226,7 +228,7 @@ const SET_LABELS = {
 // A few controls are lists, not single inputs — a row of view checkboxes, a
 // bag of city chips — and squeezing those into the control column collides them
 // with their own label. They get the full width, under the description.
-const WIDE_CONTROLS = new Set(['viewButtons', 'clockZones']);
+const WIDE_CONTROLS = new Set(['uiLang', 'viewButtons', 'clockZones']);
 
 // Most rows don't get a description, and that is the point: a label labels, a
 // control demonstrates, and a sentence underneath that only restates the label
@@ -308,16 +310,7 @@ function langSelect(id) {
 }
 
 function uiLangSelect(id, value) {
-    const sel = el('select', { id });
-    for (const [v, label] of [['tron', 'TRON · terminal classic'], ['minimal', 'MINIMAL · porcelain modern'], ['liquid', 'LIQUID · glass (iOS)']]) {
-        const o = el('option', { value: v, text: label });
-        if (v === value) o.selected = true;
-        sel.appendChild(o);
-    }
-    // Instant apply, same pipeline as theme: saveSettings sets <html data-ui>
-    // (applyUiAttr) and 'soa:settings' → app.js _applyTheme re-themes xterm.
-    sel.addEventListener('change', () => saveSettings({ uiLang: asUiLang(sel.value) }));
-    return sel;
+    return designPackPicker(id, value, next => saveSettings({ uiLang: asUiLang(next) }));
 }
 
 function themeSelect(id, value) {
@@ -366,7 +359,7 @@ function buildAppearancePane(s) {
             // The one thing they cannot say is what the NEXT row does, so that
             // fact lives on the theme row, where it is about to matter.
             setRow('uiLang', '', uiLangSelect('set-uiLang', s.uiLang)),
-            setRow('theme', 'TRON only — MINIMAL and LIQUID bring their own palettes.', themeSelect('set-theme', s.theme)),
+            setRow('theme', 'Choose a light, dark, or system appearance.', themeSelect('set-theme', s.theme)),
             kvRow('termFontSize', '', numInput('set-termFontSize', s.termFontSize, 8, 28, 1)),
             kvRow('cursorBlink',  '', boolSelect('set-cursorBlink', s.cursorBlink)),
             kvRow('nocursor',     '', boolSelect('set-nocursor', s.nocursor)),
@@ -399,12 +392,27 @@ function buildMiscPane(s) {
     ]);
 }
 
+const CONN_PAIR_LABEL = {
+    en: 'Scan a desktop QR', zh: '扫描桌面二维码', fr: 'Scanner un QR de bureau',
+    de: 'Desktop-QR scannen', es: 'Escanear QR de escritorio',
+};
+function _connLang() { try { return getLang(); } catch (_) { return 'en'; } }
+
 function buildConnPane() {
     const cfg = window.__SOA_WEB__ || {};
     const saved = (() => {
         try { const raw = localStorage.getItem(LS_BACKEND_KEY); return raw ? JSON.parse(raw) : null; }
         catch (_) { return null; }
     })();
+    // Pair with another desktop without leaving the app. The welcome wizard
+    // can scan, but it is shown once — and a tablet that has since dropped its
+    // link has a camera and nowhere to use it.
+    const pair = el('button', { class: 'soa-modal-copy', text: CONN_PAIR_LABEL[_connLang()] || CONN_PAIR_LABEL.en });
+    pair.addEventListener('click', () => {
+        import('/assets/pairScan.js?v=pair-scan-20260930')
+            .then(m => m.openPairSheet())
+            .catch(() => {});
+    });
     const disconnect = el('button', { class: 'soa-modal-copy', text: tr('settings.conn.disconnect') });
     disconnect.addEventListener('click', () => {
         try { localStorage.removeItem(LS_BACKEND_KEY); } catch (_) {}
@@ -426,7 +434,7 @@ function buildConnPane() {
             el('span', { class: 'k', text: tr('settings.conn.saved') }),
             el('span', { class: 'v', text: saved ? (saved.backend || '—') : tr('settings.conn.none') }),
         ]),
-        el('div', { class: 'settings-row-actions' }, [disconnect]),
+        el('div', { class: 'settings-row-actions' }, [pair, disconnect]),
         el('p', { class: 'settings-hint', text: tr('settings.conn.hint') }),
     ]);
 }

@@ -18,13 +18,13 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=52';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=agent-unlock-20261014';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=32';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=27';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=pair-scan-20260930';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
-import { mountContextPanel } from '/assets/contextPanel.js?v=5';
-import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=3';
+import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-20261005b';
+import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=desktop-packs-20260930';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -44,15 +44,38 @@ function loadSaved() {
         if (!raw) return null;
         const j = JSON.parse(raw);
         if (!j || typeof j.backend !== 'string') return null;
-        return { backend: normalizeBackend(j.backend), token: j.token || '' };
+        return { backend: normalizeBackend(j.backend), token: j.token || '', unlock: typeof j.unlock === 'string' ? j.unlock : '' };
     } catch (_) { return null; }
 }
 
-function saveBackend(backend, token) {
+// The pairing-password unlock for THIS browser, when the backend has one. Sent
+// as `u=` beside the token (the cookie the server also sets covers same-site
+// fetches; the query form is what survives a browser that dropped it).
+let UNLOCK = '';
+
+// Strings for the password prompts, kept here so this module needs no new
+// i18n keys (which would re-version every importer of i18n.js).
+const UNLOCK_T = {
+    en: { lead: 'This desktop is password-protected. Enter its pairing password to connect this device.', lead_login: 'This desktop takes its pairing password — enter it to connect, no QR needed.', placeholder: 'pairing password', go: 'CONNECT', back: 'not now', empty: 'Enter the password.', wrong: 'Wrong password.', unreachable: 'Could not reach the desktop.', no_login: 'The desktop accepted the password but does not allow password login. On the desktop: MOBILE LINK → ALLOW PASSWORD LOGIN.' },
+    zh: { lead: '该桌面受密码保护。输入其配对密码以连接此设备。', lead_login: '该桌面需要配对密码——输入即可连接，无需二维码。', placeholder: '配对密码', go: '连接', back: '暂不', empty: '请输入密码。', wrong: '密码错误。', unreachable: '无法连接桌面。', no_login: '桌面接受了密码，但未允许密码登录。请在桌面的 MOBILE LINK 中开启 ALLOW PASSWORD LOGIN。' },
+    fr: { lead: 'Ce bureau est protégé par un mot de passe. Saisissez son mot de passe d’association pour connecter cet appareil.', lead_login: 'Ce bureau demande son mot de passe d’association — saisissez-le pour vous connecter, sans QR code.', placeholder: 'mot de passe d’association', go: 'CONNECTER', back: 'pas maintenant', empty: 'Saisissez le mot de passe.', wrong: 'Mot de passe incorrect.', unreachable: 'Impossible de joindre le bureau.', no_login: 'Le bureau a accepté le mot de passe mais n’autorise pas la connexion par mot de passe. Sur le bureau : MOBILE LINK → ALLOW PASSWORD LOGIN.' },
+    de: { lead: 'Dieser Desktop ist passwortgeschützt. Kopplungspasswort eingeben, um dieses Gerät zu verbinden.', lead_login: 'Dieser Desktop verlangt sein Kopplungspasswort — eingeben und verbinden, ohne QR-Code.', placeholder: 'Kopplungspasswort', go: 'VERBINDEN', back: 'jetzt nicht', empty: 'Passwort eingeben.', wrong: 'Falsches Passwort.', unreachable: 'Desktop nicht erreichbar.', no_login: 'Der Desktop hat das Passwort angenommen, erlaubt aber keine Passwort-Anmeldung. Am Desktop: MOBILE LINK → ALLOW PASSWORD LOGIN.' },
+    es: { lead: 'Este escritorio está protegido con contraseña. Escribe su contraseña de emparejamiento para conectar este dispositivo.', lead_login: 'Este escritorio pide su contraseña de emparejamiento — escríbela para conectar, sin QR.', placeholder: 'contraseña de emparejamiento', go: 'CONECTAR', back: 'ahora no', empty: 'Escribe la contraseña.', wrong: 'Contraseña incorrecta.', unreachable: 'No se pudo contactar con el escritorio.', no_login: 'El escritorio aceptó la contraseña pero no permite iniciar sesión con contraseña. En el escritorio: MOBILE LINK → ALLOW PASSWORD LOGIN.' },
+};
+function ut(key) {
+    let lang = 'en';
+    try { lang = getLang(); } catch (_) {}
+    return (UNLOCK_T[lang] || UNLOCK_T.en)[key] || UNLOCK_T.en[key] || key;
+}
+
+function saveBackend(backend, token, unlock) {
     try {
+        const prev = loadSaved();
+        const keep = prev && prev.backend === normalizeBackend(String(backend || '')) ? prev.unlock : '';
         localStorage.setItem(LS_KEY, JSON.stringify({
             backend: normalizeBackend(String(backend || '')),
             token: String(token || ''),
+            unlock: String(unlock == null ? keep || '' : unlock),
         }));
     } catch (_) {}
 }
@@ -93,7 +116,9 @@ async function probePing(backend, token, timeoutMs = 2500) {
         if (!res.ok) return null;
         const body = await res.json().catch(() => null);
         if (!body || !body.ok) return null;
-        if (body.tokenRequired && !token) return { needsToken: true };
+        // No token, but the desktop lets a password stand in for one: still a
+        // lead worth following (ensureAccess asks for the password).
+        if (body.tokenRequired && !token) return { needsToken: true, loginOffered: !!body.passwordLogin, info: body };
         return { ok: true, info: body };
     } catch (_) { return null; }
     finally { clearTimeout(timer); }
@@ -102,6 +127,7 @@ async function probePing(backend, token, timeoutMs = 2500) {
 function apiUrl(backend, token, path) {
     const u = new URL(backend + path);
     if (token) u.searchParams.set('t', token);
+    if (UNLOCK) u.searchParams.set('u', UNLOCK);
     return u.toString();
 }
 
@@ -110,7 +136,103 @@ function wsUrl(backend, token) {
     u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
     u.pathname = '/ws';
     if (token) u.searchParams.set('t', token);
+    if (UNLOCK) u.searchParams.set('u', UNLOCK);
     return u.toString();
+}
+
+// ── Permanent link + password ──────────────────────────────────────────────
+// A backend with a pairing password answers /api/ping with passwordRequired
+// (this browser has not unlocked it) and, when the desktop allows it,
+// passwordLogin (a correct password is also handed the pairing token). Both
+// are settled here, on the boot screen, before a socket is opened.
+async function unlockWithPassword(backend, password) {
+    try {
+        const res = await fetch(backend + '/api/pair/unlock', {
+            method: 'POST', credentials: 'include', cache: 'no-store',
+            headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+            body: JSON.stringify({ password }),
+        });
+        const body = await res.json().catch(() => null);
+        if (!res.ok || !body || !body.ok) return { ok: false, error: (body && body.error) || ut('wrong') };
+        return { ok: true, unlockToken: body.unlockToken || '', pairToken: body.pairToken || '' };
+    } catch (_) { return { ok: false, error: ut('unreachable') }; }
+}
+
+// Is a saved unlock still good? A probe with it attached, credentials omitted
+// so the answer is about the token and nothing else.
+async function probeUnlocked(backend, unlock) {
+    try {
+        const u = new URL(backend + '/api/ping');
+        u.searchParams.set('u', unlock);
+        const res = await fetch(u.toString(), { credentials: 'omit', cache: 'no-store', headers: { 'ngrok-skip-browser-warning': 'true' } });
+        const body = await res.json().catch(() => null);
+        return !!(body && body.ok && !body.passwordRequired);
+    } catch (_) { return false; }
+}
+
+// The prompt, on the boot screen. Resolves with the unlock reply, or null when
+// the user backs out (boot then treats the backend as unreachable).
+function bootUnlockPrompt(backend, { wantToken = false } = {}) {
+    return new Promise((resolve) => {
+        const host = document.querySelector('#boot .boot-inner') || document.body;
+        document.getElementById('boot-unlock')?.remove();
+        const form = document.createElement('form');
+        form.id = 'boot-unlock'; form.className = 'boot-unlock';
+        form.innerHTML = `
+            <p class="boot-unlock-lead"></p>
+            <p class="boot-unlock-host"></p>
+            <div class="boot-unlock-row">
+                <input class="boot-unlock-pw" type="password" autocapitalize="off" autocorrect="off" spellcheck="false"
+                       autocomplete="current-password" aria-label="Pairing password">
+                <button class="boot-unlock-go" type="submit"></button>
+            </div>
+            <p class="boot-unlock-err" role="alert" hidden></p>
+            <button class="boot-unlock-back" type="button"></button>`;
+        form.querySelector('.boot-unlock-lead').textContent = say(wantToken ? 'unlock.lead_login' : 'unlock.lead');
+        form.querySelector('.boot-unlock-host').textContent = backend.replace(/^https?:\/\//, '');
+        form.querySelector('.boot-unlock-pw').placeholder = ut('placeholder');
+        form.querySelector('.boot-unlock-go').textContent = ut('go');
+        form.querySelector('.boot-unlock-back').textContent = ut('back');
+        host.appendChild(form);
+        const pw = form.querySelector('.boot-unlock-pw');
+        const err = form.querySelector('.boot-unlock-err');
+        const btn = form.querySelector('.boot-unlock-go');
+        const fail = (m) => { err.textContent = m; err.hidden = !m; btn.disabled = false; };
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!pw.value) return fail(ut('empty'));
+            btn.disabled = true; fail('');
+            const r = await unlockWithPassword(backend, pw.value);
+            if (!r.ok) return fail(r.error);
+            if (wantToken && !r.pairToken) return fail(ut('no_login'));
+            form.remove();
+            resolve(r);
+        });
+        form.querySelector('.boot-unlock-back').addEventListener('click', () => { form.remove(); resolve(null); });
+        setTimeout(() => { try { pw.focus(); } catch (_) {} }, 60);
+    });
+}
+
+// Settle password + token for a backend the probe found. Returns { token,
+// unlock } to boot with, or null to move on.
+async function ensureAccess(backend, token, probed) {
+    const info = (probed && probed.info) || {};
+    const saved = loadSaved();
+    let unlock = (saved && saved.backend === backend && saved.unlock) || '';
+    let tok = token || '';
+    let needPassword = !!info.passwordRequired;
+    if (needPassword && unlock && await probeUnlocked(backend, unlock)) needPassword = false;
+    const wantToken = !tok && !!info.tokenRequired;
+    if (wantToken && !info.passwordLogin) return null;   // nothing here can mint a token
+    if (needPassword || wantToken) {
+        const r = await bootUnlockPrompt(backend, { wantToken });
+        if (!r) return null;
+        unlock = r.unlockToken || unlock;
+        if (wantToken) tok = r.pairToken;
+    }
+    UNLOCK = unlock;
+    CFG._resolvedUnlock = UNLOCK;   // widgets.js api() carries it too (cookie-less PWAs)
+    return { token: tok, unlock };
 }
 
 const FETCH_INIT = { credentials: 'include', headers: { 'ngrok-skip-browser-warning': 'true' } };
@@ -266,6 +388,10 @@ const inputPending = () => {
     } catch (_) {}
     return performance.now() - (window.__soaLastInteract || 0) < 120;
 };
+
+// How long a visible dashboard can go untouched before it stops sizing the
+// terminals for everyone else (see App._watchVisibility).
+const VIEWER_IDLE_MS = 90 * 1000;
 
 const docHidden = () => {
     try { return document.visibilityState === 'hidden'; } catch (_) { return false; }
@@ -426,19 +552,92 @@ class TabRuntime {
         // before the scroll position proves it. Under load the scroll event can
         // arrive several frames late — long enough for a repaint to have yanked
         // the viewport back down and fought the gesture. Read the intention.
+        // The alternate screen has no scrollback to be "away" in, and a
+        // synthetic wheel is one _attachTouchScroll sent for the program, so
+        // neither is an intention to stop following.
+        const altScreen = () => { try { return this.term.buffer.active.type === 'alternate'; } catch (_) { return false; } };
         this.container.addEventListener('wheel', (e) => {
-            if (e.deltaY < 0) this.setFollow(false);
+            if (e.deltaY < 0 && !e.__soaSynthetic && !altScreen()) this.setFollow(false);
         }, { passive: true });
         this.container.addEventListener('touchstart', () => { this._touchY = null; }, { passive: true });
         this.container.addEventListener('touchmove', (e) => {
             const y = e.touches && e.touches[0] && e.touches[0].clientY;
-            if (y != null && this._touchY != null && y > this._touchY) this.setFollow(false);
+            if (y != null && this._touchY != null && y > this._touchY && !altScreen()) this.setFollow(false);
             this._touchY = y;
         }, { passive: true });
+        this._attachTouchScroll();
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
         if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
         return true;
+    }
+
+    // ── Touch scrolling while the program owns the mouse ────────────────
+    //
+    // xterm 5.3 scrolls on touch only while mouse tracking is OFF: its
+    // touchstart/touchmove handlers return early the moment the program asks
+    // for mouse reports. Claude Code asks (?1003h ?1006h) and re-asks on every
+    // redraw — and opening a side panel resizes the grid, which is a redraw.
+    // The screen is not inside the scrolling viewport, so nothing native picks
+    // the gesture up either: on a phone or iPad a finger drag simply did
+    // nothing. Wheel still worked on desktop, so it only ever looked broken
+    // on touch, and only on Claude tabs.
+    //
+    // So take the gesture ourselves, and only in that state. In the normal
+    // buffer it scrolls the scrollback exactly as xterm would have; in the
+    // alternate screen (vim, less, a full-screen TUI) there is no scrollback,
+    // so the drag becomes wheel steps the program can act on. Capture phase on
+    // the container runs before xterm's own listeners; with tracking off we
+    // never touch the event, and a short drag stays a tap.
+    _attachTouchScroll() {
+        const c = this.container;
+        let lastY = null, startY = 0, moved = false, wheelAcc = 0;
+        const mouseOn = () => {
+            try { return this.term.modes.mouseTrackingMode !== 'none'; } catch (_) { return false; }
+        };
+        c.addEventListener('touchstart', (e) => {
+            if (e.touches.length !== 1) { lastY = null; return; }
+            lastY = startY = e.touches[0].clientY;
+            moved = false; wheelAcc = 0;
+        }, { passive: true, capture: true });
+        c.addEventListener('touchmove', (e) => {
+            if (lastY == null || e.touches.length !== 1 || !mouseOn()) return;
+            // Cancel EVERY move, slop included: iOS hands the gesture to its own
+            // pan on the first uncancelled touchmove and ignores preventDefault
+            // after that, so the page would drift under the terminal. The slop
+            // only decides when the scroll starts, so a tap is still a tap.
+            if (e.cancelable) e.preventDefault();
+            const y = e.touches[0].clientY;
+            if (!moved && Math.abs(y - startY) < 8) return;
+            if (!moved) lastY = y;
+            moved = true;
+            const dy = lastY - y;
+            lastY = y;
+            if (!dy) return;
+            let buf = 'normal';
+            try { buf = this.term.buffer.active.type; } catch (_) {}
+            if (buf === 'normal') {
+                if (this._vp) this._vp.scrollTop += dy;
+                return;
+            }
+            const cellH = this._cellHeight() || 18;
+            wheelAcc += dy;
+            const screen = this._screenEl || (this.term.element && this.term.element.querySelector('.xterm-screen'));
+            if (!screen) return;
+            const x = e.touches[0].clientX;
+            while (Math.abs(wheelAcc) >= cellH) {
+                const step = wheelAcc > 0 ? cellH : -cellH;
+                wheelAcc -= step;
+                const wheel = new WheelEvent('wheel', {
+                    deltaY: step, deltaMode: 0, clientX: x, clientY: y, bubbles: true, cancelable: true,
+                });
+                wheel.__soaSynthetic = true;
+                screen.dispatchEvent(wheel);
+            }
+        }, { passive: false, capture: true });
+        const end = () => { lastY = null; };
+        c.addEventListener('touchend', end, { passive: true, capture: true });
+        c.addEventListener('touchcancel', end, { passive: true, capture: true });
     }
 
     // ── Following the tail ──────────────────────────────────────────────
@@ -649,25 +848,26 @@ class TabRuntime {
     // copying and garbage per second, on the same thread that has to scroll.
     // Keep the chunks in an array and drop whole ones off the front instead;
     // nothing retained is ever copied, and the join happens once, on switch.
-    static REPLAY_CAP = 1 << 17;   // 128 KB of buffered history per hidden tab
+    static REPLAY_CAP = 1 << 19;   // Drain into the emulator at this size; never discard accepted bytes.
 
     queueReplay(data) {
         if (!data) return;
-        if (data.length > TabRuntime.REPLAY_CAP) {
-            data = data.slice(-TabRuntime.REPLAY_CAP);
-            this._replayChunks = [];
-            this._replayLen = 0;
-            this._replayTruncated = true;
-        }
         this._replayChunks.push(data);
         this._replayLen += data.length;
-        while (this._replayLen > TabRuntime.REPLAY_CAP && this._replayChunks.length > 1) {
-            this._replayLen -= this._replayChunks.shift().length;
-            this._replayTruncated = true;
+        if (this._replayLen >= TabRuntime.REPLAY_CAP) this.flushPendingReplay();
+        // xterm can parse without a renderer. Hidden tabs still need to consume
+        // cursor motion in order, or a few busy Codex turns erase their history.
+        if (!this._replayTimer && (this._authGrid || this._everFit)) {
+            this._replayTimer = setTimeout(() => {
+                this._replayTimer = null;
+                this.flushPendingReplay();
+            }, 200);
         }
     }
 
     resetReplay(data = '') {
+        if (this._replayTimer) clearTimeout(this._replayTimer);
+        this._replayTimer = null;
         if (this._wRaf) cancelAnimationFrame(this._wRaf);
         if (this._wTimer) clearTimeout(this._wTimer);
         this._wRaf = this._wTimer = null;
@@ -686,7 +886,7 @@ class TabRuntime {
         // Only flush once xterm has actually been fit against a real-sized
         // container — otherwise absolute-column escapes in the scrollback
         // land at the wrong column.
-        if (!this._everFit) {
+        if (!this._everFit && !this._authGrid) {
             const rect = this.container.getBoundingClientRect();
             if (rect.width < 2 || rect.height < 2) return false;
             this.fitNow();
@@ -806,7 +1006,11 @@ class TabRuntime {
     static BAND_COLS = 8;
     // Must match the Terminal's `scrollback` option: it is also the point at
     // which absolute line indices stop being stable — see _bandFor.
-    static SCROLLBACK = 1000;
+    // 3000 since 2026-09-29: the server now replays RENDERED history (what had
+    // scrolled off, not repaint churn), so the browser buffer is what decides
+    // how far back a reload can scroll. ~12 bytes/cell → ~6 MB per tab at 160
+    // cols; the active tab is the one that matters, background tabs buffer bytes.
+    static SCROLLBACK = 3000;
 
     _bandFor(buf, abs) {
         const hit = this._bandCache.get(abs);
@@ -1105,19 +1309,25 @@ class TabRuntime {
     // back to nobody — see _suppressReport — and remembered, so the next fit
     // measures the container for a REQUEST without overwriting the grid.
     adoptGrid(cols, rows) {
+        if (!(cols >= 2 && rows >= 1)) return false;
+        // Drain old-grid bytes BEFORE resizing. xterm parses asynchronously.
+        this.flushPendingReplay();
         this._authGrid = { cols, rows };
-        if (!this._opened) return false;
-        if (this.term.cols === cols && this.term.rows === rows) return false;
-        this._suppressReport = true;
-        try { this.term.resize(cols, rows); }
-        catch (_) { return false; }
-        finally { this._suppressReport = false; }
+        if (!this._gridPending && this.term.cols === cols && this.term.rows === rows) return false;
+        this._gridPending = (this._gridPending || 0) + 1;
+        // Resizing synchronously would parse accepted OLD-grid bytes at the
+        // new width. xterm's write callback is the ordered parser boundary.
+        this.term.write('', () => {
+            this._suppressReport = true;
+            try { this.term.resize(cols, rows); } catch (_) {}
+            finally { this._suppressReport = false; this._gridPending--; }
         // The agent drew its last frame for the old grid, so what is on screen
         // now is stale at every width. It repaints on the SIGWINCH the daemon
         // just delivered; refresh so the reflowed rows are not left half-drawn
         // in the meantime.
         try { this.term.refresh(0, this.term.rows - 1); } catch (_) {}
         this._followTail();
+        });
         return true;
     }
 
@@ -1143,7 +1353,7 @@ class TabRuntime {
                     // measurement is the answer. Either way the REQUEST that
                     // goes up is what we measured, never what we adopted.
                     const grid = this._authGrid || this._desired;
-                    if (grid.cols !== this.term.cols || grid.rows !== this.term.rows) {
+                    if (!this._gridPending && (grid.cols !== this.term.cols || grid.rows !== this.term.rows)) {
                         this._suppressReport = !!this._authGrid;
                         try { this.term.resize(grid.cols, grid.rows); }
                         finally { this._suppressReport = false; }
@@ -1215,6 +1425,7 @@ class TabRuntime {
     }
 
     dispose() {
+        if (this._replayTimer) clearTimeout(this._replayTimer);
         if (this._wRaf) cancelAnimationFrame(this._wRaf);
         if (this._wTimer) clearTimeout(this._wTimer);
         this.detachRenderer();   // release the GPU context before the terminal goes
@@ -1231,6 +1442,20 @@ class Shell {
         this.backend = backend || '';
         this.audio = audio || { play: () => {}, setEnabled: () => {} };
         this.tabs = new Map();
+        // History on this device: the last screens of every tab, kept in this
+        // browser for when the daemon cannot be reached (deviceHistory.js).
+        this._devHistory = null;
+        import('/assets/deviceHistory.js?v=link-login-20260930').then((m) => {
+            this._devHistoryMod = m;
+            let storage = null;
+            try { storage = localStorage; } catch (_) {}
+            this._devHistory = new m.DeviceHistory(storage);
+            try { navigator.storage?.persist?.().catch(() => {}); } catch (_) {}
+        }).catch(() => {});
+        window.addEventListener('pagehide', () => this._archiveTabs());
+        window.addEventListener('beforeunload', () => this._archiveTabs());
+        document.addEventListener('visibilitychange', () => { if (document.hidden) this._archiveTabs(); });
+        setInterval(() => this._archiveTabs(true), 60000);
         // id -> cwd, straight off the snapshot; the context canvas reads the active
         // tab's cwd from here rather than duplicating a tabs poll.
         this._tabCwd = new Map();
@@ -1734,7 +1959,28 @@ class Shell {
         bridge.addEventListener('unauthorized', () => { location.reload(); });
     }
 
+    /** Snapshot the rendered text of every tab (or just the active one) into the device archive. */
+    _archiveTabs(activeOnly = false) {
+        const store = this._devHistory, mod = this._devHistoryMod;
+        if (!store || !mod) return;
+        const backend = (window.__SOA_WEB__ || {})._resolvedBackend || location.origin;
+        for (const [id, rt] of this.tabs) {
+            if (activeOnly && id !== this.activeId) continue;
+            if (!rt || !rt.term) continue;
+            const text = mod.snapshotTerminal(rt.term);
+            if (text) store.update(backend, { id, title: rt.title, cwd: this._tabCwd ? this._tabCwd.get(id) : '' }, text);
+        }
+    }
+
+    _openDeviceHistory() {
+        if (!this._devHistory || !this._devHistoryMod) return;
+        this._archiveTabs();
+        this._devHistoryMod.openDeviceHistory(this._devHistory);
+    }
+
     _onStatus({ state, attempt, retryIn }) {
+        // The moment the link drops is the moment the archive must be current.
+        if (state === 'closed') this._archiveTabs();
         this._updateRecovery(state, attempt, retryIn);
         const s = $('#status-conn');
         s.className = state === 'open' ? 'ok' : state === 'connecting' ? 'warn' : 'err';
@@ -1784,6 +2030,15 @@ class Shell {
             this._recoveryDismissed = true;
             box.hidden = true;
         });
+        $('#recovery-history')?.addEventListener('click', () => this._openDeviceHistory());
+        // Re-pair from here: the daemon this page knew is unreachable, and on a
+        // tablet the camera is the shortest way to a desktop that is up.
+        const pairBtn = $('#recovery-pair');
+        if (pairBtn) import('/assets/pairScan.js?v=pair-scan-20260930').then((m) => {
+            if (!m.cameraLikely()) return;
+            pairBtn.hidden = false;
+            pairBtn.addEventListener('click', () => m.openPairSheet());
+        }).catch(() => {});
         // Dismissing it should not be a one-way door: the red status word is
         // the handle that brings it back.
         const conn = $('#status-conn');
@@ -1842,6 +2097,7 @@ class Shell {
             // cwd never changed stayed unrecorded for the life of the page.
             for (const t of tabs) {
                 this._ensureTab(t.id, t.title);
+                if (t.cols && t.rows) this.tabs.get(t.id).adoptGrid(t.cols, t.rows);
                 this.tabs.get(t.id).resetReplay();
                 if (t.mem != null) this._tabMem.set(t.id, t.mem);
                 if (t.cwd) this._tabCwd.set(t.id, t.cwd);
@@ -2105,7 +2361,7 @@ class Shell {
         this.termsEl.appendChild(rt.container);
         rt.attach(
             data => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: data }),
-            (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: docHidden() }),
+            (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: this._notLooking() }),
             t => this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: t }),
         );
         this.tabs.set(id, rt);
@@ -4047,18 +4303,52 @@ class Shell {
     _watchVisibility() {
         if (this._visWatched) return;
         this._visWatched = true;
-        document.addEventListener('visibilitychange', () => {
+        this._lastLocalInput = performance.now();
+        const redeclare = () => {
             const rt = this.tabs.get(this.activeId);
             if (!rt || !rt.term) return;
-            const { cols, rows } = rt.term;
+            // What this screen MEASURED, not the grid it is rendering: that one
+            // may be another device's size adopted from the daemon, and
+            // declaring it back would ratchet the PTY to it.
+            const { cols, rows } = rt._desired || rt.term;
             if (!(cols > 1 && rows > 1)) return;
             // Force the send: the size has NOT changed, only who is looking, and
             // _broadcastSize dedupes on the size alone.
             if (this._sentSize) this._sentSize.delete(this.activeId);
             this.bridge.input(INPUT_KIND.TERM_RESIZE,
-                { id: this.activeId, cols, rows, hidden: docHidden() });
+                { id: this.activeId, cols, rows, hidden: this._notLooking() });
             if (!docHidden()) this._fitActive();
-        });
+        };
+        document.addEventListener('visibilitychange', redeclare);
+        // The device you are USING sizes the terminal. A PTY has one grid, and
+        // the daemon takes the smallest viewer that is looking; "looking" used to
+        // mean only "page visible", so an iPad on the couch held the Mac's
+        // terminals at iPad width all day, and the Mac held the iPad wide in
+        // turn. A screen with no input for VIEWER_IDLE_MS now releases its
+        // claim exactly as a hidden one does, and the next touch, click, key or
+        // wheel takes it back. Nothing changes when one device is attached, and
+        // when every device is idle the daemon counts them all again — the old
+        // smallest-wins grid — so this can only ever widen a screen.
+        let idle = false;
+        const wake = () => {
+            this._lastLocalInput = performance.now();
+            if (idle) { idle = false; redeclare(); }
+        };
+        for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+            window.addEventListener(ev, wake, { passive: true, capture: true });
+        setInterval(() => {
+            if (!idle && this._viewerIdle()) { idle = true; redeclare(); }
+        }, 15000);
+    }
+
+    _viewerIdle() {
+        return performance.now() - (this._lastLocalInput || 0) > (window.__soaViewerIdleMs || VIEWER_IDLE_MS);
+    }
+
+    // What the daemon should treat as "not looking": a hidden page, or a
+    // visible one nobody has touched lately (see _watchVisibility).
+    _notLooking() {
+        return docHidden() || this._viewerIdle();
     }
 
     // Every tab shares ONE terminal area, so the active tab's measurement is
@@ -4089,7 +4379,7 @@ class Shell {
             // added, which is exactly the reported shape.
             if (known && id !== this.activeId) continue;
             this._sentSize.set(id, key);
-            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: docHidden() });
+            this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: this._notLooking() });
         }
     }
 
@@ -4654,9 +4944,9 @@ class Shell {
         try {
             const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
             const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
-            const url = new URL(backend + '/api/agent-browser');
-            if (token) url.searchParams.set('t', token);
-            const res = await fetch(url.toString(), {
+            // apiUrl adds the password unlock beside the token: the endpoint is
+            // authenticated now, and a cookie-less client needs both.
+            const res = await fetch(apiUrl(backend, token, '/api/agent-browser'), {
                 method: 'POST', credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: 'list' }),
@@ -6694,7 +6984,6 @@ class Shell {
         this._tilesGridEl.style.display = '';
         this._tilesGridEl.classList.toggle('tiles-grouped', !!this.tilesGrouped);
         this._installTilesDrop();
-        this._updateDashboardPortInfo();
         const existing = new Map();
         for (const node of this._tilesGridEl.querySelectorAll('.tile')) {
             existing.set(Number(node.dataset.tileId), node);
@@ -6740,12 +7029,8 @@ class Shell {
             }
         }
         for (const old of existing.values()) old.remove();
-        // replaceChildren wipes the pinned header cards too — carry them
-        // across the re-render (FLEET bar above, port info below) instead of
-        // waiting for the next async refresh to repaint them.
-        const pinnedPorts = this._tilesGridEl.querySelector('.dashboard-port-info');
+        // Rebuild the tiles, then restore the fleet summary above them.
         this._tilesGridEl.replaceChildren(fragment);
-        if (pinnedPorts) this._tilesGridEl.insertBefore(pinnedPorts, this._tilesGridEl.firstChild);
         this._renderFleetBar();
     }
 
@@ -7316,7 +7601,7 @@ class Shell {
         if (!this._fleetBarEl || !this._fleetBarEl.isConnected) {
             this._fleetBarEl = el('div', { class: 'dashboard-fleet-bar' });
         }
-        // Always pinned above the port info card.
+        // Keep the fleet summary above the session tiles.
         if (this._tilesGridEl.firstChild !== this._fleetBarEl) {
             this._tilesGridEl.insertBefore(this._fleetBarEl, this._tilesGridEl.firstChild);
         }
@@ -7340,87 +7625,6 @@ class Shell {
         const kids = [row];
         if (callout.length) kids.push(el('div', { class: 'fleet-callout', text: callout.join('  ·  ') }));
         this._fleetBarEl.replaceChildren(...kids);
-    }
-
-    async _updateDashboardPortInfo() {
-        if (!this._tilesGridEl) return;
-
-        // _renderTiles fires on every snapshot, and each call used to start
-        // its own fetch; concurrent slow responses then stacked duplicate
-        // "Active Ports" cards (each removed the old card BEFORE its fetch
-        // and inserted AFTER). One in-flight fetch at a time, refreshed at
-        // most every 10s — the existing card stays up in the meantime.
-        if (this._portInfoBusy) return;
-        if (this._portInfoAt && Date.now() - this._portInfoAt < 10_000) return;
-        this._portInfoBusy = true;
-
-        try {
-            const backend = (window.__SOA_WEB__ || {})._resolvedBackend || '';
-            const token = (window.__SOA_WEB__ || {})._resolvedToken || '';
-            const url = new URL(backend + '/api/ports');
-            if (token) url.searchParams.set('t', token);
-
-            const res = await fetch(url.toString(), { credentials: 'include' });
-            if (!res.ok) return;
-
-            const { data } = await res.json();
-            this._portInfoAt = Date.now();
-            if (!this._tilesGridEl) return;
-            const count = data.ports.length;
-
-            const portInfo = el('div', { class: 'dashboard-port-info' });
-            const header = el('div', { class: 'dashboard-port-header' });
-            const countLabel = count === 1 ? '1 Active Port' : `${count} Active Ports`;
-            const countEl = el('span', { class: 'dashboard-port-count', text: countLabel });
-            header.appendChild(countEl);
-
-            if (data.conflict) {
-                const conflictEl = el('span', {
-                    class: 'dashboard-port-conflict',
-                    text: `⚠ Port ${data.conflict.port} conflict`
-                });
-                header.appendChild(conflictEl);
-            }
-
-            portInfo.appendChild(header);
-
-            if (count > 0) {
-                const list = el('div', { class: 'dashboard-port-list' });
-                // Every port is clickable → opens it in the preview (proxied
-                // through /preview/<port>/ so it's viewable here and on paired
-                // phones). It's always safe — the proxy only ever reaches your
-                // own localhost; non-web ports just render whatever they serve.
-                data.ports.forEach(p => {
-                    const item = el('button', {
-                        class: 'dashboard-port-item',
-                        type: 'button',
-                        title: `Open localhost:${p.port} (${p.process}) in the preview`,
-                        text: `:${p.port} — ${p.process}`,
-                        onclick: async () => {
-                            try {
-                                const wp = await import('/assets/previewPanel.js?v=3');
-                                wp.openPreviewModal(this, String(p.port));
-                            } catch (err) { console.warn('[ports] preview open failed', err); }
-                        },
-                    });
-                    list.appendChild(item);
-                });
-                portInfo.appendChild(list);
-            }
-
-            // Swap in atomically: clear every existing copy (including any
-            // duplicates an older build left behind) only now that the
-            // replacement is ready, then pin below the FLEET bar if present.
-            this._tilesGridEl.querySelectorAll('.dashboard-port-info').forEach(n => n.remove());
-            const anchor = (this._fleetBarEl && this._fleetBarEl.isConnected)
-                ? this._fleetBarEl.nextSibling
-                : this._tilesGridEl.firstChild;
-            this._tilesGridEl.insertBefore(portInfo, anchor);
-        } catch (e) {
-            // Silently fail - port info is optional
-        } finally {
-            this._portInfoBusy = false;
-        }
     }
 
     _removeTilesGrid() {
@@ -7566,9 +7770,12 @@ async function resolveBackend() {
     const fromURL = pickBackendFromURL();
     if (fromURL) {
         const probed = await probePing(fromURL.backend, fromURL.token, 3500);
-        if (probed && probed.ok) {
-            saveBackend(fromURL.backend, fromURL.token);
-            return fromURL;
+        if (probed && (probed.ok || probed.loginOffered)) {
+            const acc = await ensureAccess(fromURL.backend, fromURL.token, probed);
+            if (acc) {
+                saveBackend(fromURL.backend, acc.token, acc.unlock);
+                return { backend: fromURL.backend, token: acc.token };
+            }
         }
         // Pairing via deep link failed — say so, but keep going: a saved or
         // local backend may still be reachable (previously this dead-ended).
@@ -7579,7 +7786,13 @@ async function resolveBackend() {
     const saved = loadSaved();
     if (saved) {
         const probed = await probePing(saved.backend, saved.token, 2500);
-        if (probed && probed.ok) return saved;
+        if (probed && (probed.ok || probed.loginOffered)) {
+            const acc = await ensureAccess(saved.backend, saved.token, probed);
+            if (acc) {
+                if (acc.token !== saved.token || acc.unlock !== saved.unlock) saveBackend(saved.backend, acc.token, acc.unlock);
+                return { backend: saved.backend, token: acc.token };
+            }
+        }
         // Do NOT clear the pairing on one failed ping — a daemon restart or a
         // transient outage used to permanently un-pair the browser here and
         // funnel boot into the sandbox fallback. Keep it; it is re-probed on
@@ -7589,7 +7802,10 @@ async function resolveBackend() {
     if (CFG.backend) {
         const cfgBackend = String(CFG.backend).replace(/\/+$/, '');
         const probed = await probePing(cfgBackend, '', 2000);
-        if (probed && probed.ok) return { backend: cfgBackend, token: '' };
+        if (probed && (probed.ok || probed.loginOffered)) {
+            const acc = await ensureAccess(cfgBackend, '', probed);
+            if (acc) return { backend: cfgBackend, token: acc.token };
+        }
     }
     if (CFG.mode !== 'webcontainer') {
         const same = location.origin.replace(/\/+$/, '');
@@ -7672,6 +7888,7 @@ async function bootServerMode({ backend, token }) {
 }
 
 async function _doBoot() {
+    if (isPhone()) armTouchFullscreen();
     wireLangSelector();
     wireReleaseLink();
     wireVersion();
@@ -7704,7 +7921,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=33');
+        await import('/assets/app-wc.js?v=pair-scan-20260930');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -7753,9 +7970,55 @@ function renderSandboxFailure(err) {
 // paired desktop would otherwise hit a failed boot. Detect that case up front.
 function isPhone() {
     try {
-        return window.matchMedia('(max-width: 820px)').matches
-            && window.matchMedia('(pointer: coarse)').matches;
+        // A touch-only pointer at any width: phones and tablets alike. iPadOS
+        // asks for the desktop site by default and reports a Mac user agent,
+        // so a "Mac" with touch points is an iPad whatever the viewport says.
+        if (window.matchMedia('(pointer: coarse)').matches
+            && window.matchMedia('(hover: none)').matches) return true;
+        return /Mac/.test(navigator.platform || '') && navigator.maxTouchPoints > 1;
     } catch (_) { return false; }
+}
+// On a touch device the dashboard defaults to full screen, as the phone
+// companion does: a page may only request it from a gesture, so the first tap
+// asks. Leaving full screen (Esc, swipe, Back) is respected until the tab is
+// reloaded. Launches with nothing left to hide (a `fullscreen` install, an
+// iOS Home Screen app, the native shell) and browsers with no element
+// fullscreen (iPhone Safari) are left alone. An Android `standalone` install
+// is NOT: it still shows the system navigation bar, so it asks too.
+function armTouchFullscreen() {
+    const root = document.documentElement;
+    const request = root.requestFullscreen || root.webkitRequestFullscreen;
+    const chromeless = () => navigator.standalone === true || !!window.Capacitor
+        || matchMedia('(display-mode: fullscreen)').matches;
+    const active = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (!request || chromeless()) return;
+    try { if (sessionStorage.getItem('soa.fsAuto') === 'off') return; } catch (_) {}
+    const kinds = ['touchend', 'click'];
+    const disarm = () => kinds.forEach(k => document.removeEventListener(k, onTap, true));
+    const onTap = () => {
+        disarm();
+        if (chromeless() || active()) return;
+        Promise.resolve(root.requestFullscreen
+            ? root.requestFullscreen({ navigationUI: 'hide' })
+            : root.webkitRequestFullscreen()).catch(() => {});
+    };
+    kinds.forEach(k => document.addEventListener(k, onTap, true));
+    let was = false;
+    const onChange = () => {
+        const now = active();
+        if (was && !now) {
+            disarm();
+            try { sessionStorage.setItem('soa.fsAuto', 'off'); } catch (_) {}
+        }
+        was = now;
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+}
+
+// A tablet has room for the full dashboard, so it is offered the choice.
+function isTabletWidth() {
+    try { return window.matchMedia('(min-width: 700px)').matches; } catch (_) { return false; }
 }
 
 // Friendly mobile landing. A phone with no paired desktop gets ONE decisive
@@ -7780,12 +8043,73 @@ function renderMobileWelcome() {
     // ── Pair by camera (primary action) ───────────────────────────────────
     let scanner = null;
 
+    // Where the pairing lands. The phone companion at /m/ is built for a
+    // phone; a tablet can hold this dashboard, so it gets a switch and
+    // defaults to it. Phones never see the switch.
+    const openAs = { value: isTabletWidth() ? 'desktop' : 'companion' };
+    let openAsEl = null;
+    if (isTabletWidth()) {
+        // Three labels, kept here rather than in i18n.js so this screen does
+        // not need every importer of that module re-versioned.
+        const OPENAS_T = {
+            en: ['Open as', 'Full dashboard', 'Phone companion'],
+            zh: ['打开为', '完整仪表盘', '手机伴侣'],
+            fr: ['Ouvrir en', 'Tableau de bord complet', 'Compagnon mobile'],
+            de: ['Öffnen als', 'Volles Dashboard', 'Handy-Begleiter'],
+            es: ['Abrir como', 'Panel completo', 'Compañero móvil'],
+        };
+        const oa = OPENAS_T[getLang()] || OPENAS_T.en;
+        const mk = (v, label) => {
+            const b = el('button', { class: 'mwel-openas-o' + (openAs.value === v ? ' on' : ''), type: 'button',
+                role: 'radio', 'aria-checked': String(openAs.value === v), text: label });
+            b.addEventListener('click', () => {
+                openAs.value = v;
+                openAsEl.querySelectorAll('.mwel-openas-o').forEach((o) => {
+                    const on = o === b; o.classList.toggle('on', on); o.setAttribute('aria-checked', String(on));
+                });
+            });
+            return b;
+        };
+        openAsEl = el('div', { class: 'mwel-openas', role: 'radiogroup', 'aria-label': oa[0] }, [
+            el('span', { class: 'mwel-openas-l', text: oa[0] }),
+            mk('desktop', oa[1]),
+            mk('companion', oa[2]),
+        ]);
+    }
+
     const connectFromScan = async (raw) => {
         const { parsePairingPayload } = await import('/m/qrscan.js');
         const p = parsePairingPayload(raw);
         if (!p) { showErr(tr('mwel.err_code')); return false; }
-        if (!p.token) { showErr(tr('mwel.err_token')); return false; }
+        if (!p.token) {
+            // A bare link (no QR token): fine when the desktop lets its pairing
+            // password stand in for the token — ask for it, right here.
+            const backend = (p.backend || p.origin).replace(/\/+$/, '');
+            const probed = await probePing(backend, '', 3000);
+            const info = probed && probed.info;
+            if (!info || !info.passwordLogin) { showErr(tr('mwel.err_token')); return false; }
+            manual.open = true; pwRow.hidden = false;
+            if (!pwInput.value) { showErr(ut('lead_login')); try { pwInput.focus(); } catch (_) {} return false; }
+            const r = await unlockWithPassword(backend, pwInput.value);
+            if (!r.ok) { showErr(r.error); return false; }
+            if (!r.pairToken) { showErr(ut('no_login')); return false; }
+            p.token = r.pairToken;
+            UNLOCK = r.unlockToken || '';
+            CFG._resolvedUnlock = UNLOCK;
+            saveBackend(backend, p.token, UNLOCK);   // the deep link below boots without a second prompt
+        }
         if (scanner) { scanner.stop(); scanner = null; }
+        // A tablet that chose the full dashboard takes the desktop deep link:
+        // this page pointed at the paired daemon — exactly the `?backend=&t=`
+        // the desktop QR encodes for a second computer.
+        if (openAs.value === 'desktop') {
+            const dest = new URL(location.origin + location.pathname);
+            dest.searchParams.set('backend', p.backend || p.origin);
+            dest.searchParams.set('t', p.token);
+            try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
+            location.href = dest.toString();
+            return true;
+        }
         // The companion at /m/ owns a paired session — its own storage, its own
         // service worker, its own touch UI. Hand the pairing URL over rather
         // than trying to drive someone else's desktop shell from this page.
@@ -7795,6 +8119,7 @@ function renderMobileWelcome() {
         // it costs the phone its failover and forces a re-pair the next time
         // the network flips.
         const target = new URL(p.url);
+        if (!target.searchParams.get('t')) target.searchParams.set('t', p.token);
         const hash = new URLSearchParams();
         if (p.altOrigin) hash.set('alt', p.altOrigin);
         if (p.backend) hash.set('backend', p.backend);
@@ -7849,9 +8174,17 @@ function renderMobileWelcome() {
     urlInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); go(); }
     });
+    // Revealed only when a pasted link turns out to need the desktop's password.
+    const pwInput = el('input', {
+        class: 'mwel-url', type: 'password', autocapitalize: 'off', autocorrect: 'off',
+        spellcheck: 'false', autocomplete: 'current-password', placeholder: ut('placeholder'),
+    });
+    pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    const pwRow = el('div', { class: 'mwel-manual-row', hidden: '' }, [pwInput]);
     const manual = el('details', { class: 'mwel-manual' }, [
         el('summary', { text: tr('mwel.manual') }),
         el('div', { class: 'mwel-manual-row' }, [urlInput, goBtn]),
+        pwRow,
     ]);
 
     // ── Secondary path: no desktop installed yet ──────────────────────────
@@ -7868,7 +8201,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=33').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=pair-scan-20260930').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.
@@ -7897,6 +8230,7 @@ function renderMobileWelcome() {
             el('section', { class: 'mwel-pair' }, [
                 scanBtn,
                 el('p', { class: 'mwel-scan-p', text: tr('mwel.scan_p') }),
+                ...(openAsEl ? [openAsEl] : []),
                 errEl,
                 manual,
             ]),

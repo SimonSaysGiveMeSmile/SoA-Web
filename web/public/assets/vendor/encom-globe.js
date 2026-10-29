@@ -42030,7 +42030,9 @@ function Globe(width, height, opts){
 
     this.setScale(this.scale);
 
-    this.renderer = new THREE.WebGLRenderer( { antialias: true, alpha: true } );
+    // The host owns the context, including teardown after a partial boot.
+    this.renderer = new THREE.WebGLRenderer( { antialias: true, alpha: true,
+        canvas: opts.canvas, context: opts.context, devicePixelRatio: opts.devicePixelRatio } );
     this.renderer.setSize( this.width, this.height);
 
     this.renderer.gammaInput = true;
@@ -42069,7 +42071,7 @@ Globe.prototype.init = function(fog_color, cb){
     this.smokeProvider = new SmokeProvider(this.scene);
 
     createParticles.call(this);
-    setTimeout(cb, 500);
+    this._initTimer = setTimeout(cb, 500);
 };
 
 Globe.prototype.destroy = function(callback){
@@ -42090,6 +42092,8 @@ Globe.prototype.destroy = function(callback){
 };
 
 Globe.prototype.addPin = function(lat, lon, text, altitude){
+
+    var priorTweens = TWEEN.getAll().slice();
 
     lat = parseFloat(lat);
     lon = parseFloat(lon);
@@ -42162,9 +42166,22 @@ Globe.prototype.addPin = function(lat, lon, text, altitude){
 
     }
 
+    // Track only this globe's active tweens, so teardown can release its scene
+    // without stopping the animation of another mounted globe.
+    var activeTweens = TWEEN.getAll();
+    this._ownedTweens = (this._ownedTweens || []).filter(function(t){ return activeTweens.indexOf(t) !== -1; });
+    for(var ti = 0; ti < activeTweens.length; ti++){
+        if(priorTweens.indexOf(activeTweens[ti]) === -1) this._ownedTweens.push(activeTweens[ti]);
+    }
     return pin;
 
 }
+
+Globe.prototype.stopAnimations = function(){
+    clearTimeout(this._initTimer);
+    (this._ownedTweens || []).forEach(function(t){ t.stop(); });
+    this._ownedTweens = [];
+};
 
 Globe.prototype.addMarker = function(lat, lon, text, connected, altitude, color){
 

@@ -1,0 +1,44 @@
+SON OF ANTON: VERIFIED PRODUCTION CHECKPOINT
+
+Restored October 25 UI, including the corrected mobile clean-URL routes.
+Deployment: dpl_BU7vVX1CEEY6zmG1uR1nc6qL9jm9
+Restore tag: production-checkpoint-20261027-recovered
+Source base: b85a90d95ec9fb2931b063e85c502a314548dd4a
+
+This branch preserves the exact public frontend and routing output. Its backend
+source is the GitHub base commit above. The running Mac also has unpublished
+backend work, which is preserved in private local backups. Restoring this
+frontend does not require restarting the daemon, tunnel, or terminal sessions.
+
+Recreate the build output in a fresh directory (Node 18 or newer):
+
+  git clone --branch production-checkpoint-20261027-recovered --single-branch https://github.com/SimonSaysGiveMeSmile/SoA-Web.git soa-restore
+  cd soa-restore
+  node deploy/production-checkpoint/restore.cjs
+
+The script verifies all 121 source and output checksums. It refuses to
+overwrite existing output. An optional first argument selects another empty
+output path. No dependency installation or network access is required.
+
+To prepare a replacement deployment when needed:
+
+  vercel link --project soa-web --scope hireal-projects --yes
+  vercel deploy --prebuilt --prod --skip-domain --scope hireal-projects --yes
+
+Validate the new deployment's desktop themes, /m/ connection and controls before
+assigning the live domains. Use the URL returned above for this command:
+
+  vercel rollback <verified-deployment-url> --scope hireal-projects --yes
+
+The explicit rollback workflow keeps automatic domain promotion paused. A
+normal source build can regenerate runtime settings or routing, so use the
+verified prebuilt output for an exact restore. Git-triggered deployments are
+disabled for this archival branch. Never force-push or merge this backup branch
+as a substitute for a reviewed change to main.
+
+Private working-copy and Git-bundle backups are under:
+  /Users/test/.soa-web-backups/protected-production-20261027-195902
+  /Users/test/.soa-web-backups/protected-production-20261028-182932
+
+Those local archives can contain credentials and session state. Keep them
+private. They omit Git-ignored environment files and installed dependencies.

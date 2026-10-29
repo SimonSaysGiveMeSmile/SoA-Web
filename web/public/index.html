@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#05080d">
+  <!-- Home Screen launch on a tablet/phone opens without browser bars; the
+       translucent status bar lets the page draw under the clock, and .shell
+       pads itself by the safe-area insets. In a browser tab the first tap
+       requests full screen (armTouchFullscreen in app.js). -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Son of Anton">
+  <link rel="manifest" href="/manifest.webmanifest">
   <script>
     /* Apply the saved theme BEFORE first paint to avoid a flash. Mirrors
        theme.js resolveTheme(); the full module takes over once app.js loads. */
@@ -18,10 +27,10 @@
           (t === 'light' || t === 'dim') ? t
           : (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light'
           : 'dark';
-        // UI language (tron | minimal | liquid) — same pre-paint treatment so
+        // Design pack (nine supported skins) — same pre-paint treatment so
         // an alternate skin never flashes TRON first (each keys off data-ui).
         var _ui = s && s.uiLang;
-        document.documentElement.dataset.ui = (_ui === 'minimal' || _ui === 'liquid') ? _ui : 'tron';
+        document.documentElement.dataset.ui = ['tron', 'minimal', 'liquid', 'brutalist', 'classic', 'dos', 'macos27', 'windows11', 'neumorphism'].includes(_ui) ? _ui : 'tron';
       } catch (e) { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.ui = 'tron'; }
     })();
   </script>
@@ -153,12 +162,15 @@
   </script>
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
-  <link rel="apple-touch-icon" href="/assets/New-icon-transparent.png?v=3">
-  <link rel="stylesheet" href="/assets/styles.css?v=94">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=49">
-  <link rel="stylesheet" href="/assets/minimal.css?v=9">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
+  <link rel="stylesheet" href="/assets/styles.css?v=fullscreen-20261014">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=usage-pace-20261014">
+  <link rel="stylesheet" href="/assets/minimal.css?v=usage-burn-range-20260929">
   <link rel="stylesheet" href="/assets/liquid.css?v=14">
-  <link rel="stylesheet" href="/assets/voice-control.css?v=2">
+  <script type="module" src="/assets/minimal-ui.js?v=desktop-packs-20260929"></script>
+  <link rel="stylesheet" href="/assets/design-packs.css?v=desktop-packs-20260930">
+  <link rel="stylesheet" href="/assets/desktop-packs.css?v=desktop-packs-20261025">
+  <link rel="stylesheet" href="/assets/voice-control.css?v=3">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -178,10 +190,14 @@
         } catch (_) {}
         try {
             if (hasPairLink) return;
-            // Phones get a dedicated companion welcome from the boot path (the
-            // desktop install wizard doesn't apply) — skip the wizard gate here.
-            if (window.matchMedia && matchMedia('(max-width: 820px)').matches
-                && matchMedia('(pointer: coarse)').matches) return;
+            // Phones AND tablets get the companion welcome from the boot path
+            // (the install wizard can't run there) — skip the wizard gate. The
+            // tell is a touch-only pointer, not the viewport: an iPad is wider
+            // than a phone and asks for the desktop site by default, with a Mac
+            // user agent — so a "Mac" that reports touch points is an iPad.
+            if (window.matchMedia && matchMedia('(pointer: coarse)').matches
+                && matchMedia('(hover: none)').matches) return;
+            if (/Mac/.test(navigator.platform || '') && navigator.maxTouchPoints > 1) return;
             if (localStorage.getItem('soa_web_welcomed') === '1') return;
         } catch (_) { /* private mode — treat as not yet welcomed */ }
         document.documentElement.dataset.welcome = '1';
@@ -227,6 +243,28 @@
               <button type="button" class="welcome-copy" id="welcome-copy" data-w="copy">COPY</button>
             </div>
           </details>
+          <!-- A second computer (or a tablet on the desktop site) installs
+               nothing: it pairs with the daemon that already runs, by scanning
+               the QR the desktop shows — in this page — or pasting its link. -->
+          <div class="wiz-pair">
+            <p class="wiz-pair-p" data-w="wiz_pair_p">Already running it on another machine?</p>
+            <button type="button" class="wiz-pair-btn" id="wiz-scan">
+              <span class="wiz-pair-ico" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+              <span data-w="wiz_pair_scan">Scan its QR code</span>
+            </button>
+            <details class="wiz-alt wiz-pair-manual" id="wiz-pair-manual">
+              <summary data-w="wiz_pair_paste">Or paste the pairing link</summary>
+              <div class="welcome-cmdwrap">
+                <input class="wiz-pair-url" id="wiz-pair-url" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://…/m/?t=…" aria-label="Pairing link">
+                <button type="button" class="welcome-copy" id="wiz-pair-go" data-w="wiz_pair_go">CONNECT</button>
+              </div>
+              <div class="welcome-cmdwrap wiz-pair-pwrow" id="wiz-pair-pwrow" hidden>
+                <input class="wiz-pair-url" id="wiz-pair-pw" type="password" autocapitalize="off" autocomplete="current-password" spellcheck="false" placeholder="pairing password" aria-label="Pairing password">
+              </div>
+            </details>
+            <button type="button" class="wiz-link" id="wiz-devhist" hidden data-w="wiz_devhist">Read history saved on this device</button>
+            <p class="wiz-pair-err" id="wiz-pair-err" role="alert" hidden></p>
+          </div>
         </div>
 
         <!-- Step 2 · Run -->
@@ -392,6 +430,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_download: '⬇ Download installer',
                 wiz1_meta: 'macOS / Linux · ~30 seconds · no account',
                 wiz_or_copy: 'Prefer to paste a command?',
+                wiz_pair_p: 'Already running it on another machine?', wiz_pair_scan: 'Scan its QR code', wiz_pair_paste: 'Or paste the pairing link', wiz_pair_go: 'CONNECT',
+                wiz_pair_cancel: 'Cancel', wiz_pair_hint: 'Point the camera at the QR code in the desktop sidebar (MOBILE LINK).', wiz_pair_torch: 'Light',
+                wiz_pair_err_code: 'That is not a Son of Anton pairing code.', wiz_pair_err_token: 'That link has no pairing token — open MOBILE LINK on the desktop and scan the QR it shows.', wiz_pair_err_cam: 'No camera here. Paste the pairing link instead.',
+                wiz_pair_err_denied: 'Camera access was refused. Allow it in the browser, or paste the link.', wiz_pair_err_open: 'The camera could not start ({detail}). Paste the link instead.',
+                wiz_pair_pw_hint: 'This desktop takes its pairing password — enter it below.', wiz_pair_pw_ph: 'pairing password', wiz_pair_err_pw: 'Wrong password.', wiz_pair_err_nologin: 'The desktop accepted the password but does not allow password login. On the desktop: MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'Could not reach that desktop. Check the link and that it is online.', wiz_devhist: 'Read history saved on this device',
                 wiz2_title: 'Run the installer',
                 wiz2_a: 'Double-click',
                 wiz2_b: 'in your Downloads — Terminal opens and installs it for you.',
@@ -446,6 +489,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_download: '⬇ 下载安装程序',
                 wiz1_meta: 'macOS / Linux · 约 30 秒 · 无需账号',
                 wiz_or_copy: '想用命令行?',
+                wiz_pair_p: '已经在另一台机器上运行？', wiz_pair_scan: '扫描它的二维码', wiz_pair_paste: '或粘贴配对链接', wiz_pair_go: '连接',
+                wiz_pair_cancel: '取消', wiz_pair_hint: '将相机对准桌面侧栏（MOBILE LINK）中的二维码。', wiz_pair_torch: '补光',
+                wiz_pair_err_code: '这不是 Son of Anton 的配对码。', wiz_pair_err_token: '该链接没有配对令牌——在桌面打开 MOBILE LINK 并扫描其二维码。', wiz_pair_err_cam: '此设备没有相机。请改为粘贴配对链接。',
+                wiz_pair_err_denied: '相机权限被拒绝。请在浏览器中允许，或粘贴链接。', wiz_pair_err_open: '相机无法启动（{detail}）。请改为粘贴链接。',
+                wiz_pair_pw_hint: '该桌面需要配对密码——请在下方输入。', wiz_pair_pw_ph: '配对密码', wiz_pair_err_pw: '密码错误。', wiz_pair_err_nologin: '桌面接受了密码，但未允许密码登录。请在桌面的 MOBILE LINK 中开启 ALLOW PASSWORD LOGIN。', wiz_pair_err_unreach: '无法连接该桌面。请检查链接并确认其在线。', wiz_devhist: '查看此设备上保存的历史',
                 wiz2_title: '运行安装程序',
                 wiz2_a: '双击',
                 wiz2_b: '(在「下载」中)——终端会自动打开并完成安装。',
@@ -500,6 +548,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_download: '⬇ Télécharger l’installateur',
                 wiz1_meta: 'macOS / Linux · ~30 secondes · sans compte',
                 wiz_or_copy: 'Vous préférez une commande ?',
+                wiz_pair_p: 'Déjà lancé sur une autre machine ?', wiz_pair_scan: 'Scanner son QR code', wiz_pair_paste: 'Ou coller le lien d’association', wiz_pair_go: 'CONNECTER',
+                wiz_pair_cancel: 'Annuler', wiz_pair_hint: 'Visez le QR code de la barre latérale du bureau (MOBILE LINK).', wiz_pair_torch: 'Lampe',
+                wiz_pair_err_code: 'Ce n’est pas un code d’association Son of Anton.', wiz_pair_err_token: 'Ce lien n’a pas de jeton — ouvrez MOBILE LINK sur le bureau et scannez son QR code.', wiz_pair_err_cam: 'Pas de caméra ici. Collez plutôt le lien.',
+                wiz_pair_err_denied: 'Accès caméra refusé. Autorisez-le dans le navigateur, ou collez le lien.', wiz_pair_err_open: 'La caméra n’a pas démarré ({detail}). Collez plutôt le lien.',
+                wiz_pair_pw_hint: 'Ce bureau demande son mot de passe d’association — saisissez-le ci-dessous.', wiz_pair_pw_ph: 'mot de passe d’association', wiz_pair_err_pw: 'Mot de passe incorrect.', wiz_pair_err_nologin: 'Le bureau a accepté le mot de passe mais n’autorise pas la connexion par mot de passe. Sur le bureau : MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'Impossible de joindre ce bureau. Vérifiez le lien et qu’il est en ligne.', wiz_devhist: 'Lire l’historique enregistré sur cet appareil',
                 wiz2_title: 'Lancer l’installateur',
                 wiz2_a: 'Double-cliquez sur',
                 wiz2_b: 'dans vos Téléchargements — Terminal s’ouvre et l’installe pour vous.',
@@ -554,6 +607,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_download: '⬇ Installer herunterladen',
                 wiz1_meta: 'macOS / Linux · ~30 Sekunden · kein Konto',
                 wiz_or_copy: 'Lieber einen Befehl einfügen?',
+                wiz_pair_p: 'Läuft es schon auf einem anderen Rechner?', wiz_pair_scan: 'Seinen QR-Code scannen', wiz_pair_paste: 'Oder den Kopplungslink einfügen', wiz_pair_go: 'VERBINDEN',
+                wiz_pair_cancel: 'Abbrechen', wiz_pair_hint: 'Kamera auf den QR-Code in der Desktop-Seitenleiste (MOBILE LINK) richten.', wiz_pair_torch: 'Licht',
+                wiz_pair_err_code: 'Das ist kein Son-of-Anton-Kopplungscode.', wiz_pair_err_token: 'Der Link hat kein Kopplungs-Token — MOBILE LINK am Desktop öffnen und dessen QR-Code scannen.', wiz_pair_err_cam: 'Keine Kamera hier. Füge stattdessen den Link ein.',
+                wiz_pair_err_denied: 'Kamerazugriff abgelehnt. Im Browser erlauben oder den Link einfügen.', wiz_pair_err_open: 'Die Kamera startet nicht ({detail}). Füge stattdessen den Link ein.',
+                wiz_pair_pw_hint: 'Dieser Desktop verlangt sein Kopplungspasswort — unten eingeben.', wiz_pair_pw_ph: 'Kopplungspasswort', wiz_pair_err_pw: 'Falsches Passwort.', wiz_pair_err_nologin: 'Der Desktop hat das Passwort angenommen, erlaubt aber keine Passwort-Anmeldung. Am Desktop: MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'Desktop nicht erreichbar. Link prüfen und ob er online ist.', wiz_devhist: 'Auf diesem Gerät gespeicherten Verlauf lesen',
                 wiz2_title: 'Installer ausführen',
                 wiz2_a: 'Doppelklicke',
                 wiz2_b: 'in deinen Downloads — Terminal öffnet sich und installiert es.',
@@ -608,6 +666,11 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_download: '⬇ Descargar instalador',
                 wiz1_meta: 'macOS / Linux · ~30 segundos · sin cuenta',
                 wiz_or_copy: '¿Prefieres pegar un comando?',
+                wiz_pair_p: '¿Ya lo tienes en otra máquina?', wiz_pair_scan: 'Escanear su código QR', wiz_pair_paste: 'O pega el enlace de emparejamiento', wiz_pair_go: 'CONECTAR',
+                wiz_pair_cancel: 'Cancelar', wiz_pair_hint: 'Apunta la cámara al QR de la barra lateral del escritorio (MOBILE LINK).', wiz_pair_torch: 'Luz',
+                wiz_pair_err_code: 'Eso no es un código de emparejamiento de Son of Anton.', wiz_pair_err_token: 'Ese enlace no tiene token — abre MOBILE LINK en el escritorio y escanea su QR.', wiz_pair_err_cam: 'Aquí no hay cámara. Pega el enlace en su lugar.',
+                wiz_pair_err_denied: 'Acceso a la cámara denegado. Permítelo en el navegador o pega el enlace.', wiz_pair_err_open: 'La cámara no pudo iniciarse ({detail}). Pega el enlace en su lugar.',
+                wiz_pair_pw_hint: 'Este escritorio pide su contraseña de emparejamiento — escríbela abajo.', wiz_pair_pw_ph: 'contraseña de emparejamiento', wiz_pair_err_pw: 'Contraseña incorrecta.', wiz_pair_err_nologin: 'El escritorio aceptó la contraseña pero no permite iniciar sesión con contraseña. En el escritorio: MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'No se pudo contactar con ese escritorio. Revisa el enlace y que esté en línea.', wiz_devhist: 'Leer el historial guardado en este dispositivo',
                 wiz2_title: 'Ejecutar el instalador',
                 wiz2_a: 'Haz doble clic en',
                 wiz2_b: 'en tus Descargas — Terminal se abre y lo instala por ti.',
@@ -809,6 +872,94 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
             });
         }
 
+        // Pair with a daemon that already runs elsewhere: scan the QR the
+        // desktop shows (camera, in this page) or paste its link. Lands on this
+        // dashboard pointed at that backend — the same `?backend=&t=` deep
+        // link the QR carries for a second computer, so the welcome gate above
+        // steps aside and the terminal boots against the paired shell.
+        var pairErr = document.getElementById('wiz-pair-err');
+        var pairManual = document.getElementById('wiz-pair-manual');
+        function pairFail(msg) {
+            if (pairErr) { pairErr.textContent = msg || ''; pairErr.hidden = !msg; }
+            if (msg && pairManual) pairManual.open = true;
+        }
+        var pairPwRow = document.getElementById('wiz-pair-pwrow');
+        var pairPw = document.getElementById('wiz-pair-pw');
+        function pairEnter(backend, token) {
+            var dest = new URL(location.origin + location.pathname);
+            dest.searchParams.set('backend', backend);
+            dest.searchParams.set('t', token);
+            try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
+            location.href = dest.toString();
+            return true;
+        }
+        var NGROK = { 'ngrok-skip-browser-warning': 'true' };
+        // A link without a token: the desktop may let its pairing password stand
+        // in for the QR (MOBILE LINK → ALLOW PASSWORD LOGIN). Ask, right here.
+        function pairWithPassword(backend) {
+            return fetch(backend + '/api/ping', { credentials: 'omit', cache: 'no-store', headers: NGROK })
+                .then(function (r) { return r.json(); }).catch(function () { return null; })
+                .then(function (ping) {
+                    if (!ping || !ping.ok) { pairFail(strings.wiz_pair_err_unreach); return false; }
+                    if (!ping.passwordLogin) { pairFail(strings.wiz_pair_err_token); return false; }
+                    if (pairPwRow) pairPwRow.hidden = false;
+                    if (pairManual) pairManual.open = true;
+                    if (pairPw) pairPw.placeholder = strings.wiz_pair_pw_ph;
+                    if (!pairPw || !pairPw.value) { pairFail(strings.wiz_pair_pw_hint); try { pairPw.focus(); } catch (_) {} return false; }
+                    return fetch(backend + '/api/pair/unlock', {
+                        method: 'POST', credentials: 'include', cache: 'no-store',
+                        headers: Object.assign({ 'Content-Type': 'application/json' }, NGROK),
+                        body: JSON.stringify({ password: pairPw.value }),
+                    }).then(function (r) { return r.json().catch(function () { return null; }).then(function (b) { return { r: r, b: b }; }); })
+                    .then(function (x) {
+                        if (!x.r.ok || !x.b || !x.b.ok) { pairFail((x.b && x.b.error) || strings.wiz_pair_err_pw); return false; }
+                        if (!x.b.pairToken) { pairFail(strings.wiz_pair_err_nologin); return false; }
+                        // The unlock rides along so the boot does not ask twice.
+                        try { localStorage.setItem('soa_web_backend', JSON.stringify({ backend: backend, token: x.b.pairToken, unlock: x.b.unlockToken || '' })); } catch (_) {}
+                        return pairEnter(backend, x.b.pairToken);
+                    }).catch(function () { pairFail(strings.wiz_pair_err_unreach); return false; });
+                });
+        }
+        function pairGo(raw) {
+            return import('/m/qrscan.js').then(function (mod) {
+                var p = mod.parsePairingPayload(raw);
+                if (!p) { pairFail(strings.wiz_pair_err_code); return false; }
+                var backend = (p.backend || p.origin).replace(/\/+$/, '');
+                if (!p.token) return pairWithPassword(backend);
+                return pairEnter(backend, p.token);
+            }).catch(function () { pairFail(strings.wiz_pair_err_code); return false; });
+        }
+        if (pairPw) pairPw.addEventListener('keydown', function (e) { if (e.key === 'Enter') pairGo(pairUrl ? pairUrl.value : ''); });
+        // Anything archived on this device is readable from here, desktop or not.
+        var devBtn = document.getElementById('wiz-devhist');
+        if (devBtn) import('/assets/deviceHistory.js?v=link-login-20260930').then(function (m) {
+            if (!m.hasDeviceHistory()) return;
+            devBtn.hidden = false;
+            devBtn.addEventListener('click', function () { m.openDeviceHistory(new m.DeviceHistory(localStorage)); });
+        }).catch(function () {});
+        var scanBtn = document.getElementById('wiz-scan');
+        if (scanBtn) scanBtn.addEventListener('click', function () {
+            pairFail('');
+            import('/m/qrscan.js').then(function (mod) {
+                if (!mod.QrScanner.supported) { pairFail(strings.wiz_pair_err_cam); return; }
+                var scanner = new mod.QrScanner({
+                    onResult: function (v) { scanner.stop(); pairGo(v); },
+                    onError: function (e) { scanner.stop(); pairFail((e && e.message) || strings.wiz_pair_err_cam); },
+                    labels: {
+                        cancel: strings.wiz_pair_cancel, hint: strings.wiz_pair_hint, torch: strings.wiz_pair_torch,
+                        errNoCam: strings.wiz_pair_err_cam, errDenied: strings.wiz_pair_err_denied, errOpen: strings.wiz_pair_err_open,
+                    },
+                });
+                scanner.start();
+            }).catch(function () { pairFail(strings.wiz_pair_err_cam); });
+        });
+        var pairUrl = document.getElementById('wiz-pair-url');
+        var pairGoBtn = document.getElementById('wiz-pair-go');
+        if (pairGoBtn && pairUrl) {
+            pairGoBtn.addEventListener('click', function () { pairGo(pairUrl.value); });
+            pairUrl.addEventListener('keydown', function (e) { if (e.key === 'Enter') pairGo(pairUrl.value); });
+        }
+
         // Init: light up step 1, and a one-shot probe so a returning user who
         // already installed jumps straight to "Connected" with no clicks.
         gotoStep(1);
@@ -868,6 +1019,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <button id="timemachine" class="more-item mi-clock" role="menuitem" data-label="Time machine" title="Time machine — restore a prior IDE snapshot" aria-label="Time machine">TIME</button>
           <button id="restart-daemon" class="more-item mi-restart" role="menuitem" data-label="Restart server" title="Restart the SoA server — flushes tabs + scrollback, re-adopts the tunnel, and auto-resumes every Claude session on boot" aria-label="Restart server">↻ RESTART</button>
         </div>
+        <button id="toggle-voice" class="voice-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="voice-panel" aria-label="Voice controls — microphone off" title="Voice controls — microphone off">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg>
+          <span class="voice-toggle-label">VOICE</span><span class="voice-toggle-dot" aria-hidden="true"></span>
+        </button>
         <button id="user-chip" class="user-chip" title="Profile &amp; settings (Ctrl+Shift+S)" aria-label="Profile and settings">
           <span class="user-avatar" data-initial="U"></span>
           <span class="user-chip-flag" aria-hidden="true"></span>
@@ -899,6 +1054,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         <p class="recovery-lead">Your terminals are still running on this Mac. This page lost its
           connection to them — nothing has been closed and nothing has been deleted.</p>
         <p id="recovery-pulse" class="recovery-pulse">Reconnecting…</p>
+        <button type="button" id="recovery-history" class="recovery-history">Read history saved on this device</button>
+        <button type="button" id="recovery-pair" class="recovery-history" hidden>Scan a desktop QR code to reconnect</button>
 
         <ol class="recovery-steps">
           <li class="recovery-step" data-rung="1">
@@ -999,12 +1156,12 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js"></script>
   <script src="/assets/speech-utils.js?v=2"></script>
-  <script src="/assets/voice-control.js?v=2"></script>
+  <script src="/assets/voice-control.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-actions.js?v=2"></script>
-  <script src="/assets/voice-commands.js?v=2"></script>
+  <script src="/assets/voice-commands.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-audio.js?v=2"></script>
   <script src="/assets/voice-vision.js?v=2"></script>
-  <script type="module" src="/assets/app.js?v=159"></script>
+  <script type="module" src="/assets/app.js?v=navbar-20261016"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

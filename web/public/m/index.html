@@ -1,17 +1,34 @@
 <!doctype html>
 <html lang="en">
 <head>
+    <script>
+        // Vercel removes /m/'s trailing slash. Keep the app under its own
+        // directory so relative assets and the offline worker share a scope.
+        if (location.pathname === '/m') location.replace('/m/index' + location.search + location.hash);
+        // Android only, before first paint: Chrome on Android redraws every
+        // backdrop blur and infinite animation on the GPU each frame, which is
+        // what makes the installed app feel sticky there while iOS stays at
+        // 120 Hz. styles.css / voice-chat.css end with html.soa-android
+        // overrides; iOS never gets the class, so it renders exactly as before.
+        try {
+            var uad = navigator.userAgentData;
+            if (/Android/i.test(navigator.userAgent) || (uad && uad.platform === 'Android')) document.documentElement.classList.add('soa-android');
+        } catch (e) {}
+    </script>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#000000" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Son of Anton" />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="icon.svg" />
+    <!-- iOS ignores an SVG touch icon (it screenshots the page instead). -->
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <title>Son of Anton · Mobile</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="voice-chat.css" />
 </head>
 <body>
     <div id="app">
@@ -40,6 +57,8 @@
                 <button class="bb-btn" data-view="web-view" title="Web — the agent's browser & localhost preview">WEB</button>
                 <button class="bb-btn" data-view="widgets-view" title="System — device stats, ports & widgets">SYS</button>
             </nav>
+            <button class="bb-btn bb-icon" id="btn-mic" type="button" title="Open voice chat" aria-label="Open voice chat">🎤</button>
+            <button class="bb-btn bb-icon" id="btn-fullscreen" type="button" title="Full screen — hide browser bars" aria-label="Full screen — hide browser bars" aria-pressed="false">⛶</button>
             <!-- Overflow trigger — pinned OUTSIDE the scrolling #controls strip so
                  the secondary actions (mic/speak/camera/…) are always one tap away
                  even if the view row scrolls. The buttons live in #overflow-overlay
@@ -56,9 +75,9 @@
         <div id="install-hint" hidden role="status">
             <span class="ih-icon" aria-hidden="true">⤒</span>
             <span class="ih-text"></span>
+            <button class="ih-action" type="button">Set up</button>
             <button class="ih-close" type="button" aria-label="Dismiss">✕</button>
         </div>
-
 
         <main id="stage">
             <section id="terminal-view" class="view active">
@@ -66,12 +85,20 @@
                 <button id="term-jump" class="term-jump" type="button" aria-label="Jump to latest output">↓ LATEST</button>
             </section>
             <section id="chat-view" class="view">
+                <div class="voice-chat-bar">
+                    <button id="chat-history" type="button">History</button>
+                    <button id="chat-manager" type="button">Manager chat</button>
+                    <span id="chat-target">Selected terminal</span>
+                    <button id="chat-read" type="button" aria-pressed="false">Read replies</button>
+                </div>
+                <div id="voice-chat-status" class="voice-chat-status" role="status">Tap Talk, review your message, then Send.</div>
                 <div id="chat-status" class="chat-status" hidden>
                     <span class="chat-status-dot"></span>
                     <span class="chat-status-text"></span>
                 </div>
                 <div id="chat-log" class="chat-log"></div>
                 <form id="chat-composer" class="chat-composer">
+                    <button id="chat-mic" class="chat-send" type="button" aria-label="Dictate a message" aria-pressed="false">Talk</button>
                     <textarea id="chat-input" class="chat-input" rows="1"
                               placeholder="Message the agent…" autocapitalize="sentences"
                               autocorrect="on" spellcheck="true"></textarea>
@@ -129,7 +156,6 @@
                     <button id="web-go" class="web-go" type="button">GO</button>
                     <button id="web-reload" class="web-go web-reload" type="button" title="Reload">⟳</button>
                     <button id="agent-toggle" class="web-go" type="button" title="Agent browser — live, isolated, drivable by agents" aria-pressed="false">🤖</button>
-                    <button id="desktop-control" class="web-go" type="button" title="Use the Mac: tap, scroll and type on its screen" aria-label="Control the Mac desktop">⌨ CONTROL</button>
                 </div>
                 <div class="web-frame-wrap">
                     <iframe id="web-frame" class="web-frame"
@@ -140,10 +166,24 @@
             </section>
         </main>
 
-        <button id="focus-exit" class="focus-exit" title="Exit fullscreen" aria-label="Exit fullscreen">⤢</button>
+        <button id="focus-exit" class="focus-exit" title="Show app controls" aria-label="Show app controls">⤢</button>
 
         <section id="kbd" aria-label="Virtual keyboard"></section>
     </div>
+
+    <dialog id="fullscreen-help" aria-labelledby="fullscreen-title">
+        <div class="fullscreen-help-body">
+            <h2 id="fullscreen-title">Hide the browser bars</h2>
+            <p>Open Son of Anton as a Home Screen app for more room on your screen.</p>
+            <p id="fullscreen-message" role="status"></p>
+            <ol id="fullscreen-steps"></ol>
+            <p class="fullscreen-note">If the app asks to connect again, scan the desktop QR code from the app.</p>
+            <div class="fullscreen-help-actions">
+                <button id="fullscreen-install" type="button" hidden>Install app</button>
+                <button id="fullscreen-close" type="button" autofocus>Done</button>
+            </div>
+        </div>
+    </dialog>
 
     <div id="settings-overlay">
         <div class="settings-sheet">
@@ -219,9 +259,9 @@
                 <div class="settings-label">Sound</div>
                 <div class="sound-grid" id="sound-grid"></div>
             </div>
-            <div class="settings-section">
-                <div class="settings-label">Microphone</div>
-                <div class="settings-hint">Select input device and adjust gain.</div>
+            <details class="settings-section">
+                <summary class="settings-label">Microphone diagnostics</summary>
+                <div class="settings-hint">These controls only affect the test meter. Voice chat uses your phone’s default microphone.</div>
                 <div class="mic-control">
                     <label for="mic-device-select" class="mic-label">Input Device</label>
                     <select id="mic-device-select" class="mic-select">
@@ -245,7 +285,7 @@
                     <button class="settings-btn" id="btn-test-mic" type="button">TEST MIC</button>
                     <button class="settings-btn" id="btn-refresh-devices" type="button">REFRESH DEVICES</button>
                 </div>
-            </div>
+            </details>
             <div class="settings-section">
                 <div class="settings-label">Connection</div>
                 <div class="settings-hint" id="reload-hint">
@@ -285,11 +325,7 @@
             </div>
             <div class="overflow-grid">
                 <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-mic" title="Toggle microphone">🎤</button>
-                    <span class="overflow-cap">Mic</span>
-                </div>
-                <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak Claude's replies aloud" aria-pressed="false">🔊</button>
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-speak" title="Speak the selected agent’s replies aloud" aria-pressed="false">🔊</button>
                     <span class="overflow-cap">Speak</span>
                 </div>
                 <div class="overflow-tile">
@@ -297,8 +333,8 @@
                     <span class="overflow-cap">Photo</span>
                 </div>
                 <div class="overflow-tile">
-                    <button class="bb-btn bb-icon overflow-btn" id="btn-fullscreen" title="Focus / fullscreen" aria-pressed="false">⛶</button>
-                    <span class="overflow-cap">Fullscreen</span>
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-focus" title="Hide app controls to focus on the terminal" aria-label="Hide app controls" aria-pressed="false">⛶</button>
+                    <span class="overflow-cap">Focus</span>
                 </div>
                 <div class="overflow-tile">
                     <button class="bb-btn bb-icon-sm overflow-btn" id="btn-settings" title="Settings">&#9881;</button>
@@ -308,19 +344,11 @@
                     <button class="bb-btn bb-icon overflow-btn" id="btn-newtab" title="New tab">+</button>
                     <span class="overflow-cap">New tab</span>
                 </div>
+                <div class="overflow-tile">
+                    <button class="bb-btn bb-icon overflow-btn" id="btn-scan" title="Re-pair by scanning the desktop QR code">⧉</button>
+                    <span class="overflow-cap">Re-pair</span>
+                </div>
             </div>
-        </div>
-    </div>
-
-    <!-- Long-press help: press-and-hold any control to see what it does. -->
-    <div id="help-overlay">
-        <div class="overflow-sheet">
-            <div class="settings-handle"><span></span></div>
-            <div class="overflow-header">
-                <div class="overflow-title help-title">Help</div>
-                <button class="settings-close help-close" aria-label="Close help">&times;</button>
-            </div>
-            <p class="help-body"></p>
         </div>
     </div>
 
@@ -331,6 +359,7 @@
             <div class="reconnect-sub" id="reconnect-sub">checking link…</div>
             <p class="reconnect-diag" id="reconnect-diag" hidden></p>
             <button class="reconnect-btn" id="reconnect-retry" hidden>RETRY NOW</button>
+            <button class="reconnect-btn" id="reconnect-history">READ SAVED HISTORY</button>
             <button class="reconnect-btn reconnect-open" id="reconnect-open-browser" hidden>OPEN WIFI LOGIN</button>
         </div>
     </div>

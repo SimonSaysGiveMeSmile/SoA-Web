@@ -37,6 +37,9 @@ const el = (tag, props = {}, children = []) => {
 
 function api(base, p) {
     const u = new URL((base || '').replace(/\/+$/, '') + p, location.origin);
+    const cfg = window.__SOA_WEB__ || {};
+    if (cfg._resolvedToken) u.searchParams.set('t', cfg._resolvedToken);
+    if (cfg._resolvedUnlock) u.searchParams.set('u', cfg._resolvedUnlock);
     return u.toString();
 }
 
@@ -138,6 +141,11 @@ class ContextCanvas {
         // is held by the daemon and delivered when the agent is actually back at
         // its input box.
         this._queueList = el('div', { class: 'ctx-queue' });
+        this._effortSelect = el('select', { class: 'ctx-queue-effort', 'aria-label': 'Effort for the next task' },
+            [['auto', 'Auto effort'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max'], ['inherit', 'Session default']]
+                .map(([value, text]) => el('option', { value, text })));
+        Object.assign(this._effortSelect.style, { color: 'inherit', background: 'var(--panel-bg, #24272c)', border: '1px solid var(--border, #555)', borderRadius: '6px', padding: '4px 8px', maxWidth: '100%' });
+        this._effortSelect.disabled = true;
         this._queueInput = el('textarea', {
             class: 'ctx-queue-add', rows: '1', placeholder: 'queue a message for the next turn',
             onkeydown: (e) => {
@@ -164,7 +172,9 @@ class ContextCanvas {
                 this._queueWhy = el('span', { class: 'ctx-sub' }),
             ]),
             this._queueList,
+            this._effortSelect,
             this._queueInput,
+            el('button', { class: 'ctx-link', text: 'Full conversation', onclick: () => this._openConversation() }),
         ]);
 
         this._stepsBand = el('div', { class: 'ctx-band ctx-band-steps' }, [
@@ -314,6 +324,9 @@ class ContextCanvas {
     async tick() {
         if (this.root.closest('.stage')?.classList.contains('no-context')) return;
         if (document.hidden) return;
+        // Task delivery is shared by both CLIs; it must not depend on the
+        // Claude context endpoint being available for this workspace.
+        this._queueFetch();
         const cwd = this.getCwd();
         if (!cwd) { this._empty('open a tab to see its context'); return; }
         try {
@@ -343,10 +356,6 @@ class ContextCanvas {
         this._renderFacts(d.workspace || {}, d);
         this._renderArtifacts(d.artifacts || []);
         this._renderSteps();
-        // Rides the canvas poll rather than a timer of its own: the queue only
-        // changes when you add to it or the daemon delivers one, and both are
-        // visible within the same 2.5s the rest of this panel already costs.
-        this._queueFetch();
     }
 
     // A turn is keyed by when it was sent, not by its position: the thread grows
@@ -450,6 +459,7 @@ class ContextCanvas {
             });
             if (!r.ok) throw new Error(String(r.status));
             const d = await r.json();
+            if (this._effortSelect) this._effortSelect.disabled = !d.taskEffort;
             this.queue = Array.isArray(d.queue) ? d.queue : [];
             this.queueGate = d.gate || null;
         } catch (_) { /* leave the last view up rather than blanking it */ }
@@ -464,12 +474,17 @@ class ContextCanvas {
         this.queue = this.queue.concat([{ id: 'pending-' + Date.now(), text, pending: true }]);
         this._renderQueue();
         try {
-            await fetch(api(this.backend, '/api/queue'), {
+            const response = await fetch(api(this.backend, '/api/queue'), {
                 method: 'POST', credentials: 'include',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ id, text }),
+                body: JSON.stringify({ id, text, effort: this._effortSelect?.value || 'auto' }),
             });
-        } catch (_) {}
+            const result = await response.json();
+            if (!response.ok || !result.ok) throw new Error(result.error || 'Could not queue task');
+        } catch (error) {
+            this._queueInput.value = text;
+            this._queueWhy.textContent = error.message;
+        }
         this._queueFetch();
     }
 
@@ -498,7 +513,7 @@ class ContextCanvas {
             limited: 'waiting — rate limited',
             cooldown: 'sending…',
             gone: 'tab is gone',
-        }[why] || 'sending after this turn';
+        }[why] || why || 'sending after this turn';
     }
 
     _renderQueue() {
@@ -514,13 +529,61 @@ class ContextCanvas {
             // Position is the useful ordinal: this is a line, and the only
             // question anyone has is what goes in next.
             el('span', { class: 'ctx-qmsg-n', text: String(i + 1) }),
-            el('span', { class: 'ctx-qmsg-x', text: e.text }),
+            el('span', { class: 'ctx-qmsg-x', text: e.text, title: e.effort ? `${e.effort.mode === 'auto' ? 'Auto · ' : ''}${e.effort.level || 'Session default'}` : '' }),
             el('button', {
                 class: 'ctx-qmsg-del', title: 'remove',
                 'aria-label': 'Remove this queued message',
                 text: '\u00d7', onclick: () => this._queueRemove(e.id),
             }),
         ])));
+    }
+
+    async _openConversation() {
+        const id = this.getTabId();
+        if (id == null) return;
+        document.getElementById('soa-conversation')?.remove();
+        const dialog = el('dialog', { id: 'soa-conversation', 'aria-label': 'Full conversation' });
+        Object.assign(dialog.style, { width: 'min(900px, 92vw)', maxHeight: '90vh', padding: '20px', borderRadius: '14px', border: '1px solid var(--soa-line, #555)', color: 'var(--soa-fg, #eee)', background: 'var(--soa-bg-panel, #202226)' });
+        const list = el('div', { class: 'devhist-list' });
+        const status = el('p', { class: 'devhist-sub', role: 'status', text: 'Loading…' });
+        const close = el('button', { class: 'devhist-back', text: 'Close', onclick: () => dialog.close() });
+        const older = el('button', { class: 'devhist-copy', text: 'Earlier messages' });
+        let cursor = null, thread = null, selectedThread = null;
+        const load = async (reset = false) => {
+            older.disabled = true;
+            try {
+                const url = api(this.backend, `/api/agent-history?tab=${id}${!reset && cursor != null ? '&before=' + cursor : ''}${selectedThread ? '&session=' + encodeURIComponent(selectedThread) : ''}`);
+                const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.ok) throw new Error(data.error || 'Conversation unavailable');
+                if (data.chooseConversation) {
+                    status.textContent = 'Choose a saved conversation'; older.hidden = true;
+                    const select = el('select', { 'aria-label': 'Saved conversation' }, [el('option', { value: '', text: 'Select conversation…' }),
+                        ...data.conversations.map(c => el('option', { value: c.id, text: `${new Date(c.updatedAt).toLocaleString()} · ${c.id.slice(0, 13)}` }))]);
+                    select.addEventListener('change', () => { if (select.value) { selectedThread = select.value; load(true); } });
+                    list.replaceChildren(select); return;
+                }
+                if (thread && thread !== data.sessionId) throw new Error('This tab switched conversations. Close and reopen history.');
+                thread = data.sessionId;
+                const fragment = document.createDocumentFragment();
+                for (const message of data.messages) {
+                    fragment.append(el('article', { class: 'devhist-item' }, [
+                        el('p', { class: 'devhist-title', text: message.role === 'user' ? 'You' : data.agent === 'codex' ? 'Codex' : 'Claude' }),
+                        el('pre', { class: 'devhist-text', text: message.text }),
+                    ]));
+                }
+                if (reset) list.replaceChildren(fragment); else list.prepend(fragment);
+                cursor = data.nextBefore; older.hidden = !data.hasMore;
+                status.textContent = data.hasMore ? '' : 'Beginning of conversation';
+            } catch (error) { status.textContent = error.message; }
+            finally { older.disabled = false; }
+        };
+        older.addEventListener('click', () => load());
+        const refresh = el('button', { class: 'devhist-copy', text: 'Refresh', onclick: () => load(true) });
+        dialog.append(el('header', { class: 'devhist-head' }, [el('h2', { text: 'Conversation' }), close]), status, older, refresh, list);
+        dialog.addEventListener('close', () => dialog.remove(), { once: true });
+        document.body.append(dialog); dialog.showModal();
+        await load(true);
     }
 
     _renderSteps() {

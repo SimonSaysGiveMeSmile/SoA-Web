@@ -1,0 +1,97 @@
+{
+  "version": 3,
+  "routes": [
+    {
+      "src": "^/m$",
+      "headers": {
+        "Location": "/m/"
+      },
+      "status": 307
+    },
+    {
+      "src": "^/m/(?:index(?:\\.html)?/?)?$",
+      "dest": "/m/index",
+      "headers": {
+        "Cache-Control": "public, max-age=0, must-revalidate",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": "microphone=(self)",
+        "Cross-Origin-Embedder-Policy": "credentialless",
+        "Cross-Origin-Opener-Policy": "same-origin"
+      }
+    },
+    {
+      "src": "^/(?:(.+)/)?index(?:\\.html)?/?$",
+      "headers": {
+        "Location": "/$1"
+      },
+      "status": 308
+    },
+    {
+      "src": "^/(.*)\\.html/?$",
+      "headers": {
+        "Location": "/$1"
+      },
+      "status": 308
+    },
+    {
+      "src": "^/(.*)/$",
+      "headers": {
+        "Location": "/$1"
+      },
+      "status": 308
+    },
+    {
+      "src": "^/assets(?:/(.*))$",
+      "headers": {
+        "Cache-Control": "public, max-age=0, must-revalidate"
+      },
+      "continue": true
+    },
+    {
+      "src": "^/_config\\.js$",
+      "headers": {
+        "Cache-Control": "public, max-age=0, must-revalidate"
+      },
+      "continue": true
+    },
+    {
+      "src": "^(?:/(.*))$",
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": "microphone=(self)",
+        "Cross-Origin-Embedder-Policy": "credentialless",
+        "Cross-Origin-Opener-Policy": "same-origin"
+      },
+      "continue": true
+    },
+    {
+      "handle": "error"
+    },
+    {
+      "status": 404,
+      "src": "^(?!/api).*$",
+      "dest": "/404"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/"
+    }
+  ],
+  "overrides": {
+    "index.html": {
+      "path": "index"
+    },
+    "m/index.html": {
+      "path": "m/index"
+    },
+    "share.html": {
+      "path": "share"
+    }
+  },
+  "crons": []
+}

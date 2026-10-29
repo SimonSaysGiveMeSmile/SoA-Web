@@ -1,0 +1,432 @@
+/* Three desktop languages, each matched to its source instead of to each other.
+   macOS 27  — the Tahoe line: traffic lights, a Liquid Glass toolbar of capsules, a
+               vibrancy sidebar of white inset-grouped cards, SF Pro, systemBlue #007AFF,
+               NSSwitch (26 × 15, blue when on), Terminal.app "Basic" (white / #1E1E1E).
+   Windows 11 — WinUI 3 / Fluent: Mica behind everything, a Windows Terminal tab strip
+               attached to the title bar (no painted caption buttons), Settings cards at 4 px,
+               NavigationView items with the accent pill, buttons with the darker bottom
+               edge, text boxes with the accent underline, ToggleSwitch (40 × 20),
+               Segoe UI Variable, accent #005FB8 / #60CDFF, Campbell / One Half Light.
+   Neumorphism — Soft UI: one slab of #E0E5EC lifted or pressed by the canonical
+               #A3B1C6 / #FFFFFF dual shadows (9/16 cards, 5/10 controls, inset 3/6
+               fields), pills, no strokes anywhere, Nunito set heavy.
+   The shell still owns every control and layout; the packs only paint. */
+
+/* Self-hosted faces (vendor/fonts, same COEP setup as minimal.css). Open Sans is
+   Steve Matteson's open sibling of Segoe UI — the closest legal stand-in on a Mac;
+   real Segoe UI Variable wins where it is installed. Nunito is the rounded face
+   Soft UI was drawn with. Both are variable fonts, one latin file each. */
+@font-face { font-family: 'Open Sans VF'; src: url('/assets/vendor/fonts/open-sans-latin.woff2') format('woff2'); font-weight: 300 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Nunito VF'; src: url('/assets/vendor/fonts/nunito-latin.woff2') format('woff2'); font-weight: 200 1000; font-style: normal; font-display: swap; }
+
+/* Previews are miniatures of the real chrome: the lights, the tab strip, the well. */
+[data-pack="macos27"] .pack-preview { background: linear-gradient(135deg,#cfdcf3,#e9def2 55%,#f3d9dc); border-color: #b9c2d3; border-radius: 9px; color: #1d1d1f; }
+[data-pack="macos27"] .pack-preview-bar { gap: 3px; background: #ffffffa8; border-color: #ffffffcc; }
+[data-pack="macos27"] .pack-preview-bar i { width: 5px; height: 5px; border: 0; background: #ff5f57; }
+[data-pack="macos27"] .pack-preview-bar i:nth-child(2) { background: #febc2e; }
+[data-pack="macos27"] .pack-preview-bar i:nth-child(3) { background: #28c840; }
+[data-pack="macos27"] .pack-preview-rail { border: 0; border-radius: 4px; background: #ffffff8a; opacity: 1; box-shadow: inset 0 0 0 .5px #0000001a; }
+[data-pack="macos27"] .pack-preview-terminal { border: 0; border-radius: 5px; background: #fff; color: #1d1d1f; box-shadow: 0 0 0 .5px #00000026, 0 3px 8px #1d1d1f1f; }
+[data-pack="windows11"] .pack-preview { background: linear-gradient(110deg,#eef2f7,#f3f3f3 45%,#f5f1f2); border-color: #0000000f; border-radius: 6px; color: #1b1b1b; }
+[data-pack="windows11"] .pack-preview-bar { justify-content: flex-end; gap: 7px; padding-right: 6px; background: transparent; border: 0; }
+[data-pack="windows11"] .pack-preview-bar i { width: 5px; height: 5px; border-radius: 0; border-color: #1b1b1b; opacity: .85; }
+[data-pack="windows11"] .pack-preview-bar i:first-child { height: 1px; border-width: 0 0 1px; }
+[data-pack="windows11"] .pack-preview-bar i:last-child { border: 0; background: linear-gradient(45deg,transparent 42%,#1b1b1b 42% 58%,transparent 58%), linear-gradient(-45deg,transparent 42%,#1b1b1b 42% 58%,transparent 58%); }
+[data-pack="windows11"] .pack-preview-rail { position: relative; border: 0; border-radius: 3px; background: #0000000a; opacity: 1; }
+[data-pack="windows11"] .pack-preview-rail::before { content: ''; position: absolute; left: 0; top: 4px; width: 2px; height: 7px; border-radius: 2px; background: #005fb8; }
+[data-pack="windows11"] .pack-preview-terminal { border: 1px solid #0000000f; border-radius: 4px 4px 0 0; background: #0c0c0c; color: #cccccc; }
+[data-pack="neumorphism"] .pack-preview { background: #e0e5ec; border: 0; border-radius: 10px; color: #3b4a60; box-shadow: inset 0 0 0 1px #ffffff80; }
+[data-pack="neumorphism"] .pack-preview-bar { background: transparent; border: 0; }
+[data-pack="neumorphism"] .pack-preview-bar i { display: none; }
+[data-pack="neumorphism"] .pack-preview-rail { border: 0; border-radius: 6px; background: #e0e5ec; opacity: 1; box-shadow: 3px 3px 6px #a3b1c6, -3px -3px 6px #fff; }
+[data-pack="neumorphism"] .pack-preview-terminal { border: 0; border-radius: 6px; background: #e0e5ec; box-shadow: inset 3px 3px 6px #a3b1c6, inset -3px -3px 6px #fff; }
+
+/* Tokens every pack fills; the shared skeleton below reads only these. */
+:root:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) {
+  color-scheme: light;
+  --desk-radius: 10px; --desk-control-radius: 6px; --desk-term-radius: 10px;
+  --desk-chrome: var(--soa-bg-panel); --desk-menu: var(--soa-bg-panel); --desk-field: var(--soa-bg-panel);
+  --desk-control: var(--soa-bg-panel); --desk-control-hover: var(--desk-selection);
+  --desk-control-line: var(--soa-line); --desk-control-shadow: none;
+  --desk-selection: rgba(var(--soa-accent-rgb),.12); --desk-hover: rgba(0,0,0,.04);
+  --desk-shadow: none; --desk-menu-shadow: 0 12px 38px #0003; --desk-widget-line: var(--soa-line-soft);
+  --desk-blur: none; --desk-focus: var(--soa-accent); --desk-text-2: var(--soa-accent-dim);
+  --desk-ring-session: var(--soa-accent); --desk-ring-week: var(--soa-green); --desk-term: var(--soa-bg-panel);
+}
+
+/* ── macOS 27 ── window #ECECEC, label at 85 % black, systemBlue, hairlines at 12 %.
+   The glass is real: backdrop blur + saturation and a specular rim on every capsule. */
+:root[data-ui="macos27"] {
+  --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro', 'Helvetica Neue', Helvetica, sans-serif;
+  --soa-bg: #ececec; --soa-bg-deep: #e2e2e2; --soa-bg-panel: #ffffff; --soa-bg-panel-rgb: 255,255,255;
+  --soa-fg: #262626; --soa-accent: #007aff; --soa-accent-rgb: 0,122,255;
+  --soa-accent-bright: #0060df; --soa-accent-dim: #6e6e73;
+  --soa-line: rgba(0,0,0,.12); --soa-line-soft: rgba(0,0,0,.07);
+  --soa-green: #1f8f3b; --soa-orange: #c93400; --soa-red: #d70015; --soa-blue: #007aff; --soa-yellow: #8a6a00;
+  --desk-radius: 10px; --desk-control-radius: 6px; --desk-term-radius: 10px;
+  --desk-chrome: rgba(246,246,246,.78); --desk-menu: rgba(246,246,246,.88); --desk-blur: blur(40px) saturate(1.8);
+  --desk-field: #fff; --desk-control: rgba(255,255,255,.62); --desk-control-hover: rgba(255,255,255,.95);
+  --desk-control-line: rgba(255,255,255,.75);
+  --desk-control-shadow: 0 0 0 .5px rgba(0,0,0,.14), 0 1px 3px rgba(0,0,0,.08), inset 0 1px 0 rgba(255,255,255,.9);
+  --desk-selection: rgba(0,0,0,.075); --desk-hover: rgba(0,0,0,.045);
+  --desk-shadow: 0 0 0 .5px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05); --desk-widget-line: transparent;
+  --desk-menu-shadow: 0 0 0 .5px rgba(0,0,0,.16), 0 12px 40px rgba(0,0,0,.22);
+  --desk-focus: rgba(0,122,255,.55); --desk-text-2: #6e6e73; --desk-switch-off: rgba(0,0,0,.09);
+  --desk-ring-session: #007aff; --desk-ring-week: #28cd41; --desk-term: #ffffff;
+}
+:root[data-ui="macos27"][data-theme="dark"] {
+  color-scheme: dark; --soa-bg: #282828; --soa-bg-deep: #1f1f1f; --soa-bg-panel: #323232; --soa-bg-panel-rgb: 50,50,50;
+  --soa-fg: #f0f0f0; --soa-accent: #0a84ff; --soa-accent-rgb: 10,132,255;
+  --soa-accent-bright: #409cff; --soa-accent-dim: #9a9a9e;
+  --soa-line: rgba(255,255,255,.13); --soa-line-soft: rgba(255,255,255,.07);
+  --soa-green: #32d74b; --soa-orange: #ff9f0a; --soa-red: #ff453a; --soa-blue: #0a84ff; --soa-yellow: #ffd60a;
+  --desk-chrome: rgba(40,40,40,.78); --desk-menu: rgba(45,45,45,.88);
+  --desk-field: #1e1e1e; --desk-control: rgba(255,255,255,.08); --desk-control-hover: rgba(255,255,255,.16);
+  --desk-control-line: rgba(255,255,255,.14);
+  --desk-control-shadow: 0 0 0 .5px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.12);
+  --desk-selection: rgba(255,255,255,.1); --desk-hover: rgba(255,255,255,.06);
+  --desk-shadow: 0 0 0 .5px rgba(0,0,0,.4), 0 1px 2px rgba(0,0,0,.3);
+  --desk-menu-shadow: 0 0 0 .5px rgba(0,0,0,.6), 0 12px 40px rgba(0,0,0,.5);
+  --desk-focus: rgba(10,132,255,.6); --desk-text-2: #9a9a9e; --desk-switch-off: rgba(255,255,255,.12);
+  --desk-ring-session: #0a84ff; --desk-ring-week: #32d74b; --desk-term: #1e1e1e;
+}
+:root[data-ui="macos27"][data-theme="dim"] { --soa-bg: #e3e3e5; --soa-bg-deep: #d8d8db; --soa-bg-panel: #f5f5f7; --soa-bg-panel-rgb: 245,245,247; --desk-chrome: rgba(236,236,238,.8); --desk-field: #f7f7f9; --desk-term: #f5f5f7; }
+
+/* ── Windows 11 ── Mica #F3F3F3 / #202020, layer fill at 70 % white, card stroke at
+   5.78 %, text at 89.56 % black, accent #005FB8 (dark #60CDFF), 4 px controls, 8 px overlays. */
+:root[data-ui="windows11"] {
+  --font-display: 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Open Sans VF', 'Helvetica Neue', sans-serif;
+  --soa-bg: #f3f3f3; --soa-bg-deep: #ebebeb; --soa-bg-panel: #fbfbfb; --soa-bg-panel-rgb: 251,251,251;
+  --soa-fg: #1b1b1b; --soa-accent: #005fb8; --soa-accent-rgb: 0,95,184;
+  --soa-accent-bright: #003e92; --soa-accent-dim: #5f5f5f;
+  --soa-line: rgba(0,0,0,.0803); --soa-line-soft: rgba(0,0,0,.0578);
+  --soa-green: #0f7b0f; --soa-orange: #9d5d00; --soa-red: #c42b1c; --soa-blue: #005fb8; --soa-yellow: #8a6a00;
+  --desk-radius: 4px; --desk-control-radius: 4px; --desk-term-radius: 8px;
+  --desk-mica: linear-gradient(110deg,#eef2f7 0%,#f3f3f3 45%,#f5f1f2 100%);
+  --desk-chrome: transparent; --desk-menu: rgba(252,252,252,.88); --desk-blur: blur(30px) saturate(1.25);
+  --desk-layer: rgba(255,255,255,.7);
+  --desk-field: rgba(255,255,255,.7); --desk-control: rgba(255,255,255,.7); --desk-control-hover: rgba(249,249,249,.5);
+  --desk-control-line: rgba(0,0,0,.0578); --desk-control-line-b: rgba(0,0,0,.1622); --desk-strong-line: rgba(0,0,0,.4458);
+  --desk-selection: rgba(0,0,0,.0373); --desk-hover: rgba(0,0,0,.0373);
+  --desk-menu-shadow: 0 8px 16px rgba(0,0,0,.14);
+  --desk-dialog-shadow: 0 32px 64px rgba(0,0,0,.19), 0 2px 21px rgba(0,0,0,.15);
+  --desk-focus: #1b1b1b; --desk-focus-inner: #fff; --desk-text-2: #5f5f5f;
+  --desk-ring-session: #005fb8; --desk-ring-week: #0f7b0f; --desk-term: #fafafa;
+}
+:root[data-ui="windows11"][data-theme="dark"] {
+  color-scheme: dark; --soa-bg: #202020; --soa-bg-deep: #1a1a1a; --soa-bg-panel: #2b2b2b; --soa-bg-panel-rgb: 43,43,43;
+  --soa-fg: #ffffff; --soa-accent: #60cdff; --soa-accent-rgb: 96,205,255;
+  --soa-accent-bright: #99ebff; --soa-accent-dim: #c5c5c5;
+  --soa-line: rgba(255,255,255,.0837); --soa-line-soft: rgba(255,255,255,.0605);
+  --soa-green: #6ccb5f; --soa-orange: #fce100; --soa-red: #ff99a4; --soa-blue: #60cdff; --soa-yellow: #fce100;
+  --desk-mica: linear-gradient(110deg,#1f2226 0%,#202020 45%,#242124 100%);
+  --desk-menu: rgba(44,44,44,.96); --desk-layer: rgba(255,255,255,.0538);
+  --desk-field: rgba(255,255,255,.0605); --desk-control: rgba(255,255,255,.0605); --desk-control-hover: rgba(255,255,255,.0837);
+  --desk-control-line: rgba(255,255,255,.093); --desk-control-line-b: rgba(255,255,255,.0698); --desk-strong-line: rgba(255,255,255,.5442);
+  --desk-selection: rgba(255,255,255,.0605); --desk-hover: rgba(255,255,255,.0605);
+  --desk-menu-shadow: 0 8px 16px rgba(0,0,0,.26);
+  --desk-dialog-shadow: 0 32px 64px rgba(0,0,0,.37), 0 2px 21px rgba(0,0,0,.37);
+  --desk-focus: #ffffff; --desk-focus-inner: #000; --desk-text-2: #c5c5c5;
+  --desk-ring-session: #60cdff; --desk-ring-week: #6ccb5f; --desk-term: #0c0c0c;
+}
+:root[data-ui="windows11"][data-theme="dim"] { --soa-bg: #e9e9e9; --soa-bg-deep: #dfdfdf; --soa-bg-panel: #f2f2f2; --soa-bg-panel-rgb: 242,242,242; --desk-mica: linear-gradient(110deg,#e4e8ee,#e9e9e9 45%,#ebe7e8); --desk-term: #f0f0f0; }
+
+/* ── Neumorphism ── one material, #E0E5EC, lifted or pressed by #A3B1C6 / #FFFFFF. */
+:root[data-ui="neumorphism"] {
+  --font-display: 'Nunito VF', Nunito, 'Avenir Next', 'Helvetica Neue', sans-serif;
+  --soa-bg: #e0e5ec; --soa-bg-deep: #d6dce5; --soa-bg-panel: #e0e5ec; --soa-bg-panel-rgb: 224,229,236;
+  --soa-fg: #3b4a60; --soa-accent: #4a67f0; --soa-accent-rgb: 74,103,240;
+  --soa-accent-bright: #3550d6; --soa-accent-dim: #7f8ea8;
+  --soa-line: rgba(59,74,96,.14); --soa-line-soft: rgba(59,74,96,.08);
+  --soa-green: #2a9a64; --soa-orange: #b8641a; --soa-red: #c93b40; --soa-blue: #4a67f0; --soa-yellow: #a07a0c;
+  --desk-radius: 20px; --desk-control-radius: 50px; --desk-term-radius: 20px;
+  --n-dark: #a3b1c6; --n-light: #ffffff;
+  --desk-chrome: var(--soa-bg); --desk-menu: var(--soa-bg); --desk-field: var(--soa-bg);
+  --desk-control: var(--soa-bg); --desk-control-hover: #e6ebf2; --desk-control-line: transparent; --desk-widget-line: transparent;
+  --desk-control-shadow: 5px 5px 10px var(--n-dark), -5px -5px 10px var(--n-light);
+  --desk-shadow: 9px 9px 16px var(--n-dark), -9px -9px 16px var(--n-light);
+  --desk-inset: inset 5px 5px 10px var(--n-dark), inset -5px -5px 10px var(--n-light);
+  --desk-inset-sm: inset 3px 3px 6px var(--n-dark), inset -3px -3px 6px var(--n-light);
+  --desk-well: inset 8px 8px 16px var(--n-dark), inset -8px -8px 16px var(--n-light);
+  --desk-menu-shadow: 12px 12px 24px var(--n-dark), -12px -12px 24px var(--n-light);
+  --desk-selection: var(--soa-bg); --desk-hover: transparent; --desk-focus: var(--soa-accent); --desk-text-2: #7f8ea8;
+  --desk-ring-session: #4a67f0; --desk-ring-week: #2fb47a; --desk-term: #e0e5ec;
+}
+:root[data-ui="neumorphism"][data-theme="dark"] {
+  color-scheme: dark; --soa-bg: #2c3038; --soa-bg-deep: #262a31; --soa-bg-panel: #2c3038; --soa-bg-panel-rgb: 44,48,56;
+  --soa-fg: #dfe5ef; --soa-accent: #7f95ff; --soa-accent-rgb: 127,149,255;
+  --soa-accent-bright: #a6b6ff; --soa-accent-dim: #98a4b8;
+  --soa-line: rgba(223,229,239,.14); --soa-line-soft: rgba(223,229,239,.08);
+  --soa-green: #5fcf98; --soa-orange: #f0a462; --soa-red: #f27f84; --soa-blue: #7f95ff; --soa-yellow: #e6c46a;
+  --n-dark: #1d2026; --n-light: #3b414b; --desk-control-hover: #31353e; --desk-text-2: #98a4b8;
+  --desk-ring-session: #7f95ff; --desk-ring-week: #5fcf98; --desk-term: #2c3038;
+}
+:root[data-ui="neumorphism"][data-theme="dim"] { --soa-bg: #d4dae3; --soa-bg-deep: #cad1db; --soa-bg-panel: #d4dae3; --soa-bg-panel-rgb: 212,218,227; --n-dark: #9aa8bd; --n-light: #f6f9fd; --desk-control-hover: #dbe1e9; --desk-term: #d4dae3; }
+
+/* ── Shared skeleton: type, chrome, cards, tabs, menus, settings, rings. No control is
+   hidden or replaced by a painted icon; the lights and caption glyphs are decoration. ── */
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(body,button,input,select) { font-family: var(--font-display); letter-spacing: 0; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .topbar { background: var(--desk-chrome); border-color: var(--soa-line); -webkit-backdrop-filter: var(--desk-blur); backdrop-filter: var(--desk-blur); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .brand { color: var(--soa-fg); font-size: 13px; font-weight: 600; letter-spacing: 0; text-shadow: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.brand #toggle-sidebar,.topbar-actions button,.topbar-actions .release-btn,.widget-btn,.soa-modal-copy,.soa-modal-close,.soa-modal-link) { border-radius: var(--desk-control-radius); border: 1px solid var(--desk-control-line); background: var(--desk-control); color: var(--soa-fg); box-shadow: var(--desk-control-shadow); text-shadow: none; letter-spacing: 0; font-family: var(--font-display); transition: background .12s, box-shadow .12s, color .12s; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.brand #toggle-sidebar,.topbar-actions button,.topbar-actions .release-btn,.widget-btn,.soa-modal-copy,.soa-modal-close,.soa-modal-link):hover { background: var(--desk-control-hover); border-color: var(--desk-control-line); color: var(--soa-fg); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .user-chip { border-radius: var(--desk-control-radius) !important; border-color: var(--desk-control-line) !important; background: var(--desk-control) !important; color: var(--soa-fg) !important; font-family: var(--font-display) !important; letter-spacing: 0 !important; box-shadow: var(--desk-control-shadow); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .user-chip:hover { background: var(--desk-control-hover) !important; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .view-switch { border: 1px solid var(--desk-control-line); border-radius: var(--desk-control-radius); background: var(--desk-control); box-shadow: var(--desk-control-shadow); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .topbar-actions .view-switch .view-btn { color: var(--desk-text-2); border-left-color: var(--desk-control-line); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .topbar-actions .view-switch .view-btn:hover { background: var(--desk-hover); color: var(--soa-fg); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .topbar-actions .view-switch .view-btn.active { background: var(--soa-accent); color: #fff; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tabs { gap: 4px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab { border-radius: var(--desk-control-radius); background: transparent; border-color: transparent; color: var(--desk-text-2); font-family: var(--font-display); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab:hover { background: var(--desk-hover); border-color: transparent; color: var(--soa-fg); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab.active { background: var(--desk-selection); color: var(--soa-fg); border-color: transparent; box-shadow: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab.active::after { content: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab :is(.tab-label,.tab-sub) { font-family: var(--font-display); letter-spacing: 0; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab-label { font-weight: 500; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab.active .tab-sub { color: var(--desk-text-2); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.sidebar,.context-panel) { background: var(--desk-chrome); border-color: var(--soa-line); -webkit-backdrop-filter: var(--desk-blur); backdrop-filter: var(--desk-blur); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .sidebar { gap: 12px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.widget,.tile) { border: 1px solid var(--desk-widget-line); border-radius: var(--desk-radius); background: var(--soa-bg-panel); box-shadow: var(--desk-shadow); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .widget-h { padding: 9px 12px 7px; border-color: var(--soa-line-soft); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .widget-title { font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--soa-fg); text-shadow: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .widget-title::before { content: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .widget-pulse { box-shadow: none; animation: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.bar,.bar-fill,.ctx-bar) { border-radius: 99px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .terms .term { background: var(--desk-term); border: 0; outline: 1px solid var(--soa-line); outline-offset: -1px; border-radius: var(--desk-term-radius); box-shadow: var(--desk-shadow); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.soa-modal,.ctx-popover,.more-menu,.meet-picker,.voice-panel) { background: var(--desk-menu); color: var(--soa-fg); border: 1px solid var(--soa-line); border-radius: var(--desk-radius); box-shadow: var(--desk-menu-shadow); -webkit-backdrop-filter: var(--desk-blur); backdrop-filter: var(--desk-blur); font-family: var(--font-display); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .more-menu .more-item { border-radius: var(--desk-control-radius); color: var(--soa-fg); font-family: var(--font-display); letter-spacing: 0; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .more-menu .more-item:hover { background: var(--desk-hover); color: var(--soa-fg); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .soa-settings-drop .settings-actions { background: var(--desk-menu); border-color: var(--soa-line-soft); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .soa-modal-title { font: 600 15px/1.3 var(--font-display); letter-spacing: 0; color: var(--soa-fg); border-bottom: 1px solid var(--soa-line-soft); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .soa-modal-body { color: var(--soa-fg); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .settings-sidebar { border-right: 1px solid var(--soa-line-soft); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .settings-tab { border-radius: var(--desk-control-radius); border-color: transparent; color: var(--soa-fg); font-family: var(--font-display); font-size: 12px; letter-spacing: 0; padding: 7px 10px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .settings-tab:hover { background: var(--desk-hover); border-color: transparent; color: var(--soa-fg); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .settings-tab--active { background: var(--desk-selection); color: var(--soa-fg); border-color: transparent; box-shadow: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.set-label,.set-desc,.pack-name,.pack-detail,.set-static) { font-family: var(--font-display); letter-spacing: 0; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .set-label { color: var(--soa-fg); font-size: 13px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .set-desc { color: var(--desk-text-2); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .set-key { display: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .set-row { border-bottom: 1px solid var(--soa-line-soft); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .set-ctl :is(select,input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"])) { color: var(--soa-fg); background: var(--desk-field); border: 1px solid var(--desk-control-line); border-radius: var(--desk-control-radius); font-family: var(--font-display); font-size: 12px; padding: 5px 9px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(input[type="radio"],input[type="checkbox"],input[type="range"]) { accent-color: var(--soa-accent); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .seg { border-radius: var(--desk-control-radius); border-color: var(--desk-control-line); background: var(--desk-control); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .seg-o { font-family: var(--font-display); font-size: 10px; letter-spacing: 0; color: var(--desk-text-2); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .seg-o.on { background: var(--soa-accent); color: #fff; text-shadow: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .status-bar { background: var(--desk-chrome); color: var(--desk-text-2); border-color: var(--soa-line); font-family: var(--font-display); font-size: 11px; letter-spacing: 0; -webkit-backdrop-filter: var(--desk-blur); backdrop-filter: var(--desk-blur); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(button,select,input,a,[role="button"]):focus-visible { outline: 2px solid var(--desk-focus); outline-offset: 2px; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .design-pack { border-radius: var(--desk-radius); }
+
+/* Native switches still click the original saved boolean controls. Each pack sets
+   its own track and knob geometry inside the same 48 × 44 hit target. */
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .ctl-wrap[data-minimal-switch] > .seg { display: none; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch { position: relative; display: block; flex: none; width: 48px; height: 44px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch::before { content: ''; position: absolute; border-radius: 99px; transition: background .18s, border-color .18s, box-shadow .18s; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch::after { content: ''; position: absolute; border-radius: 50%; transition: transform .18s cubic-bezier(.2,.8,.2,1), background .18s, scale .1s; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch:disabled { opacity: .45; cursor: default; }
+
+/* The usage rings keep the shared one-row layout (both providers side by side) and
+   only take each pack's system colours and face. */
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .usage-card[data-src] { --ring-a: var(--desk-ring-session); --ring-b: var(--desk-ring-week); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.usage-card-name,.usage-card-period,.usage-card-cap,.usage-drive-label,.usage-drive-value,.usage-drive-unit,.usage-sample,.usage-provider-status) { font-family: var(--font-display); letter-spacing: 0; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .usage-card-name { font-size: 11px; font-weight: 600; }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .usage-card-big { font-weight: 600; letter-spacing: -.02em; }
+
+/* ── macOS 27 material ── */
+[data-ui="macos27"] .brand::before { content: ''; flex: none; width: 52px; height: 12px; margin-left: 14px; background:
+  radial-gradient(circle at 6px 6px, transparent 5.3px, rgba(0,0,0,.16) 5.5px 6px, transparent 6.6px),
+  radial-gradient(circle at 26px 6px, transparent 5.3px, rgba(0,0,0,.16) 5.5px 6px, transparent 6.6px),
+  radial-gradient(circle at 46px 6px, transparent 5.3px, rgba(0,0,0,.16) 5.5px 6px, transparent 6.6px),
+  radial-gradient(circle at 6px 6px, #ff5f57 5.5px, transparent 6.1px),
+  radial-gradient(circle at 26px 6px, #febc2e 5.5px, transparent 6.1px),
+  radial-gradient(circle at 46px 6px, #28c840 5.5px, transparent 6.1px); }
+[data-ui="macos27"] .topbar { padding-right: 12px; }
+[data-ui="macos27"] :is(.brand #toggle-sidebar,.topbar-actions button,.topbar-actions .release-btn,.view-switch) { border-radius: 999px; }
+[data-ui="macos27"] .user-chip { border-radius: 999px !important; }
+[data-ui="macos27"] .view-switch { padding: 2px; background: rgba(0,0,0,.06); border: 0; box-shadow: none; }
+[data-ui="macos27"][data-theme="dark"] .view-switch { background: rgba(255,255,255,.08); }
+[data-ui="macos27"] .topbar-actions .view-switch .view-btn { border-left: 0; border-radius: 999px; }
+[data-ui="macos27"] .topbar-actions .view-switch .view-btn.active { background: #fff; color: var(--soa-fg); box-shadow: 0 0 0 .5px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.14); }
+[data-ui="macos27"][data-theme="dark"] .topbar-actions .view-switch .view-btn.active { background: #5a5a5e; color: #fff; }
+[data-ui="macos27"] .tab { border-radius: 9px; padding: 5px 12px; }
+[data-ui="macos27"] .tab.active { background: rgba(255,255,255,.92); box-shadow: 0 0 0 .5px rgba(0,0,0,.12), 0 1px 3px rgba(0,0,0,.12); }
+[data-ui="macos27"][data-theme="dark"] .tab.active { background: rgba(255,255,255,.14); box-shadow: 0 0 0 .5px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.3); }
+[data-ui="macos27"] .widget-h { border-bottom: 1px solid var(--soa-line-soft); }
+[data-ui="macos27"] .widget-title { font-size: 11px; color: var(--desk-text-2); }
+[data-ui="macos27"] .widget-btn { text-align: center; font-weight: 500; font-size: 12px; }
+[data-ui="macos27"] :is(.brand #toggle-sidebar,.topbar-actions button,.widget-btn):active { background: var(--soa-accent); color: #fff; }
+[data-ui="macos27"] .settings-tab--active { background: var(--soa-accent); color: #fff; }
+[data-ui="macos27"] .more-menu { padding: 5px; border-radius: 12px; }
+[data-ui="macos27"] .more-menu .more-item:hover { background: var(--soa-accent); color: #fff; }
+[data-ui="macos27"] .soa-modal { border-radius: 12px; }
+[data-ui="macos27"] .set-ctl :is(select,input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"])) { border-color: rgba(0,0,0,.18); box-shadow: inset 0 1px 1px rgba(0,0,0,.06); }
+[data-ui="macos27"][data-theme="dark"] .set-ctl :is(select,input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"])) { border-color: rgba(255,255,255,.16); box-shadow: none; }
+[data-ui="macos27"] :is(button,select,input,a,[role="button"]):focus-visible { outline: 3.5px solid var(--desk-focus); outline-offset: 0; }
+/* NSSwitch: 26 × 15, a 13 px knob, the accent (blue) when on — macOS is not iOS green. */
+[data-ui="macos27"] .minimal-switch::before { inset: 14px 11px 15px; background: var(--desk-switch-off); box-shadow: inset 0 0 0 .5px rgba(0,0,0,.06); }
+[data-ui="macos27"] .minimal-switch::after { top: 15px; left: 12px; width: 13px; height: 13px; background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.25); }
+[data-ui="macos27"] .minimal-switch[aria-checked="true"]::before { background: var(--soa-accent); }
+[data-ui="macos27"] .minimal-switch[aria-checked="true"]::after { transform: translateX(11px); }
+/* Overlay scrollers. */
+[data-ui="macos27"] ::-webkit-scrollbar { width: 9px; height: 9px; }
+[data-ui="macos27"] ::-webkit-scrollbar-track { background: transparent; }
+[data-ui="macos27"] ::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,.28); border: 2px solid transparent; background-clip: content-box; border-radius: 99px; }
+[data-ui="macos27"][data-theme="dark"] ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,.3); }
+
+/* ── Windows 11 material ── */
+[data-ui="windows11"] :is(.stage,.topbar,.status-bar) { background: var(--desk-mica) fixed; }
+[data-ui="windows11"] :is(.terms,.sidebar,.context-panel) { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+[data-ui="windows11"] .topbar { border-bottom: 0; }
+[data-ui="windows11"] .brand { font-size: 12px; font-weight: 400; }
+/* The Windows Terminal tab strip: tabs sit on the title bar's floor, the selected one a
+   layer card with 8 px top corners. */
+[data-ui="windows11"] .tabs { align-self: stretch; align-items: flex-end; padding-top: 6px; gap: 0; }
+[data-ui="windows11"] .tab { border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; padding: 6px 12px 7px; }
+[data-ui="windows11"] .tab.active { background: var(--desk-layer); border-color: var(--soa-line-soft); }
+[data-ui="windows11"] .sidebar { padding: 12px 10px; gap: 6px; }
+[data-ui="windows11"] :is(.widget,.tile) { background: var(--desk-layer); border-color: var(--soa-line-soft); }
+[data-ui="windows11"] .widget-h { padding: 10px 14px 6px; border-bottom: 0; }
+[data-ui="windows11"] .widget-title { font-size: 13px; font-weight: 400; }
+/* Fluent buttons: a hairline that is darker along the bottom edge. */
+[data-ui="windows11"] :is(.brand #toggle-sidebar,.topbar-actions button,.topbar-actions .release-btn,.widget-btn,.soa-modal-copy,.soa-modal-close,.soa-modal-link,.view-switch) { border-bottom-color: var(--desk-control-line-b); }
+[data-ui="windows11"] .user-chip { border-bottom-color: var(--desk-control-line-b) !important; }
+[data-ui="windows11"] :is(.brand #toggle-sidebar,.topbar-actions button,.widget-btn):active { background: rgba(249,249,249,.3); color: var(--desk-text-2); }
+[data-ui="windows11"] .widget-btn { text-align: center; padding: 6px 11px; font-size: 13px; }
+[data-ui="windows11"] .topbar-actions .view-switch .view-btn.active { background: linear-gradient(var(--soa-accent),var(--soa-accent)) center bottom 2px / 16px 3px no-repeat, var(--desk-selection); color: var(--soa-accent); }
+/* NavigationView: the selected item is a subtle fill with a 3 × 16 accent pill at its left edge. */
+[data-ui="windows11"] .settings-tab { position: relative; padding: 9px 12px 9px 14px; font-size: 14px; }
+[data-ui="windows11"] .settings-tab--active::before { content: ''; position: absolute; left: 0; top: 50%; width: 3px; height: 16px; margin-top: -8px; border-radius: 2px; background: var(--soa-accent); }
+[data-ui="windows11"] .soa-modal { border-radius: 8px; background: var(--soa-bg); box-shadow: var(--desk-dialog-shadow); -webkit-backdrop-filter: none; backdrop-filter: none; }
+[data-ui="windows11"] .soa-settings-drop .settings-actions { background: var(--soa-bg); }
+[data-ui="windows11"] .soa-modal-title { font: 600 20px/1.3 var(--font-display); border-bottom: 0; }
+/* Settings cards: every row is its own 4 px card on the Mica. */
+[data-ui="windows11"] .set-row { padding: 12px 14px; background: var(--desk-layer); border: 1px solid var(--soa-line-soft); border-radius: 4px; margin-bottom: 4px; }
+[data-ui="windows11"] .set-label { font-size: 14px; }
+[data-ui="windows11"] .set-desc { font-size: 12px; }
+[data-ui="windows11"] .more-menu { padding: 4px; border-radius: 8px; }
+[data-ui="windows11"] .more-menu .more-item { font-size: 14px; }
+/* Text box: a stronger underline, 2 px accent when focused. */
+[data-ui="windows11"] .set-ctl :is(select,input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"])) { border-bottom-color: var(--desk-strong-line); padding: 6px 10px; font-size: 13px; }
+[data-ui="windows11"] .set-ctl input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):focus { border-bottom: 2px solid var(--soa-accent); padding-bottom: 5px; background: var(--soa-bg-panel); outline: none; }
+[data-ui="windows11"] :is(button,select,input,a,[role="button"]):focus-visible { outline: 2px solid var(--desk-focus); outline-offset: 1px; box-shadow: 0 0 0 1px var(--desk-focus-inner); }
+/* ToggleSwitch: 40 × 20, a 12 px knob that grows on hover, accent when on (black knob in the dark). */
+[data-ui="windows11"] .minimal-switch::before { inset: 12px 4px; border: 1px solid var(--desk-strong-line); background: rgba(0,0,0,.0241); }
+[data-ui="windows11"] .minimal-switch::after { top: 16px; left: 9px; width: 12px; height: 12px; background: var(--desk-text-2); }
+[data-ui="windows11"] .minimal-switch:hover::after { scale: 1.17; }
+[data-ui="windows11"] .minimal-switch[aria-checked="true"]::before { background: var(--soa-accent); border-color: var(--soa-accent); }
+[data-ui="windows11"] .minimal-switch[aria-checked="true"]::after { transform: translateX(18px); background: #fff; }
+[data-ui="windows11"][data-theme="dark"] .minimal-switch[aria-checked="true"]::after { background: #000; }
+[data-ui="windows11"] .terms .term { box-shadow: none; }
+[data-ui="windows11"] .status-bar { font-size: 12px; }
+/* ScrollViewer: a 2 px rail that widens to 6 px while the pointer is over the pane. */
+[data-ui="windows11"] ::-webkit-scrollbar { width: 12px; height: 12px; }
+[data-ui="windows11"] ::-webkit-scrollbar-track { background: transparent; }
+[data-ui="windows11"] ::-webkit-scrollbar-thumb { background-color: var(--desk-strong-line); border: 5px solid transparent; background-clip: content-box; border-radius: 99px; }
+[data-ui="windows11"] :hover::-webkit-scrollbar-thumb { border-width: 3px; }
+[data-ui="windows11"] ::-webkit-scrollbar-button { display: none; }
+
+/* ── Neumorphism material ── */
+[data-ui="neumorphism"] body { font-weight: 600; }
+[data-ui="neumorphism"] :is(.topbar,.sidebar,.context-panel,.status-bar) { border: 0; }
+[data-ui="neumorphism"] .topbar { padding-right: 16px; }
+[data-ui="neumorphism"] .brand { font-weight: 800; }
+[data-ui="neumorphism"] :is(.brand #toggle-sidebar,.topbar-actions button,.topbar-actions .release-btn,.widget-btn,.soa-modal-copy,.soa-modal-close,.soa-modal-link) { border: 0; font-weight: 700; }
+[data-ui="neumorphism"] :is(.brand #toggle-sidebar,.topbar-actions button,.widget-btn,.soa-modal-copy,.soa-modal-close):active { box-shadow: var(--desk-inset-sm); background: var(--soa-bg); }
+[data-ui="neumorphism"] .user-chip { border: 0 !important; }
+[data-ui="neumorphism"] .view-switch { border: 0; box-shadow: var(--desk-inset-sm); padding: 3px; height: 32px; }
+[data-ui="neumorphism"] .topbar-actions .view-switch .view-btn { border-left: 0; border-radius: 50px; }
+[data-ui="neumorphism"] .topbar-actions .view-switch .view-btn.active { background: var(--soa-bg); color: var(--soa-accent); box-shadow: var(--desk-control-shadow); }
+[data-ui="neumorphism"] .tabs { gap: 8px; padding: 4px 2px; }
+[data-ui="neumorphism"] .tab { border: 0; border-radius: 14px; padding: 5px 14px; }
+[data-ui="neumorphism"] .tab:hover { background: var(--soa-bg); box-shadow: var(--desk-control-shadow); }
+[data-ui="neumorphism"] .tab.active { background: var(--soa-bg); color: var(--soa-accent); box-shadow: var(--desk-inset-sm); }
+[data-ui="neumorphism"] .tab-label { font-weight: 700; }
+[data-ui="neumorphism"] .sidebar { padding: 18px 16px; gap: 22px; }
+[data-ui="neumorphism"] :is(.widget,.tile) { border: 0; }
+[data-ui="neumorphism"] .widget-h { padding: 12px 16px 6px; border-bottom: 0; }
+[data-ui="neumorphism"] .widget-title { font-weight: 800; }
+[data-ui="neumorphism"] .widget-btn { border-radius: 50px; text-align: center; padding: 8px 14px; }
+[data-ui="neumorphism"] .bar { height: 8px; background: var(--soa-bg); box-shadow: var(--desk-inset-sm); }
+[data-ui="neumorphism"] .terms { background: var(--soa-bg); }
+[data-ui="neumorphism"] .terms .term { outline: 0; box-shadow: var(--desk-well); }
+[data-ui="neumorphism"] :is(.soa-modal,.ctx-popover,.more-menu,.meet-picker,.voice-panel) { border: 0; border-radius: 24px; }
+[data-ui="neumorphism"] .more-menu { padding: 8px; }
+[data-ui="neumorphism"] .more-menu .more-item { border-radius: 12px; }
+[data-ui="neumorphism"] .more-menu .more-item:hover { background: var(--soa-bg); box-shadow: var(--desk-inset-sm); color: var(--soa-accent); }
+[data-ui="neumorphism"] .soa-modal-title { font-weight: 800; border-bottom: 0; }
+[data-ui="neumorphism"] .settings-sidebar { border-right: 0; }
+[data-ui="neumorphism"] .settings-tab { border-radius: 12px; font-weight: 700; padding: 8px 12px; }
+[data-ui="neumorphism"] .settings-tab:hover { background: var(--soa-bg); box-shadow: var(--desk-control-shadow); }
+[data-ui="neumorphism"] .settings-tab--active { background: var(--soa-bg); color: var(--soa-accent); box-shadow: var(--desk-inset-sm); }
+/* Dividers are embossed, not drawn: a shadow line over a highlight line. */
+[data-ui="neumorphism"] .set-row { border-bottom: 1px solid rgba(163,177,198,.35); box-shadow: 0 1px 0 var(--n-light); }
+[data-ui="neumorphism"] .set-row:last-child { border-bottom: 0; box-shadow: none; }
+[data-ui="neumorphism"] .set-label { font-weight: 700; }
+[data-ui="neumorphism"] .set-ctl :is(select,input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"])) { border: 0; border-radius: 12px; box-shadow: var(--desk-inset-sm); padding: 6px 12px; font-weight: 600; }
+[data-ui="neumorphism"] .seg { border: 0; border-radius: 50px; box-shadow: var(--desk-inset-sm); padding: 2px; }
+[data-ui="neumorphism"] .seg-o { border-radius: 50px; font-weight: 700; }
+[data-ui="neumorphism"] .seg-o + .seg-o { border-left: 0; }
+[data-ui="neumorphism"] .seg-o.on { background: var(--soa-bg); color: var(--soa-accent); box-shadow: var(--desk-control-shadow); }
+[data-ui="neumorphism"] .design-pack { border: 0; border-radius: 16px; box-shadow: var(--desk-control-shadow); }
+[data-ui="neumorphism"] .design-pack:has(:checked) { box-shadow: var(--desk-inset-sm); }
+/* A pressed pill track and a lifted knob; on fills the track with the accent. */
+[data-ui="neumorphism"] .minimal-switch::before { inset: 10px 2px; background: var(--soa-bg); box-shadow: var(--desk-inset-sm); }
+[data-ui="neumorphism"] .minimal-switch::after { top: 13px; left: 5px; width: 18px; height: 18px; background: var(--soa-bg); box-shadow: 3px 3px 6px var(--n-dark), -3px -3px 6px var(--n-light); }
+[data-ui="neumorphism"] .minimal-switch[aria-checked="true"]::before { background: var(--soa-accent); box-shadow: inset 3px 3px 6px rgba(0,0,0,.25), inset -3px -3px 6px rgba(255,255,255,.18); }
+[data-ui="neumorphism"] .minimal-switch[aria-checked="true"]::after { transform: translateX(20px); background: #fff; box-shadow: 2px 2px 5px rgba(0,0,0,.25); }
+[data-ui="neumorphism"] ::-webkit-scrollbar { width: 12px; height: 12px; }
+[data-ui="neumorphism"] ::-webkit-scrollbar-track { background: transparent; }
+[data-ui="neumorphism"] ::-webkit-scrollbar-thumb { background-color: var(--n-dark); border: 3px solid transparent; background-clip: content-box; border-radius: 99px; }
+[data-ui="neumorphism"] :is(button,select,input,a,[role="button"]):focus-visible { outline: 2px solid var(--soa-accent); outline-offset: 3px; }
+[data-ui="neumorphism"] .usage-card-big { font-weight: 800; }
+
+@supports not (backdrop-filter: blur(2px)) {
+  [data-ui="macos27"] :is(.topbar,.sidebar,.context-panel,.status-bar) { background: var(--soa-bg); }
+  [data-ui="macos27"] :is(.soa-modal,.more-menu,.voice-panel,.ctx-popover,.meet-picker) { background: var(--soa-bg); }
+  [data-ui="windows11"] :is(.soa-modal,.more-menu,.voice-panel,.ctx-popover,.meet-picker) { background: var(--soa-bg-panel); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :is([data-ui="macos27"],[data-ui="windows11"]) :is(.topbar,.sidebar,.context-panel,.status-bar,.soa-modal,.voice-panel,.more-menu,.ctx-popover,.meet-picker) { background: var(--soa-bg-panel); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  [data-ui="windows11"] :is(.widget,.tile,.set-row,.tab.active) { background: var(--soa-bg-panel); }
+}
+@media (prefers-contrast: more) {
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.widget,.tile,.design-pack,button,select,input,.set-row) { border: 1px solid var(--soa-fg); box-shadow: none; }
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.widget,.topbar,.sidebar,.context-panel,.soa-modal,.voice-panel,.more-menu) { background: var(--soa-bg-panel); box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .terms .term { outline: 2px solid var(--soa-fg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) :is(.minimal-switch::before,.minimal-switch::after,.tab,button) { transition: none; }
+}
+@media (forced-colors: active) {
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch::before { background: Canvas; border: 1px solid ButtonText; box-shadow: none; }
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch::after { background: ButtonText; box-shadow: none; }
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch[aria-checked="true"]::before { background: Highlight; border-color: Highlight; }
+  :is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .minimal-switch[aria-checked="true"]::after { background: HighlightText; }
+  [data-ui="macos27"] .brand::before { display: none; }
+}
+
+/* Agent status in the packs.
+   The pack .tab rules above set color + border-color on every tab, at the
+   same specificity as styles.css's .tab[data-agent=…] status colours and
+   later in the cascade, so in all three packs every tab looked the same
+   whether it was working, done or waiting on you. Status comes back in the
+   pack's own idiom: a small dot in the pack's status colour on every tab,
+   and the label tinted on inactive tabs (the active tab keeps the pack's
+   selection style, so it stays legible). The colours are each pack's own
+   --soa-green / --soa-orange / --soa-red / --soa-blue. */
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab[data-agent]::before {
+  content: '';
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--tab-status, transparent);
+}
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab:is([data-agent="working"],[data-agent="delegating"]) { --tab-status: var(--soa-green); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab[data-agent="done"] { --tab-status: var(--soa-orange); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab:is([data-agent="attention"],[data-agent="error"]) { --tab-status: var(--soa-red); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab[data-agent="idle"] { --tab-status: var(--soa-blue); }
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) .tab:is([data-agent="working"],[data-agent="delegating"],[data-agent="done"],[data-agent="attention"],[data-agent="error"]):not(.active) { color: var(--tab-status); }
