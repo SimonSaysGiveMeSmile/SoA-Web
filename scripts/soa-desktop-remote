@@ -27,18 +27,34 @@
  *          unit as 4-byte-length NAL units (AVCC). The decoder config goes
  *          as JSON {t:'vconfig', codec, description(base64 avcC)} right
  *          before the first keyframe that needs it. JPEG messages start 0xff.
- * Input:   the `computeruse` CLI, which hands every event to Sarea.app; that
- *          app holds Accessibility + Screen Recording, so nothing here needs a
- *          permission grant or sudo. Clicks are delivered to the process that
- *          owns the window under the point (soa-window-at), so a tap lands on
- *          whatever is visible there, not just the frontmost app. If Sarea
- *          quits, the next input relaunches it in the background.
- * Drag:    the CLI cannot hold a button down, so press / drag / release go to
- *          "SoA Pointer" (soa-pointer.swift), a background app bundle built
- *          here once and launched through LaunchServices. macOS charges the
- *          Accessibility grant to the launching app, so it is asked for once,
- *          for that tool alone; until it is granted, drag reports "permission
- *          needed" and every other input keeps working.
+ * Input:   direct — every move, click, scroll, key, text and drag is one line
+ *          to "SoA Pointer" (soa-pointer.swift) over one persistent unix
+ *          socket, posted there as a CGEvent: no process per event, no window
+ *          lookup, ~0.1 ms. It is a background app bundle built here (only when
+ *          its source changes) and launched through LaunchServices, because
+ *          macOS charges the Accessibility grant to the launching app: the
+ *          grant covers that one tool. Moves are coalesced to the latest (at
+ *          most one per MOVE_MIN_MS) and never reordered against clicks/keys.
+ * Fallback: until that grant is on (or when the helper is missing), input
+ *          goes through the `computeruse` CLI, which hands every event to
+ *          Sarea.app (it holds Accessibility + Screen Recording). Clicks go to
+ *          the process that owns the window under the point (soa-window-at).
+ *          Sarea is kept running while a viewer is connected, so the first
+ *          tap does not wait for it to launch. The viewer is told which path
+ *          is active ({t:'input', path:'direct'|'sarea', reason}).
+ * Display: a viewer may switch the Mac's resolution (soa-display.swift:
+ *          {t:'displayModes'} / {t:'setDisplayMode', id|'match'|'original',
+ *          keep?} / {t:'setDisplayKeep', keep}); the original mode comes back
+ *          30 s after the last viewer leaves unless it was kept.
+ * Fit:     "Fit the Mac to this screen" ({t:'fit'}): a virtual display shaped
+ *          like the viewer's picture area, mirrored by the built-in display
+ *          so it is the main one, streamed and mapped instead of the built-in
+ *          (soa-virtual-display.swift). Borrowed the same way: off, the last
+ *          viewer gone for 30 s (unless kept), this service stopping or the
+ *          helper dying put the Mac back on its own screen. The fitted
+ *          screen is ONE shared Mac screen, so it belongs to one viewer (the
+ *          one that turned it on, or took it over): only that viewer's area
+ *          shapes it; the others see it letterboxed (see "who owns the fit").
  */
 'use strict';
 
@@ -56,6 +72,7 @@ const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa
 const WORK_DIR = path.join(STATE_DIR, 'desktop-remote');
 const FFMPEG = process.env.SOA_FFMPEG || 'ffmpeg';
 const COMPUTERUSE = process.env.SOA_COMPUTERUSE || 'computeruse';
+const OPEN = process.env.SOA_OPEN || 'open';     // LaunchServices (a test instance points this at a stub)
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const VIEWER_HTML = path.join(__dirname, 'soa-desktop-remote.html');
 const MAX_JPEG = 3 * 1024 * 1024;
@@ -68,7 +85,7 @@ let screen = { width: 1728, height: 1080, scale: 2 };
 function readScreen() {           // synchronous: start-up only
     // computeruse needs Sarea running; the screen-stream helper reads the
     // same geometry straight from CoreGraphics when it is not.
-    for (const [cmd, args] of [[COMPUTERUSE, ['screen-info']], [path.join(WORK_DIR, 'screen-stream'), ['--info']]]) {
+    for (const [cmd, args] of [[COMPUTERUSE, ['screen-info']], [HELPER_BIN, ['--info']]]) {
         try {
             const j = JSON.parse(execFileSync(cmd, args, { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString());
             if (j.width && j.height) { screen = { width: j.width, height: j.height, scale: j.scale_factor || 1 }; return screen; }
@@ -83,16 +100,20 @@ function readScreen() {           // synchronous: start-up only
 // a changed geometry is pushed to the viewers when it arrives.
 let screenReading = false;
 function refreshScreen() {
-    if (screenReading) return;
+    if (screenReading || fit.busy || fit.up) return;   // a fit change sets the geometry itself; fitted, it is the fit's
     screenReading = true;
-    const sources = [[COMPUTERUSE, ['screen-info']], [path.join(WORK_DIR, 'screen-stream'), ['--info']]];
+    // soa-display first (CoreGraphics, no Sarea): it is also what changes the mode.
+    const sources = [[DISPLAY_BIN, ['current']], [COMPUTERUSE, ['screen-info']], [HELPER_BIN, ['--info']]];
     const next = (i) => {
         if (i >= sources.length) { screenReading = false; return; }
+        if (i === 0 && !disp.built) { next(1); return; }
         execFile(sources[i][0], sources[i][1], { timeout: 3000 }, (err, out) => {
             let j = null;
             if (!err) { try { j = JSON.parse(out); } catch (_) {} }
+            if (i === 0 && j) j = j.mode ? { width: j.mode.width, height: j.mode.height, scale_factor: j.mode.scale } : null;
             if (!j || !j.width || !j.height) { next(i + 1); return; }
             screenReading = false;
+            if (fit.busy || fit.transition || fit.up) return;   // read mid-change: the fit sets it
             const s = { width: j.width, height: j.height, scale: j.scale_factor || 1 };
             if (s.width !== screen.width || s.height !== screen.height || s.scale !== screen.scale) {
                 log('screen geometry', `${screen.width}x${screen.height} → ${s.width}x${s.height}`);
@@ -136,6 +157,7 @@ function startWindowAt() {
 
 let activePid = 0;
 function refreshActivePid() {
+    if (inputPath() === 'direct') return;          // only the computeruse path needs it
     execFile(COMPUTERUSE, ['apps'], { timeout: 3000 }, (err, out) => {
         if (err) return;
         try {
@@ -158,9 +180,20 @@ function relaunchSarea() {
     if (Date.now() - sareaRelaunchAt < 15000) return false;
     sareaRelaunchAt = Date.now();
     log('Sarea is not running — relaunching it in the background');
-    execFile('open', ['-gja', 'Sarea'], { timeout: 10000 }, (e) => { if (e) log('relaunch failed:', e.message); });
+    execFile(OPEN, ['-gja', 'Sarea'], { timeout: 10000 }, (e) => { if (e) log('relaunch failed:', e.message); });
     return true;
 }
+// On the fallback path Sarea must already be running when the first tap
+// arrives: it quits on its own, and waking it costs seconds. While a viewer is
+// connected it is probed (read-only, ~10 ms) and relaunched ahead of need.
+function keepSareaWarm() {
+    if (!viewers.size || inputPath() === 'direct' || sareaWake) return;
+    execFile(COMPUTERUSE, ['cursor'], { timeout: 2000 }, (err, out, errOut) => {
+        const msg = String(errOut || (err && err.message) || '');
+        if (err && /Sarea is not running/i.test(msg) && relaunchSarea()) waitForSarea();
+    });
+}
+setInterval(keepSareaWarm, 5000);
 // Wait (in the background, never on the queue) for Sarea's socket to answer.
 function waitForSarea() {
     if (sareaWake) return sareaWake;
@@ -188,23 +221,21 @@ function run(args) {
     });
 }
 
-// ── drag: the SoA Pointer helper app ─────────────────────────────────────
+// ── direct input: the SoA Pointer helper app ─────────────────────────────
 const net = require('node:net');
+const POINTER_SRC = path.join(__dirname, 'soa-pointer.swift');
 const POINTER_APP = path.join(WORK_DIR, 'SoA Pointer.app');
+const POINTER_BIN = path.join(POINTER_APP, 'Contents', 'MacOS', 'soa-pointer');
 const POINTER_SOCK = path.join(WORK_DIR, 'pointer.sock');
-// `connecting` holds the in-flight socket (not a flag) so a stale socket's
-// close can never clear a newer attempt; `retry` is the single pending
-// reconnect, with a capped backoff, and a failed build is not retried per event.
-let pointer = { sock: null, connecting: null, permitted: null, buf: '', retry: null, retryMs: 1500, buildFailedAt: 0 };
-function buildPointerApp() {
-    const src = path.join(__dirname, 'soa-pointer.swift');
-    const bin = path.join(POINTER_APP, 'Contents', 'MacOS', 'soa-pointer');
-    // Rebuild only when the source changed: a new binary is a new code
-    // signature, and macOS would ask for the permission again.
-    if (fs.existsSync(bin) && fs.statSync(bin).mtimeMs >= fs.statSync(src).mtimeMs) return true;
-    try {
-        fs.mkdirSync(path.dirname(bin), { recursive: true });
-        fs.writeFileSync(path.join(POINTER_APP, 'Contents', 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
+// The hash of the source the bundle was built from. It lives OUTSIDE the
+// bundle so writing it never touches the bundle's signature.
+const POINTER_STAMP = path.join(WORK_DIR, 'pointer.source.sha256');
+// SOA_POINTER_DRY=1: the helper posts nothing and prints what it would; it is
+// then started directly (LaunchServices would not pass the variable on).
+// SOA_POINTER_LAUNCH=0: never build or launch it (a test instance brings its own).
+const POINTER_DRY = process.env.SOA_POINTER_DRY === '1';
+const POINTER_LAUNCH = process.env.SOA_POINTER_LAUNCH !== '0';
+const POINTER_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>app.s0a.pointer</string>
@@ -215,35 +246,86 @@ function buildPointerApp() {
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>LSUIElement</key><true/>
 </dict></plist>
-`);
-        execFileSync('swiftc', ['-O', '-o', bin, src], { stdio: 'inherit', timeout: 180000 });
+`;
+// `connecting` holds the in-flight socket (not a flag) so a stale socket's
+// close can never clear a newer attempt; `retry` is the single pending
+// reconnect, with a capped backoff, and a failed build is not retried per event.
+// `pend` is one entry per line written, in order: the helper answers every
+// line, so each reply is matched to its line by position.
+let pointer = { sock: null, connecting: null, permitted: null, dry: false, buf: '', pend: [], retry: null, retryMs: 1500, buildFailedAt: 0, child: null };
+function pointerHash() {
+    try { return crypto.createHash('sha256').update(fs.readFileSync(POINTER_SRC)).update(POINTER_PLIST).digest('hex'); }
+    catch (_) { return null; }
+}
+// Stale = built from other source than the one beside this script. A
+// content hash, not a timestamp: a checkout or a copy that only touches the
+// file's mtime must not rebuild, because every rebuild is a new code
+// signature and macOS then voids the Accessibility grant until it is
+// given again.
+function pointerStale() {
+    const want = pointerHash();
+    if (!want) return false;                                  // no source here: use what is built
+    if (!fs.existsSync(POINTER_BIN)) return true;
+    let have = '';
+    try { have = fs.readFileSync(POINTER_STAMP, 'utf8').trim(); } catch (_) {}
+    return have !== want;
+}
+function buildPointerApp() {
+    if (!pointerStale()) return fs.existsSync(POINTER_BIN);
+    const hash = pointerHash();
+    try {
+        fs.mkdirSync(path.dirname(POINTER_BIN), { recursive: true });
+        fs.writeFileSync(path.join(POINTER_APP, 'Contents', 'Info.plist'), POINTER_PLIST);
+        execFileSync('swiftc', ['-O', '-o', POINTER_BIN, POINTER_SRC], { stdio: 'inherit', timeout: 180000 });
         execFileSync('codesign', ['--force', '--sign', '-', '--identifier', 'app.s0a.pointer', POINTER_APP], { stdio: 'inherit', timeout: 30000 });
-        log('built', POINTER_APP);
+        fs.writeFileSync(POINTER_STAMP, hash + '\n');
+        log('built', POINTER_APP, '— a new build needs the Accessibility grant again (System Settings → Privacy & Security → Accessibility)');
         return true;
     } catch (e) { log('SoA Pointer build failed:', e.message); return false; }
+}
+function launchPointer() {
+    if (POINTER_DRY) {
+        // Started directly so the variable reaches it; it never posts.
+        if (pointer.child && pointer.child.exitCode === null && pointer.child.signalCode === null) return;
+        const c = spawn(POINTER_BIN, [POINTER_SOCK], { env: { ...process.env, SOA_POINTER_DRY: '1' }, stdio: ['ignore', 'inherit', 'inherit'] });
+        pointer.child = c;
+        c.on('error', (e) => log('SoA Pointer (dry) failed:', e.message));
+        return;
+    }
+    execFile(OPEN, ['-gj', '-a', POINTER_APP, '--args', POINTER_SOCK], { timeout: 10000 },
+        (e) => { if (e) log('SoA Pointer launch failed:', e.message); });
 }
 function pointerConnect() {
     if (pointer.sock || pointer.connecting || pointer.retry) return;     // a pending retry counts as in flight
     if (Date.now() - pointer.buildFailedAt < 60000) return;
-    if (!pointer.checkedStale) {
+    if (!pointer.checkedStale && POINTER_LAUNCH) {
         // A helper from an older source is still serving its socket: quit it
         // once so the connect fails, which rebuilds and relaunches the new one.
         pointer.checkedStale = true;
-        const bin = path.join(POINTER_APP, 'Contents', 'MacOS', 'soa-pointer');
-        try {
-            if (fs.existsSync(bin) && fs.statSync(bin).mtimeMs < fs.statSync(path.join(__dirname, 'soa-pointer.swift')).mtimeMs) {
-                log('SoA Pointer source changed — replacing the running helper');
-                execFileSync('pkill', ['-f', bin], { timeout: 5000 });
+        if (pointerStale() && fs.existsSync(POINTER_BIN)) {
+            log('SoA Pointer source changed — replacing the running helper');
+            try { execFileSync('pkill', ['-f', POINTER_BIN], { timeout: 5000 }); } catch (_) { /* nothing running */ }
+            // Let it go fully, and its socket with it, so the connect below
+            // fails (→ rebuild + launch) instead of reaching the dying helper.
+            for (let i = 0; i < 20; i++) {
+                try { execFileSync('pgrep', ['-f', POINTER_BIN], { timeout: 2000, stdio: 'ignore' }); } catch (_) { break; }
+                execFileSync('sleep', ['0.05']);
             }
-        } catch (_) { /* nothing running, or pkill found nothing */ }
+            try { fs.unlinkSync(POINTER_SOCK); } catch (_) {}
+        }
     }
     const s = net.connect(POINTER_SOCK);
     pointer.connecting = s;
     s.setEncoding('utf8');
+    s.setNoDelay && s.setNoDelay(true);
     s.on('connect', () => {
         if (pointer.connecting !== s || pointer.sock) { s.destroy(); return; }   // superseded
-        pointer.connecting = null; pointer.sock = s; pointer.buf = ''; pointer.retryMs = 1500;
+        pointer.connecting = null; pointer.sock = s; pointer.buf = ''; pointer.pend = []; pointer.retryMs = 1500;
+        // A new helper (rebuilt, relaunched) answers for itself: the old one's
+        // grant says nothing about it, in either direction.
+        pointer.permitted = null;
         pointerSend('status');
+        updateInputPath();
     });
     s.on('data', (d) => {
         if (pointer.sock !== s) return;
@@ -251,40 +333,140 @@ function pointerConnect() {
         let i;
         while ((i = pointer.buf.indexOf('\n')) >= 0) {
             const line = pointer.buf.slice(0, i); pointer.buf = pointer.buf.slice(i + 1);
-            if (line.startsWith('ready ')) setPermitted(line.endsWith('1'));
+            const ent = pointer.pend.shift();
+            const r = /^ready ([01])( dry)?/.exec(line);
+            if (r) { pointer.dry = !!r[2]; setPermitted(r[1] === '1'); }
             else if (line === 'err not permitted') setPermitted(false);
+            if (ent) {
+                if (ent.recvAt) inputStat(ent.kind, performance.now() - ent.recvAt);
+                if (ent.cb) { try { ent.cb(line); } catch (e) { log('input reply handler failed:', e.message); } }
+            }
         }
     });
     const mine = () => pointer.sock === s || pointer.connecting === s;
     const drop = () => {
-        if (pointer.sock === s) { pointer.sock = null; pointer.buf = ''; }
+        const was = pointer.sock === s;
+        if (was) { pointer.sock = null; pointer.buf = ''; pointer.pend = []; }
         if (pointer.connecting === s) pointer.connecting = null;
+        if (was) updateInputPath();
+        // The helper went away mid-session (it quit, or was replaced): come
+        // back on our own rather than waiting for the next viewer to join.
+        if (was && viewers.size && !pointer.retry) pointer.retry = setTimeout(() => { pointer.retry = null; pointerConnect(); }, 500);
     };
     s.on('error', () => {
         const wasMine = mine();
         drop();
         if (!wasMine || !viewers.size) return;                           // nobody needs the helper
-        if (!buildPointerApp()) { pointer.buildFailedAt = Date.now(); return; }
-        execFile('open', ['-gj', '-a', POINTER_APP, '--args', POINTER_SOCK], { timeout: 10000 },
-            (e) => { if (e) log('SoA Pointer launch failed:', e.message); });
+        if (POINTER_LAUNCH) {
+            if (!buildPointerApp()) { pointer.buildFailedAt = Date.now(); updateInputPath(); return; }
+            launchPointer();
+        }
         pointer.retry = setTimeout(() => { pointer.retry = null; pointerConnect(); }, pointer.retryMs);
         pointer.retryMs = Math.min(pointer.retryMs * 2, 30000);
+        updateInputPath();                                               // 'starting' becomes 'unavailable' after a few misses
     });
     s.on('close', drop);
 }
-function pointerSend(line) {
+// One line to the helper. `cb(reply)` runs when its answer arrives; `kind`
+// and `recvAt` (performance.now() when the viewer's message arrived) feed
+// the dispatch-time statistics.
+function pointerSend(line, cb = null, kind = '', recvAt = 0) {
     if (!pointer.sock) { pointerConnect(); return false; }
+    if (pointer.pend.length >= 5000) {
+        // A helper that stopped answering. Dropping the oldest entry would
+        // pair every later reply with the wrong line; start over instead.
+        log('SoA Pointer stopped answering — reconnecting');
+        pointer.sock.destroy();
+        return false;
+    }
+    pointer.pend.push({ cb, kind, recvAt });
     pointer.sock.write(line + '\n');
     return true;
 }
 function setPermitted(v) {
     if (pointer.permitted === v) return;
     pointer.permitted = v;
-    log('SoA Pointer drag permission:', v ? 'granted' : 'NOT granted');
+    log('SoA Pointer permission:', v ? 'granted' : 'NOT granted', pointer.dry ? '(dry run: posts nothing)' : '');
     const msg = JSON.stringify({ t: 'drag-permission', granted: v });
     for (const ws of viewers) if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    updateInputPath();
 }
 setInterval(() => { if (pointer.sock && pointer.permitted !== true) pointerSend('status'); }, 3000);
+
+// Which path input takes, and why — told to every viewer when it changes.
+//   direct: SoA Pointer, permitted.     sarea: the computeruse fallback, because
+//   reason = 'not-permitted' (the Accessibility grant is off), 'unavailable'
+//   (the helper cannot be built or reached) or 'starting' (not answered yet).
+function inputPath() { return pointer.sock && pointer.permitted === true ? 'direct' : 'sarea'; }
+function inputReason() {
+    if (inputPath() === 'direct') return '';
+    if (pointer.sock && pointer.permitted === false) return 'not-permitted';
+    if (!pointer.sock && (pointer.buildFailedAt || pointer.retryMs >= 12000)) return 'unavailable';
+    return 'starting';
+}
+let lastInputPath = '';
+function inputInfo() { return { path: inputPath(), reason: inputReason(), dry: pointer.dry || undefined }; }
+function updateInputPath() {
+    const info = inputInfo(), key = info.path + ':' + info.reason;
+    if (key === lastInputPath) return;
+    lastInputPath = key;
+    log('input path:', info.path, info.reason ? `(${info.reason})` : '');
+    if (info.path === 'direct') flushDirectMove();
+    else { keepSareaWarm(); refreshActivePid(); }
+    const msg = JSON.stringify({ t: 'input', ...info });
+    for (const ws of viewers) if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+}
+
+// Dispatch-time statistics: viewer message received → helper's reply (ms).
+const istat = new Map();
+function inputStat(kind, ms) {
+    let a = istat.get(kind);
+    if (!a) { a = []; istat.set(kind, a); }
+    a.push(ms); if (a.length > 500) a.shift();
+}
+function inputStats() {
+    const out = {};
+    for (const [k, a] of istat) {
+        const v = a.slice().sort((x, y) => x - y), q = (p) => +v[Math.min(v.length - 1, Math.floor(p * v.length))].toFixed(3);
+        out[k || 'other'] = { n: v.length, p50: q(0.5), p95: q(0.95), max: +v[v.length - 1].toFixed(3) };
+    }
+    return out;
+}
+
+// Moves are coalesced to the latest point, at most one per MOVE_MIN_MS, and
+// any other input first flushes the move still waiting, so nothing is
+// reordered: a click is posted after the move that preceded it.
+const MOVE_MIN_MS = 8;
+const dmove = { line: null, recvAt: 0, timer: null, lastAt: 0 };
+function directMove(x, y, recvAt) {
+    if (!dmove.line) dmove.recvAt = recvAt;                          // the oldest waiting sample times the dispatch
+    dmove.line = `move ${x} ${y}`;
+    const due = dmove.lastAt + MOVE_MIN_MS - performance.now();
+    if (due <= 0) flushDirectMove();
+    else if (!dmove.timer) dmove.timer = setTimeout(flushDirectMove, Math.ceil(due));
+}
+function flushDirectMove() {
+    clearTimeout(dmove.timer); dmove.timer = null;
+    if (!dmove.line) return;
+    const line = dmove.line; dmove.line = null;
+    dmove.lastAt = performance.now();
+    pointerSend(line, null, 'move', dmove.recvAt);
+}
+// One input on the direct path, with its computeruse equivalent as the
+// fallback when the helper turns it down (the grant was just switched off,
+// or a key this keyboard layout cannot type). A fallback job still queued
+// is not overtaken: the line then waits behind it.
+const FALLBACK_REPLIES = new Set(['err not permitted', 'err bad key']);
+function routeInput(kind, line, fallback, recvAt) {
+    const go = () => {
+        flushDirectMove();
+        const cb = fallback ? (reply) => { if (FALLBACK_REPLIES.has(reply)) { log('direct', kind, '→', reply, '— using computeruse'); enqueue(fallback); } } : null;
+        if (!pointerSend(line, cb, kind, recvAt) && fallback) enqueue(fallback);
+    };
+    if (inputPath() !== 'direct') { if (fallback) enqueue(fallback); return; }
+    if (running || queue.length) enqueue(async () => { if (inputPath() === 'direct') go(); else if (fallback) await fallback(); });
+    else go();
+}
 async function pump() {
     if (running) return;
     running = true;
@@ -314,10 +496,17 @@ function clampPoint(m) {
     return { x, y };
 }
 
+// Fallback scroll units: the viewer may send pixel deltas (direct path);
+// computeruse scrolls in lines, so pixels are carried over per viewer.
+const PX_PER_LINE = 48;
+const modArg = (mods) => (mods.length ? mods.join(',') : '-');
+
 function handleInput(m, from) {
+    const recvAt = performance.now();
     switch (m.t) {
         case 'move': {
             const { x, y } = clampPoint(m);
+            if (inputPath() === 'direct' && !running && !queue.length) { directMove(x, y, recvAt); break; }
             pendingMove = () => run(['cursor', '--move-to', `${x},${y}`]);
             pump();
             break;
@@ -327,65 +516,115 @@ function handleInput(m, from) {
             const button = ['left', 'right', 'middle'].includes(m.button) ? m.button : 'left';
             const count = Math.max(1, Math.min(3, parseInt(m.count, 10) || 1));
             const mods = modList(m.mods);
-            enqueue(async () => {
+            inputSkip(from);
+            routeInput('click', `click ${x} ${y} ${button} ${count} ${modArg(mods)}`, async () => {
                 const pid = await pidAt(x, y);
                 if (!pid) return;
                 const args = ['click', '--pid', String(pid), '--x', String(x), '--y', String(y), '--button', button, '--count', String(count)];
                 if (mods.length) args.push('--modifiers', mods.join(','));
                 await run(args);
                 refreshActivePid();
-            });
+            }, recvAt);
             break;
         }
         case 'scroll': {
+            // {dir, amount} in lines (every viewer), or {dx, dy, unit} — pixel
+            // deltas for smooth, trackpad-like scrolling (+dy shows what is below).
             const { x, y } = clampPoint(m);
-            const dir = ['up', 'down', 'left', 'right'].includes(m.dir) ? m.dir : 'down';
-            const amount = Math.max(1, Math.min(30, parseInt(m.amount, 10) || 3));
-            enqueue(async () => {
+            let dx = 0, dy = 0, unit = 'line';
+            if (m.dx !== undefined || m.dy !== undefined) {
+                unit = m.unit === 'line' ? 'line' : 'pixel';
+                const lim = unit === 'pixel' ? 4000 : 30;
+                dx = Math.max(-lim, Math.min(lim, Math.round(+m.dx || 0)));
+                dy = Math.max(-lim, Math.min(lim, Math.round(+m.dy || 0)));
+            } else {
+                const dir = ['up', 'down', 'left', 'right'].includes(m.dir) ? m.dir : 'down';
+                const amount = Math.max(1, Math.min(30, parseInt(m.amount, 10) || 3));
+                if (dir === 'down') dy = amount; else if (dir === 'up') dy = -amount; else if (dir === 'right') dx = amount; else dx = -amount;
+            }
+            if (!dx && !dy) break;
+            inputSkip(from);
+            // The fallback scrolls whole lines; pixels left over wait for the next delta.
+            const toLines = () => {
+                if (unit === 'line') return [dx, dy];
+                const r = from ? (from.scrollRem = from.scrollRem || { x: 0, y: 0 }) : { x: 0, y: 0 };
+                r.x += dx / PX_PER_LINE; r.y += dy / PX_PER_LINE;
+                const lx = Math.trunc(r.x), ly = Math.trunc(r.y); r.x -= lx; r.y -= ly;
+                return [lx, ly];
+            };
+            const fallback = async () => {
+                const [lx, ly] = toLines();
+                if (!lx && !ly) return;
                 const pid = await pidAt(x, y);
                 if (!pid) return;
-                await run(['scroll', '--pid', String(pid), '--x', String(x), '--y', String(y), '--direction', dir, '--amount', String(amount)]);
-            });
+                for (const [n, pos, neg] of [[ly, 'down', 'up'], [lx, 'right', 'left']]) {
+                    if (!n) continue;
+                    await run(['scroll', '--pid', String(pid), '--x', String(x), '--y', String(y), '--direction', n > 0 ? pos : neg, '--amount', String(Math.min(30, Math.abs(n)))]);
+                }
+            };
+            routeInput('scroll', `scroll ${dx} ${dy} ${unit} ${x} ${y}`, fallback, recvAt);
             break;
         }
         case 'type': {
-            const text = String(m.text || '').slice(0, 4000);
+            // Whole code points (a cut through an emoji would leave half a
+            // surrogate pair, which cannot be encoded), well-formed.
+            const text = Array.from(String(m.text || '').toWellFormed()).slice(0, 4000).join('');
             if (!text) break;
-            enqueue(async () => {
+            inputSkip(from);
+            routeInput('type', `text ${encodeURIComponent(text)}`, async () => {
                 const args = ['type', '--text', text];
                 if (activePid) args.push('--pid', String(activePid));
                 await run(args);
-            });
+            }, recvAt);
             break;
         }
         case 'key': {
             let key = String(m.key || '').toLowerCase();
             key = KEY_ALIAS[key] || key;
             const mods = modList(m.mods);
-            if (!(KEYS.has(key) || key.length === 1)) break;
-            enqueue(async () => {
-                const args = mods.length && key.length === 1
+            if (!(KEYS.has(key) || [...key].length === 1)) break;
+            inputSkip(from);
+            key = key.toWellFormed();
+            // computeruse knows its named keys and printable ASCII; anything
+            // else the helper could not type is not handed to it to guess at.
+            const cuOk = KEYS.has(key) || /^[\x21-\x7e]$/.test(key);
+            routeInput('key', `key ${[...key].length === 1 ? encodeURIComponent(key) : key} ${modArg(mods)}`, !cuOk ? null : async () => {
+                const args = mods.length && [...key].length === 1
                     ? ['hotkey', '--keys', [...mods, key].join(',')]
                     : ['key', '--key', key, ...(mods.length ? ['--modifiers', mods.join(',')] : [])];
                 if (activePid) args.push('--pid', String(activePid));
                 await run(args);
                 refreshActivePid();
-            });
+            }, recvAt);
             break;
         }
         case 'down': case 'drag': case 'up': {
             const { x, y } = clampPoint(m);
-            const extra = m.t === 'down' && m.button === 'right' ? ' right' : '';
+            // Modifiers armed for a drag (⇧-drag extends a selection, ⌥-drag
+            // copies) are HELD for the whole press: an app may read them at
+            // the press, while dragging or at the drop. Held with `modset`
+            // before the press, let go after the release.
+            const dmods = m.t === 'down' ? modList(m.mods) : [];
+            const button = ['right', 'middle'].includes(m.button) ? m.button : 'left';
+            const extra = m.t === 'down' && (button !== 'left' || dmods.length) ? ` ${button}${dmods.length ? ' ' + modArg(dmods) : ''}` : '';
+            const heldMods = m.t === 'down' ? dmods : (from && from.drag && from.drag.mods) || (m.t === 'up' && m.mods === 'held' ? ['held'] : []);
             // Remember the press per viewer so a viewer that vanishes mid-drag
             // (tunnel drop, phone lock) still gets its button released.
-            if (from) from.drag = m.t === 'up' ? null : { x, y };
-            // Drag events skip the computeruse queue but must not overtake a
-            // click still in it, so they wait for it to drain. A drag sample
-            // that waited too long is dropped (down and up always go), so a
-            // held queue degrades to press→release at the end point, never a
-            // replayed burst.
+            if (from) from.drag = m.t === 'up' ? null : { x, y, mods: heldMods };
+            if (m.t !== 'drag') inputSkip(from);
+            // Press / drag / release always go to the helper (computeruse cannot
+            // hold a button), but must not overtake a click still queued on the
+            // fallback, so they wait for it to drain. A drag sample that waited
+            // too long is dropped (down and up always go), so a held queue
+            // degrades to press→release at the end point, never a replayed burst.
             const at = Date.now();
-            const go = () => { if (m.t === 'drag' && Date.now() - at > 500) return; pointerSend(`${m.t} ${x} ${y}${extra}`); };
+            const go = () => {
+                if (m.t === 'drag' && Date.now() - at > 500) return;
+                flushDirectMove();
+                if (m.t === 'down' && dmods.length) pointerSend(`modset ${modArg(dmods)}`);
+                pointerSend(`${m.t} ${x} ${y}${extra}`, null, m.t, recvAt);
+                if (m.t === 'up' && heldMods.length) pointerSend('modset -');
+            };
             if (running || queue.length) enqueue(async () => { go(); }); else go();
             if (m.t === 'up') refreshActivePid();
             break;
@@ -401,10 +640,826 @@ function handleInput(m, from) {
         case 'keyframe':
             if (from && from.mode === 'h264' && from.enc) { from.vs.needKey = true; from.vs.idrAsked = true; requestIdr(from.enc); }
             break;
+        // Display resolution (see soa-display below). Async; errors are replies.
+        case 'displayModes': if (from) displayModes(from, m).catch((e) => log('displayModes failed:', e.message)); break;
+        case 'setDisplayMode': if (from) setDisplayMode(from, m).catch((e) => log('setDisplayMode failed:', e.message)); break;
+        case 'setDisplayKeep': if (from) setDisplayKeep(from, m); break;
+        case 'fit': if (from) onFitMsg(from, m); break;
         case 'ping':
             if (from && from.readyState === WebSocket.OPEN) from.send(JSON.stringify({ t: 'pong', c: +m.c || 0, s: Date.now() }));
             break;
+        // Where the Mac's pointer is (read only), so a viewer's trackpad
+        // cursor can start from it: {t:'cursor', req} → {t:'cursor', req, ok, x, y}.
+        case 'cursor': if (from) cursorQuery(from, m); break;
         default: break;
+    }
+}
+
+// The pointer's position for {t:'cursor'}: the helper's read-only `where`
+// (it needs no Accessibility grant), else `computeruse cursor`. At most one
+// question per viewer at a time and ten a second; a reply is never input.
+function cursorQuery(ws, m) {
+    const now = Date.now();
+    if (ws.cursorBusy || now - (ws.cursorAt || 0) < 100) { reply(ws, { t: 'cursor', req: m.req, ok: false, error: 'busy' }); return; }
+    ws.cursorBusy = true; ws.cursorAt = now;
+    const done = (x, y) => {
+        ws.cursorBusy = false;
+        const ok = Number.isFinite(x) && Number.isFinite(y);
+        reply(ws, ok ? { t: 'cursor', req: m.req, ok, x: Math.round(x), y: Math.round(y) } : { t: 'cursor', req: m.req, ok: false });
+    };
+    if (pointer.sock && pointerSend('where', (line) => { const r = /^at (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)/.exec(line); r ? done(+r[1], +r[2]) : done(); })) {
+        setTimeout(() => { if (ws.cursorBusy && Date.now() - ws.cursorAt > 1500) done(); }, 1600);
+        return;
+    }
+    execFile(COMPUTERUSE, ['cursor'], { timeout: 2000 }, (err, out) => {
+        const r = !err && /(-?\d+(?:\.\d+)?)\D+?(-?\d+(?:\.\d+)?)/.exec(String(out));
+        r ? done(+r[1], +r[2]) : done();
+    });
+}
+
+// ── the Mac's display resolution (soa-display) ───────────────────────────
+// A viewer may switch the Mac's main display to another "looks like" size
+// ({t:'setDisplayMode'}), e.g. a smaller one so text is readable on a phone.
+// The change is the viewer's to borrow, not to keep: the mode the Mac had
+// before the FIRST change is remembered (also on disk, so a restart of this
+// service cannot strand it) and put back once no viewer has been connected
+// for DISPLAY_RESTORE_MS (a reconnect within that window keeps the chosen
+// mode), unless a viewer asked to keep it ({keep:true}). The helper applies
+// changes "for this session", so macOS reverts them at logout in any case.
+// One change at a time; after one, the geometry is re-read and every video
+// stream restarts at the new size.
+const DISPLAY_SRC = path.join(__dirname, 'soa-display.swift');
+const DISPLAY_BIN = process.env.SOA_DISPLAY_BIN || path.join(WORK_DIR, 'display');
+const DISPLAY_STATE = path.join(WORK_DIR, 'display-state.json');
+const DISPLAY_RESTORE_MS = Math.max(0, parseInt(process.env.SOA_DISPLAY_RESTORE_MS || '30000', 10) || 0);
+// SOA_DISPLAY_DRY=1 reaches the helper through the environment: it then
+// validates and reports but changes nothing.
+const DISPLAY_DRY = process.env.SOA_DISPLAY_DRY === '1';
+const disp = { busy: false, original: null, keep: false, restoreTimer: null, built: false, failedAt: 0 };
+function buildDisplay() {
+    if (process.env.SOA_DISPLAY_BIN) return fs.existsSync(DISPLAY_BIN);   // a test brings its own
+    try {
+        if (!fs.existsSync(DISPLAY_BIN) || fs.statSync(DISPLAY_BIN).mtimeMs < fs.statSync(DISPLAY_SRC).mtimeMs) {
+            execFileSync('swiftc', ['-O', '-o', DISPLAY_BIN, DISPLAY_SRC], { stdio: 'inherit', timeout: 180000 });
+            log('built', DISPLAY_BIN);
+        }
+        return true;
+    } catch (e) { log('soa-display build failed (resolution control off):', e.message); disp.failedAt = Date.now(); return false; }
+}
+// Run the helper; resolves {ok, j, err}. Never throws.
+function displayRun(args) {
+    return new Promise((resolve) => {
+        if (!disp.built && !(disp.built = buildDisplay())) { resolve({ ok: false, err: 'resolution control unavailable' }); return; }
+        execFile(DISPLAY_BIN, args, { timeout: 10000 }, (err, out) => {
+            let j = null; try { j = JSON.parse(out); } catch (_) {}
+            if (err || !j || j.error) resolve({ ok: false, j, err: (j && j.error) || (err && err.message) || 'no answer' });
+            else resolve({ ok: true, j });
+        });
+    });
+}
+function saveDisplayState() {
+    try {
+        if (disp.original) fs.writeFileSync(DISPLAY_STATE, JSON.stringify({ original: disp.original, keep: disp.keep, at: Date.now() }) + '\n', { mode: 0o600 });
+        else fs.unlinkSync(DISPLAY_STATE);
+    } catch (_) { /* nothing saved, nothing to remove */ }
+}
+function loadDisplayState() {
+    try {
+        const s = JSON.parse(fs.readFileSync(DISPLAY_STATE, 'utf8'));
+        if (s && typeof s.original === 'string') { disp.original = s.original; disp.keep = !!s.keep; }
+    } catch (_) {}
+}
+function displayInfoMsg() { return { original: disp.original, keep: disp.keep, changed: !!disp.original, busy: disp.busy, fitted: fit.up || fit.busy || undefined, fitKeep: fit.up ? fit.keep : undefined, dry: DISPLAY_DRY || undefined }; }
+
+// "Match this device": the HiDPI mode that shows the most of the Mac while
+// its text stays readable in the viewer's screen area, the whole Mac fitted.
+// Fitted, one Mac point is fit = min(areaW / w, areaH / h) CSS pixels, and
+// CSS pixels are roughly the same visual size on every device, so `fit` is
+// the legibility: at MATCH_MIN_CSS_PER_PT (0.6) a 12 pt label is ~7 CSS px,
+// small but readable, with pinch-zoom for detail. So: among HiDPI modes (they
+// keep the Mac's own text crisp — low-resolution modes are blurry), take the
+// largest logical area whose fit reaches that; when none does (a portrait
+// phone: even 960 pt across is ~0.4), the one with the best fit, i.e. the
+// smallest. Ties (same width, e.g. 16:10 vs the taller notch mode) go to the
+// aspect closest to the area's. The area is the viewer's stage in CSS px.
+const MATCH_MIN_CSS_PER_PT = 0.6;
+function matchMode(modes, area) {
+    const hd = modes.filter((m) => m.hidpi);
+    const pool = hd.length ? hd : modes;
+    if (!pool.length || !area || !(area.w > 0) || !(area.h > 0)) return null;
+    const ar = area.w / area.h;
+    const fit = (m) => Math.min(area.w / m.width, area.h / m.height);
+    const aspectGap = (m) => Math.abs(Math.log((m.width / m.height) / ar));
+    const better = (a, b) => (a.width * a.height !== b.width * b.height ? a.width * a.height > b.width * b.height : aspectGap(a) < aspectGap(b));
+    const ok = pool.filter((m) => fit(m) >= MATCH_MIN_CSS_PER_PT);
+    let pick = null;
+    if (ok.length) for (const m of ok) { if (!pick || better(m, pick)) pick = m; }
+    else for (const m of pool) { if (!pick || fit(m) > fit(pick) + 1e-9 || (Math.abs(fit(m) - fit(pick)) < 1e-9 && aspectGap(m) < aspectGap(pick))) pick = m; }
+    return pick && { id: pick.id, width: pick.width, height: pick.height, fit: +fit(pick).toFixed(3), readable: fit(pick) >= MATCH_MIN_CSS_PER_PT };
+}
+// The viewer's area in CSS px: what it sent with the request ({area:{w,h}}),
+// else its last {t:'display'} report (device px / dpr).
+function viewerArea(ws, m) {
+    const a = m && m.area && typeof m.area === 'object' ? { w: +m.area.w, h: +m.area.h } : null;
+    if (a && a.w > 0 && a.h > 0 && a.w < 20000 && a.h < 20000) return a;
+    const d = ws && ws.display;
+    return d ? { w: d.w / (d.dpr || 1), h: d.h / (d.dpr || 1) } : null;
+}
+const reply = (ws, o) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); };
+
+async function displayModes(ws, m) {
+    if (fit.up || fit.busy) {
+        // soa-display reads the MAIN display, which is the fitted one now: show
+        // the built-in's own list from before the fit (read-only while fitted).
+        const c = disp.list, modes = (c && c.modes) || [], cur = modes.find((x) => x.current);
+        reply(ws, { t: 'displayModes', req: m.req, ok: true, modes, current: cur ? cur.id : null, match: null, ...displayInfoMsg() });
+        return;
+    }
+    const r = await displayRun(['list']);
+    if (!r.ok) { reply(ws, { t: 'displayModes', req: m.req, ok: false, error: r.err }); return; }
+    const modes = r.j.modes || [];
+    disp.list = r.j;
+    const cur = modes.find((x) => x.current);
+    reply(ws, { t: 'displayModes', req: m.req, ok: true, modes, current: cur ? cur.id : null, match: matchMode(modes, viewerArea(ws, m)), ...displayInfoMsg() });
+}
+// Apply one mode. `by` is the viewer that asked (null for an automatic restore).
+async function applyDisplayMode(id, { by = null, keep, req } = {}) {
+    if (disp.busy) return { ok: false, error: 'busy' };
+    // A viewer's change must not land on a fitted screen (a fit may have
+    // started while its mode list was being read); fitOn's own restore of
+    // the original mode comes with by = null.
+    if (by && (fit.up || fit.busy)) return { ok: false, error: 'fitted' };
+    disp.busy = true;
+    try {
+        const cur = await displayRun(['current']);
+        if (!cur.ok || !cur.j.mode || typeof cur.j.mode.id !== 'string') return { ok: false, error: cur.err || 'no current mode' };
+        const before = cur.j.mode.id;
+        const r = await displayRun(['set', id]);
+        if (!r.ok) return { ok: false, error: r.err };
+        const mode = r.j.mode || r.j.wouldSet;
+        if (!mode || typeof mode.id !== 'string') return { ok: false, error: 'helper gave no mode' };
+        if (r.j.changed) {
+            // Remember what to go back to at the first change only; going back
+            // to it (by hand or by the restore) means nothing is borrowed now.
+            if (!disp.original) disp.original = before;
+            if (mode.id === disp.original) { disp.original = null; disp.keep = false; }
+            log('display mode', before, '→', mode.id, by ? '(viewer)' : '(restore)');
+        } else if (r.j.dry) log('display mode (dry run, not applied):', before, '→', mode.id);
+        if (typeof keep === 'boolean' && disp.original) disp.keep = keep;
+        saveDisplayState();
+        if (r.j.changed) onDisplayChanged(mode);
+        const out = { t: 'displayMode', ok: true, mode, applied: !!r.j.changed, ...displayInfoMsg() };
+        for (const ws of viewers) reply(ws, ws === by ? { ...out, req } : out);
+        return { ok: true, mode };
+    } finally { disp.busy = false; }
+}
+// New geometry: pointer mapping follows `screen` (sent in status), and every
+// stream restarts — its capture was set up for the old size and aspect.
+function onDisplayChanged(mode) {
+    const s = { width: mode.width, height: mode.height, scale: mode.scale || 1 };
+    if (s.width === screen.width && s.height === screen.height && s.scale === screen.scale) return;   // same points and pixels: streams are fine
+    setGeometry(s, 'display mode');
+    setTimeout(refreshScreen, 1500);                         // and confirm it from the system
+}
+// The screen the streams capture and input maps into is now `s` (points +
+// backing scale). Every stream restarts: its capture was set up for the old
+// size and aspect (and, with `force`, for another display).
+function setGeometry(s, why, force = false) {
+    if (!s || !(s.width > 0) || !(s.height > 0)) s = screen;
+    const same = s.width === screen.width && s.height === screen.height && (s.scale || 1) === screen.scale;
+    if (same && !force) return;
+    if (!same) log('screen geometry', `${screen.width}x${screen.height} → ${s.width}x${s.height}`, `(${why})`);
+    screen = { width: s.width, height: s.height, scale: s.scale || 1 };
+    for (const e of [...encoders]) {
+        if (e.dead) continue;
+        const t = targetFor(e, e.owner || prewarm || { pref: 'auto' });
+        clearTimeout(e.resizeTimer); e.resizeTimer = null;
+        const c = e.child; e.child = null; e.config = null;
+        if (c) endChild(c);
+        Object.assign(e, { w: t.w, h: t.h, bps: t.bps });
+        startEncoder(e);
+    }
+    if (viewers.size) broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
+    if (ffmpeg || jpegViewers().length) { stopCapture(); ensureCapture(); }   // the JPEG stream's scale follows the new aspect
+}
+async function setDisplayMode(ws, m) {
+    // Fit wins: the Mac's own modes wait until the fitted screen is gone.
+    if (fit.up || fit.busy) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: 'fitted', ...displayInfoMsg() }); return; }
+    let id = typeof m.id === 'string' ? m.id.slice(0, 64) : String(+m.id || '');
+    if (id === 'match') {
+        const l = await displayRun(['list']);
+        if (fit.up || fit.busy) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: 'fitted', ...displayInfoMsg() }); return; }
+        const pick = l.ok ? matchMode(l.j.modes || [], viewerArea(ws, m)) : null;
+        if (!pick) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: l.ok ? 'no screen size to match yet' : l.err }); return; }
+        id = pick.id;
+    } else if (id === 'original') {
+        if (!disp.original) { reply(ws, { t: 'displayMode', req: m.req, ok: true, applied: false, ...displayInfoMsg() }); return; }
+        id = disp.original;
+    }
+    if (!id) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: 'no mode id' }); return; }
+    const r = await applyDisplayMode(id, { by: ws, keep: typeof m.keep === 'boolean' ? m.keep : undefined, req: m.req });
+    if (!r.ok) reply(ws, { t: 'displayMode', req: m.req, ok: false, error: r.error, ...displayInfoMsg() });
+    // Every viewer left while the change was being applied: when they left
+    // there was nothing borrowed yet to restore, so schedule it now.
+    if (!viewers.size) scheduleDisplayRestore();
+}
+function setDisplayKeep(ws, m) {
+    if (disp.original) { disp.keep = !!m.keep; saveDisplayState(); log('display mode', disp.keep ? 'kept' : 'will be restored'); }
+    if (fit.up && fitIsOwner(ws)) { fit.keep = !!m.keep; log('fit:', fit.keep ? 'kept after its viewer leaves' : 'ends after its viewer leaves'); }
+    const out = { t: 'displayMode', ok: true, applied: false, ...displayInfoMsg() };
+    for (const v of viewers) reply(v, v === ws ? { ...out, req: m.req } : out);
+    if (fit.up) broadcastFit();
+}
+// The last viewer left (or the service started holding a borrowed mode):
+// restore once nobody has come back for DISPLAY_RESTORE_MS.
+function scheduleDisplayRestore() {
+    scheduleFitRestore();
+    clearTimeout(disp.restoreTimer); disp.restoreTimer = null;
+    if (!disp.original || disp.keep || viewers.size) return;
+    disp.restoreTimer = setTimeout(async function tryRestore() {
+        disp.restoreTimer = null;
+        if (!disp.original || disp.keep || viewers.size) return;
+        if (disp.busy || fit.busy || fit.up) { disp.restoreTimer = setTimeout(tryRestore, fit.up ? 30000 : 1000); return; }
+        log('display: no viewer for', Math.round(DISPLAY_RESTORE_MS / 1000), 's — restoring', disp.original);
+        const r = await applyDisplayMode(disp.original);
+        if (!r.ok) {
+            log('display restore failed:', r.error);
+            // A mode that no longer exists (another monitor now main): give up on it.
+            if (/no such mode|bad id/.test(r.error || '')) { disp.original = null; disp.keep = false; saveDisplayState(); }
+            else disp.restoreTimer = setTimeout(tryRestore, 30000);
+        }
+    }, DISPLAY_RESTORE_MS);
+}
+function cancelDisplayRestore() { clearTimeout(disp.restoreTimer); disp.restoreTimer = null; clearTimeout(fit.restoreTimer); fit.restoreTimer = null; }
+// The service is stopping: put a borrowed mode back now (synchronously).
+function restoreDisplayNow() {
+    if (!disp.original || disp.keep || !disp.built) return;
+    try {
+        const out = JSON.parse(execFileSync(DISPLAY_BIN, ['set', disp.original], { timeout: 5000 }).toString());
+        if (out.changed || (out.mode && out.mode.id === disp.original)) { log('display restored on exit:', disp.original); disp.original = null; saveDisplayState(); }
+    } catch (e) { log('display restore on exit failed:', e.message); }
+}
+
+// ── "Fit the Mac to this screen" (soa-virtual-display) ───────────────────
+// Every built-in mode is about 16:10, so on a portrait phone the Mac is a
+// short band. Fit makes a VIRTUAL display shaped like the viewer's picture
+// area and has the built-in display MIRROR it: the virtual display becomes
+// the main one (menu bar, Dock and windows lay out at the viewer's shape),
+// the streams capture it and input maps into its points (it sits at 0,0).
+// Borrowed like a display mode: turning it off, the last viewer gone for
+// DISPLAY_RESTORE_MS (unless kept), this service stopping, or the helper
+// dying all put the Mac back on its own screen.
+//
+//   viewer  → {t:'fit', on:true, area:{w,h,dpr}, text:'smaller'|'default'|'larger', dev, take?}
+//             {t:'fit', on:false, dev}
+//   service → {t:'fit', state:'off'|'fitting'|'on'|'error', w, h (points),
+//             pxW, pxH, hidpi, text, keep, mine, owner:'you'|'other'|'away'|'none',
+//             target?{w,h}, reason?, message?}
+//             to every viewer whenever it changes (and in hello / status),
+//             each told whether the fit is its own.
+//
+// Who owns the fit. The fitted screen is ONE Mac screen shared by every
+// viewer, so it belongs to one of them: the viewer that turned it on, or
+// the last one to take it over. `dev` is a random id the page keeps on its
+// device, so the owner's phone reconnecting (a network blip) is still the
+// owner; `take` marks a request the user made by hand (the switch, a text
+// size, "Fit to this screen instead"), as opposed to one the page sends by
+// itself (on connect, after a rotation or a keyboard change).
+//  - Only the owner's area shapes the Mac: its own rotation or deck change
+//    re-fits, debounced (FIT_DEBOUNCE_MS) and only on a real change of shape
+//    (FIT_ASPECT_TOL); a height-only change of up to FIT_BAR_PX (a phone's
+//    address bar sliding) never does.
+//  - Every other viewer's area is ignored for fitting; it sees the fitted
+//    screen letterboxed in its own picture and is told the fit is another
+//    screen's (owner:'other'). Its automatic requests are only remembered,
+//    for a hand-over; a request by hand takes the fit over at once.
+//  - Only the owner turns it off (or a request by hand from another viewer).
+//  - Nobody's fit (off) and another viewer already watching: an automatic
+//    request is refused (reason:'others'), so a page that remembered "Fit"
+//    cannot re-shape the Mac under someone else; by hand it fits.
+//  - The owner leaves: it has DISPLAY_RESTORE_MS to come back (same dev).
+//    Then the fit passes to the viewer that most recently asked for it,
+//    re-shaped to that viewer's area, or (nobody asked) ends — unless the
+//    owner chose "Keep after I leave". Errors go to the owner only.
+//
+// `area` is the CSS-pixel box the viewer has for the picture (above the
+// deck in portrait, the full height in landscape) and its devicePixelRatio.
+// The helper owns the CGVirtualDisplay object: the display lives exactly as
+// long as that process, which unmirrors and removes it on stdin EOF or any
+// catchable signal (macOS undoes both by itself after a kill -9). One change
+// runs at a time; requests that arrive meanwhile coalesce to the latest. A
+// re-fit (rotation, deck shown or hidden) waits FIT_DEBOUNCE_MS and happens
+// only when the shape changes by more than FIT_ASPECT_TOL.
+const VD_SRC = path.join(__dirname, 'soa-virtual-display.swift');
+const VD_BIN = process.env.SOA_VDISPLAY_BIN || path.join(WORK_DIR, 'virtual-display');
+const VD_STATE = path.join(WORK_DIR, 'virtual-display.json');   // exists while a fitted screen may be up
+const FIT_DEBOUNCE_MS = 1500, FIT_ASPECT_TOL = 0.08, FIT_BAR_PX = 64;
+// Mac points per CSS pixel of the viewer's area, by text size: more points
+// per pixel is a bigger desktop with smaller text.
+const FIT_K = Object.freeze({ smaller: 2.0, default: 1.6, larger: 1.3 });
+// macOS backs a virtual display at 2x only from about 800x600 points: at
+// least that area AND a long side of 800 (measured: 640x821, 585x1266,
+// 800x600, 624x938 pt accepted; 680x706, 585x750, 800x500 refused).
+const FIT_HIDPI_MIN_AREA = 480000, FIT_HIDPI_MIN_LONG = 800;
+const FIT_MAX_PX = 3840;                       // the helper keeps room for resizes up to this
+const FIT_MIN_PT = Object.freeze({ long: 480, short: 360 });   // smaller is not a usable desktop
+const FIT_MESSAGES = Object.freeze({
+    unavailable: "This Mac can't make a fitted screen; showing its own screen instead.",
+    create: "This Mac couldn't create a fitted screen; showing its own screen instead.",
+    mirror: "This Mac couldn't switch to the fitted screen; showing its own screen instead.",
+    lost: "The fitted screen closed unexpectedly; showing the Mac's own screen.",
+    area: 'This screen did not say how much room it has for the picture.',
+    others: 'Another screen is watching the Mac, so it was not re-shaped. Fit it to this screen by hand if you want to.',
+});
+const fit = { up: false, id: 0, w: 0, h: 0, pxW: 0, pxH: 0, hidpi: true, text: 'default', busy: false, transition: false,
+    op: '', want: null, timer: null, keep: false, restoreTimer: null, error: null, buildFailedAt: 0,
+    area: null,                                 // the CSS area the Mac is fitted to now
+    owner: null, ownerDev: '', ownerTimer: null }; // who the fit belongs to (see above)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const evenPt = (n) => Math.max(2, Math.round(n / 2) * 2);
+
+// The virtual display for an area: points = CSS px x k, the area's shape;
+// 2x (HiDPI) when macOS allows it at that size. Too small for 2x: the text
+// size gives way (k grows until the area is enough), except for "larger",
+// which keeps its points and runs at 1x (softer, but the size asked for).
+function fitSpec(area, text) {
+    const k0 = FIT_K[text] || FIT_K.default;
+    const long = Math.max(area.w, area.h), short = Math.min(area.w, area.h);
+    let k = Math.max(k0, FIT_MIN_PT.long / long, FIT_MIN_PT.short / short), hidpi = true;
+    const kFloor = Math.max(Math.sqrt(FIT_HIDPI_MIN_AREA / (area.w * area.h)), FIT_HIDPI_MIN_LONG / long);
+    if (k < kFloor) { if (text === 'larger') hidpi = false; else k = kFloor; }
+    k = Math.min(k, FIT_MAX_PX / (hidpi ? 2 : 1) / long);
+    let w = evenPt(area.w * k), h = evenPt(area.h * k);
+    if (hidpi) {                                // rounding must not dip under the floor
+        while (Math.max(w, h) < FIT_HIDPI_MIN_LONG) { if (w >= h) w += 2; else h += 2; }
+        while (w * h < FIT_HIDPI_MIN_AREA) { if (w >= h) h += 2; else w += 2; }
+    }
+    return { w, h, hidpi, pxW: hidpi ? w * 2 : w, pxH: hidpi ? h * 2 : h, k: +k.toFixed(3) };
+}
+function cleanArea(a) {
+    if (!a || typeof a !== 'object') return null;
+    const w = +a.w, h = +a.h, dpr = +a.dpr;
+    if (!(w >= 50 && w <= 10000 && h >= 50 && h <= 10000)) return null;
+    return { w: Math.round(w), h: Math.round(h), dpr: Number.isFinite(dpr) ? Math.max(0.5, Math.min(5, dpr)) : 1 };
+}
+// The fit as one viewer sees it (ws null: a neutral view, for /health).
+function fitInfo(ws = null) {
+    const err = fit.error && !fit.up && ws && (fit.error.ws === ws || (!!fit.error.dev && fit.error.dev === ws.dev)) ? fit.error : null;
+    const state = fit.busy ? 'fitting' : fit.up ? 'on' : err ? 'error' : 'off';
+    const mine = !!ws && fitIsOwner(ws);
+    const held = fit.up || fit.busy;
+    const owner = !held ? 'none' : mine ? 'you' : fit.owner ? 'other' : fit.ownerDev ? 'away' : 'none';
+    const o = { state, keep: fit.keep, mine, owner };
+    if (fit.up) Object.assign(o, { w: fit.w, h: fit.h, pxW: fit.pxW, pxH: fit.pxH, hidpi: fit.hidpi, text: fit.text });
+    if (fit.busy) o.op = fit.op || 'on';
+    if (fit.busy && fit.want && fit.want.on) { const t = fitSpec(fit.want.area, fit.want.text); o.target = { w: t.w, h: t.h }; }
+    if (err) { o.reason = err.code; o.message = err.message; }
+    return o;
+}
+function broadcastFit() { for (const v of viewers) if (v.readyState === WebSocket.OPEN) v.send(JSON.stringify({ t: 'fit', ...fitInfo(v) })); }
+const fitIsOwner = (ws) => !!ws && fit.owner === ws;
+function setOwner(ws, why) {
+    const was = fit.owner;
+    fit.owner = ws; fit.ownerDev = ws.dev || '';
+    clearTimeout(fit.ownerTimer); fit.ownerTimer = null;
+    if (was !== ws) log('fit: belongs to', ws.label || 'a viewer', `(${why})`);
+}
+function clearOwner() { fit.owner = null; fit.ownerDev = ''; clearTimeout(fit.ownerTimer); fit.ownerTimer = null; }
+
+// ── the helper process ──
+// `child` is the helper commands go to; one being shut down is moved to
+// `dying` at once, so a fit started meanwhile gets a fresh helper (after the
+// old one has gone: two helpers must never hold displays at the same time).
+const vd = { child: null, buf: '', wait: [], ending: false, dying: null };
+function buildVd() {
+    if (process.env.SOA_VDISPLAY_BIN) return fs.existsSync(VD_BIN);       // a test brings its own
+    if (Date.now() - fit.buildFailedAt < 10 * 60 * 1000) return false;
+    try {
+        if (!fs.existsSync(VD_BIN) || fs.statSync(VD_BIN).mtimeMs < fs.statSync(VD_SRC).mtimeMs) {
+            execFileSync('swiftc', ['-O', '-o', VD_BIN, VD_SRC], { stdio: 'inherit', timeout: 180000 });
+            log('built', VD_BIN);
+        }
+        return true;
+    } catch (e) { log('virtual-display build failed (Fit unavailable):', e.message); fit.buildFailedAt = Date.now(); return false; }
+}
+function vdStart() {
+    if (vd.child) return true;
+    if (!buildVd()) return false;
+    let c;
+    try { c = spawn(VD_BIN, [], { stdio: ['pipe', 'pipe', 'pipe'] }); } catch (e) { log('virtual-display failed to start:', e.message); return false; }
+    Object.assign(vd, { child: c, buf: '', wait: [], ending: false });
+    c.stdout.setEncoding('utf8');
+    c.stdout.on('data', (d) => {
+        vd.buf += d;
+        let i;
+        while ((i = vd.buf.indexOf('\n')) >= 0) {
+            const line = vd.buf.slice(0, i); vd.buf = vd.buf.slice(i + 1);
+            let j = null; try { j = JSON.parse(line); } catch (_) {}
+            const w = vd.wait.shift();
+            if (w) w(j);
+        }
+    });
+    c.stderr.on('data', (d) => { for (const l of String(d).split('\n')) if (l.trim()) log(l.trim().slice(0, 300)); });
+    c.stdin.on('error', () => {});
+    c.on('error', (e) => log('virtual-display:', e.message));
+    c.on('exit', (code, sig) => {
+        if (vd.dying === c) vd.dying = null;
+        if (vd.child !== c) { log('virtual-display exited', code === null ? sig : code); return; }
+        vd.child = null;
+        const waiting = vd.wait; vd.wait = [];
+        for (const w of waiting) w(null);
+        const expected = vd.ending; vd.ending = false;
+        log('virtual-display exited', code === null ? sig : code, expected ? '' : '(unexpected)');
+        if (!expected) fitLost();
+    });
+    return true;
+}
+// One command line → its JSON reply (null: no answer). A helper that does not
+// answer in time is out of step with its replies: it is stopped (its signal
+// handler restores the Mac) and the next fit starts a fresh one.
+function vdCmd(line, ms = 15000) {
+    return new Promise((resolve) => {
+        const c = vd.child;
+        if (!c) { resolve(null); return; }
+        let done = false, t = null;
+        const fin = (j) => { if (done) return; done = true; clearTimeout(t); resolve(j); };
+        t = setTimeout(() => {
+            log('virtual-display did not answer', JSON.stringify(line), '— stopping it');
+            const i = vd.wait.indexOf(fin); if (i >= 0) vd.wait.splice(i, 1);
+            try { c.kill('SIGTERM'); } catch (_) {}
+            fin(null);
+        }, ms);
+        vd.wait.push(fin);
+        try { c.stdin.write(line + '\n'); } catch (_) { fin(null); }
+    });
+}
+function vdEnd() {
+    const c = vd.child; if (!c) return;
+    vd.child = null; vd.dying = c;
+    const waiting = vd.wait; vd.wait = [];
+    for (const w of waiting) w(null);
+    try { c.stdin.end(); } catch (_) {}
+}
+// Wait for a helper being shut down to be gone (it restores the Mac first);
+// one that hangs is killed (macOS drops its display and mirror by itself).
+async function vdDrain() {
+    const c = vd.dying;
+    if (!c) return;
+    for (let i = 0; vd.dying === c && i < 60; i++) await sleep(100);
+    if (vd.dying === c) { log('virtual-display still running after its shutdown — killing it'); try { c.kill('SIGKILL'); } catch (_) {} await sleep(300); vd.dying = null; }
+}
+// A one-shot run of the helper binary: each has a fresh view of CoreGraphics
+// (the long-running helper's own view of a display it changed goes stale).
+function vdOnce(args, ms = 8000) {
+    return new Promise((resolve) => {
+        if (!buildVd()) { resolve(null); return; }
+        execFile(VD_BIN, args, { timeout: ms }, (err, out) => { let j = null; try { j = JSON.parse(out); } catch (_) {} resolve(j); });
+    });
+}
+const geomOf = (mode) => (mode && mode.width > 0 && mode.height > 0
+    ? { width: mode.width, height: mode.height, scale: mode.pixelWidth > 0 ? +(mode.pixelWidth / mode.width).toFixed(3) : 1 } : null);
+async function systemScreen() { const q = await vdOnce(['--query', '0']); return geomOf(q && q.mode); }
+// Written BEFORE the display is created (id 0 until it is known), so a
+// service killed mid-create still leaves the start-up guard its helper's pid.
+function saveFitState(id) {
+    try { fs.writeFileSync(VD_STATE, JSON.stringify({ pid: vd.child ? vd.child.pid : 0, id, at: Date.now() }) + '\n', { mode: 0o600 }); } catch (_) {}
+}
+function readFitState() { try { return JSON.parse(fs.readFileSync(VD_STATE, 'utf8')); } catch (_) { return null; } }
+// --restore for the fitted screen only (a mirror the user set up stays).
+const restoreArgs = (id) => ['--restore', String(id || (readFitState() || {}).id || 0)];
+function clearFitState() { try { fs.unlinkSync(VD_STATE); } catch (_) {} }
+// The captures are stopped while the screen is switched (the display they
+// capture is about to change or vanish) and restarted by setGeometry.
+function pauseVideo() {
+    fit.transition = true;
+    for (const e of encoders) {
+        clearTimeout(e.resizeTimer); e.resizeTimer = null;
+        const c = e.child; e.child = null; e.config = null;
+        if (c) endChild(c);
+    }
+    stopCapture();
+}
+function endTransition(g, why) { fit.transition = false; setGeometry(g || screen, why, true); }
+
+// ── requests ──
+function onFitMsg(ws, m) {
+    if (typeof m.dev === 'string' && /^[\w-]{6,64}$/.test(m.dev)) ws.dev = m.dev;
+    const take = m.take === true, mine = fitIsOwner(ws);
+    const held = fit.up || (fit.busy && fit.op !== 'off') || !!(fit.want && fit.want.on);
+    if (!m.on) {
+        ws.fitAsk = null;
+        if (held && !mine && !take) { log('fit: off from a viewer that does not own the fit — ignored'); reply(ws, { t: 'fit', ...fitInfo(ws) }); return; }
+        fitTurnOff(mine ? 'turned off' : 'turned off from another screen');
+        return;
+    }
+    const area = cleanArea(m.area);
+    if (!area) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'area', message: FIT_MESSAGES.area }); return; }
+    const text = Object.prototype.hasOwnProperty.call(FIT_K, m.text) ? m.text : 'default';
+    ws.fitAsk = { area, text, at: Date.now() };
+    if (!held) {
+        // Nobody's fit: a page asking by itself must not re-shape the Mac
+        // under another viewer (the same device's older socket does not count).
+        const others = [...viewers].some((v) => v !== ws && v.readyState === WebSocket.OPEN && !(ws.dev && v.dev === ws.dev));
+        if (!take && others) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'others', message: FIT_MESSAGES.others }); return; }
+        setOwner(ws, take ? 'turned on' : 'turned on (remembered)');
+        clearTimeout(fit.timer); fit.timer = null;
+        fit.want = { on: true, area, text }; fit.error = null;
+        fitRun();
+        return;
+    }
+    if (!mine) {
+        // Someone else's fit. By hand: take it over. The owner's device back
+        // (a reconnect, even before its old socket has timed out): still its.
+        const back = !!fit.ownerDev && ws.dev === fit.ownerDev;
+        if (!take && !back) { reply(ws, { t: 'fit', ...fitInfo(ws) }); return; }
+        setOwner(ws, take ? 'taken over' : 'its viewer is back');
+        clearTimeout(fit.timer); fit.timer = null;
+        fit.want = { on: true, area, text }; fit.error = null;
+        broadcastFit();                         // everyone hears whose it is now
+        if (take) fitRun(); else fit.timer = setTimeout(() => { fit.timer = null; fitRun(); }, FIT_DEBOUNCE_MS);
+        return;
+    }
+    // The owner's own change.
+    clearTimeout(fit.timer); fit.timer = null;
+    fit.want = { on: true, area, text };
+    if (!fit.busy && (take || text !== fit.text)) fitRun();                  // by hand: at once
+    else fit.timer = setTimeout(() => { fit.timer = null; fitRun(); }, FIT_DEBOUNCE_MS);   // a re-shape: once it settles
+}
+// Turning off ends the fit now: a debounced re-fit is dropped, and a change
+// still being made (a create can take seconds) is cut short — the helper,
+// signalled, stops waiting, restores the Mac and exits.
+function fitTurnOff(why) {
+    clearTimeout(fit.timer); fit.timer = null;
+    clearOwner();
+    fit.want = { on: false, why }; fit.error = null;
+    if (fit.busy && (fit.op === 'on' || fit.op === 'resize') && vd.child) {
+        log('fit: turned off while a change was still running — cutting it short');
+        const c = vd.child; vdEnd();             // moved to `dying`: its exit is expected
+        try { c.kill('SIGTERM'); } catch (_) {}
+    }
+    fitRun();
+}
+// Is `spec` (for request `w`) a different screen from the fitted one?
+function fitDiffers(spec, w) {
+    if (w.text !== fit.text) return true;
+    // A phone's address bar or a tab strip sliding in and out changes the
+    // height (or, on its side, the width) a little: never a re-fit.
+    const a = fit.area;
+    if (a && ((Math.abs(w.area.w - a.w) <= 2 && Math.abs(w.area.h - a.h) <= FIT_BAR_PX)
+        || (Math.abs(w.area.h - a.h) <= 2 && Math.abs(w.area.w - a.w) <= FIT_BAR_PX))) return false;
+    return Math.abs((spec.w / spec.h) / (fit.w / fit.h) - 1) > FIT_ASPECT_TOL;
+}
+// The owner left. It has DISPLAY_RESTORE_MS to come back; then the fit goes
+// to the viewer that asked for it most recently (shaped to that viewer), or
+// ends — unless it was kept. With nobody left at all, scheduleFitRestore
+// does the same job.
+function scheduleOwnerHandoff() {
+    clearTimeout(fit.ownerTimer); fit.ownerTimer = null;
+    if (fit.owner || !(fit.up || fit.busy)) return;
+    fit.ownerTimer = setTimeout(() => {
+        fit.ownerTimer = null;
+        if (fit.owner || !(fit.up || fit.busy)) return;
+        if (fit.keep) { log('fit: its viewer has gone; kept, so it stays (any screen can take it over)'); return; }
+        const next = [...viewers].filter((v) => v.readyState === WebSocket.OPEN && v.fitAsk).sort((a, b) => b.fitAsk.at - a.fitAsk.at)[0];
+        if (next) {
+            setOwner(next, 'handed over: its viewer did not come back');
+            fit.want = { on: true, area: next.fitAsk.area, text: next.fitAsk.text };
+            broadcastFit(); fitRun();
+            return;
+        }
+        log('fit: its viewer did not come back and no other screen asked for it — back to the Mac\'s own screen');
+        fitTurnOff('its viewer left');
+    }, DISPLAY_RESTORE_MS);
+}
+function fitViewerLeft(ws) {
+    if (fit.owner !== ws) return;
+    fit.owner = null;
+    clearTimeout(fit.timer); fit.timer = null;
+    if (fit.want && fit.want.on) fit.want = null;          // its pending re-shape goes with it
+    log('fit: its viewer left — it has', Math.round(DISPLAY_RESTORE_MS / 1000), 's to come back');
+    if (viewers.size) { scheduleOwnerHandoff(); broadcastFit(); }
+}
+async function fitRun() {
+    if (fit.busy) return;                       // the running change picks the latest request up
+    fit.busy = true;
+    try {
+        for (let n = 0; n < 4 && fit.want && !fit.timer; n++) {
+            const w = fit.want;
+            if (!w.on) { fit.want = null; fit.op = 'off'; if (fit.up) broadcastFit(); await fitOff(w.why || 'turned off'); continue; }
+            const spec = fitSpec(w.area, w.text);
+            if (fit.up && !fitDiffers(spec, w)) { fit.want = null; continue; }
+            fit.op = fit.up ? 'resize' : 'on';
+            broadcastFit();                     // "Fitting…"
+            const ok = fit.up ? await fitResize(spec, w) : await fitOn(spec, w);
+            if (fit.want === w) fit.want = null;
+            if (!ok) { if (fit.want && fit.want.on) fit.want = null; break; }   // a failure is not retried by itself
+        }
+    } catch (e) { log('fit failed:', e.message); }
+    finally {
+        if (fit.transition) endTransition(screen, 'fit');
+        fit.busy = false; fit.op = '';
+        if (!fit.up && !(fit.want && fit.want.on)) clearOwner();   // no fit, nobody's
+        broadcastFit();
+        if (!viewers.size) scheduleFitRestore();
+        else if (fit.up && !fit.owner && !fit.ownerTimer && !fit.keep) scheduleOwnerHandoff();
+    }
+    if (fit.up && !vd.child) { fitLost(); return; }        // the helper went while this ran
+    if (fit.want && !fit.timer) fitRun();
+}
+async function fitOn(spec, w) {
+    const t0 = Date.now();
+    // Fit wins over a borrowed resolution: the Mac's own mode goes back first,
+    // so the built-in returns to it when the fitted screen ends.
+    for (let i = 0; disp.busy && i < 75; i++) await sleep(200);
+    if (disp.original) {
+        const r = await applyDisplayMode(disp.original);
+        if (!r.ok) log('fit: could not put the original resolution back first:', r.error);
+    }
+    const l = await displayRun(['list']);
+    if (l.ok) disp.list = l.j;                  // the built-in's own modes, shown (read-only) while fitted
+    await vdDrain();
+    if (!vdStart()) return fitFail('unavailable');
+    const c = vd.child, alive = () => vd.child === c;
+    pauseVideo();
+    saveFitState(0);
+    let r = await vdCmd(`create ${spec.pxW} ${spec.pxH} ${spec.hidpi ? 1 : 0} SoA Remote`, 25000);
+    if (r && r.id) saveFitState(r.id);
+    if (r && r.dry && !r.id) return fitFail('unavailable', 'dry run');
+    if (r && !r.ok && r.id && spec.hidpi) {
+        // The window server would not back this size at 2x: the same points at 1x.
+        log('fit: 2x refused at', `${spec.w}x${spec.h} pt`, '— using 1x');
+        spec = { ...spec, hidpi: false, pxW: spec.w, pxH: spec.h };
+        r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} 0`, 15000);
+    }
+    if (!r || !r.ok || !r.id) return fitFail(!alive() ? 'lost' : r && /not available/.test(r.error || '') ? 'unavailable' : 'create', r ? r.error : 'no answer', r && r.id);
+    const id = r.id;
+    const m = await vdCmd('mirror on', 12000);
+    if (!alive()) return fitFail('lost', 'helper gone after mirror', id);
+    if (!m || !m.ok) return fitFail('mirror', m ? m.error : 'no answer', id);
+    const q = await vdOnce(['--query', String(id)]);
+    // The helper can die (or macOS drop the display) while this ran: never
+    // report a fitted screen that is not there, or map taps into it.
+    if (!alive() || (q && q.online === false)) return fitFail('lost', 'display gone', id);
+    if (q && q.main !== id) return fitFail('mirror', `the fitted screen is not the main display (main is ${q.main})`, id);
+    const g = geomOf(q && q.mode) || { width: spec.w, height: spec.h, scale: spec.hidpi ? 2 : 1 };
+    Object.assign(fit, { up: true, id, w: g.width, h: g.height, pxW: Math.round(g.width * g.scale), pxH: Math.round(g.height * g.scale),
+        hidpi: g.scale >= 2, text: w.text, error: null, keep: false, area: w.area });
+    endTransition(g, 'fit');
+    log('fit: on' + (r.dry ? ' (dry run: no display was made)' : ''), `${g.width}x${g.height} pt`, `${fit.pxW}x${fit.pxH} px`, `display ${id}`, `(area ${w.area.w}x${w.area.h} css, ${w.text})`, `${Date.now() - t0} ms`);
+    return true;
+}
+async function fitResize(spec, w) {
+    const t0 = Date.now();
+    const c = vd.child, alive = () => !!c && vd.child === c;
+    if (!alive()) return fitFail('lost', 'no helper', fit.id);
+    pauseVideo();
+    let r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} ${spec.hidpi ? 1 : 0}`, 15000);
+    if (r && !r.ok && spec.hidpi && vd.child && !/maximum/.test(r.error || '')) {
+        log('fit: 2x refused at', `${spec.w}x${spec.h} pt`, '— using 1x');
+        spec = { ...spec, hidpi: false, pxW: spec.w, pxH: spec.h };
+        r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} 0`, 15000);
+    }
+    if (r && !r.ok && /maximum/.test(r.error || '')) { await fitOff('re-create'); return fitOn(spec, w); }
+    if (!alive()) return fitFail('lost', 'helper gone during resize', fit.id);
+    if (!r || !r.ok) return fitFail('create', r ? r.error : 'no answer', fit.id);
+    const q = await vdOnce(['--query', String(fit.id)]);
+    if (!alive() || (q && q.online === false)) return fitFail('lost', 'display gone', fit.id);
+    if (q && q.main !== fit.id) return fitFail('mirror', `the fitted screen is not the main display (main is ${q.main})`, fit.id);
+    const g = geomOf(q && q.mode) || { width: spec.w, height: spec.h, scale: spec.hidpi ? 2 : 1 };
+    Object.assign(fit, { w: g.width, h: g.height, pxW: Math.round(g.width * g.scale), pxH: Math.round(g.height * g.scale), hidpi: g.scale >= 2, text: w.text, error: null, area: w.area });
+    endTransition(g, 'fit resize');
+    log('fit: resized', `${g.width}x${g.height} pt`, `${fit.pxW}x${fit.pxH} px`, `(area ${w.area.w}x${w.area.h} css, ${w.text})`, `${Date.now() - t0} ms`);
+    return true;
+}
+async function fitOff(why, knownId) {
+    const id = knownId || fit.id || (readFitState() || {}).id || 0;
+    if (!fit.up && !vd.child) {
+        // Nothing of ours is running; a helper that died mid-change may have
+        // left a mirror behind (macOS normally drops it with the display).
+        if (fs.existsSync(VD_STATE)) { await vdDrain(); const x = await vdOnce(restoreArgs(id)); log('fit: restore', JSON.stringify(x)); clearFitState(); }
+        if (fit.transition) endTransition(await systemScreen() || screen, 'fit');
+        return;
+    }
+    const t0 = Date.now();
+    pauseVideo();
+    const r = vd.child ? await vdCmd('destroy', 15000) : null;
+    vdEnd();
+    if (!r || r.unmirror === false) { await vdDrain(); const x = await vdOnce(restoreArgs(id)); log('fit: restore', JSON.stringify(x)); }
+    clearFitState();
+    Object.assign(fit, { up: false, id: 0, keep: false, area: null });
+    const g = geomOf(r && r.mainMode) || await systemScreen();
+    endTransition(g, 'fit off');
+    log('fit: off', `(${why})`, g ? `main ${r && r.main} ${g.width}x${g.height}` : '', `${Date.now() - t0} ms`);
+}
+async function fitFail(code, detail, id) {
+    const offAsked = !!(fit.want && !fit.want.on);          // cut short by "off": not a failure
+    const who = fit.owner, dev = fit.ownerDev;
+    log(offAsked ? 'fit: stopped (turned off):' : 'fit failed:', code, detail || '');
+    await fitOff(offAsked ? fit.want.why || 'turned off' : 'failed', id);
+    if (!offAsked) fit.error = { code, message: FIT_MESSAGES[code] || FIT_MESSAGES.create, ws: who, dev };
+    return false;
+}
+// The helper went away on its own (crashed, killed): macOS has already
+// dropped its display; make sure nothing stays mirrored, then show the Mac.
+function fitLost() {
+    if (fit.busy || !fit.up) return;            // a change in flight sees its command fail and cleans up
+    fit.busy = true; fit.op = 'off';
+    // A loss is not undone by itself: a re-fit still waiting must not make a
+    // new fitted screen a moment later.
+    clearTimeout(fit.timer); fit.timer = null;
+    if (fit.want && fit.want.on) fit.want = null;
+    (async () => {
+        try {
+            pauseVideo();
+            const x = await vdOnce(restoreArgs(fit.id));
+            log('fit: helper lost — restore', JSON.stringify(x));
+            clearFitState();
+            Object.assign(fit, { up: false, id: 0, keep: false, area: null, error: { code: 'lost', message: FIT_MESSAGES.lost, ws: fit.owner, dev: fit.ownerDev } });
+            endTransition(await systemScreen(), 'fit lost');
+        } catch (e) { log('fit: restore after a lost helper failed:', e.message); }
+        finally {
+            if (fit.transition) endTransition(screen, 'fit');
+            fit.busy = false; fit.op = '';
+            if (!fit.up && !(fit.want && fit.want.on)) clearOwner();
+            broadcastFit();
+            if (fit.want && !fit.timer) fitRun();
+        }
+    })();
+}
+// A capture asked for the fitted screen and got the main display instead
+// (soa-screen-stream says so on stderr): check the fitted screen is still
+// there and main; if not, put the Mac back on its own screen, as for a loss.
+let fitChecking = false;
+async function fitCheck(why) {
+    if (!fit.up || fit.busy || !fit.id || fitChecking) return;
+    fitChecking = true;
+    try {
+        const id = fit.id, q = await vdOnce(['--query', String(id)]);
+        if (!q || !fit.up || fit.busy || fit.id !== id || (q.online !== false && q.main === id)) return;
+        log('fit: the fitted screen is', q.online === false ? 'gone' : `not the main display (main is ${q.main})`, `(${why}) — back to the Mac's own screen`);
+        const err = { code: 'lost', message: FIT_MESSAGES.lost, ws: fit.owner, dev: fit.ownerDev };
+        fitTurnOff('the fitted screen went away');
+        for (let i = 0; i < 100 && (fit.busy || fit.up); i++) await sleep(100);
+        fit.error = err; broadcastFit();
+    } finally { fitChecking = false; }
+}
+// The last viewer left: the fitted screen ends once nobody has come back for
+// DISPLAY_RESTORE_MS, unless it was kept.
+function scheduleFitRestore() {
+    clearTimeout(fit.restoreTimer); fit.restoreTimer = null;
+    if (!fit.up || fit.keep || viewers.size) return;
+    fit.restoreTimer = setTimeout(() => {
+        fit.restoreTimer = null;
+        if (!fit.up || fit.keep || viewers.size) return;
+        log('fit: no viewer for', Math.round(DISPLAY_RESTORE_MS / 1000), "s — back to the Mac's own screen");
+        fitTurnOff('no viewer');
+    }, DISPLAY_RESTORE_MS);
+}
+// Start-up: a fitted screen from before a restart (this service killed, its
+// helper killed with it) must not survive. Only when this service left the
+// marker behind, so mirroring the user set up is never touched.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// Gone = no such process, or a zombie (our own child, exited, not reaped
+// while this thread is blocked here: kill(pid, 0) still succeeds on it).
+function waitGone(pid, ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+        try { process.kill(pid, 0); } catch (_) { return true; }
+        let stat = '';
+        try { stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { timeout: 1000 }).toString().trim(); } catch (_) { return true; }
+        if (!stat || stat.startsWith('Z')) return true;
+        sleepSync(50);
+    }
+    return false;
+}
+function fitGuardAtStart() {
+    const st = readFitState();
+    if (!st && !fs.existsSync(VD_STATE)) return;     // an unreadable marker still means: restore
+    log("fit: a fitted screen may be left from before a restart — making sure the Mac is on its own screen");
+    if (st && st.pid > 1) {
+        let ours = false;
+        try { ours = /virtual-display$/.test(execFileSync('ps', ['-o', 'comm=', '-p', String(st.pid)], { timeout: 2000 }).toString().trim()); } catch (_) {}
+        if (ours) { try { process.kill(st.pid, 'SIGTERM'); } catch (_) {} waitGone(st.pid, 5000); }
+    }
+    if (buildVd()) {
+        try { log('fit: restore', execFileSync(VD_BIN, ['--restore', String((st && st.id) || 0)], { timeout: 8000 }).toString().trim()); }
+        catch (e) { log('fit: restore failed:', e.message); }
+    }
+    clearFitState();
+    readScreen();                               // the geometry read at start-up may have been the fitted screen's
+}
+// The service is stopping: the helper restores the Mac on SIGTERM; wait for it.
+function fitShutdownSync() {
+    const c = vd.child || vd.dying;
+    if (c) {
+        vd.ending = true;
+        try { c.kill('SIGTERM'); } catch (_) {}
+        if (!waitGone(c.pid, 6000)) { try { c.kill('SIGKILL'); } catch (_) {} waitGone(c.pid, 1000); }
+        log('fit: helper stopped with the service');
+    }
+    if (fs.existsSync(VD_STATE)) {
+        try { execFileSync(VD_BIN, restoreArgs(fit.id), { timeout: 5000 }); } catch (_) {}
+        clearFitState();
     }
 }
 
@@ -430,7 +1485,7 @@ function setQuality(m) {
 
 const jpegViewers = () => [...viewers].filter((ws) => ws.mode === 'jpeg');
 function ensureCapture() {
-    if (ffmpeg || !jpegViewers().length) return;
+    if (ffmpeg || !jpegViewers().length || fit.transition) return;
     const args = [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
         '-f', 'avfoundation', '-pixel_format', 'nv12', '-framerate', String(quality.fps),
@@ -485,7 +1540,7 @@ function consume(chunk) {
 }
 function sendStatus(ws, state, message = '') {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen, quality, video: videoInfo(ws.enc) }));
+    ws.send(JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen, quality, video: videoInfo(ws.enc), input: inputInfo(), fit: fitInfo(ws) }));
 }
 function broadcastStatus(state, message = '', onlyMode = null) {
     for (const ws of viewers) if (!onlyMode || ws.mode === onlyMode) sendStatus(ws, state, message);
@@ -505,7 +1560,7 @@ const VIDEO_MSG = 0x01;
 const VIDEO_HDR = 14;
 const VIDEO_FPS = Math.max(10, Math.min(60, parseInt(process.env.SOA_DESKTOP_FPS || '30', 10) || 30));
 const HELPER_SRC = path.join(__dirname, 'soa-screen-stream.swift');
-const HELPER_BIN = path.join(WORK_DIR, 'screen-stream');
+const HELPER_BIN = process.env.SOA_SCREEN_STREAM_BIN || path.join(WORK_DIR, 'screen-stream');   // a test brings its own
 // Auto spends 2-12 Mbit/s on a healthy link. A link that measurably carries
 // less (the Mac's uplink is the usual limit) is followed further down, to
 // BPS_FLOOR, rather than held above what it can deliver.
@@ -521,10 +1576,31 @@ const RESIZE_DEBOUNCE_MS = 1500;
 // floor is the path's round trip (plus the viewer's ~50 ms report interval),
 // so "behind" is judged above that floor, never as an absolute figure that a
 // 250 ms tunnel would already be close to.
-const LAG_MAX_MS = 900;       // queueing above the floor past this → the viewer is behind
-const LAG_OK_MS = 350;        // ...and back under this → it may resume (from a keyframe)
-const QUEUE_SLOW_MS = 450;    // standing queue past this → Auto steps the bitrate down
-const QUEUE_OK_MS = 300;      // ...and under this → it may step up
+// Latency first: a frame shown more than ~a third of a second late is worth
+// less than a fresh keyframe, and a standing queue of 180 ms is already a
+// link carrying less than is sent. (The thresholds were 900/350/450/300 ms.)
+const LAG_MAX_MS = 300;       // queueing above the floor past this → the viewer is behind
+const LAG_OK_MS = 120;        // ...and back under this → it may resume (from a keyframe)
+const QUEUE_SLOW_MS = 180;    // standing queue past this → Auto steps the bitrate down
+const QUEUE_OK_MS = 100;      // ...and under this → it may step up
+// A keyframe is several frames' worth of bytes by design (the helper caps a
+// half-second at 1.25x its share), so while one is crossing the link the
+// frames behind it are late by its transit time. That is not "behind": the
+// lag allowance grows by that transit while it lasts, or every keyframe would
+// trigger a drop that asks for another keyframe — a freeze loop.
+const KEY_GRACE_MAX_MS = 1500;
+// Input while the picture is behind: frames already queued show the screen
+// from BEFORE the tap. Skip them — send nothing until the path has drained,
+// then a keyframe taken just after the input (INPUT_IDR_DELAY_MS gives the
+// app time to draw its response), so what shows next is the result.
+const SKIP_BEHIND_MS = 100;
+const INPUT_SKIP = process.env.SOA_INPUT_SKIP !== '0';
+const INPUT_IDR_DELAY_MS = 50;
+// Auto prefers frame rate and latency over pixels: when the bitrate it can
+// afford spreads too thin over the frame (bits per pixel per frame), it steps
+// the encode size down (x0.8, never under AUTO_W_MIN wide) instead of letting
+// a large picture crawl, and back up once the bitrate covers it again.
+const BPP_LOW = 0.05, BPP_HIGH = 0.11, AUTO_SCALE_MIN = 0.5, AUTO_W_MIN = 800, SCALE_HOLD_MS = 15000;   // a resize causes its own brief lag; 5 s let Auto bounce on it
 // Bytes sent but not yet reported received. On a healthy path that is about
 // bitrate × (floor + one report interval); past bitrate × (floor + SLACK) the
 // link is carrying less than is being sent. This is the EARLY signal: the
@@ -535,7 +1611,19 @@ const BACKLOG_OVER_MS = 150;  // ...and the oldest frame is this late: not a key
 
 const encoders = new Set();
 let vgen = 0;
-let lastAutoBps = BPS_START;  // what the last Auto stream settled at: a new one starts near it
+// What the last Auto stream settled at: a new one starts near it. The very
+// first starts at BPS_MIN, not BPS_START: its first keyframe must cross the
+// link before anything else shows, and one sized for 6 Mbit/s takes ~2 s over
+// a 1.5 Mbit/s tunnel. A link that carries more is found within seconds (the
+// start-up ramp below), a slower one never sees that 2 s backlog.
+let lastAutoBps = BPS_MIN;
+let lastAutoScale = 1;
+// What the last link-limited stream measured its link to carry (capEst), so
+// the next stream on the same tunnel starts AT that rate instead of at 3-6
+// Mbit/s: over a ~1.5 Mbit/s tunnel that start alone queued 2-3 s of video
+// (and one keyframe sized for 6 Mbit/s takes 2 s to cross it).
+let lastLinkCap = { bps: 0, at: 0 };
+const LINK_CAP_TTL_MS = 30 * 60 * 1000;
 let helperFailedAt = 0, videoFails = [];
 
 const videoViewers = () => [...viewers].filter((ws) => ws.mode === 'h264' && ws.readyState === WebSocket.OPEN);
@@ -549,7 +1637,7 @@ function newVideoState() {
     // the last few seconds is what the link can carry; what the encoder
     // happens to send (a still screen sends little) says nothing about that.
     return { needKey: true, idrAsked: false, gen: 0, drops: 0, dropEvents: 0, inflight: [], unacked: 0, lag: 0, minLag: Infinity, minLagAt: 0,
-        lastAckAt: 0, busy: [], goodput: 0, queue: 0, sent: 0, slowTicks: 0 };
+        lastAckAt: 0, busy: [], goodput: 0, caps: [], queue: 0, sent: 0, slowTicks: 0, keySentAt: 0, keyLen: 0, skipAt: 0, skips: 0, skipTimer: null, probe: null, tapMs: [] };
 }
 function setMode(ws, mode, m = {}) {
     ws.mode = mode;
@@ -593,7 +1681,32 @@ function sizeFor(src) {
 }
 function targetFor(e, src) {
     const auto = !isPreset(src.pref);
-    return { ...sizeFor(src), auto, bps: Math.round(auto ? e.autoBps : PRESETS[src.pref].bps) };
+    let size = sizeFor(src);
+    if (auto && e.autoScale < 1) {
+        const aspect = screen.width / screen.height;
+        const w = even(Math.max(Math.min(AUTO_W_MIN, size.w), size.w * e.autoScale));
+        size = { w, h: even(w / aspect) };
+    }
+    return { ...size, auto, bps: Math.round(auto ? e.autoBps : PRESETS[src.pref].bps) };
+}
+const bppOf = (bps, w, h) => bps / Math.max(1, w * h * VIDEO_FPS);
+// Step Auto's encode size by one notch (-1 down, +1 up), applied now (no
+// resize debounce: this is the link talking, not a rotating phone).
+function stepScale(e, dir) {
+    if (!e.auto || e.dead || Date.now() - e.lastScaleAt < SCALE_HOLD_MS) return false;
+    const next = dir < 0 ? Math.max(AUTO_SCALE_MIN, +(e.autoScale * 0.8).toFixed(3)) : Math.min(1, +(e.autoScale / 0.8).toFixed(3));
+    if (next === e.autoScale) return false;
+    const src = e.owner || prewarm;
+    if (!src) return false;
+    const was = e.autoScale;
+    e.autoScale = next;
+    const t = targetFor(e, src);
+    if (t.w === e.w && t.h === e.h) { e.autoScale = was; return false; }   // already at the floor (or the cap)
+    e.lastScaleAt = Date.now(); lastAutoScale = next;
+    log('video: auto size', `${e.w}x${e.h} → ${t.w}x${t.h}`, `(${Math.round(e.autoBps / 1000)} kb/s, ${bppOf(e.autoBps, t.w, t.h).toFixed(3)} bpp)`);
+    clearTimeout(e.resizeTimer); e.resizeTimer = null;
+    resizeVideo(e, t);
+    return true;
 }
 // A viewer about to connect: /token?v=1 carries the screen it will report,
 // so capture starts while the socket is still being opened (one tunnel round
@@ -622,11 +1735,23 @@ function videoInfo(e) {
 
 function newEncoder(owner, src) {
     const e = { owner, kind: null, child: null, w: 0, h: 0, bps: 0, auto: true, autoBps: 0, gotFrame: false, startedAt: 0, config: null,
-        seq: 0, cutSeq: 0, lastCongestAt: 0, lastRaiseAt: 0, resizeTimer: null, lastIdrAt: 0, idrTimer: null, retryTimer: null, lastKeyLen: 0,
+        seq: 0, cutSeq: 0, lastCongestAt: 0, lastRaiseAt: 0, autoScale: 1, lastScaleAt: 0, resizeTimer: null, lastIdrAt: 0, idrTimer: null, retryTimer: null, lastKeyLen: 0,
         dead: false, stat: { frames: 0, bytes: 0, fps: 0, kbps: 0 } };
     // A new Auto stream starts from what the last link carried, but not so
     // low that a better link would take a minute to climb back.
-    e.autoBps = Math.max(3e6, Math.min(BPS_START, lastAutoBps));
+    const known = lastLinkCap.bps > 0 && Date.now() - lastLinkCap.at < LINK_CAP_TTL_MS;
+    e.autoBps = known ? Math.max(BPS_FLOOR, Math.min(BPS_START, Math.round(lastLinkCap.bps * CAP_TARGET)))
+        : Math.max(BPS_MIN, Math.min(BPS_START, lastAutoBps));
+    e.autoScale = Math.max(0.8, lastAutoScale);              // and near the size it last settled at
+    // A low starting rate starts at a size it can carry (see BPP_LOW), not
+    // at full size waiting for the first congestion to step it down.
+    if (!isPreset(src.pref)) {
+        while (e.autoScale > AUTO_SCALE_MIN) {
+            const t0 = targetFor(e, src);
+            if (bppOf(e.autoBps, t0.w, t0.h) >= BPP_LOW || t0.w <= AUTO_W_MIN) break;
+            e.autoScale = Math.max(AUTO_SCALE_MIN, +(e.autoScale * 0.8).toFixed(3));
+        }
+    }
     const t = targetFor(e, src);
     Object.assign(e, { w: t.w, h: t.h, bps: t.bps, auto: t.auto });
     encoders.add(e);
@@ -687,20 +1812,28 @@ function reconcileEnc(e, src) {
     if (e.dead) return;
     const t = targetFor(e, src);
     e.auto = t.auto;
-    if (t.w !== e.w || t.h !== e.h) {
-        // Changing size restarts the encode; wait for the size to settle.
+    // Changing size restarts the encode (a keyframe burst, a moment of lag),
+    // so a change of a few percent — a phone's address bar sliding in and out,
+    // a pinch between zoom steps — keeps the running size. A new aspect (the
+    // Mac's screen changed shape) always resizes.
+    const near = (a, b) => Math.abs(a - b) / Math.max(1, b) < 0.12;
+    const sameAspect = e.w > 0 && e.h > 0 && Math.abs(t.w / t.h - e.w / e.h) < 0.02;
+    if ((t.w !== e.w || t.h !== e.h) && !(sameAspect && near(t.w, e.w) && near(t.h, e.h))) {
+        // Wait for the size to settle.
         clearTimeout(e.resizeTimer);
         e.resizeTimer = setTimeout(() => {
             e.resizeTimer = null;
             if (e.dead) return;
             const n = targetFor(e, e.owner || src);
-            if (n.w !== e.w || n.h !== e.h) resizeVideo(e, n);
+            const same = e.w > 0 && e.h > 0 && Math.abs(n.w / n.h - e.w / e.h) < 0.02;
+            if ((n.w !== e.w || n.h !== e.h) && !(same && near(n.w, e.w) && near(n.h, e.h))) resizeVideo(e, n);
         }, RESIZE_DEBOUNCE_MS);
     }
     if (t.bps !== e.bps) setVideoBitrate(e, t.bps);
 }
 
 function buildHelper() {
+    if (process.env.SOA_SCREEN_STREAM_BIN) return fs.existsSync(HELPER_BIN);
     try {
         if (!fs.existsSync(HELPER_BIN) || fs.statSync(HELPER_BIN).mtimeMs < fs.statSync(HELPER_SRC).mtimeMs) {
             execFileSync('swiftc', ['-O', '-o', HELPER_BIN, HELPER_SRC], { stdio: 'inherit', timeout: 180000 });
@@ -747,6 +1880,8 @@ let lastHelperStartAt = 0;
 function startEncoder(e) {
     if (e.dead) return;
     clearTimeout(e.retryTimer); e.retryTimer = null;
+    // The screen is being switched (fit on/off/resize): start once it is there.
+    if (fit.transition) { e.retryTimer = setTimeout(() => { e.retryTimer = null; if (!e.dead && !e.child) startEncoder(e); }, 300); return; }
     const kind = helperUsable() ? 'helper' : 'ffmpeg';
     const wait = kind === 'helper' ? lastHelperStartAt + HELPER_SPACING_MS - Date.now() : 0;
     if (wait > 0) { e.retryTimer = setTimeout(() => { e.retryTimer = null; if (!e.dead && !e.child) startEncoder(e); }, wait); return; }
@@ -754,13 +1889,16 @@ function startEncoder(e) {
     let child;
     try {
         child = kind === 'helper'
-            ? spawn(HELPER_BIN, [e.w, e.h, VIDEO_FPS, e.bps].map(String), { stdio: ['pipe', 'pipe', 'pipe'] })
+            ? spawn(HELPER_BIN, [e.w, e.h, VIDEO_FPS, e.bps, fit.up ? fit.id : 0].map(String), { stdio: ['pipe', 'pipe', 'pipe'] })
             : spawn(FFMPEG, ffmpegH264Args(e), { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) { videoFailed(e, kind, err.message); return; }
     Object.assign(e, { kind, child, gotFrame: false, startedAt: Date.now(), config: null });
     if (e.owner && e.owner.vs) { e.owner.vs.needKey = true; e.owner.vs.idrAsked = false; }
     let stderr = '';
-    child.stderr.on('data', (c) => { stderr = (stderr + c).slice(-800); });
+    child.stderr.on('data', (c) => {
+        stderr = (stderr + c).slice(-800);
+        if (kind === 'helper' && fit.up && /not available — capturing the main display/.test(String(c))) fitCheck('a capture could not find it');
+    });
     if (child.stdin) child.stdin.on('error', () => {});
     if (kind === 'helper') child.stdout.on('data', recordParser((au, key, ts) => onAccessUnit(e, child, splitNals(au), key, ts)));
     else child.stdout.on('data', annexBSplitter((nals, key) => onAccessUnit(e, child, nals, key, Date.now())));
@@ -1018,9 +2156,9 @@ function onAccessUnit(e, child, nals, key, ts) {
     // next keyframe starts the new, lower rate. (Twice the cap in flight
     // without a cut — the last one is still draining — stops it the same way.)
     // (Not in the first two seconds: a page still starting up reports late.)
-    const backlog = vs.unacked > cap && over > BACKLOG_OVER_MS && Number.isFinite(vs.minLag) && vs.sent >= 2 * VIDEO_FPS;
+    const backlog = vs.unacked > cap && over > BACKLOG_OVER_MS + keyGrace(e, vs, now) && Number.isFinite(vs.minLag) && vs.sent >= 2 * VIDEO_FPS;
     const cut = backlog && congested(e, vs, true);
-    if (ws.bufferedAmount > budget || over > LAG_MAX_MS || cut || (backlog && vs.unacked > 2 * cap)) {
+    if (ws.bufferedAmount > budget || over > LAG_MAX_MS + keyGrace(e, vs, now) || cut || (backlog && vs.unacked > 2 * cap)) {
         vs.drops++;
         if (!vs.needKey) { vs.needKey = true; vs.idrAsked = false; vs.dropEvents++; congested(e, vs, backlog); }
         return;
@@ -1029,11 +2167,7 @@ function onAccessUnit(e, child, nals, key, ts) {
         // Never a P-frame after a gap: wait for a keyframe, and ask for one
         // as soon as this viewer has drained.
         vs.drops++;
-        if (!vs.idrAsked && ws.bufferedAmount < budget / 2 && over < LAG_OK_MS && vs.unacked < cap / 2) {
-            // Drained. The backlog just measured the link; resume at what it
-            // carried, not at a guess that would queue up all over again.
-            vs.idrAsked = true; settleRate(e, vs); requestIdr(e);
-        }
+        maybeResume(e, ws, now);
         return;
     }
     if (key && vs.gen !== e.config.gen) {
@@ -1041,10 +2175,53 @@ function onAccessUnit(e, child, nals, key, ts) {
         vs.gen = e.config.gen;
     }
     ws.send(msg, { binary: true });
-    if (key) { vs.needKey = false; vs.idrAsked = false; }
+    if (vs.probe && vs.probe.seq === null && ts >= vs.probe.at) vs.probe.seq = seq;
+    if (key) { vs.needKey = false; vs.idrAsked = false; vs.keySentAt = now; vs.keyLen = len; }
     vs.inflight.push([seq, now, len]); vs.unacked += len;
     if (vs.inflight.length > 900) vs.unacked -= vs.inflight.shift()[2];
     vs.sent++;
+}
+// How long the newest keyframe takes to cross this viewer's link, while it is
+// still crossing (0 otherwise): the extra lag that is no reason to drop.
+function keyGrace(e, vs, now) {
+    if (!vs.keySentAt || !vs.keyLen) return 0;
+    const rate = Math.max(2e5, Math.min(e.bps, vs.goodput || e.bps));
+    const transit = Math.min(KEY_GRACE_MAX_MS, vs.keyLen * 8000 / rate);
+    return now - vs.keySentAt < transit + lagFloor(vs) + LAG_MAX_MS ? transit : 0;
+}
+// Waiting for a keyframe (after a drop, or a skip for an input): ask for one
+// once this viewer has drained. Checked on every frame AND every report, so a
+// still screen (which sends no frames) still gets its fresh picture.
+function maybeResume(e, ws, now = Date.now()) {
+    const vs = ws.vs;
+    if (!vs || !vs.needKey || vs.idrAsked || e.dead || ws.enc !== e) return;
+    if (now < vs.skipAt) {
+        if (!vs.skipTimer) vs.skipTimer = setTimeout(() => { vs.skipTimer = null; maybeResume(e, ws); }, vs.skipAt - now + 1);
+        return;
+    }
+    const budget = Math.max(256 * 1024, e.bps / 8 * 0.5), cap = unackedCap(e, vs);
+    const age = vs.inflight.length ? now - vs.inflight[0][1] : 0;
+    if (ws.bufferedAmount < budget / 2 && age - lagFloor(vs) < LAG_OK_MS && vs.unacked < cap / 2) {
+        // Drained. The backlog just measured the link; resume at what it
+        // carried, not at a guess that would queue up all over again.
+        vs.idrAsked = true; settleRate(e, vs); requestIdr(e);
+    }
+}
+// An input arrived. If this viewer's picture is behind, skip what is queued
+// so the next thing it shows is the screen after the input (see SKIP_BEHIND_MS).
+function inputSkip(ws) {
+    if (!ws || ws.mode !== 'h264' || !ws.enc || !ws.vs || ws.readyState !== WebSocket.OPEN) return;
+    const vs = ws.vs, e = ws.enc, now = Date.now();
+    // tap → picture: time from this input to the viewer receiving the first
+    // frame captured after it (reported as vstat.tapMs). One probe at a time.
+    if (!vs.probe) vs.probe = { at: now, seq: null };
+    if (!INPUT_SKIP) return;
+    const age = vs.inflight.length ? now - vs.inflight[0][1] : 0;
+    const behind = age - lagFloor(vs) - keyGrace(e, vs, now);
+    if (behind < SKIP_BEHIND_MS && ws.bufferedAmount < 64 * 1024) return;
+    vs.skipAt = now + INPUT_IDR_DELAY_MS;
+    if (!vs.needKey || vs.idrAsked) { vs.needKey = true; vs.idrAsked = false; vs.skips++; }
+    maybeResume(e, ws, now);
 }
 // The viewer reports the newest frame it has received (every ~50 ms); that
 // is the only round trip, and nothing waits on it.
@@ -1055,6 +2232,10 @@ function videoAck(ws, m) {
     let sentAt = 0, bytes = 0;
     while (q.length && ((seq - q[0][0]) >>> 0) < 0x80000000) { sentAt = q[0][1]; bytes += q[0][2]; q.shift(); }
     vs.unacked = Math.max(0, vs.unacked - bytes);
+    if (vs.probe) {
+        if (vs.probe.seq !== null && ((seq - vs.probe.seq) >>> 0) < 0x80000000) { vs.tapMs.push(now - vs.probe.at); if (vs.tapMs.length > 50) vs.tapMs.shift(); vs.probe = null; }
+        else if (now - vs.probe.at > 10000) vs.probe = null;
+    }
     if (!sentAt) return;
     const prevAt = vs.lastAckAt; vs.lastAckAt = now;
     vs.lag = now - sentAt;
@@ -1065,6 +2246,7 @@ function videoAck(ws, m) {
     // and more were waiting behind it): the interval was link-paced.
     if (prevAt && vs.lag - lagFloor(vs) > 150 && q.length) vs.busy.push([now, bytes, now - prevAt]);
     while (vs.busy.length && now - vs.busy[0][0] > 4000) vs.busy.shift();
+    if (vs.needKey && ws.enc) maybeResume(ws.enc, ws, now);
 }
 // What this viewer's link carries (bits/s), measured only over intervals
 // where it was the bottleneck; 0 when there is too little to say. `quick`
@@ -1079,6 +2261,30 @@ function goodput(vs, quick = false) {
     return enough ? b * 8 / (ms / 1000) : 0;
 }
 function lagFloor(vs) { return Number.isFinite(vs.minLag) ? vs.minLag : 250; }
+// What this link has carried lately: the median of the last CAP_WINDOW_MS of
+// whole-window goodput samples (each one ≥1.5 s of link-paced delivery), 0
+// until there are three. A stall (a tunnel that stops for half a second, then
+// flushes) is not a slower link: the bytes it held still arrive, so the
+// window's rate barely moves, while a drain measured right after the stall
+// (one second, most of it the stall) reads far too low. Cuts never go under
+// CAP_FLOOR of this, and Auto climbs back to CAP_TARGET of it once the link
+// has been clean for RECOVER_MS — so stalls every few seconds can no longer
+// ratchet the picture down to the floor and keep it there.
+const CAP_WINDOW_MS = 30000, CAP_FLOOR = 0.7, CAP_TARGET = 0.85, RECOVER_MS = 3000;
+function capEst(vs) {
+    const now = Date.now();
+    while (vs.caps.length && now - vs.caps[0][0] > CAP_WINDOW_MS) vs.caps.shift();
+    if (vs.caps.length < 3) return 0;
+    const v = vs.caps.map((c) => c[1]).sort((a, b) => a - b);
+    return v[v.length >> 1];
+}
+// The lowest rate a cut may set now: the measured floor, but never far under
+// what this link has been shown to carry.
+function cutFloor(vs, gp) {
+    const base = gp > 0 && gp < BPS_MIN / 0.8 ? BPS_FLOOR : BPS_MIN;
+    const cap = capEst(vs);
+    return cap ? Math.max(BPS_FLOOR, Math.min(base, Math.round(cap * CAP_FLOOR))) : base;
+}
 // Step Auto's bitrate down: to what the link delivers (with headroom), or by
 // 30% when that is not yet measurable — 50% when a backlog is standing.
 function congested(e, vs, severe = false) {
@@ -1095,19 +2301,27 @@ function congested(e, vs, severe = false) {
     if (gp > 0) next = Math.min(next, Math.round(gp * 0.8));
     // Below 2 Mbit/s only on evidence: a measured link that slow.
     // (and never up: a rate already below that floor was set from a measurement)
-    e.autoBps = Math.min(was, Math.max(gp > 0 && gp < BPS_MIN / 0.8 ? BPS_FLOOR : BPS_MIN, next));
+    e.autoBps = Math.min(was, Math.max(cutFloor(vs, gp), next));
     lastAutoBps = e.autoBps;
     if (e.autoBps === was) return false;
     log('video behind — bitrate', Math.round(e.autoBps / 1000), 'kb/s', gp ? `(link delivers ${Math.round(gp / 1000)} kb/s)` : '', severe ? '(backlog)' : '');
     setVideoBitrate(e, e.autoBps);
+    if (bppOf(e.autoBps, e.w, e.h) < BPP_LOW) stepScale(e, -1);
     return true;
 }
 // After a drop has drained: no more than the link delivered while it drained.
 function settleRate(e, vs) {
     if (!e.auto) return;
-    const gp = goodput(vs, true);
+    // The whole-window rate, not the last second: right after a stall the
+    // last second is mostly the stall, and reads as a link several times
+    // slower than it is. Without a window's worth of evidence, no cut here
+    // (the drop already cleared the backlog; congestion checks cut if the
+    // link really is slower).
+    const gp = goodput(vs);
     if (!gp) return;
-    const next = Math.max(gp < BPS_MIN / 0.8 ? BPS_FLOOR : BPS_MIN, Math.round(gp * 0.8));
+    // Never under what the link has been carrying, so one tunnel hiccup
+    // cannot floor the picture.
+    const next = Math.max(cutFloor(vs, gp), Math.round(gp * 0.8));
     if (next >= e.autoBps) return;
     e.autoBps = lastAutoBps = next; e.lastCongestAt = Date.now(); e.cutSeq = e.seq;
     log('video drained — resuming at', Math.round(next / 1000), 'kb/s', `(link delivered ${Math.round(gp / 1000)} kb/s)`);
@@ -1122,14 +2336,38 @@ setInterval(() => {
         const ws = e.owner;
         if (!ws || ws.readyState !== WebSocket.OPEN || ws.mode !== 'h264' || !e.child) continue;
         const vs = ws.vs, q = vs.inflight, age = q.length ? now - q[0][1] : 0;
-        vs.queue = Math.max(0, Math.max(age, vs.lag) - lagFloor(vs));
+        vs.queue = Math.max(0, Math.max(age, vs.lag) - lagFloor(vs) - keyGrace(e, vs, now));
         vs.slowTicks = vs.queue > QUEUE_SLOW_MS && vs.lag > 0 ? vs.slowTicks + 1 : 0;
         vs.goodput = goodput(vs);
+        if (vs.goodput) vs.caps.push([now, vs.goodput]);
+        const cap = capEst(vs);
+        if (cap) lastLinkCap = { bps: cap, at: now };
         if (e.auto) {
             // Down: a standing queue (frames arrive, but ever later) means the
             // link carries less than we send — follow what it delivers, before
             // it grows into a drop. (Two checks running: one late burst is jitter.)
             if (vs.slowTicks >= 2) congested(e, vs);
+            else if (cap && e.autoBps < cap * CAP_TARGET * 0.95 && now - e.lastCongestAt > RECOVER_MS && now - e.lastRaiseAt > 2000
+                && vs.queue < QUEUE_OK_MS && !vs.needKey) {
+                // Back up to what this link has been carrying, quickly (a cut
+                // after a stall is not where the link is): ×1.3 a step, every 2 s.
+                e.lastRaiseAt = now;
+                e.autoBps = Math.min(BPS_MAX, Math.round(cap * CAP_TARGET), Math.round(e.autoBps * 1.3));
+                lastAutoBps = e.autoBps;
+                log('video recovering — bitrate', Math.round(e.autoBps / 1000), 'kb/s', `(link carries ~${Math.round(cap / 1000)} kb/s)`);
+                setVideoBitrate(e, e.autoBps);
+                if (e.autoScale < 1 && bppOf(e.autoBps, e.w / 0.8, e.h / 0.8) > BPP_HIGH) stepScale(e, +1);
+            }
+            else if (!e.lastCongestAt && e.autoBps < BPS_START && now - e.startedAt > 2000 && now - e.lastRaiseAt > 2000
+                && st.kbps * 1000 > 0.4 * e.autoBps && vs.queue < QUEUE_OK_MS && !vs.needKey) {
+                // Start-up ramp: a stream that has never met congestion climbs
+                // x1.3 every 2 s to BPS_START (2 → 6 Mbit/s in ~8 s of motion).
+                e.lastRaiseAt = now;
+                e.autoBps = Math.min(BPS_START, Math.round(e.autoBps * 1.3));
+                lastAutoBps = e.autoBps;
+                setVideoBitrate(e, e.autoBps);
+                if (e.autoScale < 1 && bppOf(e.autoBps, e.w / 0.8, e.h / 0.8) > BPP_HIGH) stepScale(e, +1);
+            }
             else if (now - e.lastCongestAt > 6000 && now - e.lastRaiseAt > 4000 && e.autoBps < BPS_MAX
                 // Up: after a clean stretch, and only when the stream is actually
                 // spending its budget (a still screen proves nothing).
@@ -1138,10 +2376,12 @@ setInterval(() => {
                 e.autoBps = Math.min(BPS_MAX, Math.round(e.autoBps * 1.15));
                 lastAutoBps = e.autoBps;
                 setVideoBitrate(e, e.autoBps);
+                if (e.autoScale < 1 && bppOf(e.autoBps, e.w / 0.8, e.h / 0.8) > BPP_HIGH) stepScale(e, +1);
             }
         }
         ws.send(JSON.stringify({ t: 'vstat', ...videoInfo(e), drops: vs.drops, dropEvents: vs.dropEvents, lag: vs.lag,
-            queue: Math.round(vs.queue), goodputKbps: Math.round(vs.goodput / 1000), linkLimited: e.autoBps < BPS_MIN && e.auto }));
+            queue: Math.round(vs.queue), goodputKbps: Math.round(vs.goodput / 1000), linkLimited: e.autoBps < BPS_MIN && e.auto,
+            skips: vs.skips, scale: e.autoScale, input: inputPath(), tapMs: vs.tapMs.slice(-10) }));
     }
 }, 1000);
 
@@ -1178,13 +2418,14 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' });
         const encs = [...encoders].map((e) => ({ ...videoInfo(e), owned: !!e.owner }));
         res.end(JSON.stringify({ ok: true, viewers: viewers.size, capturing: !!ffmpeg, frames, screen, quality, video: encs[0] || null, encoders: encs,
-            modes: [...viewers].map((ws) => ws.mode || 'pending') }));
+            modes: [...viewers].map((ws) => ws.mode || 'pending'), input: { ...inputInfo(), dispatchMs: inputStats() }, display: displayInfoMsg(), fit: fitInfo() }));
         return;
     }
     res.writeHead(404); res.end('not found');
 });
 
 const wss = new WebSocket.Server({ noServer: true, maxPayload: 64 * 1024 });
+let viewerSeq = 0;
 server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://x');
     if (url.pathname !== '/ws' || !tokenOk(url.searchParams.get('token'))) {
@@ -1195,14 +2436,21 @@ server.on('upgrade', (req, socket, head) => {
         // capture starts; one that never says gets the JPEG stream.
         ws.mode = null; ws.pref = 'auto'; ws.display = null; ws.vs = newVideoState(); ws.enc = null;
         viewers.add(ws);
+        cancelDisplayRestore();                  // a reconnect keeps the mode it chose
+        if ((fit.up || fit.busy) && !fit.owner && !fit.ownerTimer && !fit.keep) scheduleOwnerHandoff();   // an ownerless fit: back, handed over, or ended
         refreshActivePid();
-        ws.send(JSON.stringify({ t: 'hello', screen, quality, dragPermitted: pointer.permitted, video: true }));
+        ws.label = 'viewer ' + (++viewerSeq);
+        ws.send(JSON.stringify({ t: 'hello', screen, quality, dragPermitted: pointer.permitted, video: true, input: inputInfo(), fit: fitInfo(ws) }));
         refreshScreen();
         pointerConnect();
+        keepSareaWarm();                         // the fallback must not make the first tap wait for Sarea
         log('viewer joined', viewers.size);
         setTimeout(() => { if (!ws.mode && viewers.has(ws)) setMode(ws, 'jpeg'); }, 3000);
         broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
+        ws.lastHeardAt = Date.now();
+        ws.on('pong', () => { ws.lastHeardAt = Date.now(); });
         ws.on('message', (data, isBinary) => {
+            ws.lastHeardAt = Date.now();
             if (isBinary) return;
             let m; try { m = JSON.parse(data); } catch (_) { return; }
             if (!m || typeof m !== 'object' || Array.isArray(m)) return;
@@ -1212,16 +2460,18 @@ server.on('upgrade', (req, socket, head) => {
         });
         ws.on('close', () => {
             if (ws.drag) {                       // never leave the Mac's button held when the viewer vanishes
-                const { x, y } = ws.drag; ws.drag = null;
+                const { x, y, mods } = ws.drag; ws.drag = null;
                 log('viewer left mid-drag — releasing the button');
-                handleInput({ t: 'up', x, y });
+                handleInput({ t: 'up', x, y, mods: mods && mods.length ? 'held' : undefined });
             }
             viewers.delete(ws);
+            fitViewerLeft(ws);
             if (ws.enc) stopEncoder(ws.enc);
             log('viewer left', viewers.size);
             if (!jpegViewers().length) stopCapture();
             reconcileVideo();
             if (viewers.size) broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
+            else scheduleDisplayRestore();
         });
         ws.on('error', () => {});
     });
@@ -1229,8 +2479,24 @@ server.on('upgrade', (req, socket, head) => {
 
 startWindowAt();
 buildHelper();
+disp.built = buildDisplay();
+loadDisplayState();
+if (disp.original) { log('display: holding a borrowed mode from before a restart — restore pending', disp.original); scheduleDisplayRestore(); }
 readScreen();
-setInterval(refreshActivePid, 2000);
+setInterval(() => { if (viewers.size) refreshActivePid(); }, 2000);
+// A viewer that went silent (phone off the network, a half-open socket that
+// never closes) must not keep a 30 fps capture running or hold the display
+// restore. Every viewer pings at least every 10 s and reports frames every
+// 50 ms; a WebSocket ping is sent too (proxies that relay it answer it). After
+// VIEWER_SILENT_MS without a word, the socket is dropped like a close.
+const VIEWER_SILENT_MS = Math.max(5000, parseInt(process.env.SOA_VIEWER_SILENT_MS || '30000', 10) || 30000);
+setInterval(() => {
+    const now = Date.now();
+    for (const ws of viewers) {
+        if (now - (ws.lastHeardAt || now) > VIEWER_SILENT_MS) { log('viewer silent for', Math.round((now - ws.lastHeardAt) / 1000), 's — dropping it'); ws.terminate(); continue; }
+        try { ws.ping(); } catch (_) {}
+    }
+}, 5000);
 // A port already taken (an older copy still running) is one log line and a
 // slow retry, not a stack trace every few seconds under launchd's KeepAlive.
 server.on('error', (e) => {
@@ -1238,6 +2504,8 @@ server.on('error', (e) => {
     setTimeout(() => process.exit(1), 30000).unref();
     server.close();
 });
-server.listen(PORT, HOST, () => log(`soa-desktop-remote on http://${HOST}:${PORT} (screen ${screen.width}x${screen.height})`));
+// The fit guard runs once this copy owns the port: a second copy started by
+// hand must not end the running copy's fitted screen on its way to EADDRINUSE.
+server.listen(PORT, HOST, () => { log(`soa-desktop-remote on http://${HOST}:${PORT} (screen ${screen.width}x${screen.height})`); fitGuardAtStart(); });
 const stopAllVideo = () => { clearPrewarm(); for (const e of [...encoders]) stopEncoder(e); };
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); stopAllVideo(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); stopAllVideo(); fitShutdownSync(); restoreDisplayNow(); process.exit(0); });
