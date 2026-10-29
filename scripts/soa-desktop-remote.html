@@ -5,94 +5,356 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="color-scheme" content="light dark">
 <title>Mac — Son of Anton</title>
 <style>
-  :root { color-scheme: dark; --bg: #000; --bar: rgba(18,18,20,.92); --fg: #e8e8ea; --dim: #8a8a90; --acc: #3ea6ff; --on: #ffb000; }
+  /* A MacBook in the hand: the Mac's screen in a black lid on top, the
+     aluminium deck below it with a black-key keyboard and a glass trackpad.
+     The trackpad is the one loud thing; everything else stays quiet.
+     Layout (JS sets data-layout / data-rail on <html>):
+       stack    touch screen with room below the picture: lid, hinge strip, deck
+       overlay  landscape / tablet landscape / desktop: picture as large as it
+                fits, strip as a side rail or bottom bar, deck slides up on demand */
+  :root {
+    --lid: #000;
+    --alu: #D4D5D8; --alu-edge: #E6E7E9; --hinge: #BEBFC3;
+    --key: #1C1C1E; --key-down: #3A3A3D; --legend: #F2F2F4; --legend-dim: #A2A2A7;
+    --glass-a: #E9EAEC; --glass-b: #DCDDE0; --glass-rim: rgba(0,0,0,.13); --glass-hi: rgba(255,255,255,.85);
+    --touch: rgba(255,255,255,.75);
+    --ink: #1D1D1F; --ink-dim: #5D5E62;
+    --accent: #007AFF; --led: #34C759; --warn: #B86E00; --bad: #D70015;
+    --panel: #F2F2F7; --row: #FFFFFF; --sep: rgba(60,60,67,.16);
+    --ctl: rgba(0,0,0,.07); --ctl-on: #FFFFFF;
+    /* focus ring: #0062CC keeps 3:1 on the hinge and the aluminium (#007AFF does not) */
+    --focus: #0062CC;
+    --sw-off: #E9E9EB; --sw-rim: #C7C7CC;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --alu: #2B2C2F; --alu-edge: #36373A; --hinge: #1D1E21;
+      --key: #0E0E0F; --key-down: #2C2C2E; --legend: #E4E4E7; --legend-dim: #8D8D92;
+      --glass-a: #3B3C40; --glass-b: #333438; --glass-rim: rgba(0,0,0,.55); --glass-hi: rgba(255,255,255,.10);
+      --touch: rgba(255,255,255,.22);
+      --ink: #ECECEE; --ink-dim: #9D9EA3;
+      --accent: #0A84FF; --led: #30D158; --warn: #FFB340; --bad: #FF453A;
+      --panel: #1C1C1E; --row: #2C2C2E; --sep: rgba(84,84,88,.6);
+      --ctl: rgba(255,255,255,.08); --ctl-on: #5A5A5E;
+      --focus: #0A84FF;
+      --sw-off: #39393D; --sw-rim: rgba(255,255,255,.08);
+    }
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.3 -apple-system, system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; touch-action: none; }
-  /* bottom is set to the bar's height while the bar shows, so the bar never covers the picture */
-  #stage { position: fixed; inset: 0; overflow: hidden; background: #000; }
-  #frame { position: absolute; left: 0; top: 0; transform-origin: 0 0; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; pointer-events: none; image-rendering: auto; }
-  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 6px; align-items: center; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: var(--bar); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
-  #bar::-webkit-scrollbar { display: none; }
-  #bar.hidden { transform: translateY(100%); }
-  #bar, #tip { transition: transform .2s ease, opacity .2s ease; }
-  button, select { font: inherit; color: var(--fg); background: #2a2a2e; border: 0; border-radius: 8px; padding: 8px 11px; min-width: 40px; flex: 0 0 auto; }
-  button:active { background: #3a3a40; }
-  button[aria-pressed="true"] { background: var(--on); color: #000; font-weight: 600; }
-  button.go { background: var(--acc); color: #000; font-weight: 600; }
-  #status { color: var(--dim); font-size: 12px; margin-left: auto; padding-right: 4px; }
-  #status b { color: var(--fg); font-weight: 500; }
-  #tip { position: fixed; top: calc(10px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); background: var(--bar); padding: 8px 14px; border-radius: 10px; font-size: 13px; opacity: 0; pointer-events: none; max-width: 92vw; text-align: center; }
-  #tip.show { opacity: 1; }
-  #kb { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; font-size: 16px; }
-  #handle { position: fixed; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); width: 40px; height: 40px; border-radius: 20px; background: var(--bar); color: var(--fg); display: none; align-items: center; justify-content: center; font-size: 18px; }
-  #handle.show { display: flex; }
-  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #000; color: var(--dim); text-align: center; padding: 24px; }
-  #overlay[hidden] { display: none; }
-  /* where the last tap / drag / scroll landed on the Mac, drawn locally at once */
-  #mark { position: fixed; left: 0; top: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%; border: 2px solid var(--acc); box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6); pointer-events: none; opacity: 0; transform: scale(.6); transition: opacity .35s ease, transform .15s ease; }
-  #mark::after { content: ''; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: var(--acc); }
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; touch-action: none; }
+  body { background: var(--alu); color: var(--ink); font: 14px/1.3 var(--font); -webkit-font-smoothing: antialiased; -webkit-user-select: none; user-select: none; }
+  [data-layout="overlay"] body { background: var(--lid); }
+  [hidden] { display: none !important; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #safe { position: fixed; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
+
+  /* ── the lid: black glass around the picture ─────────────────────────── */
+  #lid { position: fixed; left: 0; top: 0; right: 0; background: var(--lid); }
+  #stage { position: fixed; overflow: hidden; background: var(--lid); }
+  #frame { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; -webkit-user-drag: none; }
+  /* The pointer drawn here moves with the finger at once; the Mac's own
+     pointer in the picture catches up a round trip later and sits under it. */
+  #cursor { position: absolute; left: 0; top: 0; width: 24px; height: 24px; transform-origin: 0 0; pointer-events: none; will-change: transform; filter: drop-shadow(0 1px 1.5px rgba(0,0,0,.45)); }
+  #cursor.drag path { fill: #1D1D1F; stroke: var(--accent); }
+  #mark { position: absolute; left: 0; top: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%; border: 2px solid var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.55); pointer-events: none; opacity: 0; transform: scale(.6); transition: opacity .35s ease, transform .15s ease; }
   #mark.on { opacity: 1; transform: scale(1); transition: none; }
-  #mark.right { border-color: var(--on); } #mark.right::after { background: var(--on); }
-  #overlay h1 { font-size: 18px; font-weight: 600; color: var(--fg); margin: 0; }
-  @media (prefers-reduced-motion: reduce) { #bar, #tip { transition: none; } }
+  #mark.right { border-color: var(--warn); }
+  #overlay { position: fixed; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: var(--lid); color: #9D9EA3; text-align: center; padding: 24px; font-size: 14px; }
+  #overlay h1 { font-size: 17px; font-weight: 600; color: #ECECEE; margin: 0; }
+  #tip { position: fixed; left: 50%; transform: translate(-50%, -4px); background: rgba(30,30,32,.86); color: #F2F2F4; padding: 7px 13px; border-radius: 9px; font-size: 13px; opacity: 0; pointer-events: none; max-width: min(92vw, 420px); text-align: center; transition: opacity .18s ease, transform .18s ease; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+  #tip.show { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ── the hinge strip ─────────────────────────────────────────────────── */
+  #strip { position: fixed; display: flex; align-items: center; gap: 6px; background: var(--hinge); color: var(--ink); z-index: 3; }
+  [data-layout="stack"] #strip { padding: 0 max(8px, env(safe-area-inset-right, 0px)) 0 max(8px, env(safe-area-inset-left, 0px)); box-shadow: inset 0 1px 0 rgba(0,0,0,.18), inset 0 -1px 0 var(--alu-edge); }
+  /* beside the picture the strip sits on the black lid, so it is always dark */
+  [data-layout="overlay"] #strip { background: transparent; color: #E6E6E9; --ctl: rgba(255,255,255,.1); --ctl-on: #5A5A5E; --ink-dim: #A0A1A6; --focus: #3D9BFF; }
+  [data-rail="side"] #strip { flex-direction: column; justify-content: center; padding: calc(6px + env(safe-area-inset-top, 0px)) calc(4px + env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) 4px; overflow-y: auto; scrollbar-width: none; }
+  [data-rail="bottom"] #strip { justify-content: center; padding: 4px max(8px, env(safe-area-inset-right, 0px)) calc(4px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
+  .sb { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 44px; min-width: 44px; padding: 0 10px; border-radius: 10px; flex: 0 0 auto; font-size: 13px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .sb:active { background: var(--ctl); }
+  .sb svg { width: 20px; height: 20px; flex: 0 0 auto; }
+  .sb[aria-pressed="true"] { background: var(--ctl-on); box-shadow: 0 0.5px 2px rgba(0,0,0,.25); }
+  .grow { flex: 1 1 auto; }
+  [data-rail="side"] .grow { flex: 0 0 4px; }
+  [data-rail="side"] .sb { padding: 0; width: 48px; }
+  [data-rail="side"] .sb .lbl { display: none; }
+  [data-rail="side"] #b-conn { flex-direction: column; gap: 2px; height: 48px; font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-dim); flex: 0 0 auto; }
+  .dot.good { background: var(--led); } .dot.fair { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .seg { display: inline-flex; background: var(--ctl); border-radius: 10px; padding: 2px; gap: 2px; flex: 0 0 auto; }
+  [data-rail="side"] .seg { flex-direction: column; }
+  .seg button { height: 44px; min-width: 44px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; }
+  .seg button svg { width: 20px; height: 20px; }
+  .seg button[aria-checked="true"] { background: var(--ctl-on); box-shadow: 0 0.5px 2px rgba(0,0,0,.22); }
+  [data-touch="no"] .seg { display: none; }
+  [data-layout="stack"] .ovonly { display: none; }
+  #res-t { max-width: 11ch; overflow: hidden; text-overflow: ellipsis; }
+  /* the connection and resolution buttons carry text, not an icon: a faint
+     fill says they are buttons */
+  [data-layout="stack"] #b-conn, [data-layout="stack"] #b-res { background: var(--ctl); }
+  #b-conn { flex-shrink: 1; overflow: hidden; } #conn-t { overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 430px) { [data-layout="stack"] #b-res svg { display: none; } [data-layout="stack"] .sb { padding: 0 8px; } [data-layout="stack"] #strip { gap: 4px; } }
+  /* the narrowest phones: the Mac's width alone names the resolution */
+  @media (max-width: 380px) { [data-layout="stack"]:not([data-fit="on"]) #res-t .resh { display: none; } [data-layout="stack"][data-fit="on"] #res-t { font-size: 12px; } }
+
+  /* input on the slow (computeruse) path: one line that stays until fixed or tapped away */
+  #slow { position: fixed; display: flex; align-items: center; gap: 8px; justify-content: center; padding: 0 12px; height: 34px; font-size: 12.5px; color: var(--ink); background: color-mix(in srgb, var(--warn) 16%, var(--alu)); z-index: 3; }
+  #slow::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); flex: 0 0 auto; }
+  /* the Mac is fitted to another screen: one quiet bar at the top of the picture, with the way to take it over */
+  #fz-other { position: fixed; display: flex; align-items: center; gap: 4px; padding: 3px 3px 3px 12px; min-height: 34px; border-radius: 17px; font-size: 12.5px; color: #F2F2F4; background: rgba(30,30,32,.86); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); z-index: 3; transform: translateX(-50%); white-space: nowrap; touch-action: manipulation; }
+  #fz-other .t { overflow: hidden; text-overflow: ellipsis; }
+  #fz-other button { min-height: 28px; padding: 0 11px; border-radius: 14px; font-weight: 600; }
+  #fz-other #fz-other-take { background: #0A84FF; color: #fff; }
+  #fz-other #fz-other-x { padding: 0 9px; color: #A2A2A7; font-weight: 400; }
+  #slow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  [data-layout="overlay"] #slow { border-radius: 10px; background: rgba(30,30,32,.88); color: #F2F2F4; transform: translateX(-50%); max-width: min(92vw, 440px); }
+
+  /* ── the deck ────────────────────────────────────────────────────────── */
+  #deck { position: fixed; display: flex; flex-direction: column; align-items: center; gap: var(--dg, 12px); padding: var(--dp, 8px); padding-bottom: calc(var(--dp, 8px) + env(safe-area-inset-bottom, 0px)); background: var(--alu); z-index: 2; }
+  [data-layout="stack"] #deck { box-shadow: inset 0 1px 0 var(--alu-edge); }
+  [data-layout="overlay"] #deck { flex-direction: row; align-items: stretch; justify-content: center; border-radius: 14px 14px 0 0; background: var(--alu); box-shadow: 0 -1px 0 var(--alu-edge), 0 -10px 30px rgba(0,0,0,.35); transition: transform .24s cubic-bezier(.2,.8,.2,1), visibility 0s; }
+  [data-rail="side"] #deck { padding-bottom: calc(var(--dp, 8px) + env(safe-area-inset-bottom, 0px)); }
+  [data-rail="bottom"] #deck { padding-bottom: var(--dp, 8px); }
+  [data-layout="overlay"] #deck:not(.open) { transform: translateY(calc(100% + 24px)); visibility: hidden; transition: transform .2s ease-in, visibility 0s .2s; }
+
+  /* keyboard: black keys in the aluminium, legends where a MacBook has them */
+  #keyboard { display: flex; flex-direction: column; gap: var(--kg, 5px); flex: 0 0 auto; touch-action: none; }
+  #keyboard .row { display: flex; gap: var(--kg, 5px); height: var(--kh, 38px); }
+  #keyboard .row.fnrow { height: var(--fh, 22px); }
+  .k { position: relative; flex: var(--w, 1) 1 0; min-width: 0; height: 100%; border-radius: var(--kr, 5px); background: var(--key); color: var(--legend); box-shadow: 0 0 0 0.5px rgba(0,0,0,.35), 0 1px 0 rgba(255,255,255,.07) inset; display: flex; align-items: center; justify-content: center; font-size: var(--kf, 15px); line-height: 1; }
+  .k.down { background: var(--key-down); }
+  .k .sh { position: absolute; top: 18%; left: 0; right: 0; text-align: center; font-size: calc(var(--kf, 15px) * .72); color: var(--legend); }
+  .k.two .main { position: absolute; bottom: 16%; left: 0; right: 0; text-align: center; font-size: calc(var(--kf, 15px) * .82); }
+  .k .wd { position: absolute; bottom: 14%; font-size: var(--kw, 9.5px); color: var(--legend); letter-spacing: .01em; white-space: nowrap; }
+  .k .sy { position: absolute; top: 14%; font-size: calc(var(--kw, 9.5px) * 1.3); }
+  .k.wl .wd { left: 12%; } .k.wr .wd { right: 12%; }
+  .k.ml .sy, .k.ml .wd { right: 12%; } .k.mr .sy, .k.mr .wd { left: 12%; }
+  .k.fk { font-size: var(--kw, 9.5px); color: var(--legend-dim); }
+  .k.fk .wd { bottom: 18%; }
+  .k .led { position: absolute; top: 14%; left: 12%; width: 4px; height: 4px; border-radius: 50%; background: #3A3A3C; }
+  .k.locked .led, .k.caps-on .led { background: var(--led); box-shadow: 0 0 4px var(--led); }
+  .k.armed, .k.locked { background: var(--key-down); }
+  .k.armed .sy, .k.locked .sy, .k.armed .wd, .k.locked .wd { color: #fff; }
+  .k.mod .led { display: none; left: auto; right: 12%; top: auto; bottom: 14%; }
+  .k.mod.locked .led { display: block; }
+  .k.mod.mr .led { right: auto; left: 12%; }
+  /* compact (phone): modifier words do not fit, the symbol carries the key */
+  #keyboard.compact .k.mod .wd { display: none; }
+  #keyboard.compact .cl { display: none; }
+  #keyboard.compact .k.wl .wd { left: 8%; } #keyboard.compact .k.wr .wd { right: 8%; } #keyboard.compact .k[data-caps] .wd { font-size: calc(var(--kw, 9.5px) * .92); }
+  #keyboard.compact .k.mod .sy { top: auto; left: 0; right: 0; text-align: center; font-size: calc(var(--kf, 15px) * .95); }
+  #keyboard.compact .k.mod .led { bottom: 10%; }
+  #keyboard.compact .k.ch.down::after { content: attr(data-pop); position: absolute; left: 50%; bottom: calc(100% + 6px); transform: translateX(-50%); min-width: 150%; padding: 6px 4px; border-radius: 8px; background: var(--key-down); color: #fff; font-size: calc(var(--kf, 15px) * 1.6); text-align: center; box-shadow: 0 4px 14px rgba(0,0,0,.35); pointer-events: none; }
+  .arrows { flex: 3 1 0; min-width: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px var(--kg, 5px); }
+  .arrows .k { font-size: calc(var(--kf, 15px) * .62); border-radius: calc(var(--kr, 5px) * .7); }
+  .arrows .up { grid-column: 2; grid-row: 1; } .arrows .dn { grid-column: 2; grid-row: 2; }
+  .arrows .lt { grid-column: 1; grid-row: 2; } .arrows .rt { grid-column: 3; grid-row: 2; }
+  .k svg { width: calc(var(--kf, 15px) * .9); height: calc(var(--kf, 15px) * .9); }
+
+  /* trackpad: the one bold element. Force Touch glass, flush in the deck. */
+  #pad { position: relative; flex: 0 0 auto; border-radius: var(--pr, 12px); background: linear-gradient(180deg, var(--glass-a), var(--glass-b)); box-shadow: inset 0 0 0 1px var(--glass-rim), inset 0 1px 0 var(--glass-hi), 0 1px 0 var(--alu-edge); touch-action: none; overflow: hidden; cursor: default; }
+  #pad::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: radial-gradient(120% 70% at 50% -10%, var(--glass-hi), transparent 60%); opacity: .55; pointer-events: none; }
+  #pad.press { box-shadow: inset 0 0 0 1px var(--glass-rim), inset 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent), 0 1px 0 var(--alu-edge); }
+  #pad.click { animation: padclick .16s ease-out; }
+  @keyframes padclick { 0% { filter: brightness(.94); } 100% { filter: none; } }
+  .contact { position: absolute; left: 0; top: 0; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; background: radial-gradient(circle, var(--touch) 0, transparent 68%); pointer-events: none; }
+  #pad-hint { position: absolute; left: 0; right: 0; bottom: 12px; text-align: center; color: var(--ink-dim); font-size: 12px; line-height: 1.45; padding: 0 16px; pointer-events: none; transition: opacity .3s; }
+  #pad-hint.gone { opacity: 0; }
+
+  /* ── display & connection sheet ──────────────────────────────────────── */
+  #sheet { position: fixed; inset: 0; z-index: 10; display: flex; align-items: flex-end; justify-content: center; }
+  #sheet .scrim { position: absolute; inset: 0; background: rgba(0,0,0,.32); }
+  #sheet .panel { position: relative; width: min(100%, 460px); max-height: min(88vh, 720px); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; background: var(--panel); color: var(--ink); border-radius: 14px 14px 0 0; padding: 6px 16px calc(18px + env(safe-area-inset-bottom, 0px)); box-shadow: 0 -8px 40px rgba(0,0,0,.35); -webkit-user-select: text; user-select: text; }
+  @media (min-width: 700px) and (min-height: 560px) { #sheet { align-items: center; } #sheet .panel { border-radius: 14px; padding-bottom: 18px; } }
+  #sheet header { display: flex; align-items: center; justify-content: space-between; position: sticky; top: -6px; background: var(--panel); padding: 10px 0 6px; z-index: 1; }
+  #sheet h2 { font-size: 17px; font-weight: 600; margin: 0; }
+  #sheet h3 { font-size: 13px; font-weight: 400; color: var(--ink-dim); margin: 18px 4px 6px; scroll-margin-top: 64px; }
+  #sheet h3:focus-visible { outline: none; }   /* a heading is focused only to start reading there */
+  #sheet-x { width: 44px; height: 44px; margin-right: -10px; border-radius: 22px; color: var(--ink-dim); font-size: 20px; }
+  .group { background: var(--row); border-radius: 10px; overflow: hidden; }
+  .group > * + * { box-shadow: 0 -0.5px 0 var(--sep); }
+  .opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px; padding: 10px 14px; text-align: left; font-size: 15px; }
+  .opt .meta { color: var(--ink-dim); font-size: 13px; }
+  .opt .check { width: 18px; color: var(--accent); font-weight: 600; text-align: right; }
+  .opt:active { background: var(--ctl); }
+  .opt[disabled] { opacity: .45; cursor: default; }
+  .opt.act { color: var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; }
+  .chips button { min-height: 44px; padding: 0 14px; border-radius: 8px; background: var(--ctl); font-size: 14px; }
+  .chips button[aria-checked="true"] { background: var(--accent); color: #fff; }
+  .chips .cap { width: 100%; font-size: 13px; color: var(--ink-dim); }
+  dl.stats { display: grid; grid-template-columns: auto 1fr; gap: 0; margin: 0; }
+  dl.stats dt, dl.stats dd { margin: 0; padding: 9px 14px; font-size: 14px; box-shadow: 0 -0.5px 0 var(--sep); }
+  dl.stats dt { color: var(--ink-dim); } dl.stats dd { text-align: right; font-variant-numeric: tabular-nums; }
+  dl.stats dt:first-of-type, dl.stats dd:first-of-type { box-shadow: none; }
+  .note { font-size: 12.5px; color: var(--ink-dim); margin: 6px 4px 0; line-height: 1.4; }
+  .switch { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 6px 14px; font-size: 15px; }
+  .switch input { appearance: none; -webkit-appearance: none; width: 46px; height: 28px; border-radius: 14px; background: var(--sw-off); box-shadow: inset 0 0 0 1px var(--sw-rim); position: relative; margin: 0; flex: 0 0 auto; transition: background .2s; }
+  .switch input::after { content: ''; position: absolute; top: 2px; left: 2px; width: 24px; height: 24px; border-radius: 12px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .2s; }
+  .switch input:checked { background: var(--led); box-shadow: none; }
+  .switch input:checked::after { transform: translateX(18px); }
+  .switch input:disabled { opacity: .6; }
+  #d-msg { min-height: 1.4em; }
+  #d-msg.err, #fz-msg.err { color: var(--bad); }
+  .switch .txt { display: flex; flex-direction: column; gap: 2px; padding-right: 12px; }
+  .switch .sub { font-size: 13px; color: var(--ink-dim); }
+  #fz-msg { min-height: 1.4em; }
+  #fz-msg.ok { color: var(--ink); }
+  .chips.off { opacity: .45; }
+  #d-list .opt[disabled] { opacity: .45; }
+  #kb { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; font-size: 16px; }
+  @media (prefers-reduced-motion: reduce) {
+    #tip, #mark, #deck, #pad-hint, .switch input, .switch input::after { transition: none !important; }
+    #pad.click { animation: none; }
+  }
+  @media (forced-colors: active) { .k, #pad, .sb, .seg button { border: 1px solid CanvasText; } .k.armed, .k.locked { outline: 2px solid Highlight; } }
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="frame" role="img" aria-label="Mac display" width="1" height="1"></canvas></div>
-<div id="overlay"><h1>Connecting to your Mac…</h1><div id="ovmsg">Asking the desktop for a session.</div></div>
-<div id="mark" aria-hidden="true"></div>
-<div id="tip"></div>
-<input id="kb" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Keyboard input">
-<div id="bar">
-  <button id="b-kb" title="Keyboard">⌨</button>
-  <button id="m-cmd" aria-pressed="false" title="Command">⌘</button>
-  <button id="m-shift" aria-pressed="false" title="Shift">⇧</button>
-  <button id="m-opt" aria-pressed="false" title="Option">⌥</button>
-  <button id="m-ctrl" aria-pressed="false" title="Control">⌃</button>
-  <button data-key="escape">esc</button>
-  <button data-key="tab">tab</button>
-  <button data-key="return">↩</button>
-  <button data-key="delete">⌫</button>
-  <button data-key="up">↑</button>
-  <button data-key="down">↓</button>
-  <button data-key="left">←</button>
-  <button data-key="right">→</button>
-  <button id="b-right" aria-pressed="false" title="Next tap is a right-click">R-click</button>
-  <button id="b-fit" title="Fit to screen">fit</button>
-  <select id="q" title="Quality">
-    <option value="auto" selected>Auto</option>
-    <option value="1440">1440p</option>
-    <option value="1080">1080p</option>
-    <option value="720">720p</option>
-    <optgroup label="Compatibility (JPEG)">
-      <option value="low">Low · 6 fps</option>
-      <option value="med">Medium · 10 fps</option>
-      <option value="high">High · 15 fps</option>
-    </optgroup>
-  </select>
-  <button id="b-full" title="Full screen">⤢</button>
-  <button id="b-hide" title="Hide bar">▾</button>
-  <span id="status">—</span>
+<div id="safe" aria-hidden="true"></div>
+<div id="lid" aria-hidden="true"></div>
+<div id="stage">
+  <canvas id="frame" role="img" aria-label="Mac display" width="1" height="1"></canvas>
+  <div id="mark" aria-hidden="true"></div>
+  <svg id="cursor" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M1.5 1.2 L1.5 18.6 L5.6 14.8 L8.4 21.4 L11.5 20.1 L8.8 13.6 L14.6 13.6 Z" fill="#000" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>
 </div>
-<div id="handle">▴</div>
+<div id="overlay"><h1>Connecting to your Mac…</h1><div id="ovmsg">Asking the desktop for a session.</div></div>
+<div id="tip" role="status" aria-live="polite"></div>
+<input id="kb" type="text" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="true" aria-label="System keyboard input">
+<nav id="strip" aria-label="Remote controls">
+  <button class="sb" id="b-conn" aria-haspopup="dialog" aria-label="Connection and stream quality"><span class="dot" id="conn-dot"></span><span id="conn-t">Connecting</span></button>
+  <button class="sb" id="b-res" aria-haspopup="dialog" aria-label="Mac resolution"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="3.5" width="16" height="10.5" rx="1.5"/><path d="M7 17h6M10 14v3"/></svg><span class="lbl" id="res-t">—</span></button>
+  <span class="grow" aria-hidden="true"></span>
+  <div class="seg" role="radiogroup" aria-label="Touching the screen">
+    <button role="radio" id="m-touch" aria-checked="true" aria-label="Touch: tap the screen to click there" title="Touch: tap the screen to click"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V4.2a1.3 1.3 0 0 1 2.6 0V9l3.7.8a1.6 1.6 0 0 1 1.2 1.8l-.6 4.2a2 2 0 0 1-2 1.7H9.6a2 2 0 0 1-1.6-.8L5 12.6a1.3 1.3 0 0 1 2-1.6z"/></svg></button>
+    <button role="radio" id="m-pad" aria-checked="false" aria-label="Trackpad: the screen only shows; the trackpad moves the pointer" title="Trackpad: point with the trackpad"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.5 L5 14 L7.6 11.7 L9.3 15.6 L11.1 14.8 L9.4 11 L12.9 11 Z"/></svg></button>
+  </div>
+  <button class="sb" id="b-keys" aria-pressed="false" aria-label="Show keyboard" title="Keyboard"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="1.8" y="5" width="16.4" height="10" rx="1.6"/><path d="M5 8h.01M8 8h.01M11 8h.01M14 8h.01M5 11h.01M15 11h.01M7.5 12h5"/></svg></button>
+  <button class="sb ovonly" id="b-pad" aria-pressed="false" aria-label="Show trackpad" title="Trackpad"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/></svg></button>
+  <button class="sb" id="b-ime" aria-label="System keyboard, for long text and dictation" title="System keyboard (dictation, autocorrect)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 15.5 7 4.5l4 11M4.4 12h5.2"/><path d="M13 9.5c.6-.6 1.3-.9 2.1-.9 1.3 0 2 .7 2 2v4.9M17.1 12.6c-2.6 0-4.2.6-4.2 1.7 0 .8.6 1.3 1.6 1.3 1.6 0 2.6-1 2.6-2.4"/></svg></button>
+  <button class="sb ovonly" id="b-full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 7.5V3h4.5M17 7.5V3h-4.5M3 12.5V17h4.5M17 12.5V17h-4.5"/></svg></button>
+</nav>
+<div id="slow" role="status" hidden><span id="slow-t"></span></div>
+<div id="fz-other" role="status" hidden><span class="t" id="fz-other-t">The Mac is fitted to another screen</span><button id="fz-other-take">Fit here</button><button id="fz-other-x" aria-label="Hide this message">✕</button></div>
+<section id="deck" aria-label="Keyboard and trackpad">
+  <div id="keyboard" role="group" aria-label="Mac keyboard" hidden></div>
+  <div id="pad" role="application" aria-roledescription="trackpad" aria-label="Trackpad. One finger moves the pointer, tap to click, two fingers scroll, two-finger tap right-clicks.">
+    <div id="pad-hint">Tap to click. Tap with two fingers to right-click.<br>Two fingers scroll. Hold, or tap then drag, to drag.</div>
+  </div>
+</section>
+<div id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-h" hidden>
+  <div class="scrim" id="sheet-scrim"></div>
+  <div class="panel">
+    <header><h2 id="sheet-h">Display and connection</h2><button id="sheet-x" aria-label="Close">✕</button></header>
+    <h3 id="h-stream" tabindex="-1">Stream quality</h3>
+    <div class="group" id="g-stream" role="radiogroup" aria-labelledby="h-stream"></div>
+    <div class="group" style="margin-top:8px"><div class="chips" id="g-compat" role="radiogroup" aria-label="Compatibility (JPEG)"></div></div>
+    <p class="note">Auto sizes the picture for this screen and lowers it when the link slows. Compatibility sends still pictures for browsers that can't play the video.</p>
+    <h3>Now</h3>
+    <div class="group"><dl class="stats" id="stats"></dl></div>
+    <p class="note" id="input-note" hidden></p>
+    <h3 id="h-mac" tabindex="-1">Mac resolution</h3>
+    <div class="group">
+      <label class="switch"><span class="txt"><span>Fit the Mac to this screen</span><span class="sub" id="fz-sub">The Mac takes this screen's shape</span></span><input type="checkbox" role="switch" id="fz-on" aria-describedby="fz-msg"></label>
+      <div class="chips" id="fz-text" role="radiogroup" aria-labelledby="fz-text-cap"><span class="cap" id="fz-text-cap">Text size</span><button role="radio" data-fz-text="smaller" aria-checked="false">Smaller</button><button role="radio" data-fz-text="default" aria-checked="true">Default</button><button role="radio" data-fz-text="larger" aria-checked="false">Larger</button></div>
+      <label class="switch" id="fz-keep-row" hidden><span class="txt"><span>Keep after I leave</span><span class="sub">The fitted screen ends 30 seconds after you leave, unless you keep it</span></span><input type="checkbox" role="switch" id="fz-keep"></label>
+    </div>
+    <p class="note" id="fz-msg" role="status" aria-live="polite"></p>
+    <div class="group" id="fz-take-g" hidden><button class="opt act" id="fz-take"><span>Fit the Mac to this screen instead</span><span class="meta" id="fz-take-m"></span></button></div>
+    <h3 id="h-own">Mac's own screen</h3>
+    <div class="group">
+      <button class="opt act" id="d-match" disabled><span>Match this device</span><span class="meta" id="d-match-m"></span></button>
+      <button class="opt act" id="d-restore" hidden><span>Restore</span><span class="meta" id="d-restore-m"></span></button>
+    </div>
+    <p class="note" id="d-msg" role="status" aria-live="polite"></p>
+    <div class="group" id="d-list" role="radiogroup" aria-labelledby="h-own"></div>
+    <button class="opt act" id="d-all" style="padding-left:4px" hidden>Show low resolution modes</button>
+    <div class="group" style="margin-top:8px"><label class="switch"><span>Keep after I leave</span><input type="checkbox" role="switch" id="d-keep" disabled></label></div>
+    <p class="note">A change goes back 30 seconds after you leave, unless you keep it.</p>
+    <h3>View</h3>
+    <div class="group"><button class="opt" id="b-fit"><span>Show the whole screen</span><span class="meta">Undo zoom</span></button></div>
+  </div>
+</div>
+<select id="q" hidden aria-hidden="true" tabindex="-1">
+  <option value="auto" selected>Auto</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option>
+  <option value="low">Low</option><option value="med">Medium</option><option value="high">High</option>
+</select>
 <script>
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const frame = $('frame'), stage = $('stage'), overlay = $('overlay'), ovmsg = $('ovmsg'), tip = $('tip'), kb = $('kb'), bar = $('bar'), status = $('status');
+  const root = document.documentElement;
+  const frame = $('frame'), stage = $('stage'), overlay = $('overlay'), ovmsg = $('ovmsg'), tip = $('tip'), kb = $('kb');
+  const strip = $('strip'), deck = $('deck'), pad = $('pad'), keyboard = $('keyboard'), cursorEl = $('cursor'), lid = $('lid');
   // Everything is relative to document.baseURI: the daemon's preview proxy
   // injects a base element pointing at /preview/<port>/ when it serves this page.
   const base = new URL('.', document.baseURI);
   const query = location.search || '';            // keeps ?t=<pairing token> for the daemon's gate
-  let ws = null, screen = { width: 1728, height: 1080 }, quality = null;
-  let fps = 0, frameCount = 0, backoff = 1000, mods = new Set(), rightNext = false;
+  let ws = null, screen = { width: 1728, height: 1117 }, quality = null;
+  let fps = 0, frameCount = 0, backoff = 1000;
+  // Armed modifiers (one-shot: spent by the next key or click) and locked ones
+  // (double-tapped: stay until tapped again). 'fn' never leaves this page: it
+  // turns delete/arrows into forward delete/page up/down/home/end here.
+  const mods = new Set(), locked = new Set();
+  let caps = false;
   const ctx = frame.getContext('2d', { alpha: false, desynchronized: true });
   // The canvas stands in for the old <img>: same transform, same natural size.
   Object.defineProperty(frame, 'naturalWidth', { get: () => frame.width });
   Object.defineProperty(frame, 'naturalHeight', { get: () => frame.height });
   let dragPermitted = null;                       // null = unknown; the service reports it in hello and on change
+  const touchFirst = matchMedia('(pointer: coarse)').matches;
+  root.dataset.touch = touchFirst ? 'yes' : 'no';
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+
+  // ── preferences (this browser only) ─────────────────────────────────
+  const PREF_KEY = 'soa-desktop-remote:deck';
+  const prefs = Object.assign({ mode: 'touch', stackKb: true, ovKb: false, ovPad: false, hint: true }, (() => {
+    try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') || {}; } catch (_) { return {}; }
+  })());
+  function savePrefs() { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) {} }
+  // "Fit the Mac to this screen", remembered on this device.
+  const FIT_KEY = 'soa-desktop-remote:fit';
+  const FIT_TEXTS = ['smaller', 'default', 'larger'];
+  const fitPref = Object.assign({ on: false, text: 'default' }, (() => {
+    try { return JSON.parse(localStorage.getItem(FIT_KEY) || '{}') || {}; } catch (_) { return {}; }
+  })());
+  if (!FIT_TEXTS.includes(fitPref.text)) fitPref.text = 'default';
+  fitPref.on = fitPref.on === true;
+  function saveFitPref() { try { localStorage.setItem(FIT_KEY, JSON.stringify({ on: fitPref.on, text: fitPref.text })); } catch (_) {} }
+  // This device, to the Mac: the fit belongs to one screen, and a reconnect
+  // (a network blip) must still be that screen. Random, kept on this device.
+  const DEV = (() => {
+    const mk = () => Array.from(crypto.getRandomValues(new Uint8Array(9)), (b) => b.toString(16).padStart(2, '0')).join('');
+    try { let d = localStorage.getItem('soa-desktop-remote:dev'); if (!/^[\w-]{6,64}$/.test(d || '')) { d = mk(); localStorage.setItem('soa-desktop-remote:dev', d); } return d; } catch (_) { return mk(); }
+  })();
+
+  // Which way input reaches the Mac: 'direct' (SoA Pointer, instant) or
+  // 'sarea' (the computeruse fallback — every input a process launch, and the
+  // first after a pause may wait for Sarea). Reported in hello / status / {t:'input'}.
+  let input = { path: '', reason: '' }, slowHidden = false;
+  const direct = () => input.path === 'direct';
+  function onInputInfo(i) {
+    if (!i || typeof i !== 'object' || !i.path) return;
+    const was = input.path; input = { path: i.path, reason: i.reason || '' };
+    const el = $('slow');
+    const msg = input.path === 'direct' ? ''
+      : input.reason === 'not-permitted' ? 'Turn on SoA Pointer in Accessibility for instant input'
+      : input.reason === 'unavailable' ? 'Instant input is unavailable (SoA Pointer did not start). Using the slow path.' : '';
+    if (msg) { $('slow-t').textContent = msg; el.title = 'On the Mac: System Settings → Privacy & Security → Accessibility → SoA Pointer. Tap to hide.'; }
+    const hide = !msg || slowHidden;
+    if (el.hidden !== hide) { el.hidden = hide; layout(); }
+    if (was && was !== 'direct' && input.path === 'direct') showTip('Instant input on');
+    renderStats();
+  }
 
   // ── view transform (pinch-zoom + pan) ───────────────────────────────
   // fitted: the whole Mac is on screen, and stays so through a rotation,
@@ -100,12 +362,16 @@
   const view = { s: 1, x: 0, y: 0, nat: { w: 1, h: 1 }, fitted: true };
   function fit() {
     const sw = stage.clientWidth, sh = stage.clientHeight;
-    const s = Math.min(sw / view.nat.w, sh / view.nat.h);
+    // A Mac fitted to this screen has its shape to within rounding: fill the
+    // area (a sub-pixel crop) instead of leaving a hairline of letterbox.
+    const same = Math.abs((sw / sh) / (view.nat.w / view.nat.h) - 1) < 0.012;
+    const s = same ? Math.max(sw / view.nat.w, sh / view.nat.h) : Math.min(sw / view.nat.w, sh / view.nat.h);
     view.s = s; view.x = (sw - view.nat.w * s) / 2; view.y = (sh - view.nat.h * s) / 2; view.fitted = true;
     apply();
   }
   function apply() {
     frame.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
+    drawCursor();
   }
   // A new stream size keeps the picture where it was on screen: rescale the
   // view so the displayed rect does not jump.
@@ -125,16 +391,56 @@
   // how far in the user has zoomed (the service decides the encode size).
   function displayInfo() {
     const dpr = window.devicePixelRatio || 1, w = Math.round(stage.clientWidth * dpr), h = Math.round(stage.clientHeight * dpr);
-    return { w, h, dpr, orient: w >= h ? 'landscape' : 'portrait', zoom: +zoomRel().toFixed(2) };
+    // Zoom in steps: every pinch frame asking for a new stream size restarted
+    // the encode over and over.
+    const z = zoomRel(), zq = z < 1.3 ? 1 : z < 1.8 ? 1.5 : z < 2.5 ? 2 : z < 3.5 ? 3 : 4;
+    return { w, h, dpr, orient: w >= h ? 'landscape' : 'portrait', zoom: zq };
   }
+  // Mac display resolution (the service does the work; see soa-desktop-remote
+  // "the Mac's display resolution"):
+  //   soaDisplay.list()            → {modes, current, match, original, keep, ...}
+  //   soaDisplay.set(id, keep?)    id = a mode id, 'match' (fit this screen) or 'original'
+  //   soaDisplay.keep(bool)        keep the chosen mode after this viewer leaves
+  // Each returns a Promise of the service's reply; every reply and broadcast
+  // also fires a 'soa-display' event on window (detail = the message).
+  const dispWait = new Map();
+  let dispReq = 0;
+  function onDisplayMsg(m) {
+    const w = m.req && dispWait.get(m.req);
+    if (w) { dispWait.delete(m.req); w(m); }
+    window.dispatchEvent(new CustomEvent('soa-display', { detail: m }));
+  }
+  function dispAsk(o) {
+    return new Promise((resolve) => {
+      if (!ws || ws.readyState !== 1) { resolve({ ok: false, error: 'not connected' }); return; }
+      const req = 'd' + (++dispReq);
+      const area = { w: stage.clientWidth, h: stage.clientHeight };   // CSS px the Mac is fitted into
+      dispWait.set(req, resolve);
+      setTimeout(() => { if (dispWait.delete(req)) resolve({ ok: false, error: 'timeout' }); }, 15000);
+      send({ ...o, area, req });
+    });
+  }
+  window.soaDisplay = {
+    list: () => dispAsk({ t: 'displayModes' }),
+    set: (id, keep) => dispAsk({ t: 'setDisplayMode', id, ...(typeof keep === 'boolean' ? { keep } : {}) }),
+    keep: (keep) => dispAsk({ t: 'setDisplayKeep', keep: !!keep }),
+  };
   let dispT = 0;
-  function reportDisplay() { clearTimeout(dispT); dispT = setTimeout(() => send({ t: 'display', ...displayInfo() }), 300); }
+  let lastDisp = '';
+  function reportDisplay() {
+    clearTimeout(dispT);
+    dispT = setTimeout(() => {
+      const d = displayInfo(), k = d.w + 'x' + d.h + '@' + d.zoom;
+      if (k === lastDisp) return;            // pans and repeats change nothing
+      lastDisp = k; send({ t: 'display', ...d });
+    }, 600);
+  }
   function clampView() {
     const sw = stage.clientWidth, sh = stage.clientHeight, w = view.nat.w * view.s, h = view.nat.h * view.s;
     view.x = w <= sw ? (sw - w) / 2 : Math.min(0, Math.max(sw - w, view.x));
     view.y = h <= sh ? (sh - h) / 2 : Math.min(0, Math.max(sh - h, view.y));
   }
-  // stage pixel → Mac point
+  // stage-local pixel → Mac point
   function toMac(cx, cy) {
     const fx = (cx - view.x) / view.s, fy = (cy - view.y) / view.s;
     return { x: Math.round(fx / view.nat.w * screen.width), y: Math.round(fy / view.nat.h * screen.height) };
@@ -143,6 +449,11 @@
     const fx = (cx - view.x) / view.s, fy = (cy - view.y) / view.s;
     return fx >= 0 && fy >= 0 && fx <= view.nat.w && fy <= view.nat.h;
   }
+  function macToStage(p) { return { x: view.x + p.x / screen.width * view.nat.w * view.s, y: view.y + p.y / screen.height * view.nat.h * view.s }; }
+  const ptPerPx = () => screen.width / (view.nat.w * view.s);   // Mac points per stage pixel at this zoom
+  // client (viewport) → stage-local; the stage is no longer at the origin
+  let stageRect = { left: 0, top: 0 };
+  const loc = (e) => [e.clientX - stageRect.left, e.clientY - stageRect.top];
 
   // ── socket ───────────────────────────────────────────────────────────
   function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
@@ -171,7 +482,7 @@
       if (gen !== sockGen) { connecting = false; return resume(); }
       if (r.status === 401) { connecting = false; ovmsg.textContent = 'Not paired. Open this from the Son of Anton app (WEB → ⌨ CONTROL) so the link carries your pairing.'; return; }
       if (!r.ok) throw new Error('token ' + r.status);
-      const j = await r.json(); tok = j.token; if (j.screen) screen = j.screen;
+      const j = await r.json(); tok = j.token; if (j.screen) setScreen(j.screen);
       marks.token = Math.round(performance.now());
     } catch (e) {
       connecting = false;
@@ -189,28 +500,37 @@
     ws = sock;
     mode = null; vReset();
     ws.onopen = () => {
+      lastDisp = '';                       // a new socket hears the size again
       if (ws !== sock) return;
       backoff = 1000; ovmsg.textContent = 'Starting the screen…'; marks.open = Math.round(performance.now());
       pingClock();
       applyQuality();                              // declares the stream this browser can decode
+      askCursor();
     };
     ws.onmessage = (ev) => {
       if (ws !== sock) return;
       if (typeof ev.data === 'string') {
         let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
-        if (m.t === 'hello') { if (m.screen) screen = m.screen; if (typeof m.dragPermitted === 'boolean') dragPermitted = m.dragPermitted; }
+        if (m.t === 'hello') {
+          if (m.screen) setScreen(m.screen); if (typeof m.dragPermitted === 'boolean') dragPermitted = m.dragPermitted; onInputInfo(m.input);
+          fitConnected(m.fit);
+        }
+        if (m.t === 'fit') onFitInfo(m);
+        if (m.t === 'input') onInputInfo(m);
         if (m.t === 'drag-permission') {
           const was = dragPermitted; dragPermitted = !!m.granted;
           if (dragPermitted && was === false) showTip('Drag enabled');
         }
         if (m.t === 'status') {
-          if (m.screen) screen = m.screen; quality = m.quality || quality;
+          if (m.screen) setScreen(m.screen); quality = m.quality || quality; onInputInfo(m.input); if (m.fit) onFitInfo(m.fit);
           if (m.state === 'error' && mode === 'jpeg') { overlay.hidden = false; ovmsg.textContent = m.message || 'Screen capture failed.'; }
         }
         if (m.t === 'vconfig') onVConfig(m);
         if (m.t === 'vstat') vstat = m;
         if (m.t === 'pong') onPong(m);
+        if (m.t === 'cursor') onCursor(m);
         if (m.t === 'video-unavailable') videoUnavailable(m.message || 'video unavailable');
+        if (m.t === 'displayModes' || m.t === 'displayMode') onDisplayMsg(m);
         return;
       }
       bytes += ev.data.byteLength;
@@ -220,13 +540,25 @@
     };
     ws.onclose = () => {
       if (ws !== sock) return;                       // an old socket, already let go
-      ws = null; dragging = false; vReset(); overlay.hidden = false;
+      ws = null; dragging = false; padReset(); vReset(); overlay.hidden = false;
+      fitPending = 0; renderFit(); renderOther();
       if (document.hidden) return;                   // reconnects when the page shows again
       ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry();
     };
     ws.onerror = () => {};
   }
-
+  // The Mac's geometry (points) decides the picture's shape, so a new one re-lays the page.
+  function setScreen(s) {
+    if (!s || !(s.width > 0) || !(s.height > 0)) return;
+    const changed = s.width !== screen.width || s.height !== screen.height;
+    screen = s;
+    if (changed) {
+      cur.x = Math.min(cur.x, screen.width - 1); cur.y = Math.min(cur.y, screen.height - 1);
+      layout(); if (ws) askCursor();
+    }
+    $('res-t').innerHTML = `${+screen.width}<span class="resh"> × ${+screen.height}</span>`;
+    $('b-res').setAttribute('aria-label', `${F.state === 'on' ? 'Mac fitted to this screen' : 'Mac resolution'}, ${screen.width} by ${screen.height}`);
+  }
   // ── H.264 (WebCodecs) ────────────────────────────────────────────────
   // Feature-detect once: no VideoDecoder, or no H.264 in it (older iOS), means
   // the JPEG stream, and the status line says so.
@@ -380,32 +712,420 @@
   let pings = 0;
   setInterval(() => { if (ws && (pings++ < 5 || pings % 10 === 0)) pingClock(); }, 1000);
   function retry() { clearTimeout(retryT); retryT = setTimeout(() => { retryT = 0; connect(); }, backoff); backoff = Math.min(15000, backoff * 1.7); }
+  // Once a second: what the strip's connection button and the sheet say.
+  let lastStats = { lat: null, fps: 0, mb: '', video: '', kbps: 0 };
   setInterval(() => {
     fps = frameCount; frameCount = 0; recvFps = recvCount; recvCount = 0; decFps = decCount; decCount = 0;
     const kbps = Math.round(bytes * 8 / 1000); bytes = 0;
     const mb = kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mb/s' : kbps + ' kb/s';
-    const lat = latencies.length ? latencies.sort((a, b) => a - b)[latencies.length >> 1] : null; latencies = [];
-    if (!ws) status.textContent = 'offline';
-    else if (mode === 'h264') {
-      const drops = vstat && vstat.drops ? ` · ${vstat.drops} dropped` : '';
-      const link = vstat && vstat.linkLimited ? ' · slow link' : '';
-      status.innerHTML = `<b>H.264</b> ${esc(V.codec || '')} ${frame.width}×${frame.height} · <b>${fps}</b> fps · ${mb}${lat != null ? ' · ~' + Math.round(lat) + ' ms' : ''}${drops}${link}`;
-    } else {
-      status.innerHTML = `<b>JPEG</b> · <b>${fps}</b> fps · ${mb}${QUAL[$('q').value] ? '' : ' · ' + level()}${videoBroken ? ' · ' + esc(videoBroken) : ''}`;
-    }
-    window.__soaRemote = { marks, mode, fps, recvFps, decFps, kbps, latency: lat, w: frame.width, h: frame.height, codec: V.codec, firstPictureMs, drops: vstat ? vstat.drops : 0, server: vstat, videoBroken, decoded: V.total };
+    const lsorted = latencies.sort((a, b) => a - b);
+    const lat = lsorted.length ? lsorted[lsorted.length >> 1] : null, latP95 = lsorted.length ? lsorted[Math.min(lsorted.length - 1, Math.floor(lsorted.length * 0.95))] : null; latencies = [];
+    const video = mode === 'h264' ? `H.264 ${frame.width}×${frame.height}` : mode === 'jpeg' ? `JPEG, ${level()}${videoBroken ? ' (' + videoBroken + ')' : ''}` : '';
+    lastStats = { lat, fps, mb, video, kbps, drops: vstat && vstat.drops, link: vstat && vstat.linkLimited };
+    renderConn();
+    renderStats();
+    window.__soaRemote = { marks, mode, fps, recvFps, decFps, kbps, latency: lat, latP95, input: input.path, w: frame.width, h: frame.height, codec: V.codec, firstPictureMs, drops: vstat ? vstat.drops : 0, server: vstat, videoBroken, decoded: V.total };
     autoTune();
   }, 1000);
+  function renderConn() {
+    const s = lastStats, dot = $('conn-dot'), t = $('conn-t');
+    let cls = 'bad', txt = 'Offline';
+    if (ws && overlay.hidden) {
+      txt = s.lat != null ? Math.round(s.lat) + ' ms' : s.fps + ' fps';
+      cls = !direct() || (s.lat != null && s.lat > 350) || s.link ? 'fair' : 'good';
+    } else if (ws || connecting) { txt = 'Connecting'; cls = ''; }
+    dot.className = 'dot ' + cls; t.textContent = txt;
+    $('b-conn').setAttribute('aria-label', `Connection and stream quality: ${txt}${ws && !direct() && input.path ? ', slow input' : ''}`);
+  }
+  function renderStats() {
+    if ($('sheet').hidden) return;
+    const s = lastStats, inputTxt = !input.path ? '—' : direct() ? 'Instant' : 'Slow';
+    const rows = [['Latency', s.lat != null ? '~' + Math.round(s.lat) + ' ms' : '—'], ['Frame rate', s.fps + ' fps'], ['Bitrate', s.mb || '—'], ['Video', s.video || '—'], ['Input', inputTxt]];
+    if (s.drops) rows.push(['Dropped', String(s.drops)]);
+    if (s.link) rows.push(['Link', 'Slow — lowered automatically']);
+    $('stats').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    const note = $('input-note');
+    note.hidden = !input.path || direct();
+    if (!note.hidden) note.textContent = input.reason === 'not-permitted'
+      ? 'Every tap waits for a helper app. On the Mac, open System Settings → Privacy & Security → Accessibility and turn on SoA Pointer; input becomes instant without a restart.'
+      : 'Instant input is not available right now, so taps and keys take the slow path.';
+  }
 
-  // ── pointer handling ─────────────────────────────────────────────────
-  const pts = new Map(); let gesture = null, longTimer = null, gesture2 = null;
-  const isCoarse = matchMedia('(pointer: coarse)').matches;
-  function showTip(t) { tip.textContent = t; tip.classList.add('show'); clearTimeout(showTip._t); showTip._t = setTimeout(() => tip.classList.remove('show'), 1400); }
+  // ── layout: lid + strip + deck, or picture + rail + sliding deck ─────
+  function insets() {
+    const c = getComputedStyle($('safe'));
+    return { t: parseFloat(c.paddingTop) || 0, r: parseFloat(c.paddingRight) || 0, b: parseFloat(c.paddingBottom) || 0, l: parseFloat(c.paddingLeft) || 0 };
+  }
+  const box = (el, r) => { el.style.left = r.l + 'px'; el.style.top = r.t + 'px'; el.style.width = r.w + 'px'; el.style.height = r.h + 'px'; };
+  const fitAR = (w, h, ar) => (w / h > ar ? { w: Math.round(h * ar), h: Math.round(h) } : { w: Math.round(w), h: Math.round(w / ar) });
+  const STRIP = 52, RAIL = 60, SLOW_H = 34;
+  let lay = { kind: '' };
+  // Fit layout: the picture area comes from this screen and the deck alone,
+  // never from the Mac's shape (the Mac takes the area's shape, so letting the
+  // area follow the Mac would chase its own tail). In portrait the deck keeps
+  // what it needs (keyboard rows + a trackpad of FIT_PAD px) and the picture
+  // gets the rest; in landscape (and on any screen where the deck slides
+  // over the picture) the area is the full height beside the rail.
+  const FIT_PAD_KB = 130, FIT_PAD_ONLY = 190, FIT_PAD_WIDE = 200;
+  function deckNeed(roomW) {
+    const wide = roomW >= 600, P = wide ? 18 : 8, G = wide ? 16 : 10, kg = wide ? 6 : 5, W = roomW - 2 * P;
+    const padMin = wide ? FIT_PAD_WIDE : prefs.stackKb ? FIT_PAD_KB : FIT_PAD_ONLY;
+    if (!prefs.stackKb) return { h: 2 * P + padMin, padMin };
+    const kbW = Math.min(W, 14.5 * 62), kh = Math.max(30, Math.min(wide ? 50 : 42, Math.round(kbW / 14.5 * 1.45)));
+    return { h: 2 * P + Math.round(kh * 0.58) + 5 * kh + 5 * kg + G + padMin, padMin };
+  }
+  // While the Mac IS fitted (or going back) its shape is the fit's, whatever
+  // this page asked: turning Fit off keeps the fit layout until the Mac is
+  // back on its own screen. Off on the Mac and not to be asked again
+  // (another screen turned it off, or an error): the Mac's own shape.
+  const fitLayout = () => F.state === 'on' || F.state === 'fitting' || (fitPref.on && fitAuto && !fitBlocked && F.state !== 'error');
+  // `area` fitted to the Mac's shape, centred; the whole area when they match.
+  function inArea(a, ar) {
+    if (Math.abs((a.w / a.h) / ar - 1) < 0.012) return { ...a };
+    const f = fitAR(a.w, a.h, ar);
+    return { l: a.l + Math.round((a.w - f.w) / 2), t: a.t + Math.round((a.h - f.h) / 2), w: f.w, h: f.h };
+  }
+  function layout() {
+    const vw = innerWidth, vh = innerHeight, sa = insets();
+    const ar = screen.width > 0 && screen.height > 0 ? screen.width / screen.height : 1.6;
+    const aw = vw - sa.l - sa.r, ah = vh - sa.t - sa.b;
+    const slowOn = !$('slow').hidden;
+    const stackH = Math.round(aw / ar);
+    const fitOn = fitLayout();
+    const need = fitOn ? deckNeed(vw - sa.l - sa.r) : null;
+    // Below the picture there must be room for a real deck; otherwise the
+    // picture takes the whole screen and the deck slides over it on demand.
+    // Fitted, a portrait touch screen keeps the deck below a picture of the
+    // room left above it.
+    const stack = fitOn ? touchFirst && ah > aw && ah - STRIP - need.h - (slowOn ? SLOW_H : 0) >= 200
+      : touchFirst && ah - stackH - STRIP >= Math.max(250, ah * 0.34);
+    root.dataset.layout = stack ? 'stack' : 'overlay';
+    root.dataset.fit = fitOn ? 'on' : 'off';
+    let st, area = null;
+    if (stack) {
+      root.dataset.rail = 'none';
+      if (fitOn) { area = { l: sa.l, t: sa.t, w: aw, h: ah - STRIP - need.h - (slowOn ? SLOW_H : 0) }; st = inArea(area, ar); }
+      else st = { l: sa.l, t: sa.t, w: aw, h: stackH };
+      const pic = area || st;
+      box(lid, { l: 0, t: 0, w: vw, h: pic.t + pic.h });
+      const sy = pic.t + pic.h;
+      box(strip, { l: 0, t: sy, w: vw, h: STRIP });
+      box($('slow'), { l: 0, t: sy + STRIP, w: vw, h: SLOW_H });
+      const dy = sy + STRIP + (slowOn ? SLOW_H : 0);
+      box(deck, { l: 0, t: dy, w: vw, h: vh - dy });
+      deck.classList.add('open');
+      sizeDeck('stack', { w: vw - sa.l - sa.r, h: vh - dy - sa.b, padL: sa.l, padR: sa.r, padMin: need ? need.padMin : 0 });
+    } else {
+      const fr = fitAR(aw - RAIL, ah, ar), fb = fitAR(aw, ah - STRIP, ar);
+      // fitted, the rail goes on the long side's end: beside the picture in landscape
+      const side = fitOn ? aw > ah : fr.w * fr.h >= fb.w * fb.h;
+      root.dataset.rail = side ? 'side' : 'bottom';
+      box(lid, { l: 0, t: 0, w: vw, h: vh });
+      if (side) {
+        if (fitOn) area = { l: sa.l, t: sa.t, w: aw - RAIL, h: ah };
+        st = fitOn ? inArea(area, ar) : { l: sa.l + Math.round((aw - RAIL - fr.w) / 2), t: sa.t + Math.round((ah - fr.h) / 2), w: fr.w, h: fr.h };
+        box(strip, { l: vw - sa.r - RAIL, t: 0, w: RAIL + sa.r, h: vh });
+      } else {
+        if (fitOn) area = { l: sa.l, t: sa.t, w: aw, h: ah - STRIP };
+        st = fitOn ? inArea(area, ar) : { l: sa.l + Math.round((aw - fb.w) / 2), t: sa.t + Math.round((ah - STRIP - fb.h) / 2), w: fb.w, h: fb.h };
+        box(strip, { l: 0, t: vh - sa.b - STRIP, w: vw, h: STRIP + sa.b });
+      }
+      const sl = $('slow'); sl.style.left = (st.l + st.w / 2) + 'px'; sl.style.top = (st.t + 8) + 'px'; sl.style.width = 'auto'; sl.style.height = SLOW_H + 'px';
+      const right = side ? vw - sa.r - RAIL : vw, bottom = side ? vh : vh - sa.b - STRIP;
+      const open = prefs.ovKb || prefs.ovPad;
+      // the trackpad alone needs less height than the keyboard
+      const dh = Math.round(touchFirst ? Math.min(vh * (prefs.ovKb ? 0.6 : 0.46), 360) : Math.min(vh * 0.45, 330));
+      box(deck, { l: 0, t: bottom - dh, w: right, h: dh });
+      deck.classList.toggle('open', open);
+      // The deck's content keeps clear of the notch side; the side rail
+      // already holds the other edge's inset.
+      sizeDeck('overlay', { w: right - sa.l - (side ? 0 : sa.r), h: dh - (side ? sa.b : 0), padL: sa.l, padR: side ? 0 : sa.r });
+      if (open) {
+        // The open deck takes the bottom of the screen and the picture the
+        // rest, fitted whole above it: the deck never covers the Mac (or the
+        // pointer). The stream is re-sized for the smaller picture.
+        const availW = side ? aw - RAIL : aw, availH = Math.max(60, bottom - dh - sa.t);
+        // Fitted, the area stays the full height: the deck is a visitor in
+        // landscape, and re-shaping the Mac each time it slides up would
+        // rearrange every window for a moment's typing. The picture shrinks
+        // above it meanwhile, as it does unfitted.
+        if (fitOn) st = inArea({ l: sa.l, t: sa.t, w: availW, h: availH }, ar);
+        else {
+          const f = fitAR(availW, availH, ar);
+          st = { l: sa.l + Math.round((availW - f.w) / 2), t: sa.t + Math.round((availH - f.h) / 2), w: f.w, h: f.h };
+        }
+      }
+    }
+    box(stage, st);
+    box(overlay, st);
+    const fo = $('fz-other'); fo.style.left = (st.l + st.w / 2) + 'px'; fo.style.top = (st.t + 8 + (slowOn && !stack ? SLOW_H + 6 : 0)) + 'px'; fo.style.maxWidth = Math.max(160, st.w - 16) + 'px';
+    tip.style.top = (st.t + (slowOn && !stack ? SLOW_H + 14 : 8)) + 'px';
+    stageRect = stage.getBoundingClientRect();
+    $('b-full').hidden = stack || !(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    syncToggles();
+    lay = { kind: stack ? 'stack' : 'overlay', rail: root.dataset.rail, area };
+    onResize();
+    drawCursor();
+    if (fitPref.on) fitAreaChanged();
+  }
+  // Key and trackpad sizes from the room the deck has. Units: a MacBook row is
+  // 14.5 key widths; the function row is a little over half height.
+  function sizeDeck(kind, room) {
+    const kbOn = kind === 'stack' ? prefs.stackKb : prefs.ovKb, padOn = kind === 'stack' || prefs.ovPad;
+    keyboard.hidden = !kbOn; pad.hidden = !padOn;
+    // wide: a tablet or a desktop. A phone on its side is wide but short, and
+    // every pixel of its height goes to the keys.
+    const wide = room.w >= 600 && room.h >= 260;
+    const P = wide ? 18 : 8, G = wide ? 16 : 10, kg = wide ? 6 : 5;
+    deck.style.setProperty('--dp', P + 'px'); deck.style.setProperty('--dg', G + 'px');
+    deck.style.paddingLeft = (P + room.padL) + 'px'; deck.style.paddingRight = (P + room.padR) + 'px';
+    const W = room.w - 2 * P, H = room.h - 2 * P;
+    let kbW = 0, kh = 0, fh = 0, kbH = 0, padW = 0, padH = 0;
+    const kbHeight = (k) => Math.round(k * 0.58) + 5 * k + 5 * kg;
+    if (kind === 'stack') {
+      if (kbOn) {
+        kbW = Math.min(W, 14.5 * 62);
+        kh = Math.max(30, Math.min(wide ? 50 : 42, Math.round(kbW / 14.5 * 1.45)));
+        while (kh > 26 && H - kbHeight(kh) - G < Math.max(room.padMin || 150, H * 0.3)) kh--;
+        kbH = kbHeight(kh);
+      }
+      // MacBook proportions under a keyboard; with the keyboard away, the glass takes the deck
+      padW = !wide ? W : kbOn ? Math.min(W, Math.max(420, kbW * 0.56)) : Math.min(W, 880);
+      padH = Math.max(120, H - (kbOn ? kbH + G : 0));
+      if (wide) padH = Math.min(padH, Math.round(padW / 1.45));
+    } else {
+      padW = padOn ? (kbOn ? (wide ? Math.max(200, Math.min(440, W * 0.32)) : Math.max(160, Math.min(300, W * 0.26))) : Math.min(W, Math.max(320, W * 0.55), 680)) : 0;
+      kbW = kbOn ? W - (padOn ? padW + G : 0) : 0;
+      if (kbOn && !padOn) kbW = Math.min(kbW, 14.5 * 66);
+      kh = Math.max(24, Math.min(52, Math.floor((H - 5 * kg) / 5.58), Math.round(kbW / 14.5 * 1.3)));
+      kbH = kbHeight(kh);
+      padH = H;
+    }
+    if (kbOn) {
+      fh = Math.round(kh * 0.58);
+      const unit = kbW / 14.5;
+      const ks = keyboard.style;
+      ks.width = Math.floor(kbW) + 'px';
+      ks.setProperty('--kh', kh + 'px'); ks.setProperty('--fh', fh + 'px'); ks.setProperty('--kg', kg + 'px');
+      ks.setProperty('--kr', Math.round(Math.max(4, kh * 0.14)) + 'px');
+      ks.setProperty('--kf', Math.round(Math.min(18, kh * 0.38, unit * 0.62)) + 'px');
+      ks.setProperty('--kw', Math.max(8, Math.min(11, unit * 0.2)).toFixed(1) + 'px');
+      keyboard.classList.toggle('compact', unit < 34); keyboard.classList.toggle('tiny', unit < 25);
+      if (kind === 'overlay') keyboard.style.alignSelf = 'flex-end';
+      else keyboard.style.alignSelf = '';
+    }
+    if (padOn) {
+      pad.style.width = Math.floor(padW) + 'px'; pad.style.height = Math.floor(padH) + 'px';
+      pad.style.setProperty('--pr', (wide ? 14 : 12) + 'px');
+    }
+    $('pad-hint').hidden = !prefs.hint || padH < 150 || padW < 240;
+  }
+  // A rotation keeps the picture fitted, or (zoomed in) keeps the same Mac
+  // point at the middle of the screen. iOS can report the old size in the
+  // first resize event, so it is settled again a moment later.
+  let stageW = 0, stageH = 0;
+  function onResize() {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    if (sw === stageW && sh === stageH) return;
+    if (view.fitted || !stageW) fit();
+    else { view.x += (sw - stageW) / 2; view.y += (sh - stageH) / 2; clampView(); apply(); }
+    stageW = sw; stageH = sh; reportDisplay();
+  }
+  window.addEventListener('resize', () => { layout(); setTimeout(layout, 250); });
+  window.addEventListener('orientationchange', () => setTimeout(layout, 300));
+
+  // ── "Fit the Mac to this screen" ─────────────────────────────────────
+  // The Mac makes a screen shaped like this page's picture area (a virtual
+  // display its own screen mirrors) and streams that. This page says how
+  // much room it has — {t:'fit', on, area:{w,h,dpr}, text} on connect, and
+  // again when the area changes (rotation, keyboard shown or hidden); the Mac
+  // re-fits only when the shape really changed. F is what the Mac reports:
+  // {state:'off'|'fitting'|'on'|'error', w, h, pxW, pxH, hidpi, keep, op, target, message}.
+  let F = { state: 'off' };
+  // fitPending: when this page last asked for a fit (an 'off' already on its
+  // way is not the answer). fitAuto: area changes may re-ask; off after an
+  // error or when another screen turned it off, until the user asks again.
+  // fitBlocked: the Mac said no to an automatic ask because another screen
+  // is watching it (it is not re-shaped under someone else); by hand it fits.
+  let fitPending = 0, fitAuto = true, fitSent = null, fitT = 0, fitOffNote = '', fitBlocked = false, otherHidden = false, fitAskAt = -1e9;
+  // The Mac is fitted, and the fit is another screen's: this page only sees
+  // it (letterboxed); its own area does not shape the Mac.
+  const elsewhere = () => (F.state === 'on' || (F.state === 'fitting' && F.op !== 'off')) && F.mine === false;
+  function sendFit(take = false) {
+    clearTimeout(fitT); fitT = 0;
+    const a = lay.area;
+    if (!ws || ws.readyState !== 1 || !fitPref.on || !fitAuto || !a) return;
+    const dpr = window.devicePixelRatio || 1;
+    fitSent = { w: a.w, h: a.h, text: fitPref.text };
+    if (!elsewhere() || take) fitPending = performance.now();
+    fitAskAt = performance.now();
+    send({ t: 'fit', on: true, area: { w: a.w, h: a.h, dpr: +dpr.toFixed(2) }, text: fitPref.text, dev: DEV, ...(take ? { take: true } : {}) });
+  }
+  // Called after every layout: re-ask once the area has settled (a rotation
+  // reports several sizes on its way). The Mac decides whether it re-fits.
+  function fitAreaChanged() {
+    const a = lay.area;
+    if (!a || !fitAuto || !ws) return;
+    if (fitSent && Math.abs(fitSent.w - a.w) < 2 && Math.abs(fitSent.h - a.h) < 2 && fitSent.text === fitPref.text) return;
+    clearTimeout(fitT); fitT = setTimeout(sendFit, 400);
+  }
+  // A new socket: this device's choice is asked for again (by itself: it
+  // does not take a fit another screen holds).
+  function fitConnected(f) {
+    fitSent = null; fitPending = 0; fitBlocked = false;
+    if (f) onFitInfo(f, true);
+    if (fitPref.on) { fitAuto = true; fitOffNote = ''; layout(); sendFit(); }
+    renderFit();
+  }
+  // By hand: fit the Mac to this screen, taking it over from another screen.
+  function takeFit() {
+    fitPref.on = true; saveFitPref();
+    fitAuto = true; fitOffNote = ''; fitBlocked = false; otherHidden = false; fitSent = null;
+    layout(); sendFit(true); renderFit();
+  }
+  function onFitInfo(f, quiet) {
+    if (!f || typeof f.state !== 'string') return;
+    if (f.ok === false && f.reason === 'others') {   // an automatic ask, declined: someone else is watching
+      fitPending = 0; fitBlocked = true;
+      if (!quiet) showTip('Another screen is watching the Mac, so Fit waits. Tap “Fit here” to fit it to this screen.', 3200);
+      const was = fitLayout();
+      F = { ...F, state: f.state, mine: !!f.mine, owner: f.owner || 'none' };
+      if (fitLayout() !== was) layout();
+      renderFit(); renderOther(); return;
+    }
+    if (f.ok === false && f.message) f = { ...f, state: 'error' };              // this request was refused
+    if (f.state === 'off' && fitPending && performance.now() - fitPending < 20000) return;   // sent before our request landed
+    const prev = F, wasLayout = fitLayout(), wasElse = elsewhere();
+    F = { state: f.state, w: f.w, h: f.h, pxW: f.pxW, pxH: f.pxH, hidpi: f.hidpi, keep: !!f.keep, op: f.op || '', target: f.target || null, message: f.message || '', text: f.text,
+      mine: typeof f.mine === 'boolean' ? f.mine : true, owner: f.owner || 'none' };
+    if (f.state !== 'off') fitPending = 0;
+    if (F.state !== 'off') fitBlocked = false;
+    if (!quiet) {
+      if (f.state === 'error' && prev.state !== 'error') { fitAuto = false; showTip(F.message || "The Mac couldn't fit its screen to this one.", 3200); }
+      if (f.state === 'on' && F.mine && (prev.state !== 'on' || (!prev.mine && prev.owner !== 'away') || prev.w !== f.w || prev.h !== f.h)) showTip(prev.mine === false && prev.state === 'on' ? `Fitted to this screen: ${f.w} × ${f.h}` : `Fitted: ${f.w} × ${f.h}`);
+      if (f.state === 'off' && (prev.state === 'on' || prev.state === 'fitting') && prev.mine && fitPref.on && !fitPending) {
+        fitAuto = false; fitOffNote = 'Fit was turned off from another screen. Turn the switch on to fit again.';
+        showTip('Fit was turned off from another screen');
+      }
+      if (!wasElse && elsewhere()) {
+        otherHidden = false;
+        showTip(prev.mine && (prev.state === 'on' || prev.state === 'fitting') ? 'Another screen took over the fit' : 'The Mac is fitted to another screen', 2600);
+      }
+      if (f.state === 'fitting' && prev.state !== 'fitting' && f.op !== 'off' && prev.state !== 'on' && F.mine) showTip('Fitting the Mac to this screen…');
+    }
+    if (fitLayout() !== wasLayout) layout();
+    setScreen(screen);                              // the strip's label says whether it is fitted
+    renderFit(); renderOther();
+    if (!$('sheet').hidden) renderModes();
+  }
+  // The bar at the top of the picture: another screen's fit, or a fit that
+  // waits because another screen is watching. Hidden with ✕ until it changes.
+  function renderOther() {
+    // A fit whose screen is away may be this device's own, back from a blip:
+    // give the Mac a moment to say so before showing anything.
+    const settling = F.owner === 'away' && fitPref.on && performance.now() - fitAskAt < 2500;
+    if (settling) { clearTimeout(renderOther._t); renderOther._t = setTimeout(renderOther, 2600); }
+    const el = $('fz-other'), show = !!ws && !otherHidden && !settling && (elsewhere() || (fitBlocked && fitPref.on && F.state === 'off'));
+    if (show) $('fz-other-t').textContent = elsewhere() ? 'The Mac is fitted to another screen' : 'Another screen is watching the Mac';
+    if (el.hidden !== !show) el.hidden = !show;
+  }
+  $('fz-other-take').addEventListener('click', takeFit);
+  $('fz-other-x').addEventListener('click', () => { otherHidden = true; renderOther(); });
+  $('fz-take').addEventListener('click', takeFit);
+  function renderFit() {
+    const on = $('fz-on'), msg = $('fz-msg'), chips = $('fz-text'), other = elsewhere();
+    // Checked = this page has the Mac fitted (or is asking for it) now. After
+    // another screen turned it off, took it over, or an error, it reads off;
+    // switching it on fits the Mac to this screen again.
+    on.checked = fitPref.on && fitAuto && !other && !fitBlocked;
+    on.disabled = !ws;
+    chips.hidden = !on.checked;
+    const kr = $('fz-keep-row'); kr.hidden = !(F.state === 'on' && F.mine); $('fz-keep').checked = !!F.keep; $('fz-keep').disabled = !ws;
+    for (const b of chips.querySelectorAll('[data-fz-text]')) b.setAttribute('aria-checked', b.dataset.fzText === fitPref.text ? 'true' : 'false');
+    $('fz-take-g').hidden = !ws || !(other || (fitBlocked && F.state === 'off'));
+    $('fz-take-m').textContent = other ? 'Takes it over' : '';
+    let t = '', cls = '';
+    if (!ws) t = 'Connect to the Mac to fit it to this screen.';
+    else if (other) t = `The Mac is fitted to another screen${F.state === 'on' && F.w ? ` (${F.w} × ${F.h})` : ''}. You see that screen here, letterboxed; this screen's shape doesn't change it.`;
+    else if (fitBlocked && F.state === 'off') t = 'Another screen is watching the Mac, so it was not re-shaped for this one.';
+    else if (F.state === 'fitting') t = F.op === 'off' ? "Going back to the Mac's own screen…" : F.target ? `Fitting… (${F.target.w} × ${F.target.h})` : 'Fitting…';
+    else if (F.state === 'on') { t = `Fitted: ${F.w} × ${F.h}` + (F.hidpi === false ? ' (standard resolution: softer text)' : ''); cls = 'ok'; }
+    else if (F.state === 'error' && fitPref.on) { t = F.message || "This Mac couldn't create a fitted screen; showing its own screen instead."; cls = 'err'; }
+    else if (fitPref.on && fitOffNote) t = fitOffNote;
+    else if (fitPref.on && fitAuto && fitPending) t = 'Fitting…';
+    else t = "Off. When it's on, the Mac's own display mirrors a screen shaped like this one while you're connected.";
+    msg.textContent = t; msg.className = 'note' + (cls ? ' ' + cls : '');
+    $('fz-sub').textContent = F.state === 'on' && F.mine ? 'Menu bar, Dock and windows fit this screen' : "The Mac takes this screen's shape";
+  }
+  $('fz-keep').addEventListener('change', async (e) => {
+    const r = await soaDisplay.keep(e.target.checked);
+    if (r.ok && typeof r.fitKeep === 'boolean') F.keep = r.fitKeep;
+    $('fz-msg').textContent = !r.ok ? `Couldn't save that (${r.error}).` : F.keep ? 'The fitted screen stays after you leave.' : 'The fitted screen ends 30 seconds after you leave.';
+    $('fz-keep').checked = !!F.keep;
+  });
+  $('fz-on').addEventListener('change', (e) => {
+    if (e.target.checked) { takeFit(); return; }      // by hand: this screen, even if another holds the fit
+    fitPref.on = false; saveFitPref();
+    fitOffNote = ''; fitBlocked = false; fitPending = 0; clearTimeout(fitT); fitT = 0;
+    if (!elsewhere()) send({ t: 'fit', on: false, dev: DEV });   // another screen's fit is not this page's to end
+    layout(); renderFit(); renderOther();
+  });
+  $('fz-text').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-fz-text]'); if (!b || !fitPref.on) return;
+    if (fitPref.text === b.dataset.fzText) return;
+    fitPref.text = b.dataset.fzText; saveFitPref();
+    fitAuto = true; fitOffNote = ''; sendFit(true); renderFit();
+  });
+  $('fz-text').addEventListener('keydown', (e) => {
+    if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key)) return;
+    e.preventDefault();
+    const i = FIT_TEXTS.indexOf(fitPref.text), j = Math.max(0, Math.min(2, i + (/Left|Up/.test(e.key) ? -1 : 1)));
+    const b = $('fz-text').querySelector(`[data-fz-text="${FIT_TEXTS[j]}"]`); b.click(); b.focus();
+  });
+
+  // ── strip toggles ────────────────────────────────────────────────────
+  function syncToggles() {
+    const stack = root.dataset.layout === 'stack';
+    const kbOn = stack ? prefs.stackKb : prefs.ovKb;
+    $('b-keys').setAttribute('aria-pressed', kbOn ? 'true' : 'false');
+    $('b-keys').setAttribute('aria-label', kbOn ? 'Hide keyboard' : 'Show keyboard');
+    $('b-pad').setAttribute('aria-pressed', prefs.ovPad ? 'true' : 'false');
+    $('b-pad').setAttribute('aria-label', prefs.ovPad ? 'Hide trackpad' : 'Show trackpad');
+    $('m-touch').setAttribute('aria-checked', prefs.mode === 'touch' ? 'true' : 'false');
+    $('m-pad').setAttribute('aria-checked', prefs.mode === 'pad' ? 'true' : 'false');
+  }
+  $('b-keys').addEventListener('click', () => {
+    if (root.dataset.layout === 'stack') prefs.stackKb = !prefs.stackKb; else prefs.ovKb = !prefs.ovKb;
+    savePrefs(); layout();
+  });
+  $('b-pad').addEventListener('click', () => { prefs.ovPad = !prefs.ovPad; savePrefs(); layout(); });
+  function setMode(m) {
+    prefs.mode = m; savePrefs(); syncToggles(); drawCursor();
+    showTip(m === 'pad' ? 'Trackpad: the screen only shows. Point with the trackpad.' : 'Touch: tap the screen to click there.');
+  }
+  $('m-touch').addEventListener('click', () => setMode('touch'));
+  $('m-pad').addEventListener('click', () => setMode('pad'));
+  $('m-touch').parentElement.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault(); e.stopPropagation(); const m = prefs.mode === 'touch' ? 'pad' : 'touch'; setMode(m); $(m === 'touch' ? 'm-touch' : 'm-pad').focus();
+    }
+  });
+  $('b-ime').addEventListener('click', () => { if (document.activeElement === kb) kb.blur(); else kb.focus(); });
+  $('b-full').addEventListener('click', () => { const el = document.documentElement; if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document); else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el); });
+  // Strip and keys must not take focus from the field, or the soft keyboard closes mid-shortcut.
+  for (const el of [strip, deck]) el.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
+  $('slow').addEventListener('click', () => { slowHidden = true; $('slow').hidden = true; layout(); });
+
+  // ── tips + the landing mark ──────────────────────────────────────────
+  function showTip(t, ms = 1600) {
+    // A picture this small (landscape, keyboard open) would be mostly tip: the strip and the sheet say it.
+    if (stage.clientHeight && stage.clientHeight < 200 && ms <= 1600 && /^(Fitted|Fitting)/.test(t)) return;
+    tip.textContent = t; tip.classList.add('show'); clearTimeout(showTip._t); showTip._t = setTimeout(() => tip.classList.remove('show'), ms);
+  }
   // The marker shows where an input landed on the Mac, drawn from the Mac
   // point that was sent (not from the finger), so what you see is what the
   // Mac got — before the picture of it can come back over the link.
   const mark = $('mark'); let markT = 0;
-  function macToStage(p) { return { x: view.x + p.x / screen.width * view.nat.w * view.s, y: view.y + p.y / screen.height * view.nat.h * view.s }; }
   function showMark(p, kind, hold) {
     const s = macToStage(p);
     mark.style.left = s.x + 'px'; mark.style.top = s.y + 'px';
@@ -413,10 +1133,74 @@
     clearTimeout(markT); if (!hold) markT = setTimeout(() => mark.classList.remove('on'), 140);
   }
   function hideMark() { clearTimeout(markT); markT = setTimeout(() => mark.classList.remove('on'), 140); }
-  function takeMods() { const l = [...mods]; if (mods.size) { mods.clear(); syncMods(); } return l; }
+
+  // ── the pointer: local copy of the Mac's cursor ──────────────────────
+  // `cur` is where the Mac's pointer is (Mac points), as this page drives it.
+  // The trackpad moves it here first and the Mac follows; {t:'cursor'} asks
+  // the Mac where its pointer really is (someone at the Mac may have moved it).
+  const cur = { x: 864, y: 558, known: false, movedAt: 0 };
+  let curAsk = null, curReq = 0;
+  const curPt = () => ({ x: Math.round(cur.x), y: Math.round(cur.y) });
+  function askCursor(tries = 0) {
+    if (!ws || ws.readyState !== 1) return;
+    curAsk = { req: 'c' + (++curReq), x: cur.x, y: cur.y, at: performance.now(), tries };
+    send({ t: 'cursor', req: curAsk.req });
+  }
+  function onCursor(m) {
+    if (!curAsk || m.req !== curAsk.req) return;
+    // right after connecting the service may not have its pointer helper yet: ask again shortly
+    if (!m.ok || !Number.isFinite(m.x) || !Number.isFinite(m.y)) { const n = curAsk.tries; curAsk = null; if (n < 2) setTimeout(() => { if (!curAsk) askCursor(n + 1); }, 700); return; }
+    // whatever the finger did since asking is added on top of the Mac's answer
+    const nx = m.x + (cur.x - curAsk.x), ny = m.y + (cur.y - curAsk.y);
+    curAsk = null;
+    if (!cur.known || Math.hypot(nx - cur.x, ny - cur.y) > 1.5) { cur.x = clampX(nx); cur.y = clampY(ny); }
+    cur.known = true; drawCursor();
+  }
+  const clampX = (x) => Math.max(0, Math.min(screen.width - 1, x)), clampY = (y) => Math.max(0, Math.min(screen.height - 1, y));
+  function cursorShown() { return cur.known && (prefs.mode === 'pad' || !pad.hidden && (root.dataset.layout === 'stack' || deck.classList.contains('open'))) && view.nat.w > 1; }
+  function drawCursor() {
+    if (!cursorEl) return;
+    const show = cursorShown();
+    // an <svg> has no .hidden property in WebKit: use the attribute
+    if (cursorEl.hasAttribute('hidden') === show) cursorEl.toggleAttribute('hidden', !show);
+    if (!show) return;
+    const s = macToStage(cur);
+    // the Mac's arrow is ~24 pt tall; never draw it smaller than a finger can follow
+    const px = Math.max(17, Math.min(34, 24 / ptPerPx()));
+    cursorEl.style.transform = `translate(${s.x}px, ${s.y}px) scale(${(px / 24).toFixed(3)})`;
+    cursorEl.classList.toggle('drag', dragging);
+  }
+  function setCursor(p) { cur.x = clampX(p.x); cur.y = clampY(p.y); cur.known = true; cur.movedAt = performance.now(); drawCursor(); }
+  // Zoomed in, the view follows the pointer so it never walks off the picture.
+  function follow() {
+    if (view.fitted) return;
+    const s = macToStage(cur), m = 36, sw = stage.clientWidth, sh = stage.clientHeight;
+    let dx = 0, dy = 0;
+    if (s.x < m) dx = m - s.x; else if (s.x > sw - m) dx = sw - m - s.x;
+    if (s.y < m) dy = m - s.y; else if (s.y > sh - m) dy = sh - m - s.y;
+    if (dx || dy) { view.x += dx; view.y += dy; clampView(); apply(); }
+  }
+  // Moves leave at most every 16 ms (40 on the slow path), the last one always.
+  let mvLast = 0, mvT = 0;
+  function queueMove() {
+    const gap = direct() ? 16 : 40, due = mvLast + gap - performance.now();
+    if (due <= 0) sendMoveNow(); else if (!mvT) mvT = setTimeout(sendMoveNow, due);
+  }
+  function sendMoveNow() { clearTimeout(mvT); mvT = 0; mvLast = performance.now(); const p = curPt(); send({ t: 'move', x: p.x, y: p.y }); }
+  function flushMove() { if (mvT) sendMoveNow(); }
+
+  // ── clicks, drags and scrolls (shared by the screen and the trackpad) ──
+  // Armed modifiers are spent by a key or a click; locked ones stay.
+  function takeMods() {
+    const l = [...mods].filter((m) => m !== 'fn');
+    let changed = false;
+    for (const m of [...mods]) if (!locked.has(m)) { mods.delete(m); changed = true; }
+    if (changed) syncMods();
+    return l;
+  }
   // Inputs leave in the order they happened: a tap still waiting to see
   // whether it becomes a double click goes out before anything after it.
-  function sendInput(m) { flushTap(); send(m); }
+  function sendInput(m) { flushTap(); flushMove(); send(m); }
 
   // A tap waits DBL_MS for a second one so a double tap is ONE double click
   // (the Mac sees press-release with clickCount 1 then 2). Sending the first
@@ -424,14 +1208,15 @@
   const DBL_MS = 280;
   let pendingTap = null;
   function flushTap() { const t = pendingTap; if (!t) return; pendingTap = null; clearTimeout(t.timer); clickNow(t.p, 'left', 1, t.mods); }
-  function clickNow(p, button, count, modList) { send({ t: 'click', x: p.x, y: p.y, button, count, mods: modList || [] }); kbReset(); }
+  function clickNow(p, button, count, modList) { flushMove(); send({ t: 'click', x: p.x, y: p.y, button, count, mods: modList || [] }); kbReset(); }
   function tapAt(cx, cy, button, near) {
     if (!inFrame(cx, cy)) return;
     const p = toMac(cx, cy);
+    setCursor(p);
     showMark(p, button);
     if (button !== 'left' || mods.size) { flushTap(); clickNow(p, button, 1, takeMods()); return; }
     const t = pendingTap;
-    if (t && performance.now() - t.at < DBL_MS && Math.hypot(cx - t.cx, cy - t.cy) <= near) {
+    if (t && !t.pad && performance.now() - t.at < DBL_MS && Math.hypot(cx - t.cx, cy - t.cy) <= near) {
       pendingTap = null; clearTimeout(t.timer); clickNow(t.p, 'left', 2, t.mods); return;
     }
     flushTap();
@@ -443,53 +1228,53 @@
   const nearPx = () => Math.min(12, Math.max(8, 12 / ptPerPx()));
   // A finger that rolls a little is still a tap when there was nothing to pan.
   const TAP_SLOP = 20;
-  function rightNextUsed() { if (rightNext) { rightNext = false; $('b-right').setAttribute('aria-pressed', 'false'); } }
 
-  // Drag = press, move with the button held, release. On touch it starts from a
-  // long-press (lifting without moving is still a right-click); with a mouse it
-  // is the ordinary button-held move. The service hands these to its pointer
-  // helper, which needs an Accessibility grant on the Mac — until then the
-  // Mac ignores them and the tip says why, while every other input keeps working.
+  // Drag = press, move with the button held, release. The service hands these
+  // to its pointer helper, which needs an Accessibility grant on the Mac —
+  // until then the Mac ignores them and the tip says why.
   let dragT = 0, dragging = false, dragLast = null;
-  function dragStart(cx, cy) {
-    if (!inFrame(cx, cy)) return false;
-    const p = toMac(cx, cy), btn = rightNext ? 'right' : 'left';
-    sendInput({ t: 'down', x: p.x, y: p.y, button: btn });
-    rightNextUsed();
-    dragging = true; dragT = 0; dragLast = p; showMark(p, btn, true);
+  function dragStartMac(p, btn) {
+    // armed modifiers ride on the press and are held for the whole drag (⇧-drag, ⌥-drag)
+    sendInput({ t: 'down', x: p.x, y: p.y, button: btn, mods: takeMods() });
+    dragging = true; dragT = 0; dragLast = p; showMark(p, btn, true); setCursor(p);
     if (dragPermitted === false) showTip('Drag needs Accessibility for "SoA Pointer" on the Mac (System Settings → Privacy & Security)');
-    else showTip(btn === 'right' ? 'right-drag' : 'drag');
     return true;
   }
-  function dragMove(cx, cy) {
+  function dragMoveMac(p) {
     if (!dragging) return;
-    const p = toMac(cx, cy); showMark(p, 'left', true);
-    const now = performance.now(); if (now - dragT < 40) return; dragT = now;
+    showMark(p, 'left', true);
+    const now = performance.now(); if (now - dragT < (direct() ? 16 : 40)) return; dragT = now;
     dragLast = p; send({ t: 'drag', x: p.x, y: p.y });
   }
-  // Without coordinates it releases at the last drag point (page hidden, socket lost).
-  function dragEnd(cx, cy) {
+  // Without a point it releases at the last drag point (page hidden, socket lost).
+  function dragEndMac(p) {
     if (!dragging) return;
-    dragging = false; hideMark();
-    const p = cx == null ? (dragLast || { x: 0, y: 0 }) : toMac(cx, cy);
-    send({ t: 'up', x: p.x, y: p.y });
+    dragging = false; hideMark(); drawCursor();
+    const q = p || dragLast || { x: 0, y: 0 };
+    send({ t: 'up', x: q.x, y: q.y });
   }
+  function dragStart(cx, cy) { if (!inFrame(cx, cy)) return false; showTip('drag'); return dragStartMac(toMac(cx, cy), 'left'); }
+  function dragMove(cx, cy) { if (dragging) { const p = toMac(cx, cy); setCursor(p); dragMoveMac(p); } }
+  function dragEnd(cx, cy) { dragEndMac(cx == null ? null : toMac(cx, cy)); }
 
-  // Scrolling: two-finger drags and wheel/trackpad deltas add up here and go
-  // out at most every SCROLL_MS, so a trackpad's stream of tiny deltas is one
-  // message per tick instead of one computeruse call each. Units are scroll
-  // lines; a finger travels PT_PER_LINE Mac points per line whatever the
-  // zoom, so the Mac content moves about as far as the finger did.
+  // Scrolling: two-finger drags and wheel deltas add up here and go out at
+  // most every 16 ms (direct) / SCROLL_MS. Units are scroll lines of
+  // PT_PER_LINE Mac points; the direct path sends them as pixels.
   const SCROLL_MS = 33, PT_PER_LINE = 48, WHEEL_PX_PER_LINE = 40;
   const sc = { x: 0, y: 0, at: null, last: 0, timer: 0 };
   function addScroll(lx, ly, at) {             // +y scrolls down, +x right (the Mac's wheel sense)
     sc.x += lx; sc.y += ly; sc.at = at;
-    const due = sc.last + SCROLL_MS - performance.now();
+    const due = sc.last + (direct() ? 16 : SCROLL_MS) - performance.now();
     if (due <= 0) flushScroll(); else if (!sc.timer) sc.timer = setTimeout(flushScroll, due);
   }
   function flushScroll() {
     clearTimeout(sc.timer); sc.timer = 0;
     if (!sc.at) return;
+    if (direct()) {
+      const dx = Math.round(sc.x * PT_PER_LINE), dy = Math.round(sc.y * PT_PER_LINE);
+      if (dx || dy) { sendInput({ t: 'scroll', x: sc.at.x, y: sc.at.y, dx, dy, unit: 'pixel' }); sc.x -= dx / PT_PER_LINE; sc.y -= dy / PT_PER_LINE; sc.last = performance.now(); }
+      return;
+    }
     for (const [axis, pos, neg] of [['y', 'down', 'up'], ['x', 'right', 'left']]) {
       const n = Math.trunc(sc[axis]); if (!n) continue;
       const amount = Math.min(30, Math.abs(n));
@@ -500,27 +1285,54 @@
     if (Math.abs(sc.x) >= 1 || Math.abs(sc.y) >= 1) sc.timer = setTimeout(flushScroll, SCROLL_MS);
   }
   function endScroll() { flushScroll(); clearTimeout(sc.timer); sc.timer = 0; sc.x = 0; sc.y = 0; sc.at = null; }
-  const ptPerPx = () => screen.width / (view.nat.w * view.s);   // Mac points per stage pixel at this zoom
 
+  // ── the screen itself (Touch mode: tap where you touch) ──────────────
+  // In Trackpad mode the screen only shows: one finger pans a zoomed view, a
+  // pinch zooms, a tap puts the pointer there without clicking.
+  const pts = new Map(); let gesture = null, longTimer = null, gesture2 = null;
+  const padMode = () => prefs.mode === 'pad';
+  // Two fingers: a pinch or a scroll? Judged from each finger's own path
+  // since the second landed (gx/gy), not from the first event: a browser
+  // reports the fingers one at a time, so after the first finger's step the
+  // pair looks like it spread by the whole step — a fast side-by-side swipe
+  // read as a pinch. Fingers moving the same way scroll, opposite ways pinch;
+  // until both have moved, wait (unless one moves well while the other is
+  // still: a pinch against an anchored thumb).
+  function twoKind(a, b, d0) {
+    const ax = a.x - a.gx, ay = a.y - a.gy, bx = b.x - b.gx, by = b.y - b.gy;
+    const ma = Math.hypot(ax, ay), mb = Math.hypot(bx, by);
+    const dd = Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - d0), dm = Math.hypot((ax + bx) / 2, (ay + by) / 2);
+    if (Math.max(dd, dm) < 8) return null;
+    if (ma >= 3 && mb >= 3) {
+      const cos = (ax * bx + ay * by) / (ma * mb);
+      if (cos > 0.5) return 'scroll';
+      if (cos < -0.5) return 'pinch';
+    } else if (Math.max(ma, mb) < 24) return null;
+    return dd > dm * 1.3 ? 'pinch' : 'scroll';
+  }
+  const markStart = (m) => { for (const p of m.values()) { p.gx = p.x; p.gy = p.y; } };
   stage.addEventListener('pointerdown', (e) => {
     try { stage.setPointerCapture(e.pointerId); } catch (_) { /* a pointer the browser no longer tracks */ }
-    pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), btn: e.button });
+    stageRect = stage.getBoundingClientRect();
+    const [x, y] = loc(e);
+    pts.set(e.pointerId, { x, y, sx: x, sy: y, t: performance.now(), btn: e.button });
     if (e.pointerType === 'mouse') {
-      if (e.button === 2) tapAt(e.clientX, e.clientY, 'right');
-      else if (e.button === 1) tapAt(e.clientX, e.clientY, 'middle');
+      if (e.button === 2) tapAt(x, y, 'right');
+      else if (e.button === 1) tapAt(x, y, 'middle');
       return;
     }
     if (pts.size === 1) {
       gesture = 'tap';
-      longTimer = setTimeout(() => {
+      if (!padMode()) longTimer = setTimeout(() => {
         gesture = 'long';
         if (navigator.vibrate) navigator.vibrate(12);
-        showTip('move to drag · lift to right-click');
+        showTip('Move to drag, or lift to right-click');
       }, 550);
     } else if (pts.size === 2) {
       clearTimeout(longTimer);
       if (dragging) { const a = [...pts.values()][0]; dragEnd(a.x, a.y); }   // a pinch mid-drag releases the button
       gesture = 'two';
+      markStart(pts);
       const [a, b] = [...pts.values()], cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
       // Undecided until the fingers have moved 10 px: spreading → pinch
       // (local zoom only), travelling together → scroll. It stays that for
@@ -530,38 +1342,39 @@
   });
   stage.addEventListener('pointermove', (e) => {
     const p = pts.get(e.pointerId);
+    const [x, y] = loc(e);
     if (e.pointerType === 'mouse') {
-      if (!p) { if (inFrame(e.clientX, e.clientY) && !pendingTap) throttledMove(e.clientX, e.clientY); return; }
+      if (!p) { if (inFrame(x, y) && !pendingTap) throttledMove(x, y); return; }
       if (p.btn !== 0) return;
-      if (!p.drag && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) p.drag = dragStart(p.sx, p.sy);
-      if (p.drag) dragMove(e.clientX, e.clientY);
+      if (!p.drag && Math.hypot(x - p.sx, y - p.sy) > 6) p.drag = dragStart(p.sx, p.sy);
+      if (p.drag) dragMove(x, y);
       return;
     }
     if (!p) return;
-    p.x = e.clientX; p.y = e.clientY;
+    p.x = x; p.y = y;
     if (pts.size === 1 && (gesture === 'long' || gesture === 'drag')) {
       if (gesture === 'long') {
-        if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) <= 8) return;
+        if (Math.hypot(x - p.sx, y - p.sy) <= 8) return;
         gesture = dragStart(p.sx, p.sy) ? 'drag' : 'done';
       }
-      if (gesture === 'drag') dragMove(e.clientX, e.clientY);
+      if (gesture === 'drag') dragMove(x, y);
     } else if (pts.size === 1 && (gesture === 'tap' || gesture === 'pan')) {
-      const dx = e.clientX - p.sx, dy = e.clientY - p.sy;
+      const dx = x - p.sx, dy = y - p.sy;
       if (Math.hypot(dx, dy) > 8) {
         clearTimeout(longTimer); gesture = 'pan';
         // one finger drags the viewport when zoomed in; at fit it is a no-op
         const ox = view.x, oy = view.y;
-        view.x += e.clientX - (p.lx ?? p.sx); view.y += e.clientY - (p.ly ?? p.sy); clampView(); apply();
+        view.x += x - (p.lx ?? p.sx); view.y += y - (p.ly ?? p.sy); clampView(); apply();
         if (Math.abs(view.x - ox) > 0.5 || Math.abs(view.y - oy) > 0.5) p.panned = true;
       }
-      p.lx = e.clientX; p.ly = e.clientY;
+      p.lx = x; p.ly = y;
     } else if (pts.size === 2 && gesture2) {
       const g = gesture2, [a, b] = [...pts.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y), cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
       if (!g.kind) {
-        const dd = Math.abs(d - g.d), dm = Math.hypot(cx - g.cx, cy - g.cy);
-        if (Math.max(dd, dm) < 10) return;
-        g.kind = dd > dm ? 'pinch' : 'scroll';
+        const k = twoKind(a, b, g.d);
+        if (!k) return;
+        g.kind = k;
         // Off the picture there is nothing to scroll: the Mac would get the
         // nearest edge (its menu bar, say) instead.
         if (g.kind === 'scroll' && !g.onPic) g.kind = 'none';
@@ -579,22 +1392,24 @@
   });
   function endPointer(e) {
     const p = pts.get(e.pointerId); pts.delete(e.pointerId);
+    const [x, y] = loc(e);
     if (e.pointerType === 'mouse') {
-      if (p && p.drag) dragEnd(e.clientX, e.clientY);
-      else if (e.button === 0 && p) tapAt(e.clientX, e.clientY, 'left', 6);
+      if (p && p.drag) dragEnd(x, y);
+      else if (e.button === 0 && p) tapAt(x, y, 'left', 6);
       return;
     }
     clearTimeout(longTimer);
     const slightRoll = gesture === 'pan' && p && !p.panned && pts.size === 0 && Math.hypot(p.x - p.sx, p.y - p.sy) <= TAP_SLOP && performance.now() - p.t < 550;
     if ((gesture === 'tap' || slightRoll) && p) {
-      tapAt(p.sx, p.sy, rightNext ? 'right' : 'left', nearPx()); rightNextUsed();
+      if (padMode()) { if (inFrame(p.sx, p.sy)) { flushTap(); setCursor(toMac(p.sx, p.sy)); sendMoveNow(); } }
+      else tapAt(p.sx, p.sy, 'left', nearPx());
     } else if (gesture === 'long' && p) {
-      tapAt(p.sx, p.sy, 'right'); showTip('right-click'); rightNextUsed();
+      tapAt(p.sx, p.sy, 'right'); showTip('Right-click');
     } else if (dragging) {
-      dragEnd(e.clientX, e.clientY);
+      dragEnd(x, y);
     }
     if (pts.size === 0) {
-      if (gesture2 && gesture2.kind === 'pinch') reportDisplay();
+      if (gesture2 && gesture2.kind === 'pinch') { if (zoomRel() < 1.04) fit(); reportDisplay(); }
       if (gesture2 && gesture2.kind === 'scroll') endScroll();
       gesture = null; gesture2 = null;
     }
@@ -602,22 +1417,326 @@
   stage.addEventListener('pointerup', endPointer);
   stage.addEventListener('pointercancel', (e) => {
     pts.delete(e.pointerId); clearTimeout(longTimer);
-    if (dragging) dragEnd(e.clientX, e.clientY);   // never leave the Mac's button held
+    if (dragging) { const [x, y] = loc(e); dragEnd(x, y); }   // never leave the Mac's button held
     if (!pts.size) { if (gesture2 && gesture2.kind === 'scroll') endScroll(); gesture = null; gesture2 = null; }
   });
-  stage.addEventListener('contextmenu', (e) => e.preventDefault());
-  stage.addEventListener('dblclick', (e) => e.preventDefault());
+  for (const el of [stage, pad]) { el.addEventListener('contextmenu', (e) => e.preventDefault()); el.addEventListener('dblclick', (e) => e.preventDefault()); }
   let moveT = 0;
-  function throttledMove(cx, cy) { const now = performance.now(); if (now - moveT < 40) return; moveT = now; const m = toMac(cx, cy); send({ t: 'move', x: m.x, y: m.y }); }
+  function throttledMove(cx, cy) { const now = performance.now(); if (now - moveT < (direct() ? 16 : 40)) return; moveT = now; const m = toMac(cx, cy); cur.x = m.x; cur.y = m.y; cur.known = true; send({ t: 'move', x: m.x, y: m.y }); }
   stage.addEventListener('wheel', (e) => {
     e.preventDefault();
-    if (e.ctrlKey) { const s = Math.max(0.2, Math.min(6, view.s * (e.deltaY < 0 ? 1.1 : 0.9))); view.x = e.clientX - (e.clientX - view.x) * (s / view.s); view.y = e.clientY - (e.clientY - view.y) * (s / view.s); view.s = s; view.fitted = false; clampView(); apply(); reportDisplay(); return; }
-    if (!inFrame(e.clientX, e.clientY)) return;
+    const [x, y] = loc(e);
+    if (e.ctrlKey) { const s = Math.max(0.2, Math.min(6, view.s * (e.deltaY < 0 ? 1.1 : 0.9))); view.x = x - (x - view.x) * (s / view.s); view.y = y - (y - view.y) * (s / view.s); view.s = s; view.fitted = false; clampView(); apply(); reportDisplay(); return; }
+    if (!inFrame(x, y)) return;
     const unit = e.deltaMode === 1 ? 1 : e.deltaMode === 2 ? 10 : 1 / WHEEL_PX_PER_LINE;
-    addScroll(e.deltaX * unit, e.deltaY * unit, toMac(e.clientX, e.clientY));   // the browser's deltas already carry the OS's scroll direction
+    addScroll(e.deltaX * unit, e.deltaY * unit, toMac(x, y));   // the browser's deltas already carry the OS's scroll direction
   }, { passive: false });
 
-  // ── keyboard ─────────────────────────────────────────────────────────
+  // ── the trackpad ─────────────────────────────────────────────────────
+  // Relative, like the Mac's own: one finger moves the pointer (with
+  // acceleration), tap clicks, two-finger tap right-clicks, double tap double-
+  // clicks, tap-then-drag or press-and-hold drags, two fingers scroll (natural,
+  // with momentum) or pinch the local view, three or four fingers swipe for
+  // Mission Control (up), App Exposé (down) and Spaces (left / right).
+  const TAP_MS = 260, HOLD_MS = 480, PAD_SLOP = 5, SCROLL_GAIN = 1.9;
+  const P = { pts: new Map(), g: null, holdT: 0, mom: 0, vs: 0, contacts: new Map() };
+  const smooth = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+  // Pointer speed: below ~0.05 px/ms it is slower than the finger (precise),
+  // above ~1.4 px/ms over three times faster — a swipe crosses the screen.
+  function padGain(v) { return (screen.width / 1440) * (0.7 + 2.7 * smooth(0.04, 1.4, v)); }
+  function moveCursorBy(dx, dy, dt) {
+    const v = Math.hypot(dx, dy) / Math.max(4, dt);
+    P.vs = P.vs * 0.55 + v * 0.45;
+    const k = padGain(P.vs);
+    if (!cur.known) { cur.known = true; cur.x = screen.width / 2; cur.y = screen.height / 2; }
+    cur.x = clampX(cur.x + dx * k); cur.y = clampY(cur.y + dy * k); cur.movedAt = performance.now();
+    drawCursor(); follow();
+    if (dragging) dragMoveMac(curPt()); else queueMove();
+  }
+  function contact(e, on) {
+    let c = P.contacts.get(e.pointerId);
+    if (!on) { if (c) { c.remove(); P.contacts.delete(e.pointerId); } return; }
+    if (!c) { c = document.createElement('div'); c.className = 'contact'; pad.appendChild(c); P.contacts.set(e.pointerId, c); }
+    const r = pad.getBoundingClientRect();
+    c.style.transform = `translate(${e.clientX - r.left}px, ${e.clientY - r.top}px)`;
+  }
+  function padPulse() { pad.classList.remove('click'); void pad.offsetWidth; pad.classList.add('click'); }
+  function hintGone() { if (prefs.hint) { prefs.hint = false; savePrefs(); $('pad-hint').classList.add('gone'); setTimeout(() => { $('pad-hint').hidden = true; }, 400); } }
+  function padClick(now) {
+    const p = curPt(); showMark(p, 'left'); padPulse();
+    if (now || mods.size) { flushTap(); clickNow(p, 'left', 1, takeMods()); return; }
+    flushTap();
+    pendingTap = { p, cx: p.x, cy: p.y, at: performance.now(), mods: [], pad: true, timer: setTimeout(flushTap, DBL_MS) };
+  }
+  function padRightClick() { const p = curPt(); flushTap(); showMark(p, 'right'); padPulse(); clickNow(p, 'right', 1, takeMods()); }
+  function maybeReconcile() { if (!cur.known || performance.now() - cur.movedAt > 1500) askCursor(); }
+  function centroid() { let x = 0, y = 0; for (const p of P.pts.values()) { x += p.x; y += p.y; } const n = P.pts.size || 1; return { x: x / n, y: y / n }; }
+  const two = () => { const [a, b] = [...P.pts.values()]; return { c: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, d: Math.hypot(a.x - b.x, a.y - b.y) }; };
+  function stopMomentum() { if (P.mom) { cancelAnimationFrame(P.mom); P.mom = 0; endScroll(); } }
+  function startMomentum(samples, at) {
+    const now = performance.now(), recent = samples.filter((s) => now - s.t < 100);
+    if (recent.length < 2) { endScroll(); return; }
+    const span = Math.max(16, now - recent[0].t);
+    let vx = recent.reduce((a, s) => a + s.dx, 0) / span, vy = recent.reduce((a, s) => a + s.dy, 0) / span;   // Mac pt / ms
+    if (Math.hypot(vx, vy) < 0.25) { endScroll(); return; }
+    let last = now;
+    const step = (t) => {
+      const dt = Math.min(40, Math.max(1, t - last)); last = t;
+      const f = Math.exp(-dt / 325);
+      addScroll(vx * dt / PT_PER_LINE, vy * dt / PT_PER_LINE, at);
+      vx *= f; vy *= f;
+      if (Math.hypot(vx, vy) < 0.03) { P.mom = 0; endScroll(); return; }
+      P.mom = requestAnimationFrame(step);
+    };
+    P.mom = requestAnimationFrame(step);
+  }
+  const SWIPE = { up: ['up', 'Mission Control'], down: ['down', 'App Exposé'], left: ['right', 'Next space'], right: ['left', 'Previous space'] };
+  pad.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    try { pad.setPointerCapture(e.pointerId); } catch (_) {}
+    // a touch that stops a coasting scroll only stops it (as on the Mac): no click
+    const stopper = !!P.mom;
+    stopMomentum(); hintGone();
+    const now = performance.now();
+    P.pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, lt: now });
+    if (e.pointerType !== 'mouse') contact(e, true);
+    const n = P.pts.size;
+    if (e.pointerType === 'mouse' && e.button === 2) { padRightClick(); P.g = { kind: 'spent' }; return; }
+    if (n === 1) {
+      maybeReconcile();
+      const second = !!(pendingTap && pendingTap.pad && now - pendingTap.at < DBL_MS);
+      if (second) clearTimeout(pendingTap.timer);   // this touch decides: double click, or the drag of a tap-and-a-half
+      P.g = { kind: 'one', t0: now, moved: false, second, hold: false, stopper };
+      P.holdT = setTimeout(() => {
+        const g = P.g;
+        if (g && g.kind === 'one' && !g.moved) { g.hold = true; pad.classList.add('press'); if (navigator.vibrate) navigator.vibrate(10); }
+      }, HOLD_MS);
+    } else if (n === 2) {
+      clearTimeout(P.holdT); pad.classList.remove('press');
+      if (P.g && P.g.second && pendingTap) flushTap();
+      if (dragging) dragEndMac(curPt());
+      const t = two();
+      markStart(P.pts);
+      P.g = { kind: 'two', t0: now, d0: t.d, c0: t.c, lc: t.c, decided: null, samples: [], s0: view.s, vx: view.x, vy: view.y, anchor: macToStage(cur), at: curPt() };
+    } else {
+      clearTimeout(P.holdT); pad.classList.remove('press');
+      if (dragging) dragEndMac(curPt());
+      if (P.g && P.g.kind === 'two' && P.g.decided === 'scroll') endScroll();
+      P.g = { kind: 'multi', c0: centroid(), decided: false };
+    }
+  });
+  pad.addEventListener('pointermove', (e) => {
+    const p = P.pts.get(e.pointerId); if (!p) return;
+    const now = performance.now(), dx = e.clientX - p.lx, dy = e.clientY - p.ly, dt = now - p.lt;
+    p.lx = p.x = e.clientX; p.ly = p.y = e.clientY; p.lt = now;
+    if (e.pointerType !== 'mouse') contact(e, true);
+    const g = P.g; if (!g) return;
+    if (g.kind === 'one' && P.pts.size === 1) {
+      if (!g.moved) {
+        if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) < (e.pointerType === 'mouse' ? 1 : PAD_SLOP)) return;
+        g.moved = true; clearTimeout(P.holdT);
+        if (g.second || g.hold) {
+          if (g.second) { clearTimeout(pendingTap && pendingTap.timer); pendingTap = null; }   // the tap was the first half of a drag
+          dragStartMac(curPt(), 'left'); drawCursor();
+        }
+      }
+      moveCursorBy(dx, dy, dt);
+    } else if (g.kind === 'two' && P.pts.size === 2) {
+      const t = two();
+      if (!g.decided) {
+        const [a, b] = [...P.pts.values()];
+        const k = twoKind(a, b, g.d0);
+        if (!k) return;
+        g.decided = k; g.lc = g.c0;                  // the way travelled while deciding counts
+        if (g.decided === 'scroll') showMark(g.at, 'left');
+      }
+      if (g.decided === 'scroll') {
+        // natural: the content follows the fingers (fingers up → see what is below)
+        const sx = -(t.c.x - g.lc.x) * SCROLL_GAIN, sy = -(t.c.y - g.lc.y) * SCROLL_GAIN; g.lc = t.c;
+        g.samples.push({ t: now, dx: sx, dy: sy }); while (g.samples.length > 12) g.samples.shift();
+        addScroll(sx / PT_PER_LINE, sy / PT_PER_LINE, g.at);
+      } else {
+        // pinch zooms this page's view about the pointer; the Mac is not told
+        const s = Math.max(0.2, Math.min(6, g.s0 * t.d / g.d0)), ax = g.anchor.x, ay = g.anchor.y;
+        view.x = ax - (ax - g.vx) * (s / g.s0); view.y = ay - (ay - g.vy) * (s / g.s0); view.s = s; view.fitted = false; clampView(); apply();
+      }
+    } else if (g.kind === 'multi' && !g.decided) {
+      const c = centroid(), mx = c.x - g.c0.x, my = c.y - g.c0.y;
+      if (Math.hypot(mx, my) < 36) return;
+      g.decided = true;
+      const dir = Math.abs(my) > Math.abs(mx) ? (my < 0 ? 'up' : 'down') : (mx < 0 ? 'left' : 'right');
+      const [key, label] = SWIPE[dir];
+      sendInput({ t: 'key', key, mods: ['control'] }); showTip(label);
+    }
+  });
+  function padUp(e, cancelled) {
+    const had = P.pts.delete(e.pointerId); contact(e, false);
+    if (!had) return;
+    const g = P.g, now = performance.now();
+    if (!g) return;
+    if (g.kind === 'one') {
+      clearTimeout(P.holdT); pad.classList.remove('press');
+      if (dragging) dragEndMac(curPt());
+      else if (!cancelled && !g.moved && !g.stopper) {
+        if (g.second && pendingTap) { const t = pendingTap; pendingTap = null; clearTimeout(t.timer); showMark(t.p, 'left'); padPulse(); clickNow(t.p, 'left', 2, t.mods); }
+        else if (g.hold) padClick(true);
+        // any lift that did not move is a click — a slow tap (TAP_MS..HOLD_MS)
+        // used to send nothing at all
+        else padClick(now - g.t0 >= TAP_MS);
+      } else if (g.second && pendingTap) flushTap();
+      P.g = null;
+    } else if (g.kind === 'two') {
+      if (!cancelled && !g.decided && now - g.t0 < 700) padRightClick();
+      else if (g.decided === 'scroll') { if (!cancelled && !reduced.matches) startMomentum(g.samples, g.at); else endScroll(); }
+      else if (g.decided === 'pinch') { if (zoomRel() < 1.04) fit(); reportDisplay(); }
+      P.g = P.pts.size ? { kind: 'spent' } : null;
+    } else if (!P.pts.size) P.g = null;
+  }
+  pad.addEventListener('pointerup', (e) => padUp(e, false));
+  pad.addEventListener('pointercancel', (e) => padUp(e, true));
+  // A page hidden or a socket lost mid-gesture: nothing stays held.
+  function padReset() {
+    clearTimeout(P.holdT); stopMomentum(); pad.classList.remove('press');
+    for (const c of P.contacts.values()) c.remove();
+    P.contacts.clear(); P.pts.clear(); P.g = null;
+  }
+
+  // ── the keyboard ─────────────────────────────────────────────────────
+  // US ANSI MacBook layout. Letters and symbols are typed as text (so the
+  // Mac's own layout cannot turn them into something else); with ⌘ ⌃ or ⌥
+  // armed a key is a shortcut and goes as a key press with those modifiers.
+  const SHIFTED = { '`': '~', 1: '!', 2: '@', 3: '#', 4: '$', 5: '%', 6: '^', 7: '&', 8: '*', 9: '(', 0: ')', '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"', ',': '<', '.': '>', '/': '?' };
+  const FN_KEYS = { delete: 'forwarddelete', up: 'pageup', down: 'pagedown', left: 'home', right: 'end' };
+  const MOD_SYM = { cmd: '⌘', option: '⌥', control: '⌃', shift: '⇧', fn: '' };
+  const MOD_WORD = { cmd: 'command', option: 'option', control: 'control', shift: 'shift', fn: 'fn' };
+  const GLOBE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M1.8 8h12.4M8 1.8c-3.2 3.4-3.2 9 0 12.4M8 1.8c3.2 3.4 3.2 9 0 12.4"/></svg>';
+  const ch = (c) => ({ c });
+  const LAYOUT = [
+    { fn: true, keys: [{ k: 'escape', label: 'esc', w: 1.5, cls: 'fk wl' }, ...Array.from({ length: 12 }, (_, i) => ({ k: 'f' + (i + 1), label: 'F' + (i + 1), w: 13 / 12, cls: 'fk' }))] },
+    { keys: [...'`1234567890-='].map(ch), tail: { k: 'delete', label: 'delete', w: 1.5, cls: 'wr', rep: true } },
+    { head: { k: 'tab', label: 'tab', w: 1.5, cls: 'wl' }, keys: [...'qwertyuiop[]\\'].map(ch) },
+    { head: { caps: true, label: 'caps lock', w: 1.75, cls: 'wl' }, keys: [...'asdfghjkl;\''].map(ch), tail: { k: 'return', label: 'return', w: 1.75, cls: 'wr' } },
+    { head: { mod: 'shift', w: 2.25, cls: 'wl' }, keys: [...'zxcvbnm,./'].map(ch), tail: { mod: 'shift', w: 2.25, cls: 'wr' } },
+    { bottom: true },
+  ];
+  function keyEl(d) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.tabIndex = -1; b.className = 'k';
+    b.style.setProperty('--w', d.w || 1);
+    if (d.c != null) {
+      const c = d.c, sh = SHIFTED[c], letter = /[a-z]/.test(c);
+      b.classList.add('ch'); b.dataset.ch = c; b.dataset.pop = letter ? c.toUpperCase() : c;
+      if (sh) { b.classList.add('two'); b.innerHTML = `<span class="sh">${esc(sh)}</span><span class="main">${esc(c)}</span>`; }
+      else b.textContent = letter ? c.toUpperCase() : c;
+      b.setAttribute('aria-label', letter ? c : c);
+    } else if (d.mod) {
+      const m = d.mod, right = /wr|mr/.test(d.cls || '');
+      b.classList.add('mod', ...(d.cls || '').split(' ').filter(Boolean)); b.dataset.mod = m;
+      if (!/w[lr]/.test(d.cls || '')) b.classList.add(right ? 'mr' : 'ml');
+      b.innerHTML = m === 'fn' ? `<span class="wd" style="left:12%;right:auto">fn</span><span class="sy" style="right:12%;top:auto;bottom:14%">${GLOBE}</span><span class="led"></span>`
+        : m === 'shift' ? `<span class="wd">shift</span><span class="sy" style="${right ? 'right:12%' : 'left:12%'}">⇧</span><span class="led"></span>`
+        : `<span class="sy">${MOD_SYM[m]}</span><span class="wd">${MOD_WORD[m]}</span><span class="led"></span>`;
+      b.setAttribute('aria-label', MOD_WORD[m] === 'fn' ? 'function' : MOD_WORD[m]);
+      b.setAttribute('aria-pressed', 'false');
+    } else if (d.caps) {
+      b.classList.add('wl'); b.dataset.caps = '1';
+      b.innerHTML = '<span class="led"></span><span class="wd">caps<span class="cl"> lock</span></span>';
+      b.setAttribute('aria-label', 'caps lock'); b.setAttribute('aria-pressed', 'false');
+    } else {
+      b.dataset.key = d.k; if (d.rep) b.dataset.rep = '1';
+      if (d.cls) b.classList.add(...d.cls.split(' '));
+      if (/w[lr]/.test(d.cls || '')) b.innerHTML = `<span class="wd">${esc(d.label)}</span>`;
+      else b.textContent = d.label || '';
+      b.setAttribute('aria-label', d.label || d.k);
+    }
+    return b;
+  }
+  function buildKeyboard() {
+    keyboard.textContent = '';
+    for (const r of LAYOUT) {
+      const row = document.createElement('div'); row.className = 'row' + (r.fn ? ' fnrow' : '');
+      if (r.bottom) {
+        for (const d of [{ mod: 'fn', w: 1 }, { mod: 'control', w: 1 }, { mod: 'option', w: 1 }, { mod: 'cmd', w: 1.25 }]) row.appendChild(keyEl(d));
+        const sp = keyEl({ k: 'space', label: '', w: 5 }); sp.setAttribute('aria-label', 'space'); row.appendChild(sp);
+        for (const d of [{ mod: 'cmd', w: 1.25, cls: 'mr' }, { mod: 'option', w: 1, cls: 'mr' }]) row.appendChild(keyEl(d));
+        const ar = document.createElement('div'); ar.className = 'arrows';
+        for (const [k, cls, sym, lbl] of [['up', 'up', '▲', 'up arrow'], ['left', 'lt', '◀', 'left arrow'], ['down', 'dn', '▼', 'down arrow'], ['right', 'rt', '▶', 'right arrow']]) {
+          const b = keyEl({ k, label: sym, rep: true }); b.classList.add(cls); b.setAttribute('aria-label', lbl); ar.appendChild(b);
+        }
+        row.appendChild(ar);
+      } else {
+        if (r.head) row.appendChild(keyEl(r.head));
+        for (const d of r.keys) row.appendChild(keyEl(d));
+        if (r.tail) row.appendChild(keyEl(r.tail));
+      }
+      keyboard.appendChild(row);
+    }
+  }
+  buildKeyboard();
+  function syncMods() {
+    for (const b of keyboard.querySelectorAll('[data-mod]')) {
+      const m = b.dataset.mod, on = mods.has(m), lk = locked.has(m);
+      b.classList.toggle('armed', on && !lk); b.classList.toggle('locked', lk);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.setAttribute('aria-label', (m === 'fn' ? 'function' : MOD_WORD[m]) + (lk ? ', locked' : on ? ', armed' : ''));
+    }
+    for (const b of keyboard.querySelectorAll('[data-caps]')) { b.classList.toggle('caps-on', caps); b.setAttribute('aria-pressed', caps ? 'true' : 'false'); }
+  }
+  // One tap arms a modifier for the next key or click, a quick second tap
+  // locks it (its light comes on), a tap on a locked one releases it.
+  const modTapAt = {};
+  function modTap(m) {
+    const now = performance.now(), last = modTapAt[m] || 0; modTapAt[m] = now;
+    if (locked.has(m)) { locked.delete(m); mods.delete(m); }
+    else if (mods.has(m)) { if (now - last < 400) locked.add(m); else mods.delete(m); }
+    else mods.add(m);
+    syncMods();
+  }
+  const COMBO = ['cmd', 'control', 'option'];
+  function deckChar(c) {
+    const letter = /[a-z]/.test(c);
+    if (COMBO.some((m) => mods.has(m))) { sendInput({ t: 'key', key: c, mods: takeMods() }); kbReset(); return; }
+    const shift = mods.has('shift');
+    let out = shift ? (SHIFTED[c] || c.toUpperCase()) : c;
+    if (caps && letter) out = c.toUpperCase();
+    takeMods();
+    sendInput({ t: 'type', text: out }); kbReset();
+  }
+  function deckKey(name) {
+    let key = name;
+    if (mods.has('fn') && FN_KEYS[name]) key = FN_KEYS[name];
+    if (key === 'space' && !COMBO.some((m) => mods.has(m))) { takeMods(); sendInput({ t: 'type', text: ' ' }); kbReset(); return null; }
+    const m = { t: 'key', key, mods: takeMods() };
+    sendInput(m); kbReset();
+    return m;                                       // what a held key repeats
+  }
+  function pressKey(b) {
+    if (b.dataset.mod) return modTap(b.dataset.mod);
+    if (b.dataset.caps) { caps = !caps; syncMods(); return; }
+    if (b.dataset.ch != null) return deckChar(b.dataset.ch);
+    if (b.dataset.key) return deckKey(b.dataset.key);
+  }
+  // Keys fire on press (no wait for the lift), delete and the arrows repeat
+  // while held, as they do on the Mac.
+  let rep = { t: 0, i: 0, b: null };
+  function stopRepeat() { clearTimeout(rep.t); clearInterval(rep.i); if (rep.b) rep.b.classList.remove('down'); rep = { t: 0, i: 0, b: null }; }
+  keyboard.addEventListener('pointerdown', (e) => {
+    const b = e.target.closest('.k'); if (!b) return;
+    e.preventDefault();
+    stopRepeat();
+    try { b.setPointerCapture(e.pointerId); } catch (_) {}
+    b.classList.add('down'); rep.b = b;
+    const sent = pressKey(b);
+    // The repeat is the press, again: same key, same modifiers. (Pressing it
+    // anew would find the one-shot modifier already spent: fn+delete would
+    // repeat as plain delete, ⇧→ would collapse the selection it extends.)
+    if (b.dataset.rep) rep.t = setTimeout(() => { rep.i = setInterval(() => { if (sent) sendInput({ ...sent, mods: [...sent.mods] }); else pressKey(b); }, 70); }, 420);
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) keyboard.addEventListener(ev, () => stopRepeat());
+  // keyboard activation (Enter/Space on a focused key) comes as a click with detail 0
+  keyboard.addEventListener('click', (e) => { const b = e.target.closest('.k'); if (b && e.detail === 0) pressKey(b); });
+
+  // ── the system keyboard field (iOS autocorrect, dictation, IME) ──────
   // The hidden field keeps what was typed since the Mac's caret last moved,
   // after a zero-width sentinel (so Backspace on an "empty" field is still an
   // edit to see). Each edit is diffed against what was already sent: an
@@ -634,33 +1753,33 @@
     if (kb.value !== SENT) kb.value = SENT;
     try { kb.setSelectionRange(1, 1); } catch (_) {}
   }
-  function syncMods() { for (const [id, m] of [['m-cmd', 'cmd'], ['m-shift', 'shift'], ['m-opt', 'option'], ['m-ctrl', 'control']]) $(id).setAttribute('aria-pressed', mods.has(m) ? 'true' : 'false'); }
-  for (const [id, m] of [['m-cmd', 'cmd'], ['m-shift', 'shift'], ['m-opt', 'option'], ['m-ctrl', 'control']]) {
-    $(id).addEventListener('click', () => { if (mods.has(m)) mods.delete(m); else mods.add(m); syncMods(); });
-  }
-  // A key or shortcut; the bar's armed modifiers join the hardware ones and are spent.
+  // A key or shortcut; the deck's armed modifiers join the hardware ones and are spent.
   function sendKey(key, extra) {
     const list = [...new Set([...takeMods(), ...(extra || [])])];
     sendInput({ t: 'key', key, mods: list });
   }
   function kbSync() {
     if (composing) return;
-    const v = kb.value, hasSent = v.startsWith(SENT), cur = (hasSent ? v.slice(1) : v).replace(/​/g, '');
-    if (hasSent && cur === kbSent) return;
-    const a = graphemes(kbSent), b = graphemes(cur);
+    const v = kb.value, hasSent = v.startsWith(SENT), cur2 = (hasSent ? v.slice(1) : v).replace(/​/g, '');
+    if (hasSent && cur2 === kbSent) return;
+    const a = graphemes(kbSent), b = graphemes(cur2);
     let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
-    const dels = a.length - i + (!hasSent && !cur && !a.length ? 1 : 0), ins = b.slice(i).join('');
-    if (mods.size) {                                 // ⌘/⌃/⌥ armed on the bar: a typed character is a shortcut
+    const dels = a.length - i + (!hasSent && !cur2 && !a.length ? 1 : 0), ins = b.slice(i).join('');
+    // ⌘/⌃/⌥ armed on the deck: a typed character is a shortcut. Not a
+    // replacement (dels > 0: autocorrect, a prediction): that is an edit of
+    // text already sent, and with ⌘ armed its Delete would be ⌘Delete,
+    // which wipes the line on the Mac. It goes as plain text; ⌘ stays armed.
+    if (COMBO.some((m) => mods.has(m)) && !dels && ins) {
       for (let k = 0; k < dels; k++) sendKey('delete');
-      for (const ch of b.slice(i)) sendKey(ch.length === 1 ? ch.toLowerCase() : ch, ch !== ch.toLowerCase() ? ['shift'] : []);
+      for (const c of b.slice(i)) sendKey(c.length === 1 ? c.toLowerCase() : c, c !== c.toLowerCase() ? ['shift'] : []);
       kbReset(); return;
     }
     for (let k = 0; k < Math.min(dels, 400); k++) sendInput({ t: 'key', key: 'delete', mods: [] });
     if (ins) sendInput({ t: 'type', text: ins });
-    kbSent = cur;
+    kbSent = cur2;
     if (!hasSent || b.length > 64) kbReset();
   }
-  kb.addEventListener('input', (e) => { if (!e.isComposing) kbSync(); });
+  kb.addEventListener('input', (e) => { if (!$('sheet').hidden) { kbReset(); return; } if (!e.isComposing) kbSync(); });
   kb.addEventListener('compositionstart', () => { composing = true; });
   kb.addEventListener('compositionend', () => { composing = false; setTimeout(kbSync, 0); });
   kb.addEventListener('focus', kbReset);
@@ -691,42 +1810,155 @@
     if (e.metaKey || e.ctrlKey) { const k = comboKey(e); if (k) { e.preventDefault(); sendKey(k, hw); kbReset(); } return; }
     if (!inField && e.key && e.key.length === 1) {           // typed while the field was not focused
       e.preventDefault();
-      if (mods.size) { sendKey(e.key.toLowerCase(), e.key !== e.key.toLowerCase() ? ['shift'] : []); return; }
+      if (COMBO.some((m) => mods.has(m))) { sendKey(e.key.toLowerCase(), e.key !== e.key.toLowerCase() ? ['shift'] : []); return; }
+      takeMods();
       sendInput({ t: 'type', text: e.key }); kbSent += e.key; kb.value = SENT + kbSent;
     }
   }
   function kbDropLast() { const g = graphemes(kbSent); g.pop(); kbSent = g.join(''); kb.value = SENT + kbSent; }
-  kb.addEventListener('keydown', (e) => onKeyDown(e, true));
-  for (const b of bar.querySelectorAll('[data-key]')) b.addEventListener('click', () => {
-    const k = b.dataset.key, plain = !mods.size;
-    sendKey(k);
-    if (k === 'delete' && plain) kbDropLast(); else kbReset();
+  // While the sheet is open no key reaches the Mac; Escape closes it.
+  kb.addEventListener('keydown', (e) => {
+    if (!$('sheet').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSheet(); } else e.preventDefault(); return; }
+    if (e.ctrlKey && e.key === 'F2') { e.preventDefault(); $('b-conn').focus(); return; }   // see the document handler
+    onKeyDown(e, true);
   });
-  // Bar buttons must not take focus from the field, or the soft keyboard closes mid-shortcut.
-  bar.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
-  $('b-right').addEventListener('click', () => { rightNext = !rightNext; $('b-right').setAttribute('aria-pressed', rightNext ? 'true' : 'false'); });
-  $('b-kb').addEventListener('click', () => { if (document.activeElement === kb) kb.blur(); else kb.focus(); });
   // Hardware keyboard on a laptop/iPad: keep the hidden field focused so keys flow.
-  stage.addEventListener('pointerup', () => { if (!isCoarse && document.activeElement !== kb) kb.focus({ preventScroll: true }); });
+  stage.addEventListener('pointerup', () => { if (!touchFirst && document.activeElement !== kb) kb.focus({ preventScroll: true }); });
   document.addEventListener('keydown', (e) => {
-    if (e.target === kb || (e.target.closest && e.target.closest('select'))) return;
-    if (e.target.closest && e.target.closest('#bar') && (e.key === 'Enter' || e.key === ' ')) return;   // activating a bar button
+    if (!$('sheet').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSheet(); } return; }   // the sheet owns the keyboard while open
+    if (e.target === kb) return;
+    // ⌃F2 (the Mac's own "focus the menu bar"): reach the controls from the keyboard
+    if (e.ctrlKey && e.key === 'F2') { e.preventDefault(); $('b-conn').focus(); return; }
+    const t = e.target;
+    if (t.closest && t.closest('#strip, #keyboard') && (e.key === 'Enter' || e.key === ' ' || e.key === 'Tab')) return;   // activating or moving between controls
+    if (t.closest && t.closest('.seg') && /^Arrow/.test(e.key)) return;
     onKeyDown(e, false);
     kb.focus({ preventScroll: true });
   });
 
-  // ── bar / quality / fullscreen ───────────────────────────────────────
+  // ── display & connection sheet ───────────────────────────────────────
   const QUAL = { low: { fps: 6, width: 960, q: 9 }, med: { fps: 10, width: 1280, q: 6 }, high: { fps: 15, width: 1728, q: 4 } };
-  // Auto: the link decides. A quick tunnel from a home Mac carries ~2-3 fps of
-  // the medium preset, so the viewer watches the frame rate it actually gets
-  // and steps down when it is starved (3 s under half the request), then
-  // tries a step up only after a long healthy stretch, backing off further
+  const STREAM_OPTS = [['auto', 'Auto', 'Sized for this screen'], ['1440', '1440p', ''], ['1080', '1080p', ''], ['720', '720p', 'Lightest video']];
+  const COMPAT_OPTS = [['low', 'Low'], ['med', 'Medium'], ['high', 'High']];
+  let sheetFrom = null;
+  function renderQuality() {
+    const v = $('q').value;
+    $('g-stream').innerHTML = STREAM_OPTS.map(([id, name, meta]) => `<button class="opt" role="radio" data-q="${id}" aria-checked="${v === id}"><span>${name}${meta ? ` <span class="meta">${meta}</span>` : ''}</span><span class="check" aria-hidden="true">${v === id ? '✓' : ''}</span></button>`).join('');
+    $('g-compat').innerHTML = '<span class="cap" id="cap-compat">Compatibility (still pictures)</span>' + COMPAT_OPTS.map(([id, name]) => `<button role="radio" data-q="${id}" aria-checked="${v === id}" aria-describedby="cap-compat">${name}</button>`).join('');
+  }
+  $('sheet').addEventListener('click', (e) => {
+    const q = e.target.closest('[data-q]');
+    if (q) { $('q').value = q.dataset.q; $('q').dispatchEvent(new Event('change')); renderQuality(); renderStats(); return; }
+    const d = e.target.closest('[data-mode-id]');
+    if (d) setMacMode(d.dataset.modeId);
+  });
+  // While the sheet is open everything behind it is inert: nothing there can
+  // take focus or a key, so a key typed into the sheet never reaches the Mac.
+  const BEHIND = ['strip', 'deck', 'stage', 'slow', 'kb', 'overlay'];
+  function setBehind(on) { for (const id of BEHIND) { const el = $(id); if (on) el.setAttribute('inert', ''); else el.removeAttribute('inert'); } }
+  function openSheet(from, focusId) {
+    sheetFrom = from;
+    if (document.activeElement === kb) kb.blur();
+    setBehind(true);
+    $('sheet').hidden = false;
+    renderQuality(); renderStats(); renderFit(); loadModes();
+    const el = focusId && $(focusId);
+    setTimeout(() => { (el || $('sheet-x')).focus({ preventScroll: !el }); if (el) el.scrollIntoView({ block: 'start' }); }, 30);
+  }
+  function closeSheet() { setBehind(false); $('sheet').hidden = true; if (sheetFrom) sheetFrom.focus({ preventScroll: true }); sheetFrom = null; }
+  $('b-conn').addEventListener('click', (e) => openSheet(e.currentTarget, 'h-stream'));
+  $('b-res').addEventListener('click', (e) => openSheet(e.currentTarget, 'h-mac'));
+  $('sheet-x').addEventListener('click', closeSheet);
+  $('sheet-scrim').addEventListener('click', closeSheet);
+  // focus stays inside the open sheet
+  $('sheet').addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const f = [...$('sheet').querySelectorAll('button:not([disabled]):not([hidden]), input:not([disabled])')].filter((x) => x.offsetParent);
+    if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+  });
+  $('b-fit').addEventListener('click', () => { fit(); reportDisplay(); closeSheet(); });
+
+  // Mac resolution: the list comes from the Mac each time the sheet opens.
+  const D = { modes: [], current: null, match: null, original: null, keep: false, busy: false, all: false, msg: '', err: false };
+  const modeName = (m) => (m ? `${m.width} × ${m.height}` : '');
+  const idName = (id) => { const r = /^(\d+)x(\d+)/.exec(id || ''); return r ? `${r[1]} × ${r[2]}` : id || ''; };
+  async function loadModes() {
+    if (!ws) { D.msg = 'Connect to the Mac to change its resolution.'; D.err = false; renderModes(); return; }
+    D.msg = D.modes.length ? D.msg : 'Asking the Mac for its resolutions…'; renderModes();
+    const r = await soaDisplay.list();
+    if (!r.ok) { D.msg = r.error === 'timeout' ? 'The Mac did not answer. Try again.' : `Couldn't read the Mac's resolutions (${r.error}).`; D.err = true; renderModes(); return; }
+    Object.assign(D, { modes: r.modes || [], current: r.current, match: r.match, original: r.original, keep: !!r.keep, busy: !!r.busy, msg: r.dry ? 'Test mode: changes are only simulated.' : '', err: false });
+    if (typeof r.fitKeep === 'boolean') F.keep = r.fitKeep;
+    renderModes();
+  }
+  function renderModes() {
+    const cur0 = D.current, fitted = F.state === 'on' || F.state === 'fitting';
+    const list = D.modes.filter((m) => D.all || m.hidpi || m.id === cur0);
+    $('d-list').innerHTML = list.map((m) => {
+      const meta = [m.default && 'Default', m.native && !m.hidpi && 'Native', !m.hidpi && 'Low resolution'].filter(Boolean).join(', ');
+      const on = m.id === cur0;
+      return `<button class="opt" role="radio" data-mode-id="${esc(m.id)}" aria-checked="${on}"${D.busy || fitted ? ' disabled' : ''}><span>${modeName(m)}${meta ? ` <span class="meta">${meta}</span>` : ''}</span><span class="check" aria-hidden="true">${on ? '✓' : ''}</span></button>`;
+    }).join('');
+    const lowN = D.modes.filter((m) => !m.hidpi && m.id !== cur0).length;
+    $('d-all').hidden = !lowN; $('d-all').textContent = D.all ? 'Hide low resolution modes' : `Show low resolution modes (${lowN})`;
+    const mt = D.match;
+    $('d-match').disabled = !mt || mt.id === cur0 || D.busy || fitted;
+    $('d-match-m').textContent = mt ? (mt.id === cur0 ? 'In use' : idName(mt.id) + (mt.readable === false ? ', still small' : '')) : '';
+    $('d-restore').hidden = !D.original;
+    $('d-restore-m').textContent = D.original ? idName(D.original) : '';
+    $('d-keep').disabled = !D.original || D.busy || fitted; $('d-keep').checked = !!D.keep;
+    const msg = $('d-msg'); msg.textContent = fitted && !D.err ? (F.mine === false ? 'While the Mac is fitted to another screen, its own resolutions wait.' : 'While the Mac is fitted to this screen, its own resolutions wait. Turn off Fit to choose one.') : D.msg; msg.classList.toggle('err', D.err);
+  }
+  async function setMacMode(id) {
+    if (D.busy) return;
+    D.busy = true; D.err = false;
+    D.msg = id === 'original' ? 'Restoring…' : `Changing to ${id === 'match' ? idName(D.match && D.match.id) : idName(id)}…`;
+    renderModes();
+    const r = await soaDisplay.set(id);
+    D.busy = false;
+    if (!r.ok) {
+      D.err = true;
+      D.msg = r.error === 'busy' ? 'Another change is still running. Try again in a moment.' : r.error === 'fitted' ? 'Turn off “Fit the Mac to this screen” first.' : r.error === 'timeout' ? 'The Mac did not answer. Try again.' : `Couldn't change the resolution (${r.error}).`;
+    } else {
+      D.current = r.mode ? r.mode.id : D.current; D.original = r.original; D.keep = !!r.keep;
+      D.msg = r.dry ? `Test mode: would change to ${modeName(r.mode)}.` : r.applied ? `Now ${modeName(r.mode)}.` : 'No change needed.';
+    }
+    renderModes();
+  }
+  $('d-match').addEventListener('click', () => setMacMode('match'));
+  $('d-restore').addEventListener('click', () => setMacMode('original'));
+  $('d-all').addEventListener('click', () => { D.all = !D.all; renderModes(); });
+  $('d-keep').addEventListener('change', async (e) => {
+    const want = e.target.checked; D.busy = true; renderModes();
+    const r = await soaDisplay.keep(want);
+    D.busy = false;
+    if (r.ok) {
+      D.keep = !!r.keep; if (typeof r.fitKeep === 'boolean') F.keep = r.fitKeep;
+      D.msg = D.keep ? 'This resolution stays after you leave.' : 'The Mac goes back when you leave.'; D.err = false;
+    }
+    else { D.err = true; D.msg = `Couldn't save that (${r.error}).`; }
+    renderModes();
+  });
+  // another viewer (or the restore) changed it: keep this sheet honest
+  window.addEventListener('soa-display', (e) => {
+    const m = e.detail;
+    if (m.t !== 'displayMode' || !m.ok || m.req) return;
+    if (m.mode && m.applied) D.current = m.mode.id;
+    D.original = m.original; D.keep = !!m.keep; if (typeof m.fitKeep === 'boolean') F.keep = m.fitKeep;
+    if (!$('sheet').hidden) renderModes();
+  });
+
+  // ── quality ──────────────────────────────────────────────────────────
+  // Auto: the link decides. In video mode the menu picks the encode size
+  // (Auto: from this screen) and the service adapts the bitrate; the JPEG
+  // levels apply only to the Compatibility stream (chosen, or forced by a
+  // browser without H.264): it steps down when starved (3 s under half the
+  // request) and up only after a long healthy stretch, backing off further
   // each time an upgrade has to be undone — so it settles, never oscillates.
   const LEVELS = ['low', 'med', 'high'];
   let autoLevel = 'med', starved = 0, healthy = 0, upWait = 30, lastUp = null;
-  // In video mode the menu picks the encode size (Auto: from this screen)
-  // and the service adapts the bitrate; the JPEG levels apply only to the
-  // Compatibility stream (chosen, or forced by a browser without H.264).
   function level() { const v = $('q').value; return QUAL[v] ? v : autoLevel; }
   function wantMode() { return !QUAL[$('q').value] && h264ok && !videoBroken ? 'h264' : 'jpeg'; }
   function applyQuality() {
@@ -749,43 +1981,28 @@
   $('q').addEventListener('change', () => { starved = 0; healthy = 0; applyQuality(); });
   try { const saved = localStorage.getItem('soa-desktop-remote:q'); if (saved && [...$('q').options].some((o) => o.value === saved)) $('q').value = saved; } catch (_) {}
   $('q').addEventListener('change', () => { try { localStorage.setItem('soa-desktop-remote:q', $('q').value); } catch (_) {} });
-  $('b-fit').addEventListener('click', () => { fit(); reportDisplay(); });
-  $('b-full').addEventListener('click', () => { const el = document.documentElement; if (document.fullscreenElement) document.exitFullscreen?.(); else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el); });
-  // The picture lives above the bar: the stage ends where the bar begins, so
-  // every Mac row (the Dock included) can be seen and tapped with the bar up.
-  function layoutStage() {
-    const h = bar.classList.contains('hidden') ? 0 : Math.ceil(bar.getBoundingClientRect().height);
-    if (stage.style.bottom !== h + 'px') { stage.style.bottom = h + 'px'; onResize(); }
-  }
-  $('b-hide').addEventListener('click', () => { bar.classList.add('hidden'); $('handle').classList.add('show'); layoutStage(); });
-  $('handle').addEventListener('click', () => { bar.classList.remove('hidden'); $('handle').classList.remove('show'); layoutStage(); });
-  // A rotation keeps the picture fitted, or (zoomed in) keeps the same Mac
-  // point at the middle of the screen. iOS can report the old size in the
-  // first resize event, so it is settled again a moment later.
-  let stageW = stage.clientWidth, stageH = stage.clientHeight;
-  function onResize() {
-    const sw = stage.clientWidth, sh = stage.clientHeight;
-    if (sw === stageW && sh === stageH) return;
-    if (view.fitted) fit();
-    else { view.x += (sw - stageW) / 2; view.y += (sh - stageH) / 2; clampView(); apply(); }
-    stageW = sw; stageH = sh; reportDisplay();
-  }
-  window.addEventListener('resize', () => { layoutStage(); onResize(); setTimeout(() => { layoutStage(); onResize(); }, 250); });
-  if (window.ResizeObserver) { new ResizeObserver(() => layoutStage()).observe(bar); new ResizeObserver(() => onResize()).observe(stage); }
-  layoutStage();
+
+  // ── page lifecycle ───────────────────────────────────────────────────
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       // Hidden: nothing streams. A tap still waiting out the double-tap
       // window and a held button go first (close() flushes what was sent).
-      clearTimeout(retryT); retryT = 0; sockGen++;
+      clearTimeout(retryT); retryT = 0; sockGen++; stopRepeat();
       if (ws) {
-        flushTap(); if (dragging) dragEnd(); endScroll();
+        flushTap(); flushMove(); if (dragging) dragEndMac(null); padReset(); endScroll();
         const s = ws; ws = null; dragging = false; vReset();
         try { s.close(); } catch (_) {}
         overlay.hidden = false; ovmsg.textContent = 'Paused while this page is hidden.';
       }
     } else if (!ws) { backoff = 1000; connect(); }
   });
+  window.__soaDeck = () => ({ fit: { pref: { ...fitPref }, state: F.state, w: F.w, h: F.h, area: lay.area, pending: !!fitPending, auto: fitAuto, mine: F.mine, owner: F.owner, elsewhere: elsewhere(), blocked: fitBlocked }, stage: { w: stage.clientWidth, h: stage.clientHeight }, frame: { w: frame.width, h: frame.height }, layout: root.dataset.layout, rail: root.dataset.rail, mode: prefs.mode, cursor: { x: cur.x, y: cur.y, known: cur.known, shown: !cursorEl.hasAttribute('hidden') }, mods: [...mods], locked: [...locked], caps, view: { ...view, zoom: zoomRel() }, dragging, deckOpen: deck.classList.contains('open'), kb: !keyboard.hidden, pad: !pad.hidden });
+  if (!prefs.hint) $('pad-hint').hidden = true;
+  if (!touchFirst) $('pad-hint').textContent = 'Click to click, right-click to right-click. Hold the button and drag to move the pointer.';
+  syncMods();
+  setScreen(screen);
+  layout();
+  if (window.ResizeObserver) new ResizeObserver(() => onResize()).observe(stage);
   h264Probe.then((ok) => {
     h264ok = ok;
     if (!ok) showTip('This browser cannot decode the video stream (' + videoBroken + ') — using JPEG');

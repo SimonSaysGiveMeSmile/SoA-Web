@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Backup public doors for the SoA daemon (scripts/soa-doors): keeps free
+     tunnels alive next to the primary and publishes the encrypted list.
+     Install: cp to ~/Library/LaunchAgents, then
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.doors.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.soa-web.doors</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string><string>-lc</string>
+        <string>exec "$HOME/.soa-web/scripts/soa-doors"</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>15</integer>
+    <key>StandardOutPath</key><string>/tmp/soa-doors.out.log</string>
+    <key>StandardErrorPath</key><string>/tmp/soa-doors.err.log</string>
+</dict>
+</plist>
