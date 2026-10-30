@@ -16,6 +16,7 @@
 //   create <pxW> <pxH> <hiDPI 0|1> [name…]   new display; {"ok","id","bounds","mode"}
 //   resize <pxW> <pxH> <hiDPI 0|1>          new mode for the same display (no re-create)
 //   mirror on|off                           built-in (the original main) mirrors the virtual one
+//   extend left|right                       place ONLY the virtual display beside the existing desktop
 //   state                                   displays, main id, modes, mirroring
 //   destroy                                 unmirror, then remove the display
 //   quit                                    destroy and exit
@@ -94,10 +95,10 @@ func dryQuery(_ asked: CGDirectDisplayID) -> [String: Any] {
         bounds = ["x": 0, "y": 0, "width": main == dryBuiltin ? 1728 : w, "height": main == dryBuiltin ? 1117 : h]
     } else if v != 0 && id == v {
         mode = ["width": w, "height": h, "pixelWidth": pxW, "pixelHeight": pxH, "refresh": 60, "ioModeId": 1]
-        bounds = ["x": main == v ? 0 : 1728, "y": 0, "width": w, "height": h]
+        bounds = ["x": main == v ? 0 : ((s["side"] as? String) == "left" ? -w : 1728), "y": 0, "width": w, "height": h]
         modes = [[w, h, pxW, pxH, 1]]
     }
-    return ["id": Int(id), "online": id == dryBuiltin || (v != 0 && id == v), "main": Int(main), "mode": mode, "bounds": bounds, "modes": modes, "dry": true]
+    return ["id": Int(id), "online": id == dryBuiltin || (v != 0 && id == v), "main": Int(main), "mirrorOf": id == dryBuiltin && mirrored ? Int(v) : 0, "mode": mode, "bounds": bounds, "modes": modes, "dry": true]
 }
 
 // ── private API through the runtime ─────────────────────────────────────
@@ -134,6 +135,7 @@ var vid: CGDirectDisplayID = 0
 var mirroredFrom: CGDirectDisplayID = 0   // the display that mirrors the virtual one
 var maxPx = (w: 0, h: 0)
 var destroying = false            // our own release: its termination callback is expected
+let originalMain = dry ? dryBuiltin : CGMainDisplayID()
 
 func online() -> [CGDirectDisplayID] {
     var n: UInt32 = 0
@@ -370,6 +372,43 @@ func mirror(_ on: Bool) -> [String: Any] {
     return ["ok": true, "main": Int(CGMainDisplayID()), "ms": Int(Date().timeIntervalSince(t0) * 1000), "state": stateJSON()]
 }
 
+// A second display uses its own global origin. Configure only that display:
+// no physical display changes its mode, mirror set, origin or primary role.
+func extend(_ side: String) -> [String: Any] {
+    guard vid != 0, mirroredFrom == 0, side == "left" || side == "right" else {
+        return ["ok": false, "error": "extend needs an independent display and left|right"]
+    }
+    if dry {
+        var st = dryRead(); st["side"] = side; dryWrite(st)
+        dryLog("extend \(side) (dry: only virtual display moves; built-in stays main)")
+        return ["ok": true, "dry": true, "id": Int(vid)]
+    }
+    let q = fresh(vid)
+    guard (q["main"] as? Int) == Int(originalMain), (q["mirrorOf"] as? Int) == 0 else {
+        return ["ok": false, "error": "the main display or mirroring changed"]
+    }
+    let state = sub(["--state", String(vid), "0"])
+    let displays = (state["displays"] as? [[String: Any]]) ?? []
+    let rects = displays.filter { ($0["id"] as? Int) != Int(vid) && ($0["active"] as? Bool) == true }
+        .compactMap { $0["bounds"] as? [String: Int] }
+    guard !rects.isEmpty, let b = q["bounds"] as? [String: Int], let width = b["width"] else {
+        return ["ok": false, "error": "display arrangement unavailable"]
+    }
+    // Attach to the outermost edge, even with several real monitors or a
+    // monitor already to the left. Keep the new display connected to it.
+    let edge = side == "left" ? rects.min { ($0["x"] ?? 0) < ($1["x"] ?? 0) }!
+        : rects.max { ($0["x"] ?? 0) + ($0["width"] ?? 0) < ($1["x"] ?? 0) + ($1["width"] ?? 0) }!
+    let x = side == "left" ? (edge["x"] ?? 0) - width : (edge["x"] ?? 0) + (edge["width"] ?? 0)
+    let y = edge["y"] ?? 0
+    let e = configure { CGConfigureDisplayOrigin($0, vid, Int32(x), Int32(y)) }
+    guard e == .success else { return ["ok": false, "error": "arrangement failed (\(e.rawValue))"] }
+    let settled = waitFor({
+        let f = fresh(vid), bounds = f["bounds"] as? [String: Int]
+        return (f["main"] as? Int) == Int(originalMain) && bounds?["x"] == x && bounds?["y"] == y
+    }, 3)
+    return ["ok": settled, "id": Int(vid), "error": settled ? NSNull() : "display did not settle beside the desktop" as Any]
+}
+
 func destroy() -> [String: Any] {
     let t0 = Date()
     var out: [String: Any] = ["ok": true]
@@ -431,7 +470,7 @@ if argv.count > 1 && argv[1].hasPrefix("--") {
         if id == 0 { id = CGMainDisplayID() }
         var seen = Set<[Int]>()
         let list = allModes(id).map { [$0.width, $0.height, $0.pixelWidth, $0.pixelHeight, $0.isUsableForDesktopGUI() ? 1 : 0] }.filter { seen.insert($0).inserted }
-        emit(["id": Int(id), "online": online().contains(id), "main": Int(CGMainDisplayID()), "mode": modeJSON(id), "bounds": boundsJSON(id), "modes": list])
+        emit(["id": Int(id), "online": online().contains(id), "main": Int(CGMainDisplayID()), "mirrorOf": Int(CGDisplayMirrorsDisplay(id)), "mode": modeJSON(id), "bounds": boundsJSON(id), "modes": list])
     case "--state":       // --state <virtualId> <mirroredFrom>
         vid = CGDirectDisplayID(argv.count > 2 ? UInt32(argv[2]) ?? 0 : 0)
         mirroredFrom = CGDirectDisplayID(argv.count > 3 ? UInt32(argv[3]) ?? 0 : 0)
@@ -493,6 +532,7 @@ func handle(_ line: String) {
         case "create": r = create(int(1), int(2), int(3) != 0, p.count > 4 ? p[4...].joined(separator: " ") : "SoA Remote")
         case "resize": r = resize(int(1), int(2), int(3) != 0)
         case "mirror": r = (p.count > 1 && (p[1] == "on" || p[1] == "off")) ? mirror(p[1] == "on") : ["ok": false, "error": "usage: mirror on|off"]
+        case "extend": r = p.count == 2 ? extend(p[1]) : ["ok": false, "error": "usage: extend left|right"]
         case "state": r = ["ok": true, "state": sub(["--state", String(vid), String(mirroredFrom)])]
         case "destroy", "quit": r = destroy()
         default: r = ["ok": false, "error": "unknown command"]
