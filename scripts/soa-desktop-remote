@@ -65,6 +65,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync, execFile } = require('node:child_process');
 const WebSocket = require('ws');
+const { RemoteExtension, globalPoint, localPoint } = require('./lib/remoteExtension.cjs');
 
 const PORT = parseInt(process.env.SOA_DESKTOP_REMOTE_PORT || '6081', 10);
 const HOST = '127.0.0.1';
@@ -457,8 +458,10 @@ function flushDirectMove() {
 // or a key this keyboard layout cannot type). A fallback job still queued
 // is not overtaken: the line then waits behind it.
 const FALLBACK_REPLIES = new Set(['err not permitted', 'err bad key']);
-function routeInput(kind, line, fallback, recvAt) {
+function routeInput(kind, line, fallback, recvAt, valid = () => true) {
+    if (fallback) { const job = fallback; fallback = async () => { if (valid()) await job(); }; }
     const go = () => {
+        if (!valid()) return;
         flushDirectMove();
         const cb = fallback ? (reply) => { if (FALLBACK_REPLIES.has(reply)) { log('direct', kind, '→', reply, '— using computeruse'); enqueue(fallback); } } : null;
         if (!pointerSend(line, cb, kind, recvAt) && fallback) enqueue(fallback);
@@ -490,10 +493,19 @@ const KEYS = new Set(['return', 'tab', 'escape', 'delete', 'forwarddelete', 'spa
 const KEY_ALIAS = { enter: 'return', esc: 'escape', backspace: 'delete', arrowup: 'up', arrowdown: 'down', arrowleft: 'left', arrowright: 'right', ' ': 'space',
     del: 'forwarddelete', forward_delete: 'forwarddelete', page_up: 'pageup', page_down: 'pagedown' };
 
-function clampPoint(m) {
-    const x = Math.max(0, Math.min(screen.width - 1, Math.round(+m.x || 0)));
-    const y = Math.max(0, Math.min(screen.height - 1, Math.round(+m.y || 0)));
-    return { x, y };
+function sourceFor(ws) {
+    if (ws && ws.extended) return extension.source(ws);
+    return { ...screen, displayId: fit.up ? fit.id : 0, revision: 0 };
+}
+function clampPoint(m, ws) { return globalPoint(sourceFor(ws) || screen, m.x, m.y); }
+const INPUT_TYPES = new Set(['move', 'click', 'scroll', 'type', 'key', 'down', 'drag', 'up']);
+function releaseDrag(ws) {
+    if (!ws || !ws.drag) return;
+    const { x, y, mods } = ws.drag; ws.drag = null;
+    // A stored press is already in GLOBAL Mac coordinates, including negative
+    // origins. Do not clamp it to the built-in or add the display origin twice.
+    const go = () => { flushDirectMove(); pointerSend(`up ${x} ${y}`); if (mods && mods.length) pointerSend('modset -'); };
+    if (running || queue.length) enqueue(async () => go()); else go();
 }
 
 // Fallback scroll units: the viewer may send pixel deltas (direct path);
@@ -503,16 +515,24 @@ const modArg = (mods) => (mods.length ? mods.join(',') : '-');
 
 function handleInput(m, from) {
     const recvAt = performance.now();
+    const inputSource = from && INPUT_TYPES.has(m.t) ? sourceFor(from) : null;
+    const valid = () => !from || (from.readyState === WebSocket.OPEN && !!inputSource
+        && sourceFor(from)?.displayId === inputSource.displayId && sourceFor(from)?.revision === inputSource.revision);
+    if (from && INPUT_TYPES.has(m.t)) {
+        const s = sourceFor(from);
+        if (!s || (from.extended && (m.displayId !== s.displayId || m.revision !== s.revision))
+            || (!from.extended && m.displayId !== undefined && m.displayId !== s.displayId)) return;
+    }
     switch (m.t) {
         case 'move': {
-            const { x, y } = clampPoint(m);
+            const { x, y } = clampPoint(m, from);
             if (inputPath() === 'direct' && !running && !queue.length) { directMove(x, y, recvAt); break; }
-            pendingMove = () => run(['cursor', '--move-to', `${x},${y}`]);
+            pendingMove = () => valid() && run(['cursor', '--move-to', `${x},${y}`]);
             pump();
             break;
         }
         case 'click': {
-            const { x, y } = clampPoint(m);
+            const { x, y } = clampPoint(m, from);
             const button = ['left', 'right', 'middle'].includes(m.button) ? m.button : 'left';
             const count = Math.max(1, Math.min(3, parseInt(m.count, 10) || 1));
             const mods = modList(m.mods);
@@ -524,13 +544,13 @@ function handleInput(m, from) {
                 if (mods.length) args.push('--modifiers', mods.join(','));
                 await run(args);
                 refreshActivePid();
-            }, recvAt);
+            }, recvAt, valid);
             break;
         }
         case 'scroll': {
             // {dir, amount} in lines (every viewer), or {dx, dy, unit} — pixel
             // deltas for smooth, trackpad-like scrolling (+dy shows what is below).
-            const { x, y } = clampPoint(m);
+            const { x, y } = clampPoint(m, from);
             let dx = 0, dy = 0, unit = 'line';
             if (m.dx !== undefined || m.dy !== undefined) {
                 unit = m.unit === 'line' ? 'line' : 'pixel';
@@ -562,7 +582,7 @@ function handleInput(m, from) {
                     await run(['scroll', '--pid', String(pid), '--x', String(x), '--y', String(y), '--direction', n > 0 ? pos : neg, '--amount', String(Math.min(30, Math.abs(n)))]);
                 }
             };
-            routeInput('scroll', `scroll ${dx} ${dy} ${unit} ${x} ${y}`, fallback, recvAt);
+            routeInput('scroll', `scroll ${dx} ${dy} ${unit} ${x} ${y}`, fallback, recvAt, valid);
             break;
         }
         case 'type': {
@@ -575,7 +595,7 @@ function handleInput(m, from) {
                 const args = ['type', '--text', text];
                 if (activePid) args.push('--pid', String(activePid));
                 await run(args);
-            }, recvAt);
+            }, recvAt, valid);
             break;
         }
         case 'key': {
@@ -595,11 +615,11 @@ function handleInput(m, from) {
                 if (activePid) args.push('--pid', String(activePid));
                 await run(args);
                 refreshActivePid();
-            }, recvAt);
+            }, recvAt, valid);
             break;
         }
         case 'down': case 'drag': case 'up': {
-            const { x, y } = clampPoint(m);
+            const { x, y } = clampPoint(m, from);
             // Modifiers armed for a drag (⇧-drag extends a selection, ⌥-drag
             // copies) are HELD for the whole press: an app may read them at
             // the press, while dragging or at the drop. Held with `modset`
@@ -619,6 +639,7 @@ function handleInput(m, from) {
             // degrades to press→release at the end point, never a replayed burst.
             const at = Date.now();
             const go = () => {
+                if (!valid()) return;
                 if (m.t === 'drag' && Date.now() - at > 500) return;
                 flushDirectMove();
                 if (m.t === 'down' && dmods.length) pointerSend(`modset ${modArg(dmods)}`);
@@ -645,6 +666,7 @@ function handleInput(m, from) {
         case 'setDisplayMode': if (from) setDisplayMode(from, m).catch((e) => log('setDisplayMode failed:', e.message)); break;
         case 'setDisplayKeep': if (from) setDisplayKeep(from, m); break;
         case 'fit': if (from) onFitMsg(from, m); break;
+        case 'extend': if (from) extension.request(from, m).catch(e => log('extend:', e.message)); break;
         case 'ping':
             if (from && from.readyState === WebSocket.OPEN) from.send(JSON.stringify({ t: 'pong', c: +m.c || 0, s: Date.now() }));
             break;
@@ -664,8 +686,8 @@ function cursorQuery(ws, m) {
     ws.cursorBusy = true; ws.cursorAt = now;
     const done = (x, y) => {
         ws.cursorBusy = false;
-        const ok = Number.isFinite(x) && Number.isFinite(y);
-        reply(ws, ok ? { t: 'cursor', req: m.req, ok, x: Math.round(x), y: Math.round(y) } : { t: 'cursor', req: m.req, ok: false });
+        const s = sourceFor(ws), ok = !!s && Number.isFinite(x) && Number.isFinite(y);
+        reply(ws, ok ? { t: 'cursor', req: m.req, ok, ...localPoint(s, x, y) } : { t: 'cursor', req: m.req, ok: false });
     };
     if (pointer.sock && pointerSend('where', (line) => { const r = /^at (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)/.exec(line); r ? done(+r[1], +r[2]) : done(); })) {
         setTimeout(() => { if (ws.cursorBusy && Date.now() - ws.cursorAt > 1500) done(); }, 1600);
@@ -843,6 +865,7 @@ function setGeometry(s, why, force = false) {
     if (ffmpeg || jpegViewers().length) { stopCapture(); ensureCapture(); }   // the JPEG stream's scale follows the new aspect
 }
 async function setDisplayMode(ws, m) {
+    if (ws.extended) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: 'extended', ...displayInfoMsg() }); return; }
     // Fit wins: the Mac's own modes wait until the fitted screen is gone.
     if (fit.up || fit.busy) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: 'fitted', ...displayInfoMsg() }); return; }
     let id = typeof m.id === 'string' ? m.id.slice(0, 64) : String(+m.id || '');
@@ -1143,6 +1166,7 @@ function endTransition(g, why) { fit.transition = false; setGeometry(g || screen
 
 // ── requests ──
 function onFitMsg(ws, m) {
+    if (m.on && extension.held) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'extend', message: 'End the second display before fitting the Mac.' }); return; }
     if (typeof m.dev === 'string' && /^[\w-]{6,64}$/.test(m.dev)) ws.dev = m.dev;
     const take = m.take === true, mine = fitIsOwner(ws);
     const held = fit.up || (fit.busy && fit.op !== 'off') || !!(fit.want && fit.want.on);
@@ -1464,6 +1488,24 @@ function fitShutdownSync() {
 }
 
 // ── capture ───────────────────────────────────────────────────────────────
+const extension = new RemoteExtension({
+    binary: VD_BIN, build: buildVd, workDir: WORK_DIR, specFor: fitSpec,
+    graceMs: DISPLAY_RESTORE_MS,
+    blocked: () => fit.up || fit.busy || fit.want?.on ? 'fit' : !helperUsable() ? 'unavailable' : null,
+    log,
+    beforeChange: ws => {
+        if (!ws) return;
+        releaseDrag(ws);
+        if (ws.enc) stopEncoder(ws.enc);
+        ws.vs = newVideoState();
+    },
+    changed: () => {
+        for (const ws of viewers) reply(ws, { t: 'extend', ...extension.info(ws) });
+        reconcileVideo();
+        broadcastStatus('ready');
+    },
+});
+
 const viewers = new Set();
 let ffmpeg = null;
 let fBuf = Buffer.alloc(0);
@@ -1483,7 +1525,7 @@ function setQuality(m) {
     if (ffmpeg) { stopCapture(); ensureCapture(); }
 }
 
-const jpegViewers = () => [...viewers].filter((ws) => ws.mode === 'jpeg');
+const jpegViewers = () => [...viewers].filter((ws) => ws.mode === 'jpeg' && !ws.extended);
 function ensureCapture() {
     if (ffmpeg || !jpegViewers().length || fit.transition) return;
     const args = [
@@ -1534,13 +1576,13 @@ function consume(chunk) {
         frames++;
         for (const ws of viewers) {
             // Drop frames for a viewer that is behind instead of queueing a backlog.
-            if (ws.mode === 'jpeg' && ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 2 * frame.length) ws.send(frame, { binary: true });
+            if (ws.mode === 'jpeg' && !ws.extended && ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 2 * frame.length) ws.send(frame, { binary: true });
         }
     }
 }
 function sendStatus(ws, state, message = '') {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen, quality, video: videoInfo(ws.enc), input: inputInfo(), fit: fitInfo(ws) }));
+    ws.send(JSON.stringify({ t: 'status', state, message, viewers: viewers.size, screen: sourceFor(ws), quality, video: videoInfo(ws.enc), input: inputInfo(), fit: fitInfo(ws), extension: extension.info(ws) }));
 }
 function broadcastStatus(state, message = '', onlyMode = null) {
     for (const ws of viewers) if (!onlyMode || ws.mode === onlyMode) sendStatus(ws, state, message);
@@ -1640,13 +1682,14 @@ function newVideoState() {
         lastAckAt: 0, busy: [], goodput: 0, caps: [], queue: 0, sent: 0, slowTicks: 0, keySentAt: 0, keyLen: 0, skipAt: 0, skips: 0, skipTimer: null, probe: null, tapMs: [] };
 }
 function setMode(ws, mode, m = {}) {
+    if (ws.extended && mode !== 'h264' && extension.owner === ws) { extension.fail('capture').catch(e => log('extend:', e.message)); return; }
     ws.mode = mode;
     if (m.pref !== undefined) ws.pref = prefOf(m.pref);
     if (m.display && typeof m.display === 'object') ws.display = cleanDisplay(m.display);
     ws.vs = newVideoState();
     // This viewer now speaks for itself: a video viewer takes over the
     // capture its own /token request started; otherwise that lapses now.
-    if (mode === 'h264' && !ws.enc && prewarm && prewarm.enc) {
+    if (mode === 'h264' && !ws.extended && !ws.enc && prewarm && prewarm.enc) {
         const e = prewarm.enc; prewarm.enc = null;
         e.owner = ws; ws.enc = e;
         log('video: viewer took over the prewarmed stream');
@@ -1664,12 +1707,12 @@ function cleanDisplay(d) {
     return { w: Math.round(n(d.w, 100, 10000, 1920)), h: Math.round(n(d.h, 100, 10000, 1080)), dpr: n(d.dpr, 0.5, 5, 1), zoom: n(d.zoom, 0.2, 8, 1) };
 }
 
-function sourcePx() { const k = screen.scale || 1; return { w: Math.round(screen.width * k), h: Math.round(screen.height * k) }; }
+function sourcePx(src) { const s = sourceFor(src) || screen, k = s.scale || 1; return { w: Math.round(s.width * k), h: Math.round(s.height * k) }; }
 // Fit the Mac's aspect into the viewer's physical pixels; zooming in asks for
 // more pixels (the visible part would otherwise be upscaled), up to the cap.
 function sizeFor(src) {
-    const aspect = screen.width / screen.height;
-    const cap = Math.min(W_MAX, sourcePx().w);
+    const s = sourceFor(src) || screen, aspect = s.width / s.height;
+    const cap = Math.min(W_MAX, sourcePx(src).w);
     let w;
     if (isPreset(src.pref)) w = PRESETS[src.pref].h * aspect;
     else {
@@ -1683,7 +1726,7 @@ function targetFor(e, src) {
     const auto = !isPreset(src.pref);
     let size = sizeFor(src);
     if (auto && e.autoScale < 1) {
-        const aspect = screen.width / screen.height;
+        const s = sourceFor(src) || screen, aspect = s.width / s.height;
         const w = even(Math.max(Math.min(AUTO_W_MIN, size.w), size.w * e.autoScale));
         size = { w, h: even(w / aspect) };
     }
@@ -1730,7 +1773,7 @@ function clearPrewarm() {
 }
 function videoInfo(e) {
     if (!e) return null;
-    return { kind: e.kind, codec: e.config ? e.config.codec : null, w: e.w, h: e.h, bps: e.bps, fps: e.stat.fps, kbps: e.stat.kbps, auto: e.auto };
+    return { displayId: e.displayId, kind: e.kind, codec: e.config ? e.config.codec : null, w: e.w, h: e.h, bps: e.bps, fps: e.stat.fps, kbps: e.stat.kbps, auto: e.auto };
 }
 
 function newEncoder(owner, src) {
@@ -1753,7 +1796,7 @@ function newEncoder(owner, src) {
         }
     }
     const t = targetFor(e, src);
-    Object.assign(e, { w: t.w, h: t.h, bps: t.bps, auto: t.auto });
+    Object.assign(e, { w: t.w, h: t.h, bps: t.bps, auto: t.auto, displayId: sourceFor(src)?.displayId || 0, extended: !!src.extended });
     encoders.add(e);
     startEncoder(e);
     return e;
@@ -1783,6 +1826,7 @@ const e2helper = (c) => c.spawnfile === HELPER_BIN;
 
 function reconcileVideo() {
     for (const ws of videoViewers()) {
+        if (ws.extended && !extension.source(ws)) { if (ws.enc) stopEncoder(ws.enc); continue; }
         if (!ws.enc) {
             if (encoders.size - (prewarm && prewarm.enc ? 1 : 0) >= MAX_ENCODERS) {
                 if (!ws.encRefused) {
@@ -1883,13 +1927,14 @@ function startEncoder(e) {
     // The screen is being switched (fit on/off/resize): start once it is there.
     if (fit.transition) { e.retryTimer = setTimeout(() => { e.retryTimer = null; if (!e.dead && !e.child) startEncoder(e); }, 300); return; }
     const kind = helperUsable() ? 'helper' : 'ffmpeg';
+    if (e.extended && kind !== 'helper') { extension.fail('capture').catch(err => log('extend:', err.message)); return; }
     const wait = kind === 'helper' ? lastHelperStartAt + HELPER_SPACING_MS - Date.now() : 0;
     if (wait > 0) { e.retryTimer = setTimeout(() => { e.retryTimer = null; if (!e.dead && !e.child) startEncoder(e); }, wait); return; }
     if (kind === 'helper') lastHelperStartAt = Date.now();
     let child;
     try {
         child = kind === 'helper'
-            ? spawn(HELPER_BIN, [e.w, e.h, VIDEO_FPS, e.bps, fit.up ? fit.id : 0].map(String), { stdio: ['pipe', 'pipe', 'pipe'] })
+            ? spawn(HELPER_BIN, [...[e.w, e.h, VIDEO_FPS, e.bps, e.extended ? e.displayId : fit.up ? fit.id : 0].map(String), ...(e.extended ? ['--strict-display'] : [])], { stdio: ['pipe', 'pipe', 'pipe'] })
             : spawn(FFMPEG, ffmpegH264Args(e), { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) { videoFailed(e, kind, err.message); return; }
     Object.assign(e, { kind, child, gotFrame: false, startedAt: Date.now(), config: null });
@@ -1912,6 +1957,16 @@ function startEncoder(e) {
     log('video started', kind, `${e.w}x${e.h}`, `${Math.round(e.bps / 1000)} kb/s`, `${VIDEO_FPS} fps`, `(${encoders.size} running)`);
 }
 function videoFailed(e, kind, why, hadFrames = false) {
+    if (e.dead) return;
+    // No JPEG/AVFoundation fallback for an independent display: those capture
+    // screen 0. Retry SCK briefly, then leave this viewer paused, never send
+    // or control a different desktop. Other viewers keep their own streams.
+    if (e.extended) {
+        e.extensionFailures = (e.extensionFailures || 0) + 1;
+        if (e.extensionFailures >= 3) { extension.fail('capture').catch(err => log('extend:', err.message)); return; }
+        e.retryTimer = setTimeout(() => { if (!e.dead && !e.child) startEncoder(e); }, 1200);
+        return;
+    }
     const now = Date.now();
     // Another stream just started or stopped and took this capture with it:
     // restart, and do not count it against the encoder.
@@ -2418,7 +2473,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' });
         const encs = [...encoders].map((e) => ({ ...videoInfo(e), owned: !!e.owner }));
         res.end(JSON.stringify({ ok: true, viewers: viewers.size, capturing: !!ffmpeg, frames, screen, quality, video: encs[0] || null, encoders: encs,
-            modes: [...viewers].map((ws) => ws.mode || 'pending'), input: { ...inputInfo(), dispatchMs: inputStats() }, display: displayInfoMsg(), fit: fitInfo() }));
+            modes: [...viewers].map((ws) => ws.mode || 'pending'), input: { ...inputInfo(), dispatchMs: inputStats() }, display: displayInfoMsg(), fit: fitInfo(), extension: extension.info() }));
         return;
     }
     res.writeHead(404); res.end('not found');
@@ -2435,12 +2490,13 @@ server.on('upgrade', (req, socket, head) => {
         // The viewer says which stream it can decode ({t:'mode'}) before any
         // capture starts; one that never says gets the JPEG stream.
         ws.mode = null; ws.pref = 'auto'; ws.display = null; ws.vs = newVideoState(); ws.enc = null;
+        ws.extended = url.searchParams.get('target') === 'extend';
         viewers.add(ws);
         cancelDisplayRestore();                  // a reconnect keeps the mode it chose
         if ((fit.up || fit.busy) && !fit.owner && !fit.ownerTimer && !fit.keep) scheduleOwnerHandoff();   // an ownerless fit: back, handed over, or ended
         refreshActivePid();
         ws.label = 'viewer ' + (++viewerSeq);
-        ws.send(JSON.stringify({ t: 'hello', screen, quality, dragPermitted: pointer.permitted, video: true, input: inputInfo(), fit: fitInfo(ws) }));
+        ws.send(JSON.stringify({ t: 'hello', screen: sourceFor(ws), quality, dragPermitted: pointer.permitted, video: true, input: inputInfo(), fit: fitInfo(ws), extension: extension.info(ws) }));
         refreshScreen();
         pointerConnect();
         keepSareaWarm();                         // the fallback must not make the first tap wait for Sarea
@@ -2459,13 +2515,10 @@ server.on('upgrade', (req, socket, head) => {
             try { handleInput(m, ws); } catch (e) { log('bad message ignored:', String(m.t).slice(0, 20), e.message); }
         });
         ws.on('close', () => {
-            if (ws.drag) {                       // never leave the Mac's button held when the viewer vanishes
-                const { x, y, mods } = ws.drag; ws.drag = null;
-                log('viewer left mid-drag — releasing the button');
-                handleInput({ t: 'up', x, y, mods: mods && mods.length ? 'held' : undefined });
-            }
+            releaseDrag(ws);
             viewers.delete(ws);
             fitViewerLeft(ws);
+            extension.left(ws);
             if (ws.enc) stopEncoder(ws.enc);
             log('viewer left', viewers.size);
             if (!jpegViewers().length) stopCapture();
@@ -2506,6 +2559,6 @@ server.on('error', (e) => {
 });
 // The fit guard runs once this copy owns the port: a second copy started by
 // hand must not end the running copy's fitted screen on its way to EADDRINUSE.
-server.listen(PORT, HOST, () => { log(`soa-desktop-remote on http://${HOST}:${PORT} (screen ${screen.width}x${screen.height})`); fitGuardAtStart(); });
+server.listen(PORT, HOST, () => { log(`soa-desktop-remote on http://${HOST}:${PORT} (screen ${screen.width}x${screen.height})`); fitGuardAtStart(); extension.recover(waitGone); });
 const stopAllVideo = () => { clearPrewarm(); for (const e of [...encoders]) stopEncoder(e); };
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); stopAllVideo(); fitShutdownSync(); restoreDisplayNow(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopCapture(); stopAllVideo(); extension.shutdown(waitGone); fitShutdownSync(); restoreDisplayNow(); process.exit(0); });

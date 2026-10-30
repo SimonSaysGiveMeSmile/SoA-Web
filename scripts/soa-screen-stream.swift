@@ -7,13 +7,14 @@
 // 2 s). Used by soa-desktop-remote; ffmpeg's AVFoundation screen input tops
 // out near 12 fps on current macOS, this path keeps up with 30-60.
 //
-//   soa-screen-stream <width> <height> <fps> <bitrate-bps> [display-id]
+//   soa-screen-stream <width> <height> <fps> <bitrate-bps> [display-id] [--strict-display]
 //   soa-screen-stream --info [display-id]   a display's size + scale as JSON
 //
 // display-id is a CGDirectDisplayID (0 or absent = the main display). A
 // display that ScreenCaptureKit does not list yet (one created a moment ago)
 // is waited for briefly; one that never shows up falls back to the main
-// display, and stderr says so.
+// display, and stderr says so. --strict-display instead fails closed: a
+// second-display viewer must never receive a different desktop by accident.
 //
 // stdout, one record per encoded frame (access unit):
 //   u32 BE  payload length
@@ -49,6 +50,7 @@ var outH = argv.count > 2 ? Int(argv[2]) ?? 1200 : 1200
 let fps = max(5, min(60, argv.count > 3 ? Int(argv[3]) ?? 30 : 30))
 var bitrate = max(500_000, argv.count > 4 ? Int(argv[4]) ?? 6_000_000 : 6_000_000)
 let wantDisplay = CGDirectDisplayID(argv.count > 5 ? UInt32(argv[5]) ?? 0 : 0)
+let strictDisplay = argv.contains("--strict-display")
 
 let encQ = DispatchQueue(label: "encode")      // owns every encoder variable below
 let outQ = DispatchQueue(label: "stdout")
@@ -190,7 +192,10 @@ Task {
                 try await Task.sleep(nanoseconds: 200_000_000)
                 content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             }
-            if !content.displays.contains(where: { $0.displayID == wantDisplay }) { say("display \(wantDisplay) not available — capturing the main display") }
+            if !content.displays.contains(where: { $0.displayID == wantDisplay }) {
+                if strictDisplay { say("requested display \(wantDisplay) unavailable"); exit(3) }
+                say("display \(wantDisplay) not available — capturing the main display")
+            }
         }
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { wantDisplay != 0 && $0.displayID == wantDisplay })

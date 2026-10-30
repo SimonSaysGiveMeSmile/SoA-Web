@@ -14,7 +14,11 @@
      Layout (JS sets data-layout / data-rail on <html>):
        stack    touch screen with room below the picture: lid, hinge strip, deck
        overlay  landscape / tablet landscape / desktop: picture as large as it
-                fits, strip as a side rail or bottom bar, deck slides up on demand */
+                fits, strip as a side rail or bottom bar, deck slides up on demand
+       fold     a foldable folded part-way (data-fold on <html>): the real fold is
+                the MacBook's hinge. tabletop = picture in the top segment, strip
+                and deck in the bottom one; book = picture left, controls right.
+                Nothing straddles the fold; flat, the layouts above apply. */
   :root {
     --lid: #000;
     --alu: #D4D5D8; --alu-edge: #E6E7E9; --hinge: #BEBFC3;
@@ -52,9 +56,15 @@
   [hidden] { display: none !important; }
   button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
   :focus { outline: none; }
+  .chips button[aria-pressed="true"] { background: var(--accent); color: #fff; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #safe { position: fixed; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
+  /* the second viewport segment, read when window.viewport.segments is missing
+     (0 × 0 on a screen with one segment) */
+  #segp { position: fixed; visibility: hidden; pointer-events: none; left: 0; top: 0; width: 0; height: 0; }
+  @media (vertical-viewport-segments: 2) { #segp { left: env(viewport-segment-left 0 1, 0px); top: env(viewport-segment-top 0 1, 0px); width: env(viewport-segment-width 0 1, 0px); height: env(viewport-segment-height 0 1, 0px); } }
+  @media (horizontal-viewport-segments: 2) { #segp { left: env(viewport-segment-left 1 0, 0px); top: env(viewport-segment-top 1 0, 0px); width: env(viewport-segment-width 1 0, 0px); height: env(viewport-segment-height 1 0, 0px); } }
 
   /* ── the lid: black glass around the picture ─────────────────────────── */
   #lid { position: fixed; left: 0; top: 0; right: 0; background: var(--lid); }
@@ -105,6 +115,9 @@
   @media (max-width: 430px) { [data-layout="stack"] #b-res svg { display: none; } [data-layout="stack"] .sb { padding: 0 8px; } [data-layout="stack"] #strip { gap: 4px; } }
   /* the narrowest phones: the Mac's width alone names the resolution */
   @media (max-width: 380px) { [data-layout="stack"]:not([data-fit="on"]) #res-t .resh { display: none; } [data-layout="stack"][data-fit="on"] #res-t { font-size: 12px; } }
+  /* folded book: the controls have half the screen, so the strip packs as it does on a narrow phone */
+  [data-pane] #b-res svg { display: none; } [data-pane] .sb { padding: 0 8px; } [data-pane] #strip { gap: 4px; }
+  [data-pane="narrowest"]:not([data-fit="on"]) #res-t .resh { display: none; } [data-pane="narrowest"][data-fit="on"] #res-t { font-size: 12px; }
 
   /* input on the slow (computeruse) path: one line that stays until fixed or tapped away */
   #slow { position: fixed; display: flex; align-items: center; gap: 8px; justify-content: center; padding: 0 12px; height: 34px; font-size: 12.5px; color: var(--ink); background: color-mix(in srgb, var(--warn) 16%, var(--alu)); z-index: 3; }
@@ -121,6 +134,14 @@
   /* ── the deck ────────────────────────────────────────────────────────── */
   #deck { position: fixed; display: flex; flex-direction: column; align-items: center; gap: var(--dg, 12px); padding: var(--dp, 8px); padding-bottom: calc(var(--dp, 8px) + env(safe-area-inset-bottom, 0px)); background: var(--alu); z-index: 2; }
   [data-layout="stack"] #deck { box-shadow: inset 0 1px 0 var(--alu-edge); }
+  /* folded: the fold is the hinge. A physical gap is painted as hinge metal,
+     and the strip under it takes the lid's shadow, as the deck of a MacBook does */
+  #fold { position: fixed; background: var(--hinge); z-index: 1; }
+  [data-fold="tabletop"] #strip { box-shadow: inset 0 5px 6px -5px rgba(0,0,0,.35), inset 0 -1px 0 var(--alu-edge); }
+  [data-fold="book"] #strip { box-shadow: inset 0 -1px 0 var(--alu-edge); }
+  [data-fold="book"] #deck { box-shadow: inset 5px 0 6px -5px rgba(0,0,0,.3); }
+  /* a short, wide segment: trackpad beside the keyboard rather than under it */
+  #deck.row { flex-direction: row; align-items: center; justify-content: center; }
   [data-layout="overlay"] #deck { flex-direction: row; align-items: stretch; justify-content: center; border-radius: 14px 14px 0 0; background: var(--alu); box-shadow: 0 -1px 0 var(--alu-edge), 0 -10px 30px rgba(0,0,0,.35); transition: transform .24s cubic-bezier(.2,.8,.2,1), visibility 0s; }
   [data-rail="side"] #deck { padding-bottom: calc(var(--dp, 8px) + env(safe-area-inset-bottom, 0px)); }
   [data-rail="bottom"] #deck { padding-bottom: var(--dp, 8px); }
@@ -221,6 +242,8 @@
 </head>
 <body>
 <div id="safe" aria-hidden="true"></div>
+<div id="segp" aria-hidden="true"></div>
+<div id="fold" aria-hidden="true" hidden></div>
 <div id="lid" aria-hidden="true"></div>
 <div id="stage">
   <canvas id="frame" role="img" aria-label="Mac display" width="1" height="1"></canvas>
@@ -255,6 +278,17 @@
   <div class="scrim" id="sheet-scrim"></div>
   <div class="panel">
     <header><h2 id="sheet-h">Display and connection</h2><button id="sheet-x" aria-label="Close">✕</button></header>
+    <h3 id="h-desktop" tabindex="-1">Desktop</h3>
+    <div class="group">
+      <div class="chips" id="e-mode" role="group" aria-label="Desktop mode">
+        <button id="e-mirror" aria-pressed="true">Mirror</button><button id="e-extend" aria-pressed="false" aria-describedby="e-msg">Extend</button>
+      </div>
+      <div id="e-controls" hidden>
+        <div class="chips" id="e-position" role="group" aria-label="Second display position"><span class="cap">Place on</span><button data-e-position="left" aria-pressed="false">Left</button><button data-e-position="right" aria-pressed="true">Right</button></div>
+        <div class="chips" id="e-text" role="group" aria-label="Second display text size"><span class="cap">Text size</span><button data-e-text="smaller" aria-pressed="false">Smaller</button><button data-e-text="default" aria-pressed="true">Default</button><button data-e-text="larger" aria-pressed="false">Larger</button></div>
+      </div>
+    </div>
+    <p class="note" id="e-msg" role="status" aria-live="polite">Use this device as a second Mac display.</p>
     <h3 id="h-stream" tabindex="-1">Stream quality</h3>
     <div class="group" id="g-stream" role="radiogroup" aria-labelledby="h-stream"></div>
     <div class="group" style="margin-top:8px"><div class="chips" id="g-compat" role="radiogroup" aria-label="Compatibility (JPEG)"></div></div>
@@ -262,6 +296,7 @@
     <h3>Now</h3>
     <div class="group"><dl class="stats" id="stats"></dl></div>
     <p class="note" id="input-note" hidden></p>
+    <section id="mirror-controls">
     <h3 id="h-mac" tabindex="-1">Mac resolution</h3>
     <div class="group">
       <label class="switch"><span class="txt"><span>Fit the Mac to this screen</span><span class="sub" id="fz-sub">The Mac takes this screen's shape</span></span><input type="checkbox" role="switch" id="fz-on" aria-describedby="fz-msg"></label>
@@ -280,6 +315,7 @@
     <button class="opt act" id="d-all" style="padding-left:4px" hidden>Show low resolution modes</button>
     <div class="group" style="margin-top:8px"><label class="switch"><span>Keep after I leave</span><input type="checkbox" role="switch" id="d-keep" disabled></label></div>
     <p class="note">A change goes back 30 seconds after you leave, unless you keep it.</p>
+    </section>
     <h3>View</h3>
     <div class="group"><button class="opt" id="b-fit"><span>Show the whole screen</span><span class="meta">Undo zoom</span></button></div>
   </div>
@@ -336,6 +372,19 @@
     const mk = () => Array.from(crypto.getRandomValues(new Uint8Array(9)), (b) => b.toString(16).padStart(2, '0')).join('');
     try { let d = localStorage.getItem('soa-desktop-remote:dev'); if (!/^[\w-]{6,64}$/.test(d || '')) { d = mk(); localStorage.setItem('soa-desktop-remote:dev', d); } return d; } catch (_) { return mk(); }
   })();
+
+  // Explicit choice in this browser tab, retained only for reconnect/refresh.
+  // A fresh visit never creates a display. The server owns its 30-second lease.
+  const EXTEND_KEY = 'soa-desktop-remote:extend';
+  let extendWanted = false, ePosition = 'right', eText = 'default';
+  try {
+    const p = JSON.parse(sessionStorage.getItem(EXTEND_KEY) || '{}');
+    extendWanted = p.selected === true; ePosition = p.position === 'left' ? 'left' : 'right';
+    eText = ['smaller', 'larger'].includes(p.text) ? p.text : 'default';
+  } catch (_) {}
+  function saveExtend() { try { sessionStorage.setItem(EXTEND_KEY, JSON.stringify({ selected: extendWanted, position: ePosition, text: eText })); } catch (_) {} }
+  let E = { state: 'off', selected: false }, extensionKnown = false, eTimer = 0, eSent = '', eError = '', pictureReady = false;
+  const remoteInputs = new Set(['move', 'click', 'scroll', 'type', 'key', 'down', 'drag', 'up']);
 
   // Which way input reaches the Mac: 'direct' (SoA Pointer, instant) or
   // 'sarea' (the computeruse fallback — every input a process launch, and the
@@ -456,7 +505,13 @@
   const loc = (e) => [e.clientX - stageRect.left, e.clientY - stageRect.top];
 
   // ── socket ───────────────────────────────────────────────────────────
-  function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+  function send(m) {
+    if (remoteInputs.has(m.t)) {
+      if (!pictureReady || (extendWanted && (!E.selected || E.state !== 'on' || !E.mine))) return;
+      m = { ...m, displayId: screen.displayId || 0, revision: screen.revision || 0 };
+    }
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(m));
+  }
   // One socket at a time, and none while the page is hidden: `connecting`
   // covers the token fetch, `sockGen` cancels a connect the page has since
   // abandoned (hidden, or superseded), and a socket's handlers act only while
@@ -476,7 +531,7 @@
       // Telling the Mac this screen up front lets it start the capture while
       // the socket opens (it lapses by itself if no socket follows).
       const tq = new URLSearchParams(query);
-      if (wantMode() === 'h264') { const d = displayInfo(); tq.set('v', '1'); tq.set('pref', $('q').value); for (const k of ['w', 'h', 'dpr', 'zoom']) tq.set(k, d[k]); }
+      if (wantMode() === 'h264' && !extendWanted) { const d = displayInfo(); tq.set('v', '1'); tq.set('pref', $('q').value); for (const k of ['w', 'h', 'dpr', 'zoom']) tq.set(k, d[k]); }
       const tqs = tq.toString();
       const r = await fetch(new URL('token' + (tqs ? '?' + tqs : ''), base), { cache: 'no-store', credentials: 'include' });
       if (gen !== sockGen) { connecting = false; return resume(); }
@@ -492,6 +547,7 @@
     connecting = false;
     if (gen !== sockGen || document.hidden || ws) return resume();
     const wsUrl = new URL('ws', base); wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:'; wsUrl.searchParams.set('token', tok);
+    if (extendWanted) wsUrl.searchParams.set('target', 'extend');
     // Over the tunnel the daemon gates this upgrade with the pairing token too
     // (a cookie is not guaranteed there — iOS drops it on a home-screen app),
     // so carry the page's own ?t= / ?u= along with the service token.
@@ -513,8 +569,13 @@
         let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
         if (m.t === 'hello') {
           if (m.screen) setScreen(m.screen); if (typeof m.dragPermitted === 'boolean') dragPermitted = m.dragPermitted; onInputInfo(m.input);
-          fitConnected(m.fit);
+          extensionKnown = !!m.extension;
+          if (m.extension) onExtendInfo(m.extension, true);
+          if (extendWanted && extensionKnown) sendExtend('resume');
+          else { extendWanted = false; saveExtend(); fitConnected(m.fit); }
+          renderExtend();
         }
+        if (m.t === 'extend') onExtendInfo(m);
         if (m.t === 'fit') onFitInfo(m);
         if (m.t === 'input') onInputInfo(m);
         if (m.t === 'drag-permission') {
@@ -522,7 +583,7 @@
           if (dragPermitted && was === false) showTip('Drag enabled');
         }
         if (m.t === 'status') {
-          if (m.screen) setScreen(m.screen); quality = m.quality || quality; onInputInfo(m.input); if (m.fit) onFitInfo(m.fit);
+          if (m.screen) setScreen(m.screen); quality = m.quality || quality; onInputInfo(m.input); if (m.fit) onFitInfo(m.fit); if (m.extension) onExtendInfo(m.extension);
           if (m.state === 'error' && mode === 'jpeg') { overlay.hidden = false; ovmsg.textContent = m.message || 'Screen capture failed.'; }
         }
         if (m.t === 'vconfig') onVConfig(m);
@@ -541,7 +602,7 @@
     ws.onclose = () => {
       if (ws !== sock) return;                       // an old socket, already let go
       ws = null; dragging = false; padReset(); vReset(); overlay.hidden = false;
-      fitPending = 0; renderFit(); renderOther();
+      fitPending = 0; pictureReady = false; renderFit(); renderOther(); renderExtend();
       if (document.hidden) return;                   // reconnects when the page shows again
       ovmsg.textContent = 'Connection dropped. Reconnecting…'; retry();
     };
@@ -556,8 +617,8 @@
       cur.x = Math.min(cur.x, screen.width - 1); cur.y = Math.min(cur.y, screen.height - 1);
       layout(); if (ws) askCursor();
     }
-    $('res-t').innerHTML = `${+screen.width}<span class="resh"> × ${+screen.height}</span>`;
-    $('b-res').setAttribute('aria-label', `${F.state === 'on' ? 'Mac fitted to this screen' : 'Mac resolution'}, ${screen.width} by ${screen.height}`);
+    $('res-t').innerHTML = E.selected ? `Display 2<span class="resh"> · ${+screen.width}</span>` : `${+screen.width}<span class="resh"> × ${+screen.height}</span>`;
+    $('b-res').setAttribute('aria-label', `${E.selected ? 'Second display' : F.state === 'on' ? 'Mac fitted to this screen' : 'Mac resolution'}, ${screen.width} by ${screen.height}`);
   }
   // ── H.264 (WebCodecs) ────────────────────────────────────────────────
   // Feature-detect once: no VideoDecoder, or no H.264 in it (older iOS), means
@@ -668,6 +729,11 @@
   }
   function videoUnavailable(why) {
     videoBroken = why; vReset();
+    if (extendWanted || E.selected) {
+      pictureReady = false; eError = 'Second-display video is unavailable. Retry Extend or choose Mirror.';
+      send({ t: 'mode', mode: 'jpeg' }); // server closes only the second display; no screen-0 fallback
+      overlay.hidden = false; ovmsg.textContent = eError; renderExtend(); return;
+    }
     if (mode === 'h264') { showTip('Video unavailable (' + why + ') — using JPEG'); applyQuality(); }
   }
   // Tell the Mac what arrived (nothing waits on this). Often, because the
@@ -682,7 +748,7 @@
   // ── JPEG (Compatibility) ─────────────────────────────────────────────
   let jpegSeq = 0, jpegShown = 0;
   function onJpeg(buf) {
-    if (mode !== 'jpeg') return;
+    if (mode !== 'jpeg' || extendWanted || E.selected) return;
     const my = ++jpegSeq, blob = new Blob([buf], { type: 'image/jpeg' });
     const show = (img, w, h, done) => {
       if (my > jpegShown) { jpegShown = my; sizeCanvas(w, h); ctx.drawImage(img, 0, 0, w, h); frameCount++; firstPicture(); }
@@ -697,6 +763,8 @@
     }
   }
   function firstPicture() {
+    if (extendWanted && (!E.selected || E.state !== 'on' || !E.mine)) return;
+    pictureReady = true;
     if (!overlay.hidden) overlay.hidden = true;
     if (firstPictureMs == null) firstPictureMs = Math.round(performance.now());
   }
@@ -778,16 +846,78 @@
   // this page asked: turning Fit off keeps the fit layout until the Mac is
   // back on its own screen. Off on the Mac and not to be asked again
   // (another screen turned it off, or an error): the Mac's own shape.
-  const fitLayout = () => F.state === 'on' || F.state === 'fitting' || (fitPref.on && fitAuto && !fitBlocked && F.state !== 'error');
+  const fitLayout = () => extendWanted || E.selected || F.state === 'on' || F.state === 'fitting' || (fitPref.on && fitAuto && !fitBlocked && F.state !== 'error');
   // `area` fitted to the Mac's shape, centred; the whole area when they match.
   function inArea(a, ar) {
     if (Math.abs((a.w / a.h) / ar - 1) < 0.012) return { ...a };
     const f = fitAR(a.w, a.h, ar);
     return { l: a.l + Math.round((a.w - f.w) / 2), t: a.t + Math.round((a.h - f.h) / 2), w: f.w, h: f.h };
   }
+  // ── foldables: viewport segments + device posture ───────────────────
+  // Two segments mean the screen is split by a fold or a hinge. Folded
+  // part-way (posture 'folded', or a hinge with a real gap) the picture gets
+  // one segment and the controls the other; a seamless fold lying flat is one
+  // screen. Browsers without either API see one segment: nothing changes.
+  const posture = () => { const p = navigator.devicePosture; return p && typeof p.type === 'string' ? p.type : ''; };
+  function segments() {
+    let s = null;
+    try { s = window.viewport && window.viewport.segments; } catch (_) {}
+    if (!s && typeof window.getWindowSegments === 'function') { try { s = window.getWindowSegments(); } catch (_) {} }
+    if (s && s.length === 2) return Array.from(s, (r) => ({ l: r.left != null ? r.left : r.x, t: r.top != null ? r.top : r.y, w: r.width, h: r.height }));
+    // CSS only (env(viewport-segment-*)): the second segment is measured from
+    // #segp, the first is what is left before it
+    const r = $('segp').getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return null;
+    // (CSS alone gives no gap: a hinge then reads as a seamless fold)
+    return r.top > 0 ? [{ l: 0, t: 0, w: innerWidth, h: r.top }, { l: r.left, t: r.top, w: r.width, h: r.height }]
+      : [{ l: 0, t: 0, w: r.left, h: innerHeight }, { l: r.left, t: r.top, w: r.width, h: r.height }];
+  }
+  function foldPanes() {
+    const s = segments();
+    if (!s) return null;
+    s.sort((a, b) => a.t - b.t || a.l - b.l);
+    const [a, b] = s, tabletop = b.t >= a.t + a.h - 1;
+    const gap = tabletop ? b.t - (a.t + a.h) : b.l - (a.l + a.w);
+    if (posture() === 'continuous' && gap < 1) return null;
+    // each half must hold its part; a sliver is not a pane
+    if (tabletop ? Math.min(a.h, b.h) < 180 : Math.min(a.w, b.w) < 240) return null;
+    return { kind: tabletop ? 'tabletop' : 'book', pic: a, ctl: b, gap };
+  }
+  function foldLayout(fp, vw, vh, sa, ar) {
+    const fitOn = fitLayout(), slowOn = !$('slow').hidden, tt = fp.kind === 'tabletop', p = fp.pic, c = fp.ctl;
+    root.dataset.layout = 'stack'; root.dataset.rail = 'none'; root.dataset.fold = fp.kind;
+    if (c.w <= 380) root.dataset.pane = 'narrowest'; else if (c.w <= 430) root.dataset.pane = 'narrow'; else delete root.dataset.pane;
+    root.dataset.fit = fitOn ? 'on' : 'off';
+    // the picture's segment, inside the safe area on the edges it shares with the screen
+    const area = { l: p.l + sa.l, t: p.t + sa.t, w: p.w - sa.l - (tt ? sa.r : 0), h: p.h - sa.t - (tt ? 0 : sa.b) };
+    let st;
+    if (fitOn) st = inArea(area, ar);
+    else { const f = fitAR(area.w, area.h, ar); st = { l: area.l + Math.round((area.w - f.w) / 2), t: area.t + Math.round((area.h - f.h) / 2), w: f.w, h: f.h }; }
+    box(lid, p);
+    const fold = $('fold');
+    fold.hidden = fp.gap < 1;
+    if (!fold.hidden) box(fold, tt ? { l: 0, t: p.t + p.h, w: vw, h: fp.gap } : { l: p.l + p.w, t: 0, w: fp.gap, h: vh });
+    // the controls' segment: strip at its top (below the status bar in book), slow line, deck
+    const sy = c.t + (tt ? 0 : sa.t);
+    box(strip, { l: c.l, t: sy, w: c.w, h: STRIP });
+    box($('slow'), { l: c.l, t: sy + STRIP, w: c.w, h: SLOW_H });
+    const dy = sy + STRIP + (slowOn ? SLOW_H : 0), dh = c.t + c.h - dy;
+    box(deck, { l: c.l, t: dy, w: c.w, h: dh });
+    deck.classList.add('open');
+    const roomW = c.w - (tt ? sa.l : 0) - sa.r, roomH = dh - sa.b;
+    // A wide, short segment (tabletop) puts the trackpad beside the keyboard;
+    // MacBook proportions would leave keys too small to hit.
+    const row = prefs.stackKb && roomW / roomH >= 2;
+    deck.classList.toggle('row', row);
+    sizeDeck('stack', { w: roomW, h: roomH, padL: tt ? sa.l : 0, padR: sa.r, padMin: 0, row });
+    return { st, area: fitOn ? area : null };
+  }
   function layout() {
     const vw = innerWidth, vh = innerHeight, sa = insets();
     const ar = screen.width > 0 && screen.height > 0 ? screen.width / screen.height : 1.6;
+    const fp = foldPanes();
+    if (fp) { const r = foldLayout(fp, vw, vh, sa, ar); return placed(r.st, r.area, true, false); }
+    delete root.dataset.fold; delete root.dataset.pane; $('fold').hidden = true; deck.classList.remove('row');
     const aw = vw - sa.l - sa.r, ah = vh - sa.t - sa.b;
     const slowOn = !$('slow').hidden;
     const stackH = Math.round(aw / ar);
@@ -856,6 +986,10 @@
         }
       }
     }
+    placed(st, area, stack, slowOn);
+  }
+  // After either layout: the picture's box, what sits on it, and the fit area.
+  function placed(st, area, stack, slowOn) {
     box(stage, st);
     box(overlay, st);
     const fo = $('fz-other'); fo.style.left = (st.l + st.w / 2) + 'px'; fo.style.top = (st.t + 8 + (slowOn && !stack ? SLOW_H + 6 : 0)) + 'px'; fo.style.maxWidth = Math.max(160, st.w - 16) + 'px';
@@ -882,7 +1016,7 @@
     const W = room.w - 2 * P, H = room.h - 2 * P;
     let kbW = 0, kh = 0, fh = 0, kbH = 0, padW = 0, padH = 0;
     const kbHeight = (k) => Math.round(k * 0.58) + 5 * k + 5 * kg;
-    if (kind === 'stack') {
+    if (kind === 'stack' && !(room.row && kbOn)) {
       if (kbOn) {
         kbW = Math.min(W, 14.5 * 62);
         kh = Math.max(30, Math.min(wide ? 50 : 42, Math.round(kbW / 14.5 * 1.45)));
@@ -911,7 +1045,7 @@
       ks.setProperty('--kf', Math.round(Math.min(18, kh * 0.38, unit * 0.62)) + 'px');
       ks.setProperty('--kw', Math.max(8, Math.min(11, unit * 0.2)).toFixed(1) + 'px');
       keyboard.classList.toggle('compact', unit < 34); keyboard.classList.toggle('tiny', unit < 25);
-      if (kind === 'overlay') keyboard.style.alignSelf = 'flex-end';
+      if (kind === 'overlay' && !room.row) keyboard.style.alignSelf = 'flex-end';
       else keyboard.style.alignSelf = '';
     }
     if (padOn) {
@@ -933,6 +1067,91 @@
   }
   window.addEventListener('resize', () => { layout(); setTimeout(layout, 250); });
   window.addEventListener('orientationchange', () => setTimeout(layout, 300));
+  // folding and unfolding: segments change with a resize, posture on its own
+  try { if (navigator.devicePosture && navigator.devicePosture.addEventListener) navigator.devicePosture.addEventListener('change', () => layout()); } catch (_) {}
+  for (const q of ['(vertical-viewport-segments: 2)', '(horizontal-viewport-segments: 2)', '(device-posture: folded)']) {
+    try { const m = matchMedia(q); if (m.addEventListener) m.addEventListener('change', () => layout()); } catch (_) {}
+  }
+
+  // ── independent second display ──────────────────────────────────────
+  function sendExtend(action) {
+    const a = lay.area || { w: stage.clientWidth, h: stage.clientHeight };
+    eSent = `${Math.round(a.w)}x${Math.round(a.h)}:${ePosition}:${eText}`;
+    send({ t: 'extend', action, dev: DEV, area: { w: Math.round(a.w), h: Math.round(a.h) }, position: ePosition, text: eText });
+  }
+  function extendAreaChanged() {
+    if (!E.selected || !E.mine || E.state !== 'on' || !ws) return;
+    const a = lay.area;
+    if (!a || eSent === `${Math.round(a.w)}x${Math.round(a.h)}:${ePosition}:${eText}`) return;
+    clearTimeout(eTimer); eTimer = setTimeout(() => sendExtend('resize'), 400);
+  }
+  function onExtendInfo(e, hello = false) {
+    if (!e || typeof e.state !== 'string') return;
+    extensionKnown = true;
+    const previous = E;
+    E = e;
+    if (e.ok === false) eError = e.message || 'The display could not change.';
+    else if (e.state === 'on' && e.mine) eError = '';
+    // A hello before the resume request is NOT a refusal to reconnect.
+    if (!hello) { extendWanted = !!e.selected; saveExtend(); }
+    if (e.selected && e.mine && e.state === 'on') { ePosition = e.position; eText = e.text; saveExtend(); }
+    const changed = e.selected !== previous.selected || e.state !== previous.state || e.mine !== previous.mine
+      || e.screen?.displayId !== previous.screen?.displayId || e.screen?.revision !== previous.screen?.revision;
+    if (changed && (e.selected || previous.selected)) {
+      pictureReady = false; vReset(); cur.known = false;
+      overlay.hidden = false;
+      ovmsg.textContent = e.selected ? e.message || (e.state === 'on' ? 'Starting the second display…' : 'Preparing the second display…') : 'Starting the Mac screen…';
+    }
+    if (e.screen) setScreen(e.screen);
+    if (changed) layout();
+    renderExtend(); renderFit();
+  }
+  function renderExtend() {
+    const connected = ws && ws.readyState === 1;
+    const changing = ['starting', 'resizing', 'stopping'].includes(E.state);
+    const other = E.owner === 'other' || E.owner === 'away';
+    $('e-mirror').setAttribute('aria-pressed', String(!E.selected));
+    $('e-extend').setAttribute('aria-pressed', String(!!E.selected));
+    $('e-mirror').disabled = !connected || E.state === 'stopping';
+    $('e-extend').disabled = !connected || !extensionKnown || changing || (other && !E.mine) || !h264ok || F.state === 'on' || F.state === 'fitting';
+    $('e-extend').textContent = E.selected && E.state === 'error' ? 'Retry Extend' : 'Extend';
+    $('e-controls').hidden = !E.selected;
+    $('mirror-controls').hidden = !!E.selected;
+    $('g-compat').parentElement.hidden = !!E.selected;
+    for (const b of $('e-controls').querySelectorAll('button')) {
+      b.disabled = !connected || changing || !E.mine;
+      b.setAttribute('aria-pressed', String(b.dataset.ePosition ? b.dataset.ePosition === ePosition : b.dataset.eText === eText));
+    }
+    let text = eError || E.message;
+    if (!text) {
+      if (!connected) text = 'Connect to the Mac to choose a desktop mode.';
+      else if (!extensionKnown) text = 'Update the Mac remote service to use Extend.';
+      else if (!h264ok) text = 'Extend needs H.264 video in this browser.';
+      else if (F.state === 'on' || F.state === 'fitting') text = 'Turn off Fit below to use Extend.';
+      else if (changing) text = E.state === 'stopping' ? 'Returning to Mirror…' : 'Preparing the second display…';
+      else if (E.selected && E.state === 'on') text = `Display 2 · ${screen.width} × ${screen.height}. Move a window past the ${E.position} edge of the Mac desktop. Disconnects 30 seconds after you leave.`;
+      else if (other) text = 'Another device is using the second display.';
+      else text = 'Use this device as a second Mac display.';
+    }
+    $('e-msg').textContent = text;
+  }
+  $('e-extend').addEventListener('click', () => {
+    fitPref.on = false; saveFitPref(); clearTimeout(fitT);
+    extendWanted = true; saveExtend(); eError = ''; pictureReady = false; eSent = '';
+    videoBroken = ''; if (QUAL[$('q').value]) $('q').value = 'auto';
+    applyQuality(); renderQuality(); layout(); sendExtend('start'); renderExtend();
+  });
+  $('e-mirror').addEventListener('click', () => {
+    eError = ''; clearTimeout(eTimer);
+    if (!E.selected && !extendWanted) return;
+    sendExtend('stop');
+  });
+  $('e-controls').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.ePosition) ePosition = b.dataset.ePosition;
+    if (b.dataset.eText) eText = b.dataset.eText;
+    saveExtend(); sendExtend('resize'); renderExtend();
+  });
 
   // ── "Fit the Mac to this screen" ─────────────────────────────────────
   // The Mac makes a screen shaped like this page's picture area (a virtual
@@ -954,7 +1173,7 @@
   function sendFit(take = false) {
     clearTimeout(fitT); fitT = 0;
     const a = lay.area;
-    if (!ws || ws.readyState !== 1 || !fitPref.on || !fitAuto || !a) return;
+    if (extendWanted || E.selected || !ws || ws.readyState !== 1 || !fitPref.on || !fitAuto || !a) return;
     const dpr = window.devicePixelRatio || 1;
     fitSent = { w: a.w, h: a.h, text: fitPref.text };
     if (!elsewhere() || take) fitPending = performance.now();
@@ -964,6 +1183,7 @@
   // Called after every layout: re-ask once the area has settled (a rotation
   // reports several sizes on its way). The Mac decides whether it re-fits.
   function fitAreaChanged() {
+    extendAreaChanged();
     const a = lay.area;
     if (!a || !fitAuto || !ws) return;
     if (fitSent && Math.abs(fitSent.w - a.w) < 2 && Math.abs(fitSent.h - a.h) < 2 && fitSent.text === fitPref.text) return;
@@ -1038,7 +1258,7 @@
     // another screen turned it off, took it over, or an error, it reads off;
     // switching it on fits the Mac to this screen again.
     on.checked = fitPref.on && fitAuto && !other && !fitBlocked;
-    on.disabled = !ws;
+    on.disabled = !ws || E.state === 'on' || E.state === 'starting' || E.state === 'resizing';
     chips.hidden = !on.checked;
     const kr = $('fz-keep-row'); kr.hidden = !(F.state === 'on' && F.mine); $('fz-keep').checked = !!F.keep; $('fz-keep').disabled = !ws;
     for (const b of chips.querySelectorAll('[data-fz-text]')) b.setAttribute('aria-checked', b.dataset.fzText === fitPref.text ? 'true' : 'false');
@@ -1861,13 +2081,13 @@
     if (document.activeElement === kb) kb.blur();
     setBehind(true);
     $('sheet').hidden = false;
-    renderQuality(); renderStats(); renderFit(); loadModes();
+    renderQuality(); renderStats(); renderFit(); renderExtend(); loadModes();
     const el = focusId && $(focusId);
     setTimeout(() => { (el || $('sheet-x')).focus({ preventScroll: !el }); if (el) el.scrollIntoView({ block: 'start' }); }, 30);
   }
   function closeSheet() { setBehind(false); $('sheet').hidden = true; if (sheetFrom) sheetFrom.focus({ preventScroll: true }); sheetFrom = null; }
   $('b-conn').addEventListener('click', (e) => openSheet(e.currentTarget, 'h-stream'));
-  $('b-res').addEventListener('click', (e) => openSheet(e.currentTarget, 'h-mac'));
+  $('b-res').addEventListener('click', (e) => openSheet(e.currentTarget, 'h-desktop'));
   $('sheet-x').addEventListener('click', closeSheet);
   $('sheet-scrim').addEventListener('click', closeSheet);
   // focus stays inside the open sheet
@@ -1894,7 +2114,7 @@
     renderModes();
   }
   function renderModes() {
-    const cur0 = D.current, fitted = F.state === 'on' || F.state === 'fitting';
+    const cur0 = D.current, fitted = E.selected || F.state === 'on' || F.state === 'fitting';
     const list = D.modes.filter((m) => D.all || m.hidpi || m.id === cur0);
     $('d-list').innerHTML = list.map((m) => {
       const meta = [m.default && 'Default', m.native && !m.hidpi && 'Native', !m.hidpi && 'Low resolution'].filter(Boolean).join(', ');
