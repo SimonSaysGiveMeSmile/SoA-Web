@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SYSTEM HEALTH — runs scripts/soa-health: the loopback service
+  (127.0.0.1:6084) that samples CPU, memory, load, swap and temperature every
+  60 s, flags processes that stay heavy, and NOTIFIES the user with a one-tap
+  stop link (default) — or, only if the user deliberately switches it on,
+  terminates them automatically. Reached through the daemon's /preview/6084/
+  proxy (same tunnel, same pairing gate; no daemon restart needed).
+
+  No sudo, no new permission: temperatures come from scripts/soa-thermal.swift
+  (compiled on first use into $SOA_WEB_STATE_DIR/health/, needs swiftc from the
+  Xcode command line tools; without it the service falls back to battery
+  temperature + memory/CPU only).
+
+  The install lives at $HOME/.soa-web; launchd does not expand $HOME in
+  ProgramArguments, so the job goes through /bin/sh. The service writes its own
+  log to $HOME/.soa-web-local/logs/health.log.
+
+  Load: cp deploy/launchd/com.soa-web.health.plist ~/Library/LaunchAgents/ &&
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.health.plist
+  Stop: launchctl bootout gui/$(id -u)/com.soa-web.health
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.health</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>mkdir -p "$HOME/.soa-web-local/logs" &amp;&amp; cd "$HOME/.soa-web" &amp;&amp; exec node "$HOME/.soa-web/scripts/soa-health" serve &gt;&gt; "$HOME/.soa-web-local/logs/health.log" 2&gt;&amp;1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

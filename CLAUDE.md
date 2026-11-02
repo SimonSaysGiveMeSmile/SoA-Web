@@ -179,6 +179,18 @@ ignored (no re-arm, no second `limited` event); a genuinely new limit (different
 reset time) re-arms normally. Control commands (`/usage-credits`, `/effort`,
 bare `continue`, …) are never replayed.
 
+**Weekly banners (2026-10-30).** Anthropic is retiring the 5-hour session limit,
+so Claude's banners become weekly: `You've hit your weekly limit · resets Nov 3,
+5pm (America/Los_Angeles)` (also `Opus weekly limit reached ∙ …`, `resets in 3d
+4h`, weekday forms). `sessionManager.js` parses these too, honours the trailing
+`(Area/City)` zone, and records which window stopped the tab (`limitWindow`:
+`weekly` | `opus weekly` | `session` | …). An undated `Nov 3` resolves to the
+NEAREST year, so a weekly banner still on screen after its reset stays in the
+past (stale, no re-arm) instead of re-arming a resume for next year. A weekly
+limit means the tab is parked for days: the timer is armed for the real reset,
+and the queue is held that long. Tests: `server/test/limitBanner.test.js`. Daemon
+code — takes effect on the next normal daemon restart.
+
 **Claude vs Codex is a first-class distinction**: each tab carries
 `agent: claude|codex` (detected from what the TUI paints: `❯`/footer vs `›`/
 `gpt-… medium · cwd`; persisted in `tabs.json` so a restart relaunches the RIGHT
@@ -193,23 +205,37 @@ working/STUCK.
 ### Token-usage control — throttle, never stop
 
 The manager also keeps the fleet under Claude's usage limit so agents don't burn
-the 5h/weekly quota and get `limited` (which *stops* their work). Live spend is a
-first-class input: `soa-sessions usage` reads the same v2 engine the dashboard
-shows and folds it per **project** (and `--by session`), tab-correlated, with a
-`$/min` burn rate and budget verdicts:
+the quota and get `limited` (which *stops* their work). **Since 2026-10-30 the
+guard is WEEKLY-first**: the 5-hour limit is being retired and the week is the
+ceiling that stops work (the week must never run out). The shared
+verdict lives in `scripts/soa-weekly-guard.cjs`: it reads the quota service
+(`/api/usage-quota` on `:4011`, loopback), projects each provider's weekly % to
+its reset (the service's recent pace for the next ~5 h, the week-to-date average
+— spread over ≥24 h — for the rest), and returns **THROTTLE** when the projection
+reaches `weekProjectedPct` (100) or usage is already ≥95%, **WATCH** at
+`weekWarnPct` (90). Live spend is the second input: `soa-sessions usage` reads
+the same v2 engine the dashboard shows and folds it per **project** (and
+`--by session`), tab-correlated, with a `$/min` burn rate and budget verdicts:
 
 ```bash
-soa-sessions usage                 # per-project 5h$ / day$ / $/min + OVER/FAST flags + a ⚠ THROTTLE header
+soa-sessions usage                 # WEEK line first, then per-project day$ / $/min (+5h$ only while a 5h window is reported) + OVER/FAST/⚠ THROTTLE
 soa-sessions usage --by session    # per-session detail
 soa-sessions usage --over          # just the over-budget tab ids (comma-list, for fan-out)
-soa-sessions usage --ids hot       # over-budget OR burning fast (the throttle set)
-soa-sessions list --cost           # the normal fleet view + a spend column
+soa-sessions usage --ids hot       # over-budget OR burning fast OR (weekly THROTTLE) the top burners
+soa-sessions usage --json          # includes week.{claude,codex} verdicts + fiveHour flag
+soa-sessions list --cost           # the normal fleet view + a spend column (today$ once the 5h window is retired)
+soa-sessions budget week <projectedPct> [warnPct]           # the weekly guard's lines (default 100 / 90)
 soa-sessions budget set <project> <blockCost> [todayCost]   # per-project caps ($ est.; default 20/5h · 60/day · 1.5/min)
 ```
 
-When a project is **OVER** budget or **FAST**, or the 5h block is projected to
-blow the limit, **THROTTLE — never `stop`** (stopping loses the work; the goal is
-to slow burn, not halt it):
+`blockCost` (the 5h $ cap) only counts while the provider still reports a 5h
+window; once it is retired the per-project caps are `todayCost` and `$/min`.
+On a weekly THROTTLE the top burners (`weekTopN`, default 3; ranked by $/min,
+then today$) join the throttle set even if no single project is over its own cap.
+
+When the week is projected to run out, or a project is **OVER** budget or
+**FAST**, **THROTTLE — never `stop`** (stopping loses the work; the goal is to
+slow burn, not halt it):
 
 ```bash
 soa-sessions throttle <id|list|over|hot|all>            # /compact each → clears context → cheaper turns, work continues
@@ -218,12 +244,17 @@ soa-sessions throttle <id|hot> --pause [Nm]             # interrupt + auto-resum
 
 Policy: prefer **`/compact`** (safe — the agent keeps working, just at a lower
 per-turn cost; best on high-context tabs). Use **`--pause`** only for the
-*fastest* burners when the block is close to the cap — it interrupts the current
+*fastest* burners when the week (or a still-reported block) is close to the cap — it interrupts the current
 turn and schedules a `continue`, so nothing is ever abandoned. **Never `stop`**
 an agent to save tokens. Re-check `usage` after throttling; on `limited` the tab
 still auto-resumes at the reset. Thresholds live in
 `~/.soa-web-local/usage-budgets.json` (defaults mirror the `soa-usage-alert`
 push watchdog and the dashboard's ⚠ hot-row highlight, so all three agree).
+The headless `scripts/soa-usage-throttle` (launchd, every ~180 s) applies the
+same order: weekly projection (`SOA_THROTTLE_WEEKLY=0` turns it off) and the
+local 7-day $ cap (`SOA_THROTTLE_WEEK`, default 2800), then project today$, and
+the 5h block caps only while a 5h window is reported. Tests:
+`server/test/weeklyGuard.test.js`. These are CLIs — live on their next run.
 
 ## Agent-to-agent comms (soa-bus)
 
@@ -415,6 +446,14 @@ a killed service never leaves a stray display; the start-up guard restores
 from the marker. Test it with the helper's DRY mode on a spare port, never
 on the live display.
 
+The viewer's experimental **Air trackpad** (front camera → MediaPipe
+HandLandmarker in the browser → the same pointer as the trackpad) needs ~34 MB
+of WASM + model that are not committed: `scripts/soa-fetch-mediapipe` downloads
+the pinned `@mediapipe/tasks-vision` 1.2.0 + `hand_landmarker` model, checks
+every sha256, and installs them into the git-ignored
+`web/public/assets/vendor/mediapipe-tasks-vision-1.2.0/` (`--check` verifies).
+Without them the viewer hides the Air trackpad button. Static — no restart.
+
 Auto-start plist:
 `deploy/launchd/com.soa-web.desktop-remote.plist`. Log:
 `~/.soa-web-local/logs/desktop-remote.log`.
@@ -570,10 +609,15 @@ launchd jobs):
    abandoned). Log: `~/.soa-web/logs/nudge-stale.log`.
 7. `com.soa-web.usage-alert` — every 120s runs `scripts/soa-usage-alert`: polls
    `/api/claude-usage` (loopback, no auth) and pushes the user when a SINGLE
-   session is "using too much token" — leaning hard on the model in the active
-   5h usage-limit block (≥ $20 est.), heavy today (≥ $60), or suddenly burning
+   session is "using too much token" — heavy today (≥ $60), suddenly burning
    fast (cost-**velocity** ≥ $1.5/min, derived by diffing successive polls; the
-   piece the stateless snapshot engine lacks). Edge-triggered with a 30-min
+   piece the stateless snapshot engine lacks), or — only while a 5h window is
+   still reported — leaning hard in the active 5h block (≥ $20 est.). Since
+   2026-10-30 it also pushes once per provider per 6 h (`SOA_USAGE_WEEK_COOLDOWN`;
+   re-fires when used% rises `SOA_USAGE_WEEK_STEP`=10 points) when the WEEKLY
+   quota is projected to run out before its reset (`soa-weekly-guard.cjs`, the
+   same verdict as `soa-sessions usage`; off with `SOA_USAGE_WEEK_ALERT=0`).
+   Edge-triggered with a 30-min
    per-session cooldown (never spams), re-fires on a 2× escalation, resets on a
    new block. Correlates each Claude session → tab (`#N title`) via `/api/tabs`.
    Delivers via `soa-notify` (ntfy OS push) + in-app CHAT. Read-only over
