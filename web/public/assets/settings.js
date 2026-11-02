@@ -25,7 +25,7 @@ const LS_BACKEND_KEY = 'soa_web_backend';
 
 export const DEFAULTS = Object.freeze({
     theme: 'dark',   // default to dark regardless of system preference
-    uiLang: 'tron',  // Design pack ID; choices are defined in DESIGN_PACKS.
+    uiLang: 'windows11',  // Design pack ID (default: Windows 11); choices are defined in DESIGN_PACKS.
     termFontSize: 13,
     cursorBlink: true,
     nocursor: false,
