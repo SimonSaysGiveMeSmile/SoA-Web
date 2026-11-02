@@ -15,6 +15,7 @@ const SHELL = [
     '/app.js',
     '/fullscreen.js',
     '/socket.js',
+    '/doors.js',
     '/ansi.js',
     '/terminal.js',
     '/voice-chat.js',

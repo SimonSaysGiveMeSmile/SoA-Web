@@ -14,6 +14,7 @@
  */
 
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
+import { DoorFailover, preferredDoor } from './doors.js';
 import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
 import { modelBadge } from './sessionMetadata.js';
@@ -874,9 +875,14 @@ class App {
             if (localStorage.getItem('soa.m.installHint') === 'auto')
                 setTimeout(() => this._installHint(), 1500);
         } catch (_) {}
+        // After a failover, a reload starts on the backup door that worked
+        // (doors.js) instead of waiting out the dead primary again; the
+        // primary stays in the rotation behind it.
+        this._doorPrimary = primaryOrigin;
+        const startDoor = token ? preferredDoor(primaryOrigin) : null;
         this.socket = new BridgeSocket({
-            url: wsBaseFromHttp(primaryOrigin),
-            altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
+            url: wsBaseFromHttp(startDoor || primaryOrigin),
+            altUrls: [startDoor && primaryOrigin, altOrigin].filter(Boolean).map(wsBaseFromHttp),
             token,
         });
 
@@ -907,6 +913,7 @@ class App {
         this._pullCapabilities();
 
         this._wireSocket();
+        this._wireDoors(token);
         this._wireUi();
         this._buildDiagPanel();
         this._wireWebPreview();
@@ -1712,6 +1719,59 @@ class App {
             })();
             this.reconnectSub.textContent = `trying alternate link · ${host}`;
         });
+    }
+
+    // Backup doors (doors.js). The desktop publishes its other public links,
+    // encrypted under the pairing token. While connected the list is kept
+    // fresh; once this link has been down ~10s the saved doors, then a fresh
+    // list, are probed and the socket moves to the first that answers, with
+    // the same token and unlock (the same thing a saved-connection tap does,
+    // without reloading the page that may have come from the dead door).
+    _wireDoors(token) {
+        const toHttp = (u) => String(u || '').replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '');
+        this._doors = new DoorFailover({
+            token,
+            current: () => toHttp(this.socket && this.socket.baseUrl),
+            primary: this._doorPrimary,
+            getUnlock: () => (this.socket && this.socket.unlock) || '',
+            onSwitch: (origin) => (this.socket ? this.socket.switchEndpoint(wsBaseFromHttp(origin)) : false),
+            onStatus: (s) => this._doorStatus(s),
+        });
+        if (!this._doors.enabled) return;
+        this.socket.addEventListener('state', (ev) => {
+            const st = ev.detail.state;
+            if (st === SocketState.CONNECTED) this._doors.connected();
+            else if (st === SocketState.DISCONNECTED || st === SocketState.CONNECTING) this._doors.disconnected();
+        });
+    }
+
+    _doorStatus(s) {
+        let line = document.getElementById('reconnect-doors');
+        if (!line && this.reconnectSub) {
+            line = document.createElement('p');
+            line.id = 'reconnect-doors';
+            line.className = 'reconnect-diag reconnect-doors';
+            line.setAttribute('aria-live', 'polite');
+            this.reconnectSub.insertAdjacentElement('afterend', line);
+        }
+        const set = (t) => { if (line) { line.textContent = t; line.hidden = !t; } };
+        const secs = Math.round((s.nextInMs || 0) / 1000);
+        switch (s.phase) {
+            case 'trying': set('Trying backup links…'); break;
+            case 'switching': set('Switching to a backup link…'); pushLog('doors: switching to ' + s.url); break;
+            case 'waiting':
+                set(s.listOk === false
+                    ? `No backup link answered and the link list is unreachable. Still trying saved links (next in ${secs}s).`
+                    : `No backup link answered yet. Still trying backup links (next in ${secs}s).`);
+                break;
+            case 'switched':
+                set('');
+                this._toast('Reconnected through a backup link');
+                this._setStatus('connected', 'paired · backup link');
+                pushLog('doors: reconnected through ' + s.url);
+                break;
+            case 'ok': set(''); break;
+        }
     }
 
     _wireUi() {

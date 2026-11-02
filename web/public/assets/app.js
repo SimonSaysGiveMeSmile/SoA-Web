@@ -27,6 +27,7 @@ import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-2026100
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=desktop-packs-20260930';
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
 import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=kbd-20261029';
+import { attachDesktopFailover, findWorkingDoor, doorsSupported } from '/assets/doors.js?v=doors-20261031';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -7930,6 +7931,19 @@ async function resolveBackend() {
         // funnel boot into the sandbox fallback. Keep it; it is re-probed on
         // every load and the user can overwrite it via ?backend= any time.
         console.warn('[soa-web] saved backend unreachable, keeping pairing:', saved.backend);
+        // The desktop may still be up behind another of its public links.
+        const door = saved.token ? await findWorkingDoor({ token: saved.token, unlock: saved.unlock, exclude: [saved.backend] }).catch(() => null) : null;
+        if (door) {
+            // Saved only once it is confirmed below: a door that fails the
+            // check must not replace the pairing.
+            const p2 = await probePing(door, saved.token, 3000);
+            const acc2 = p2 && p2.ok ? await ensureAccess(door, saved.token, p2) : null;
+            if (acc2) {
+                saveBackend(door, acc2.token, acc2.unlock);
+                try { sessionStorage.setItem('soa.doors.switched', door); } catch (_) {}
+                return { backend: door, token: acc2.token };
+            }
+        }
     }
     if (CFG.backend) {
         const cfgBackend = String(CFG.backend).replace(/\/+$/, '');
@@ -7975,6 +7989,11 @@ async function resolveBackend() {
 
 async function bootServerMode({ backend, token }) {
     const crossOrigin = backend !== location.origin.replace(/\/+$/, '');
+    // A paired remote desktop: this browser has made its choice, exactly like
+    // the ?backend= deep link the welcome gate already steps aside for. Without
+    // this, a later cold load while that desktop is down stopped at the
+    // first-run wizard instead of the recovery panel that keeps trying.
+    if (crossOrigin && token) { try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {} }
     CFG._resolvedBackend = backend;
     CFG._resolvedToken = token || '';
     $('#boot-status').textContent = tr('boot.negotiating');
@@ -7988,6 +8007,13 @@ async function bootServerMode({ backend, token }) {
     CFG._bridge = bridge;
     CFG._shell = shell;
     bridge.connect();
+    // Backup doors (doors.js): once this backend has been unreachable ~10s, move
+    // to another public link of the same desktop, saved and reloaded exactly
+    // like a picked pairing (same token, same unlock).
+    attachDesktopFailover({
+        bridge, backend, token, getUnlock: () => UNLOCK,
+        switchTo: (origin) => { saveBackend(origin, token, UNLOCK); location.reload(); },
+    });
     $('#status-session').textContent = crossOrigin ? new URL(backend).host : location.host;
 
     mountSidebar($('#sidebar'), { audio, backend, token });
@@ -8038,6 +8064,18 @@ async function _doBoot() {
             if (bs) bs.textContent = tr('boot.negotiating') + ` (reconnecting… ${attempt}/3)`;
             await new Promise(r => setTimeout(r, 1500));
             backend = await resolveBackend();
+        }
+    }
+    // Paired, but the desktop answers on none of its links right now: open the
+    // pairing anyway, offline. The recovery panel shows, the bridge keeps
+    // reconnecting, and backup links (doors.js) keep being tried, instead of
+    // dropping a paired browser into the sandbox until the next manual reload.
+    if (!backend && !isPhone()) {
+        const saved = loadSaved();
+        if (saved && saved.token && doorsSupported()) {
+            UNLOCK = saved.unlock || '';
+            CFG._resolvedUnlock = UNLOCK;
+            backend = { backend: saved.backend, token: saved.token };
         }
     }
     if (backend) {
