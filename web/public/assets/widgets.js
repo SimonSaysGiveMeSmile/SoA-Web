@@ -593,15 +593,19 @@ class ClaudeUsageWidget extends Widget {
         svg.setAttribute('class', 'usage-ring');
         svg.setAttribute('aria-hidden', 'true');
         const metrics = {};
-        for (const [key, label, radius] of [['session', '5h', 44], ['weekly', '7d', 31]]) {
+        // Weekly is the PRIMARY window (outer ring, first legend row): Claude
+        // is retiring its 5-hour limit and codex reports weekly only. The
+        // session window, while a provider still reports one, sits inside; once
+        // it is retired the card draws the weekly ring alone (_cardLayout).
+        for (const [key, label, radius] of [['weekly', '7d', 44], ['session', '5h', 31]]) {
             const g = document.createElementNS(NS, 'g');
             g.setAttribute('class', `ring none ${key === 'weekly' ? 'weekly' : ''}`);
             g.setAttribute('data-ring', key);
             const C = 2 * Math.PI * radius;
             let val, proj;
-            // proj: where the session window lands at its reset if the recent
+            // proj: where the primary window lands at its reset if the recent
             // pace holds. Drawn under the value arc so the arc stays the reading.
-            for (const cls of key === 'session' ? ['track', 'proj', 'val'] : ['track', 'val']) {
+            for (const cls of ['track', 'proj', 'val']) {
                 const circle = document.createElementNS(NS, 'circle');
                 for (const [k, v] of Object.entries({ cx: 50, cy: 50, r: radius, class: cls })) circle.setAttribute(k, v);
                 if (cls === 'val') {
@@ -625,7 +629,7 @@ class ClaudeUsageWidget extends Widget {
             metrics[key] = { el, big, period, cap, sample, detail, detailLabel, detailValue, rings: { a: { g, val, proj, C } } };
         }
         const legend = $el('div', { class: 'usage-metrics usage-legend' }, Object.values(metrics).map(m => m.el));
-        const gauge = $el('div', { class: 'usage-gauge usage-gauge-dual' }, [svg, legend]);
+        const gauge = $el('div', { class: 'usage-gauge usage-gauge-dual', 'data-layout': 'dual' }, [svg, legend]);
         const resetValue = $el('span', { text: '—' });
         const resetWindow = $el('span', { class: 'usage-reset-window' });
         const reset = $el('div', { class: 'usage-next-reset' }, [$el('span', { text: '↻', 'aria-hidden': 'true' }), resetWindow, resetValue]);
@@ -685,7 +689,27 @@ class ClaudeUsageWidget extends Widget {
             onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) this._toggle(src); } },
         }, [$el('div', { class: 'usage-card-heading' }, [name, sample, chevron]),
             gauge, reset, drive]);
-        return { el, name, sample, metrics, burn, range, cost, reset, resetValue, resetWindow };
+        return { el, name, sample, metrics, burn, range, cost, reset, resetValue, resetWindow, gauge, layout: 'dual' };
+    }
+
+    // windowStatus.session from the quota feed: 'reported' | 'not-reported' |
+    // 'retired' (the provider no longer has a 5-hour limit at all).
+    _sessionRetired(src) { return this._quota[src]?.windowStatus?.session === 'retired'; }
+    _sessionReported(src) {
+        const d = this._quota[src];
+        return d?.windowStatus?.session === 'reported' || (d?.windowStatus?.session !== 'retired' && !!d?.windows?.session);
+    }
+    // 'single' = the weekly ring alone. A provider whose 5h limit is retired
+    // draws one ring; a provider that merely does not report one (codex)
+    // follows its neighbour, so the two cards side by side stay the same
+    // object — both two-ring while Claude still has a session window, both
+    // one-ring once it is gone.
+    _cardLayout(src) {
+        if (this._sessionRetired(src)) return 'single';
+        if (this._sessionReported(src)) return 'dual';
+        const other = src === 'claude' ? 'codex' : 'claude';
+        const otherShown = other === 'claude' || this._codexSeen;
+        return otherShown && this._sessionRetired(other) ? 'single' : 'dual';
     }
 
     _setRing(metric, pct, weekly = true) {
@@ -702,13 +726,17 @@ class ClaudeUsageWidget extends Widget {
         }
     }
 
-    // The session ring's faint arc runs from the current reading to where the
-    // window lands at its reset if the recent official pace holds. Past 100%
-    // it goes .over: the limit will stop the work before the window resets,
-    // the same fact Range states in time.
+    // The primary (weekly) ring's faint arc runs from the current reading to
+    // where the window lands at its reset if the recent official pace holds.
+    // Past 100% it goes .over: the week would run out before it resets — the
+    // same fact Range states in time, and the fleet's THROTTLE trigger.
     _paintProjection(card, data) {
-        const metric = card.metrics.session, r = metric.rings.a, w = data?.windows?.session;
-        const pace = data?.pace?.session, now = Date.now();
+        const key = 'weekly';
+        const other = card.metrics.session.rings.a;
+        other.proj.style.visibility = 'hidden';
+        other.g.classList.remove('over');
+        const metric = card.metrics[key], r = metric.rings.a, w = data?.windows?.[key];
+        const pace = data?.pace?.[key], now = Date.now();
         const ok = this._quotaFresh && data?.status !== 'unavailable' && this._limitCurrent(w) && Number.isFinite(w.resetsAt) &&
             pace?.updatedAt === w.updatedAt && now - w.updatedAt <= 300000 && Number.isFinite(pace?.percentPerHour) &&
             pace.percentPerHour > 0 && ['estimated', 'reset-first'].includes(pace.state);
@@ -898,8 +926,23 @@ class ClaudeUsageWidget extends Widget {
         const labels = [];
         const connected = this._quotaFresh;
         const unavailable = !connected || data?.status === 'unavailable';
+        const layout = card.layout = this._cardLayout(src);
+        card.gauge.dataset.layout = layout;
+        card.el.dataset.layout = layout;
         let anyStale = false;
         for (const [key, metric] of Object.entries(card.metrics)) {
+            // A retired session window is not drawn, listed or announced: there
+            // is no 5-hour limit left to report on.
+            const gone = key === 'session' && layout === 'single';
+            metric.detail.hidden = gone;
+            if (gone) {
+                this._setRing(metric, null, false);
+                metric.sample.hidden = true;
+                metric.el.classList.remove('stale');
+                metric.rings.a.g.classList.remove('stale');
+                metric.el.title = '';
+                continue;
+            }
             const w = data?.windows?.[key], known = this._limitCurrent(w);
             const minutes = w?.windowMinutes;
             const label = key === 'weekly' ? (minutes && minutes !== 10080 ? `${minutes / 1440}-day` : 'Weekly') :
@@ -913,22 +956,24 @@ class ClaudeUsageWidget extends Widget {
             metric.detailLabel.textContent = label;
             metric.detailValue.textContent = metric.big.textContent;
             metric.cap.textContent = known ? this._resetText(w) : unavailable ? 'Unavailable' :
-                data?.status === 'waiting' ? 'Awaiting report' : data?.windowStatus?.[key] === 'expired' ? 'Awaiting update' : 'Not reported';
+                data?.status === 'waiting' ? 'Awaiting report' : data?.windowStatus?.[key] === 'expired' || (Number.isFinite(w?.resetsAt) && w.resetsAt > 0 && w.resetsAt <= Date.now()) ? 'Awaiting update' : 'Not reported';
             metric.sample.textContent = stale ? `Cached · ${age || 'age unknown'}` : '';
             metric.sample.hidden = !stale;
             metric.el.classList.toggle('stale', stale);
             metric.rings.a.g.classList.toggle('stale', stale);
             const via = w?.source === 'claude-oauth-usage' ? 'from Anthropic' : w?.source === 'claude-code-statusline' ? 'from Claude Code' : '';
-            metric.el.title = known ? `${label} (${key === 'session' ? 'outer' : 'inner'} ring): ${w.usedPercent.toFixed(1).replace(/\.0$/, '')}% used${via ? ', ' + via : ''}. Reported ${age || 'at an unknown time'}. ` +
+            const where = layout === 'single' ? 'the ring' : key === 'weekly' ? 'outer ring' : 'inner ring';
+            metric.el.title = known ? `${label} (${where}): ${w.usedPercent.toFixed(1).replace(/\.0$/, '')}% used${via ? ', ' + via : ''}. Reported ${age || 'at an unknown time'}. ` +
                 (w.resetsAt ? `Resets ${new Date(w.resetsAt).toLocaleString()}` : 'Reset time not reported.') :
                 `${src === 'codex' ? 'Codex' : 'Claude'} does not report a current ${key === 'session' ? 'session' : 'weekly'} quota on this plan, ` +
-                `so the ${key === 'session' ? 'outer' : 'inner'} ring is empty. That is not zero usage or unlimited capacity.`;
+                `so ${layout === 'single' ? 'the ring' : `the ${key === 'weekly' ? 'outer' : 'inner'} ring`} is empty. That is not zero usage or unlimited capacity.`;
             this._setRing(metric, known ? w.usedPercent : null, key === 'weekly');
             labels.push(`${label}: ${known ? Math.round(w.usedPercent) + ' percent used, ' + metric.cap.textContent : metric.cap.textContent}${stale ? ', ' + metric.sample.textContent : ''}`);
         }
         card.sample.textContent = !connected ? 'Offline' : data?.status === 'waiting' ? 'Waiting' : anyStale ? 'Cached' : '';
         card.sample.hidden = !card.sample.textContent;
-        const next = Object.entries(data?.windows || {}).filter(([, w]) => this._limitCurrent(w) && Number.isFinite(w.resetsAt))
+        const next = Object.entries(data?.windows || {}).filter(([k, w]) => (k !== 'session' || layout === 'dual') &&
+            card.metrics[k] && this._limitCurrent(w) && Number.isFinite(w.resetsAt))
             .sort((a, b) => a[1].resetsAt - b[1].resetsAt)[0];
         card.resetValue.textContent = next ? _fmtDur(next[1].resetsAt - Date.now()) : '—';
         card.resetWindow.textContent = next ? card.metrics[next[0]].period.textContent : '';
@@ -942,7 +987,7 @@ class ClaudeUsageWidget extends Widget {
             `${card.burn.chartTitle.textContent} ` +
             `${card.range.heading.textContent}: ${card.range.value.textContent}. ` +
             `${card.cost.heading.textContent}, estimated: ` +
-            Object.entries(card.cost.cells).map(([k, c]) =>
+            Object.entries(card.cost.cells).filter(([, c]) => !c.el.hidden).map(([k, c]) =>
                 `${k === 'block' ? 'five hours' : k === 'today' ? 'today' : 'seven days'} ${c.v.textContent.replace('≈', 'about ')}`).join(', ') + '. ' +
             'Show usage details.');
     }
@@ -998,12 +1043,17 @@ class ClaudeUsageWidget extends Widget {
             heading: 'Cost', mode: 'grid', cells, hot: live && b.cost >= HOT_COST.block,
             title: [
                 'Estimated from the token records on this device at API list prices. This is NOT a bill — a subscription does not charge these amounts, and other devices are not counted.',
+                !this._blockRowShown() ? '' :
                 live ? `This 5-hour block: ≈${_fmtUsd(b.cost)}${Number.isFinite(b.projectedCost) ? `, on track for ≈${_fmtUsd(b.projectedCost)} by its reset` : ''}.`
                      : 'No 5-hour block is active right now, so 5H is blank.',
                 Number.isFinite(today?.cost) ? `Today, since midnight: ≈${_fmtUsd(today.cost)}.` : '',
                 Number.isFinite(week?.cost) ? `Last 7 days: ≈${_fmtUsd(week.cost)}.` : '',
             ].filter(Boolean).join(' '),
         };
+    }
+
+    _blockRowShown() {
+        return this._cardLayout('claude') === 'dual' && (!this._codexSeen || this._cardLayout('codex') === 'dual');
     }
 
     _paintDrive(src) {
@@ -1041,8 +1091,16 @@ class ClaudeUsageWidget extends Widget {
             .map(([key, w]) => ({ key, w, pace: quota.pace?.[key] })) : [];
         const usable = windows.filter(({ w, pace }) => pace?.updatedAt === w.updatedAt && Number.isFinite(pace?.remainingMs) && pace.remainingMs >= 0 &&
             ['limited', 'estimated', 'reset-first'].includes(pace.state));
-        const beforeReset = usable.filter(({ pace }) => pace.state !== 'reset-first');
-        const choice = (beforeReset.length ? beforeReset : usable).sort((a, b) => a.pace.remainingMs - b.pace.remainingMs)[0];
+        // Weekly is the primary guard ("never let the week run out"): Range
+        // reads the weekly pace whenever there is one, and falls back to a
+        // still-reported session window only when the weekly pace is missing.
+        const layout = this._cardLayout(src);
+        const candidates = usable.filter(({ key }) => key !== 'session' || layout === 'dual');
+        const weeklyPace = candidates.find(({ key }) => key === 'weekly');
+        const beforeReset = candidates.filter(({ pace }) => pace.state !== 'reset-first');
+        const choice = weeklyPace || (beforeReset.length ? beforeReset : candidates).sort((a, b) => a.pace.remainingMs - b.pace.remainingMs)[0];
+        const sessionFirst = choice?.key === 'weekly' && candidates.find(({ key, pace }) => key === 'session' &&
+            ['limited', 'estimated'].includes(pace.state) && pace.remainingMs < choice.pace.remainingMs);
         const trend = !windows.length ? 'unknown' : windows.every(({ pace }) => pace?.state === 'steady') ? 'steady' : 'warming';
         card.range.heading.textContent = 'Range';
         card.range.value.textContent = '—';
@@ -1059,10 +1117,17 @@ class ClaudeUsageWidget extends Widget {
             card.range.el.title = pace.state === 'limited' ? `${windowName} quota is at 100% in the latest report.` :
                 `${windowName} quota only. Estimated time to 100% at the recent pace, based on ${Math.round(pace.sampledMs / 60000)} minutes of official account readings. ` +
                 (pace.state === 'reset-first' ? 'This quota resets before the projected limit.' : 'The estimate changes with your usage.') +
-                (Number.isFinite(pace.percentPerHour) ? ` Recent consumption: ${pace.percentPerHour.toFixed(1)} percentage points/hour.` : '');
+                (Number.isFinite(pace.percentPerHour) ? ` Recent consumption: ${pace.percentPerHour.toFixed(1)} percentage points/hour.` : '') +
+                (sessionFirst ? ` The 5-hour session quota is on pace to run out sooner, in about ${_fmtDur(sessionFirst.pace.remainingMs)}.` : '');
         }
 
         const money = this._costFor(src, activity);
+        // The 5-hour cost row exists only while every card on screen still has
+        // a session window; otherwise it goes on BOTH cards, so the two drives
+        // keep the same height side by side and TODAY carries the heading.
+        const blockRow = this._blockRowShown();
+        card.cost.cells.block.el.hidden = !blockRow;
+        card.cost.cells.today.l.textContent = blockRow ? 'Today' : 'Cost today';
         card.cost.heading.textContent = money.heading;
         card.cost.el.title = money.title;
         card.cost.el.dataset.cost = money.mode;
@@ -1074,7 +1139,10 @@ class ClaudeUsageWidget extends Widget {
             cell.el.classList.toggle('unknown', n === null || n === undefined);
             // Same threshold the push watchdog and the TOP SESSIONS highlight
             // use, so all three agree on "leaning hard on the model".
-            cell.el.dataset.state = key === 'block' && money.hot ? 'hot' : '';
+            // With no 5-hour row the day carries the warning instead, at the
+            // daily threshold ($60) the same alerter and TOP SESSIONS use.
+            cell.el.dataset.state = key === 'block' && money.hot ? 'hot' :
+                key === 'today' && !blockRow && Number.isFinite(n) && n >= HOT_COST.today ? 'hot' : '';
         }
     }
 
@@ -1092,11 +1160,19 @@ class ClaudeUsageWidget extends Widget {
         this._legA.l.textContent = 'QUOTA SOURCE';
         this._legB.l.textContent = '7-DAY TOKENS';
         this._legC.l.textContent = 'LOCAL WINDOW';
-        this._legC.row.style.display = '';
+        // No 5-hour limit any more: the local 5h block is no longer a window
+        // anything stops at, so the detail drops it and leads with the day.
+        const noBlock = this._cardLayout('claude') === 'single';
+        this._legC.row.style.display = noBlock ? 'none' : '';
         this._legB.row.style.display = '';
         this._reset.textContent = 'Claude Code · official';
         this._reset.classList.remove('warn');
-        if (b.active) {
+        if (noBlock) {
+            this._legC.v.textContent = '—';
+            const t = d.today || {};
+            this._sub.textContent = d.hasData ? `Local activity today: ${_fmtTok(t.tokens?.total)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(t.cost)}` : tr('widget.claude.no_data');
+            this._burn.v.textContent = `${_fmtTok(this._burnHistory('claude')?.at(-1) ?? 0)} ${tr('widget.claude.tokmin')}`;
+        } else if (b.active) {
             this._legC.v.textContent = `Ends in ${_fmtDur(b.remainingMs)}`;
             this._sub.textContent = `Local 5h activity: ${_fmtTok(b.tokens?.total)} ${tr('widget.claude.tok')} · ${b.requests || 0} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
             const recent = Date.now() - (b.lastTs || 0) < 10 * 60000;
@@ -1132,7 +1208,8 @@ class ClaudeUsageWidget extends Widget {
     // active, else today. Subagent usage is already folded into its parent
     // session server-side, so an agent-heavy session shows its whole bill.
     _renderSessions(d) {
-        const scope = d.sessionScope === 'block' ? 'block' : 'today';
+        // Weekly-only accounts rank by TODAY: a 5h block is not a limit there.
+        const scope = d.sessionScope === 'block' && this._cardLayout('claude') === 'dual' ? 'block' : 'today';
         const rows = (d.sessions || [])
             .map(s => ({ s, sc: (scope === 'block' ? s.block : s.today) || {} }))
             .filter(x => x.sc.tok > 0)
@@ -1158,12 +1235,12 @@ class ClaudeUsageWidget extends Widget {
             const hot = (sc.cost || 0) >= (scope === 'block' ? HOT_COST.block : HOT_COST.today);
             const tip = [
                 (s.project || '?') + ' — ' + (s.slug || s.shortId || ''),
-                `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
+                this._cardLayout('claude') === 'single' ? '' : `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
                 `today: ${_fmtTok(t.tok)} tok · ≈${_fmtUsd(t.cost)} · ${t.req || 0} req`,
             ];
             if (t.subCost > 0.01) tip.push(`of which subagents today: ≈${_fmtUsd(t.subCost)}`);
             if (hot) tip.push(`⚠ heavy this ${scope === 'block' ? '5h block' : 'day'} — the token-usage alerter has flagged this session`);
-            return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.join('\n') }, [
+            return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.filter(Boolean).join('\n') }, [
                 $el('span', { class: 'claude-sess-name', text: (hot ? '⚠ ' : '') + label }),
                 $el('span', { class: 'claude-sess-val', text: `${_fmtTok(sc.tok)} · ≈${_fmtUsd(sc.cost)}` }),
             ]);
@@ -1196,7 +1273,9 @@ class ClaudeUsageWidget extends Widget {
         this._legB.row.style.display = 'none';
         this._legC.row.style.display = 'none';
         const cq = this._quota.codex;
-        this._sub.textContent = (this._quotaFresh && cq?.available && !cq.windows?.session && cq.windows?.weekly)
+        this._sub.textContent = this._cardLayout('codex') === 'single'
+            ? 'Codex reports a weekly quota only. It refreshes every 15 seconds; token activity below comes from local logs.'
+            : (this._quotaFresh && cq?.available && !cq.windows?.session && cq.windows?.weekly)
             ? 'Codex has supplied only weekly usage. Its five-hour quota is not currently available. This does not mean zero usage or unlimited capacity.'
             : 'Account quotas refresh every 15 seconds through Codex. Token activity below comes from local logs.';
         this._weekSub.style.display = 'none';
