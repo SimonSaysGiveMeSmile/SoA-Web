@@ -296,3 +296,59 @@
 .voice-phrase--run { cursor: pointer; }
 .voice-phrase--run:hover { background: rgba(255, 255, 255, .06); }
 .voice-phrase--run:hover b { color: var(--soa-accent, #aacfd1); }
+
+/* Dictation: a row at the top of the voice panel, and a small light on the
+   mic button while it runs. The light's four states follow the indicator
+   palette above; transcribing pulses faster so "it heard me" is visible. */
+.dictate {
+    display: grid;
+    gap: .45rem;
+    padding: 0 0 .7rem;
+    margin: 0 0 .7rem;
+    padding-right: 32px;
+    border-bottom: 1px solid var(--soa-border, rgba(255, 255, 255, .12));
+}
+.dictate-head {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .8rem;
+    min-width: 0;
+}
+.dictate-status {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--soa-dim-fg, #9aa);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dictate .dictate-toggle { min-height: 40px; }
+.dictate .dictate-toggle[aria-pressed="true"] {
+    color: var(--soa-green, #5dbd5a);
+    border-color: currentColor;
+}
+.dictate-note { margin: 0; overflow-wrap: anywhere; }
+.dictate-light {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--soa-dim, #555);
+}
+.dictate-light[data-state="listening"]    { background: var(--soa-green, #5dbd5a); animation: voice-pulse 2.4s ease-in-out infinite; }
+.dictate-light[data-state="transcribing"] { background: var(--soa-yellow, #d9b657); animation: voice-pulse .7s linear infinite; }
+.dictate-light[data-state="error"]        { background: var(--soa-red, #ff6b6b); }
+.voice-toggle .dictate-light {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 7px;
+    height: 7px;
+    box-shadow: 0 0 0 1.5px var(--soa-bg, #11151b);
+    pointer-events: none;
+}
+.voice-toggle .dictate-light[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) {
+    .dictate-light { animation: none !important; }
+}

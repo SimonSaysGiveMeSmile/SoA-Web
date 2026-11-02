@@ -19,6 +19,7 @@ const SHELL = [
     '/ansi.js',
     '/terminal.js',
     '/voice-chat.js',
+    '/dictation.js',
     '/chat-attachments.js',
     '/voice-chat.css',
     '/session-history.js',

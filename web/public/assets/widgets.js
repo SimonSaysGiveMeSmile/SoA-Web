@@ -14,6 +14,7 @@ import { t as tr } from '/assets/i18n.js?v=35';
 import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=design-packs-20260927';
 import { AnimatedWorldView } from '/assets/animated-world-view.js?v=world-view-animated-20260928';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
+import { Dictation, isEditable } from '/m/dictation.js?v=dictate-20261031';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -2997,6 +2998,9 @@ class VoiceControlWidget extends Widget {
 
     _wire() {
         this._startBtn.addEventListener('click', () => {
+            // Commands and dictation share one microphone: a dictated "stop"
+            // must never reach the command parser as a Ctrl-C.
+            if (this.ctx.onVoiceStart) this.ctx.onVoiceStart();
             if (this.voice.start()) {
                 this._log(this.voice.settings.wakeMode === 'wake'
                     ? 'Say “' + this.voice.settings.wakeWord + ', next tab” or open “What can I say”.'
@@ -3227,6 +3231,17 @@ export function mountVoiceToolbar(ctx = {}) {
     });
     panel.appendChild(closeBtn);
     const host = $el('div', { class: 'voice-panel-body' });
+    // Dictation sits above the command widget and apart from it: it needs no
+    // SpeechRecognition when the Mac's Whisper answers, so it stays usable in
+    // browsers where the command widget cannot run.
+    let returnFocus = null;
+    const dictate = isSandbox() ? null : _mountDictation(button, () => widget, () => {
+        // Turning dictation on hands focus back to the field it was opened
+        // from, so the next words land there without another click.
+        const back = returnFocus;
+        if (back && back.isConnected && (isEditable(back) || back.closest('.xterm'))) { close(); back.focus(); }
+    });
+    if (dictate) panel.appendChild(dictate.row);
     panel.appendChild(host);
     panel.appendChild($el('p', { class: 'voice-hint voice-panel-hint',
         text: 'Closing this panel keeps the mic on. Choose Stop to end listening.' }));
@@ -3243,9 +3258,17 @@ export function mountVoiceToolbar(ctx = {}) {
         activity();
         if (restoreFocus) button.focus();
     };
+    // Clicking the mic moves focus onto it, so read the field it was opened
+    // from a moment earlier, on pointerdown.
+    let preFocus = null;
+    const notePreFocus = () => { preFocus = document.activeElement; };
     const open = () => {
+        const active = preFocus || document.activeElement;
+        preFocus = null;
+        returnFocus = active && active !== document.body && !panel.contains(active) && !button.contains(active) ? active : null;
         if (!widget && !isSandbox()) {
             widget = new VoiceControlWidget({ parent: host, ctx: { ...ctx,
+                onVoiceStart: () => dictate?.dictation.stop(),
                 onVoiceStatus: (st, status) => {
                     button.dataset.state = st.enabled ? 'on' : 'off';
                     const label = 'Voice controls — ' + (st.enabled ? status : 'microphone off');
@@ -3277,6 +3300,7 @@ export function mountVoiceToolbar(ctx = {}) {
     const focusout = e => {
         if (e.relatedTarget && !panel.contains(e.relatedTarget) && !button.contains(e.relatedTarget)) close();
     };
+    button.addEventListener('pointerdown', notePreFocus);
     button.addEventListener('click', toggle);
     closeBtn.addEventListener('click', () => close(true));
     panel.addEventListener('focusout', focusout);
@@ -3285,15 +3309,89 @@ export function mountVoiceToolbar(ctx = {}) {
     document.addEventListener('visibilitychange', activity);
     _voiceToolbar = { open, close, destroy() {
         close();
+        dictate?.destroy();
         widget?.destroy();
         panel.remove();
         button.removeEventListener('click', toggle);
+        button.removeEventListener('pointerdown', notePreFocus);
         document.removeEventListener('pointerdown', outside, true);
         document.removeEventListener('keydown', keydown, true);
         document.removeEventListener('visibilitychange', activity);
         _voiceToolbar = null;
     } };
     return _voiceToolbar;
+}
+
+// Dictation: the panel row (toggle + status) and the light on the mic button.
+// The engine (m/dictation.js) owns the mic and the typing; this only paints it
+// and says how to reach Whisper and the terminal.
+const DICTATE_STATE_TEXT = { idle: 'Off', listening: 'Listening', transcribing: 'Transcribing…', error: 'Problem' };
+function _mountDictation(button, getWidget, afterStart) {
+    const light = $el('span', { class: 'dictate-light', 'data-state': 'idle', 'aria-hidden': 'true' });
+    light.hidden = true;
+    button.appendChild(light);
+    const rowLight = $el('span', { class: 'dictate-light', 'data-state': 'idle', 'aria-hidden': 'true' });
+    const status = $el('span', { class: 'dictate-status', text: 'Off' });
+    const toggle = $el('button', { type: 'button', class: 'voice-btn dictate-toggle', 'aria-pressed': 'false', text: 'Start dictation' });
+    const DEFAULT_NOTE = 'Speech is typed into the focused text field or terminal. Enter is never pressed.';
+    const note = $el('div', { class: 'voice-hint dictate-note', text: DEFAULT_NOTE });
+    const row = $el('div', { class: 'dictate', role: 'group', 'aria-label': 'Dictation' }, [
+        $el('div', { class: 'dictate-head', role: 'status', 'aria-live': 'polite' }, [rowLight, $el('b', { text: 'Dictation' }), status]),
+        toggle, note,
+    ]);
+
+    const dictation = new Dictation({
+        // Mac Whisper lives behind the paired daemon's /preview/6082. This page
+        // may be served by another origin (the public site): the daemon answers
+        // its allowlisted origins with CORS, so the same URL works from there.
+        // With no daemon behind the page (its own origin, which has no
+        // /preview), there is nothing to ask: the browser engines start at once.
+        whisperUrl: p => {
+            const u = api('/preview/6082' + p);
+            try { if (new URL(u).origin === location.origin && !_daemonServesPage()) return null; } catch (_) { return null; }
+            return u;
+        },
+        // The terminal: xterm's own helper textarea has focus, so route through
+        // the tab's onData — the exact path a keystroke takes to the PTY.
+        terminalSink: el => {
+            const sh = (window.__SOA_WEB__ || {})._shell;
+            if (!sh || !el.closest || !el.closest('.xterm')) return null;
+            for (const [id, rt] of sh.tabs) {
+                if (rt.container && rt.container.contains(el) && rt._onData) return { key: id, write: t => rt._onData(t) };
+            }
+            return null;
+        },
+        onState: st => {
+            for (const l of [light, rowLight]) l.dataset.state = st.on ? st.state : 'idle';
+            light.hidden = !st.on;
+            const text = st.on ? st.label + ' · ' + (st.detail || DICTATE_STATE_TEXT[st.state]) : 'Off';
+            status.textContent = text;
+            light.title = 'Dictation: ' + text;
+            toggle.textContent = st.on ? 'Stop dictation' : 'Start dictation';
+            toggle.setAttribute('aria-pressed', String(st.on));
+            if (!st.on && st.state === 'idle') note.textContent = DEFAULT_NOTE;
+        },
+        onNotice: text => { note.textContent = text; },
+    });
+
+    toggle.addEventListener('click', () => {
+        if (dictation.on) { dictation.stop(); return; }
+        const w = getWidget();
+        if (w && w.voice && w.voice.isEnabled) w.voice.stop();
+        dictation.start();
+        afterStart();
+    });
+
+    return { row, dictation, destroy() { dictation.destroy(); light.remove(); } };
+}
+
+// True when the page itself was served by a SoA daemon (the install), false
+// on a static host such as the public site, where the paired daemon is on
+// another origin. A same-origin backend configured explicitly also counts.
+function _daemonServesPage() {
+    const c = window.__SOA_WEB__ || {};
+    const b = (c._resolvedBackend || c.backend || '').replace(/\/+$/, '');
+    return !!b && b === location.origin;
 }
 
 class VoiceLauncherWidget extends Widget {

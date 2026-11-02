@@ -24,6 +24,7 @@ import { PhoneSizeClaim, colsThatFit } from './sizeClaim.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
 import { VoiceChat } from './voice-chat.js';
+import { Dictation } from './dictation.js';
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
@@ -1784,6 +1785,7 @@ class App {
 
         this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
         this._wireVoiceChat();
+        this._wireDictation();
         this.btnMic.addEventListener('click', () => this._openVoiceManager());
 
         // Chat composer: send a message to the active tab's PTY (exactly like
@@ -2669,6 +2671,7 @@ class App {
         mic.addEventListener('click', () => {
             if (this._voiceChat.active) this._voiceChat.stop();
             else {
+                this._dictation?.stop();
                 this._stopMicMonitor();
                 this.chatInput.blur();
                 this._voiceChat.start(this.chatInput.value);
@@ -2684,6 +2687,61 @@ class App {
             if (document.hidden) { this._voiceChat.cancel(); window.speechSynthesis?.cancel(); }
         });
         if (!this._voiceChat.supported) this._voiceStatus('Use your keyboard’s dictation microphone to speak a message.');
+    }
+
+    // Dictation (⋯ sheet → Dictate): speech typed into whichever field has
+    // focus — the terminal's compose box, the chat composer, a search field.
+    // The compose box forwards what lands in it as term-keys, so the terminal
+    // receives dictated words exactly as if they were typed; nothing presses
+    // Enter. The light on the top-bar mic shows it is running. Engine choice,
+    // capture and typing live in dictation.js (shared with the desktop).
+    _wireDictation() {
+        const btn = document.getElementById('btn-dictate');
+        const cap = document.getElementById('dictate-cap');
+        if (!btn) return;
+        const light = document.createElement('span');
+        light.className = 'dictate-light';
+        light.setAttribute('aria-hidden', 'true');
+        light.hidden = true;
+        this.btnMic.appendChild(light);
+        const STATE_TEXT = { listening: 'listening', transcribing: 'transcribing', error: 'problem' };
+        let lastNotice = 0;
+        this._dictation = new Dictation({
+            // Mac Whisper behind the paired daemon's /preview/6082, with the same
+            // token + unlock as every other API call. This page may be served by
+            // another origin (the public site): the daemon answers its
+            // allowlisted origins with CORS. No paired daemon → no URL, and the
+            // browser engines start at once.
+            whisperUrl: p => {
+                const b = this.socket && this.socket.baseUrl;
+                if (!b || !/^(wss?|https?):\/\//i.test(b)) return null;
+                return this._apiUrl('/preview/6082' + p);
+            },
+            onState: st => {
+                light.hidden = !st.on;
+                light.dataset.state = st.on ? st.state : 'idle';
+                btn.setAttribute('aria-pressed', String(st.on));
+                if (cap) cap.textContent = st.on ? 'Dictating' : 'Dictate';
+                const text = st.on ? 'Dictation on · ' + st.label + ' · ' + (st.detail || STATE_TEXT[st.state] || '') : 'Dictation off';
+                btn.title = text;
+                light.title = text;
+                if (st.on && st.state === 'error' && st.detail) this._toast(st.detail);
+            },
+            onNotice: text => {
+                // "Not typed" can repeat with every phrase; one toast per few seconds.
+                if (/^Not typed/.test(text) && Date.now() - lastNotice < 4000) return;
+                lastNotice = Date.now();
+                this._toast(text);
+            },
+        });
+        btn.addEventListener('click', () => {
+            if (this._dictation.on) { this._dictation.stop(); this._toast('Dictation off'); return; }
+            // One microphone: the chat's own voice turn and the mic test yield.
+            this._voiceChat?.cancel();
+            this._stopMicMonitor();
+            this._dictation.start();
+            this._toast('Dictation on — tap a text field and speak');
+        });
     }
 
     async _openVoiceManager() {

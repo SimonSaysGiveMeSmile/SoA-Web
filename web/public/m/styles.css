@@ -2857,3 +2857,24 @@ html.soa-android .chat-status[data-state="working"] .chat-status-text::after {
     animation: none;
     content: '…';
 }
+
+/* Dictation light: a dot on the top-bar mic while dictation runs (⋯ → Dictate).
+   listening = green, transcribing = amber and quicker, error = red. */
+#btn-mic { position: relative; }
+#btn-mic .dictate-light {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green, #5dbd5a);
+    box-shadow: 0 0 0 1.5px var(--bg, #000);
+    pointer-events: none;
+}
+#btn-mic .dictate-light[hidden] { display: none; }
+#btn-mic .dictate-light[data-state="listening"]    { animation: dictate-pulse 2.4s ease-in-out infinite; }
+#btn-mic .dictate-light[data-state="transcribing"] { background: var(--yellow, #d9b657); animation: dictate-pulse .7s linear infinite; }
+#btn-mic .dictate-light[data-state="error"]        { background: var(--red, #ff6b6b); }
+@keyframes dictate-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { #btn-mic .dictate-light { animation: none; } }
