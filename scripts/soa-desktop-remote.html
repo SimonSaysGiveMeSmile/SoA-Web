@@ -2486,9 +2486,12 @@
   if (airSupported) {
     root.dataset.airpad = 'yes';
     // The MediaPipe files are not in the repo (scripts/soa-fetch-mediapipe
-    // installs them); the button stays hidden until both are found.
+    // installs them); the button stays hidden until both are found. The
+    // daemon answers an unknown GET/HEAD with its SPA shell (200 text/html),
+    // so a 200 alone does not prove the file is there.
+    const airReal = (r) => r.ok && !/^text\/html\b/i.test(r.headers.get('content-type') || '');
     Promise.all(['vision_bundle.mjs', AIR_MODEL].map((f) => fetch(AIR_BASE + f, { method: 'HEAD', credentials: 'same-origin', cache: 'no-store' })))
-      .then((rs) => { airFiles = rs.every((r) => r.ok); airFits(); }, () => {});
+      .then((rs) => { airFiles = rs.every(airReal); airFits(); }, () => {});
     if (window.ResizeObserver) new ResizeObserver(() => airFits()).observe(strip);
     if (window.MutationObserver) { const mo = new MutationObserver(() => airFits()); for (const id of ['res-t', 'conn-t']) mo.observe($(id), { childList: true, characterData: true, subtree: true }); }
   }
