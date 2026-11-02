@@ -108,15 +108,22 @@
 [data-ui="tron"] .usage-ring .meter { filter: drop-shadow(0 0 2px currentColor); }
 [data-ui="tron"] .design-pack { border-radius: 3px; }
 
-/* LIQUID GLASS / cool pools of light, legible frost and a fine specular rim. */
+/* LIQUID GLASS — on the HiOS material (2026-11-02): a clear
+   centre with one faint, uniform cool tint (light .08 / dark .06), no raised
+   rim, no inset highlight or sheen, a soft exterior shadow, and no frost on
+   persistent surfaces. --lq-rim stays as a token (other rules list it in a
+   box-shadow) but is a null shadow, so every "rim" in liquid.css drops out. */
 :root[data-ui="liquid"] {
   --soa-bg: #101c29; --soa-bg-deep: #09131e; --soa-bg-panel: rgba(28,46,61,.82);
   --soa-accent-dim: #a7bccb; --lq-ink-2: #b9cbd8; --lq-ink-3: #94aabd;
-  --lq-glass: rgba(194,224,244,.07); --lq-glass-2: rgba(194,224,244,.12);
-  --lq-glass-3: rgba(208,235,251,.16); --lq-edge: rgba(224,244,255,.2);
-  --lq-rim: inset 0 1px 0 rgba(241,250,255,.4), inset 0 0 0 1px rgba(213,237,255,.05);
-  --lq-fill: linear-gradient(150deg, rgba(232,248,255,.14), rgba(153,192,221,.04) 52%, rgba(154,200,219,.09));
-  --lq-ground: radial-gradient(ellipse at 3% 0%, rgba(76,119,151,.32), transparent 55%), radial-gradient(ellipse at 95% 95%, rgba(67,122,121,.22), transparent 55%), #0b1521;
+  --lq-glass: rgba(156,190,214,.06); --lq-glass-2: rgba(156,190,214,.1);
+  --lq-glass-3: rgba(156,190,214,.15); --lq-edge: rgba(214,232,245,.1);
+  --soa-line: rgba(214,232,245,.1); --soa-line-soft: rgba(214,232,245,.055);
+  --lq-rim: 0 0 #0000;
+  --lq-fill: rgba(156,190,214,.06); --lq-fill-2: rgba(156,190,214,.1);
+  --lq-shadow: 0 1px 2px rgba(0,0,0,.16), 0 10px 28px rgba(0,0,0,.24);
+  --lq-shadow-deep: 0 2px 6px rgba(0,0,0,.2), 0 20px 50px rgba(0,0,0,.34);
+  --lq-ground: radial-gradient(ellipse at 3% 0%, rgba(76,119,151,.24), transparent 55%), radial-gradient(ellipse at 95% 95%, rgba(67,122,121,.16), transparent 55%), #0b1521;
   --lq-tint: #4ba7ff; --lq-tint-rgb: 75,167,255; --lq-ease: 200ms cubic-bezier(.2,.7,.3,1);
   --pack-glass-menu: rgba(24,39,54,.93); --pack-term: #0a0a0e;
 }
@@ -124,17 +131,17 @@
   color-scheme: light; --soa-bg: #e8f0f5; --soa-bg-deep: #dce8f0;
   --soa-bg-panel: rgba(249,253,255,.83); --soa-bg-panel-rgb: 245,251,255;
   --soa-fg: #1b354b; --soa-accent: #254a67; --soa-accent-rgb: 37,74,103;
-  --soa-accent-bright: #142e45; --soa-accent-dim: #526d82;
+  --soa-accent-bright: #142e45; --soa-accent-dim: #48627a;   /* >=5:1 on the light glass for 8-9px captions */
   --soa-line: rgba(39,73,102,.22); --soa-line-soft: rgba(39,73,102,.1);
   --soa-green: #157442; --soa-orange: #965309; --soa-red: #bc3040; --soa-blue: #135fab; --soa-yellow: #825f00;
-  --lq-ink-2: #4d687c; --lq-ink-3: #526c7d;
-  --lq-glass: rgba(255,255,255,.42); --lq-glass-2: rgba(255,255,255,.7); --lq-glass-3: rgba(255,255,255,.88);
-  --lq-fill: linear-gradient(145deg, rgba(255,255,255,.85), rgba(255,255,255,.34));
-  --lq-fill-2: linear-gradient(145deg, rgba(255,255,255,.96), rgba(255,255,255,.6));
-  --lq-rim: inset 0 1px 0 #fff, inset 0 0 0 1px rgba(255,255,255,.6);
-  --lq-shadow: 0 2px 5px rgba(29,58,85,.06), 0 10px 26px rgba(29,58,85,.1);
-  --lq-shadow-deep: 0 4px 12px rgba(29,58,85,.1), 0 22px 60px rgba(29,58,85,.18);
-  --lq-ground: radial-gradient(ellipse at 2% 2%, #effaff, transparent 65%), radial-gradient(ellipse at 100% 95%, #b8d4d5, transparent 70%), #cbddec;
+  --lq-ink-2: #4d687c; --lq-ink-3: #48627a;
+  --lq-glass: rgba(170,197,217,.08); --lq-glass-2: rgba(170,197,217,.14); --lq-glass-3: rgba(170,197,217,.22);
+  --lq-fill: rgba(170,197,217,.08); --lq-fill-2: rgba(170,197,217,.14);
+  --lq-edge: rgba(39,73,102,.12);
+  --lq-rim: 0 0 #0000;
+  --lq-shadow: 0 1px 2px rgba(29,58,85,.06), 0 10px 28px rgba(29,58,85,.09);
+  --lq-shadow-deep: 0 2px 8px rgba(29,58,85,.09), 0 22px 56px rgba(29,58,85,.16);
+  --lq-ground: radial-gradient(ellipse at 2% 2%, #f6fbff, transparent 62%), radial-gradient(ellipse at 100% 95%, #d5e6e8, transparent 68%), #e4eef5;
   --lq-tint: #1265ad; --lq-tint-rgb: 18,101,173;
   --pack-glass-menu: rgba(243,249,253,.96); --pack-term: #f4f8fc;
 }
@@ -143,7 +150,7 @@
 [data-ui="liquid"] .widget { background: var(--lq-fill); border-color: var(--lq-edge); box-shadow: var(--lq-shadow), var(--lq-rim); border-radius: 18px; }
 [data-ui="liquid"] .tab.active { color: var(--soa-fg); background: var(--lq-glass-3); border-color: var(--soa-line); box-shadow: var(--lq-shadow), var(--lq-rim); }
 [data-ui="liquid"] .tab.active::after { animation: none; background: linear-gradient(115deg, transparent 25%, rgba(255,255,255,.09), transparent 80%); }
-[data-ui="liquid"] .tab.active .tab-sub { color: var(--lq-ink-2); }
+[data-ui="liquid"] .tab.active .tab-sub { color: var(--lq-ink-2); opacity: 1; }   /* styles.css dims it to .6: 2.3:1 on the clear glass */
 [data-ui="liquid"] .terms .term { background: var(--pack-term); -webkit-backdrop-filter: none; backdrop-filter: none; border-color: var(--soa-line); }
 [data-ui="liquid"] :is(.soa-modal, .more-menu, .actions-tray, .ctx-popover, .meet-picker) { background: var(--pack-glass-menu); border-color: var(--soa-line); }
 [data-ui="liquid"] .soa-settings-drop .settings-actions { background: var(--pack-glass-menu); }
@@ -160,7 +167,9 @@
 [data-ui="liquid"] :is(.dial-h, .dial-m) { stroke: var(--soa-fg); }
 [data-ui="liquid"] :is(.dial-ring, .dial-tick) { stroke: var(--soa-accent-dim); }
 [data-ui="liquid"] :is(.ctx-turn-x, .mgru-sess.top .mgru-sess-cost) { color: var(--soa-fg); }
-[data-ui="liquid"] .widget-pulse { background: var(--lq-tint); box-shadow: none; }
+/* Iteration 1: the static blue dot on every card header was ornament, not
+   state, so the glass pack drops it. */
+[data-ui="liquid"] .widget-pulse { display: none; }
 [data-ui="liquid"] .ctl-wrap[data-minimal-switch] > .seg { display: none; }
 [data-ui="liquid"] .minimal-switch {
   position: relative; display: block; flex: none; width: 54px; height: 44px; padding: 0;
@@ -180,6 +189,40 @@
 [data-ui="liquid"] .minimal-switch[aria-checked="true"]::after { transform: translateX(20px); }
 [data-ui="liquid"] .minimal-switch:disabled { opacity: .45; cursor: default; }
 [data-ui="liquid"] .minimal-switch:focus-visible { outline: 2px solid var(--lq-tint); outline-offset: 2px; }
+
+/* HiOS material: no frost on persistent surfaces (cards, rails, tabs, chips,
+   the sidebar column). The terminal well already has none. Only transient
+   overlays — menus, popovers, the modal, toasts — keep a backdrop blur, and
+   only on a fine pointer; they are near-opaque, so it is a nicety, not the
+   thing that makes them readable. No scroll listeners, no animation loops:
+   the active tab's specular sweep is gone. */
+[data-ui="liquid"] :is(.topbar, .sidebar, .widget, .tab, .user-chip, .status-bar, .tile,
+  .dashboard-fleet-bar, .dashboard-port-info, .cat-tile, .mgru-card, .meet-roster, .meet-actions,
+  .meet-picker, .pv-bar, .seg, .chip, .cfg-add, .recovery) {
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+[data-ui="liquid"] .topbar { background: var(--lq-glass); box-shadow: var(--lq-shadow); }
+[data-ui="liquid"] .sidebar { background: transparent; }
+[data-ui="liquid"] .status-bar { background: var(--lq-glass); }
+[data-ui="liquid"] .tab { box-shadow: none; }
+[data-ui="liquid"] .tab.active { background: var(--lq-glass-3); box-shadow: var(--lq-shadow); }
+[data-ui="liquid"] .tab.active::after { content: none; animation: none; }
+/* liquid.css clipped the active tab for the sweep; overflow:hidden also let
+   flex shrink it below its label (an empty pill at phone width). */
+[data-ui="liquid"] .tab.active { overflow: visible; }
+[data-ui="liquid"] .tab:hover { transform: none; }
+[data-ui="liquid"] .tile:hover { transform: none; }
+[data-ui="liquid"] .soa-modal-backdrop:not(.soa-settings-drop) { -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* The queue's effort picker carries an inline dark fill (contextPanel.js);
+   on the light glass it read as a black bar with unreadable text. */
+[data-ui="liquid"] .ctx-queue-effort { background: var(--lq-glass-2) !important; border-color: var(--soa-line) !important; }
+@media (pointer: coarse), (max-width: 820px) {
+  /* Phones and tablets: stable translucent surfaces, no per-surface filters. */
+  [data-ui="liquid"] :is(.more-menu, .actions-tray, .ctx-popover, .soa-modal, .soa-toast) {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
+  [data-ui="liquid"] .soa-toast { background: var(--pack-glass-menu); }
+}
 
 /* BRUTALIST / printer's ink, warm stock, safety yellow, hard offset shadows. */
 :root[data-ui="brutalist"] {
@@ -301,16 +344,35 @@
 :is([data-ui="brutalist"], [data-ui="classic"], [data-ui="dos"]) :is(button, select, input, a):focus-visible { outline: 2px solid var(--soa-blue); outline-offset: 3px; }
 .design-packs .design-pack:focus-within { z-index: 1; }
 .set-ctl select:disabled { opacity: .65; cursor: default; }
-@supports not (backdrop-filter: blur(2px)) {
-  [data-ui="liquid"] :is(.widget, .topbar, .soa-modal, .more-menu) { background: var(--soa-bg-panel); }
+@supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+  [data-ui="liquid"] :is(.soa-modal, .more-menu, .actions-tray, .ctx-popover) { background: var(--pack-glass-menu); }
 }
+/* Solid, readable fallbacks: no translucency, no blur, no shadows to read
+   depth from — the surfaces become plain panels on a plain ground. */
 @media (prefers-reduced-transparency: reduce) {
-  [data-ui="liquid"] :is(.widget, .topbar, .soa-modal, .more-menu, .sidebar) { background: var(--soa-bg-panel); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  :root[data-ui="liquid"] { --lq-ground: var(--soa-bg); }
+  [data-ui="liquid"] :is(.widget, .topbar, .tab, .tile, .status-bar, .user-chip, .mgru-card, .cat-tile,
+    .dashboard-fleet-bar, .dashboard-port-info, .soa-modal, .more-menu, .actions-tray, .ctx-popover,
+    .soa-toast, .recovery, .meet-picker, .seg, .chip, .design-pack) {
+    background: var(--soa-bg-panel); backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  [data-ui="liquid"] .tab.active { background: var(--soa-bg-deep); }
+  [data-ui="liquid"] .sidebar { background: var(--soa-bg-deep); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (forced-colors: active) {
+  [data-ui="liquid"] :is(.widget, .topbar, .tab, .tile, .status-bar, .soa-modal, .more-menu, .actions-tray,
+    .ctx-popover, .soa-toast, .recovery, .mgru-card, .design-pack) {
+    background: Canvas; color: CanvasText; border: 1px solid CanvasText;
+    box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  [data-ui="liquid"] .tab.active { border-color: Highlight; outline: 1px solid Highlight; }
+  [data-ui="liquid"] body, [data-ui="liquid"] :is(.terms, .tiles-grid, .meet-view, .manager-view) { background: Canvas; }
 }
 @media (prefers-reduced-motion: reduce) {
   [data-ui] *, [data-ui] *::before, [data-ui] *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: 0s !important; scroll-behavior: auto !important; }
 }
 @media (prefers-contrast: more) {
   .design-pack { border-width: 2px; }
-  [data-ui="liquid"] :is(.widget, .soa-modal, .topbar) { background: var(--soa-bg); border-color: var(--soa-fg); }
+  [data-ui="liquid"] :is(.widget, .soa-modal, .topbar, .tab, .tile, .status-bar, .more-menu, .mgru-card) { background: var(--soa-bg); border-color: var(--soa-fg); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  :root[data-ui="liquid"] { --lq-ground: var(--soa-bg-deep); --lq-ink-2: var(--soa-fg); }
 }
