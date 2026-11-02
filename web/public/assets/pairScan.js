@@ -11,7 +11,7 @@
 // jsQR everywhere else, back-camera preference, torch) and ends the way the
 // wizard does — this page, pointed at the paired daemon.
 
-import { maybeFocus } from '/m/focusPolicy.js?v=kbd-20261029';
+import { maybeFocus } from '/m/focusPolicy.js?v=web-20261102';
 
 const T = {
     en: { scan: 'Scan a desktop QR code', paste: 'Or paste the pairing link', connect: 'CONNECT', pw: 'pairing password',

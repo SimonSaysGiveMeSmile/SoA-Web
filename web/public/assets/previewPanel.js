@@ -6,7 +6,7 @@
  * the mobile WEB view. Reuses the .soa-modal scrim styling.
  */
 
-import { maybeFocus } from '/m/focusPolicy.js?v=kbd-20261029';
+import { maybeFocus } from '/m/focusPolicy.js?v=web-20261102';
 
 const el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);

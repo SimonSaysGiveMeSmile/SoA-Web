@@ -18,16 +18,16 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=kbd-20261029';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=32';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=kbd-20261029';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=web-20261102';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=35';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=web-20261102';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-20261005b';
-import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=desktop-packs-20260930';
+import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=web-20261102';
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
-import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=kbd-20261029';
-import { attachDesktopFailover, findWorkingDoor, doorsSupported } from '/assets/doors.js?v=doors-20261031';
+import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=web-20261102';
+import { attachDesktopFailover, findWorkingDoor, doorsSupported } from '/assets/doors.js?v=web-20261102';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -2143,7 +2143,7 @@ class Shell {
         // Re-pair from here: the daemon this page knew is unreachable, and on a
         // tablet the camera is the shortest way to a desktop that is up.
         const pairBtn = $('#recovery-pair');
-        if (pairBtn) import('/assets/pairScan.js?v=kbd-20261029').then((m) => {
+        if (pairBtn) import('/assets/pairScan.js?v=web-20261102').then((m) => {
             if (!m.cameraLikely()) return;
             pairBtn.hidden = false;
             pairBtn.addEventListener('click', () => m.openPairSheet());
@@ -5123,7 +5123,7 @@ class Shell {
             title: `Open localhost:${p.port} (${p.process}) in the preview`,
             text: `:${p.port} — ${p.process}`,
             onclick: async () => {
-                try { const wp = await import('/assets/previewPanel.js?v=kbd-20261029'); wp.openPreviewModal(this, String(p.port)); }
+                try { const wp = await import('/assets/previewPanel.js?v=web-20261102'); wp.openPreviewModal(this, String(p.port)); }
                 catch (err) { console.warn('[monitor] preview open failed', err); }
             },
         })));
@@ -6990,7 +6990,7 @@ class Shell {
                 title: `Open localhost:${p.port} (${p.process}) in the preview`,
                 text: `:${p.port} — ${p.process}`,
                 onclick: async () => {
-                    try { const wp = await import('/assets/previewPanel.js?v=kbd-20261029'); wp.openPreviewModal(this, String(p.port)); }
+                    try { const wp = await import('/assets/previewPanel.js?v=web-20261102'); wp.openPreviewModal(this, String(p.port)); }
                     catch (err) { console.warn('[manager] preview open failed', err); }
                 } }))
             : [el('div', { class: 'mgrv-empty', text: 'No open localhost ports.' })];
@@ -7382,7 +7382,7 @@ class Shell {
             if (!target) return;
         }
         try {
-            const wp = await import('/assets/previewPanel.js?v=kbd-20261029');
+            const wp = await import('/assets/previewPanel.js?v=web-20261102');
             wp.openPreviewModal(this, target);
         } catch (err) { console.warn('[preview] open failed', err); }
     }
@@ -8091,7 +8091,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=kbd-20261029');
+        await import('/assets/app-wc.js?v=web-20261102');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -8371,7 +8371,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=kbd-20261029').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=web-20261102').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.

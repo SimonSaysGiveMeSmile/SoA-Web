@@ -15,10 +15,10 @@
  * broadcast a `soa:settings` window event so widgets/tabs can re-render.
  */
 
-import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=32';
+import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=35';
 
-import { DESIGN_PACKS, designPackPicker } from '/assets/design-packs.js?v=desktop-packs-20260930';
-import { getAutoFocusPref, setAutoFocusPref, AUTOFOCUS_PREFS } from '/m/focusPolicy.js?v=kbd-20261029';
+import { DESIGN_PACKS, designPackPicker } from '/assets/design-packs.js?v=web-20261102';
+import { getAutoFocusPref, setAutoFocusPref, AUTOFOCUS_PREFS } from '/m/focusPolicy.js?v=web-20261102';
 
 const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
@@ -444,7 +444,7 @@ function buildConnPane() {
     // link has a camera and nowhere to use it.
     const pair = el('button', { class: 'soa-modal-copy', text: CONN_PAIR_LABEL[_connLang()] || CONN_PAIR_LABEL.en });
     pair.addEventListener('click', () => {
-        import('/assets/pairScan.js?v=kbd-20261029')
+        import('/assets/pairScan.js?v=web-20261102')
             .then(m => m.openPairSheet())
             .catch(() => {});
     });

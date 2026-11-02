@@ -11,11 +11,11 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=35';
-import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=design-packs-20260927';
+import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=web-20261102';
 import { AnimatedWorldView } from '/assets/animated-world-view.js?v=world-view-animated-20260928';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
-import { Dictation, isEditable } from '/m/dictation.js?v=dictate-20261031';
-import { HealthClient, HealthPanel, HEALTH_PREFIX, sameOrigin } from '/m/health.js?v=health-20261031';
+import { Dictation, isEditable } from '/m/dictation.js?v=web-20261102';
+import { HealthClient, HealthPanel, HEALTH_PREFIX, sameOrigin } from '/m/health.js?v=web-20261102';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -1591,7 +1591,7 @@ class NetStatWidget extends Widget {
                 onclick: async () => {
                     if (mine) return;
                     try {
-                        const wp = await import('/assets/previewPanel.js?v=kbd-20261029');
+                        const wp = await import('/assets/previewPanel.js?v=web-20261102');
                         wp.openPreviewModal(null, String(p.port));
                     } catch (_) {}
                 },
@@ -2110,13 +2110,13 @@ class MobileQRWidget extends Widget {
         const scan = $el('button', {
             class: 'widget-btn',
             text: MQR_SCAN_LABEL[_mqrLang()] || MQR_SCAN_LABEL.en,
-            onclick: () => import('/assets/pairScan.js?v=kbd-20261029').then(m => m.openPairSheet()).catch(() => {}),
+            onclick: () => import('/assets/pairScan.js?v=web-20261102').then(m => m.openPairSheet()).catch(() => {}),
         });
         this.body.replaceChildren(
             $el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') }),
             scan,
         );
-        import('/assets/pairScan.js?v=kbd-20261029')
+        import('/assets/pairScan.js?v=web-20261102')
             .then((m) => { if (!m.cameraLikely()) scan.remove(); })
             .catch(() => scan.remove());
     }
