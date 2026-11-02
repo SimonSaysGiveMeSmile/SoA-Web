@@ -18,6 +18,7 @@ import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
 import { modelBadge } from './sessionMetadata.js';
 import { VirtualKeyboard } from './keyboard.js';
+import { maybeFocus, getAutoFocusPref, setAutoFocusPref } from './focusPolicy.js';
 import { PhoneSizeClaim, colsThatFit } from './sizeClaim.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
@@ -30,7 +31,7 @@ import { SessionHistory, openHistory } from './session-history.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'session models · 2026-10-29';
+const MOBILE_BUILD = 'keyboard focus · 2026-10-29';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -1033,6 +1034,34 @@ class App {
         });
         this._wireWindowControls();
         this._wireReloadControls();
+        this._wireKbdFocus();
+    }
+
+    // "Open keyboard automatically" — the same setting the dashboard shows,
+    // stored once for this origin by focusPolicy.js.
+    _wireKbdFocus() {
+        const grid = document.getElementById('kbd-focus-grid');
+        if (!grid) return;
+        const opts = [['auto', 'Auto'], ['always', 'Always'], ['tap', 'On tap']];
+        const paint = () => {
+            const cur = getAutoFocusPref();
+            grid.querySelectorAll('.sound-option').forEach(b => {
+                const on = b.dataset.pref === cur;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            });
+        };
+        grid.innerHTML = '';
+        for (const [key, label] of opts) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'sound-option';
+            btn.dataset.pref = key;
+            btn.textContent = label;
+            btn.addEventListener('click', () => { setAutoFocusPref(key); paint(); });
+            grid.appendChild(btn);
+        }
+        paint();
     }
 
     // Desktop-window presets: ask the server to resize/move the desktop SoA
@@ -1845,7 +1874,9 @@ class App {
             this._updateChatBadge();
             this._renderChat();
             this._renderChatStatus();
-            setTimeout(() => { try { this.chatInput && this.chatInput.focus(); } catch (_) {} }, 60);
+            // Opening a view is not a tap on its composer: on a touch keyboard
+            // the caret waits for the tap (focusPolicy.js).
+            setTimeout(() => maybeFocus(this.chatInput), 60);
         }
         // Meet: same shape as chat, on the meeting's own counter. The transcript
         // lives server-side, so entry is a `?since=<cursor>` delta rather than a
@@ -1855,7 +1886,7 @@ class App {
             this._updateMeetBadge();
             this._pullMeetings();
             this._renderMeet();
-            setTimeout(() => { try { this.meetInput && this.meetInput.focus(); } catch (_) {} }, 60);
+            setTimeout(() => maybeFocus(this.meetInput), 60);
         }
         if (target === 'web-view') {
             this._refreshWebPorts();
@@ -2334,7 +2365,7 @@ class App {
         if (this._bcastPreIds) this._bcastCohort = 'selected';
         this._renderBroadcast();
         overlay.classList.add('visible');
-        setTimeout(() => { const i = document.getElementById('bcast-input'); if (i) i.focus(); }, 80);
+        setTimeout(() => maybeFocus(document.getElementById('bcast-input')), 80);
     }
 
     _closeBroadcast() {

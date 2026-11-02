@@ -16,8 +16,9 @@
 
 import { AudioFX } from '/assets/audiofx.js?v=18';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=32';
-import { mountSandboxSidebar } from '/assets/widgets.js?v=agent-unlock-20261014';
-import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=pair-scan-20260930';
+import { mountSandboxSidebar } from '/assets/widgets.js?v=kbd-20261029';
+import { getSettings, onSettings, openSettingsModal } from '/assets/settings.js?v=kbd-20261029';
+import { maybeFocus } from '/m/focusPolicy.js?v=kbd-20261029';
 // The WebContainer API is vendored into /assets/vendor (was esm.sh, but a
 // cross-origin static import makes the whole module graph — and therefore
 // the dynamic import of this file — fail whenever the CDN is slow, blocked,
@@ -351,7 +352,7 @@ class WCShell {
             tab.container.classList.toggle('active', tid === id);
         }
         const tab = this.tabs.get(id);
-        if (tab) { tab.focus(); requestAnimationFrame(() => tab.fitNow()); }
+        if (tab) { maybeFocus(tab); requestAnimationFrame(() => tab.fitNow()); }
         this._renderTabs();
     }
 

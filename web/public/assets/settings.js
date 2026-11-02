@@ -18,6 +18,7 @@
 import { t as tr, LANGS, getLang, setLang } from '/assets/i18n.js?v=32';
 
 import { DESIGN_PACKS, designPackPicker } from '/assets/design-packs.js?v=desktop-packs-20260930';
+import { getAutoFocusPref, setAutoFocusPref, AUTOFOCUS_PREFS } from '/m/focusPolicy.js?v=kbd-20261029';
 
 const STORAGE_KEY = 'soa-web:settings';
 const LS_BACKEND_KEY = 'soa_web_backend';
@@ -223,6 +224,7 @@ const SET_LABELS = {
     clockHours: 'Clock format',
     clockZones: 'Clock cities',
     clockFace: 'Clock face',
+    kbdFocus: 'Open keyboard automatically',
 };
 
 // A few controls are lists, not single inputs — a row of view checkboxes, a
@@ -380,6 +382,38 @@ function buildAudioPane(s) {
     ]);
 }
 
+// "Open keyboard automatically": when the app may put the caret in a field by
+// itself (after a tab switch, opening chat, ...). Stored by focusPolicy.js
+// under its own key, shared with the phone companion, and applied at once —
+// it is a property of this device, not of the settings blob the Save button
+// writes. Strings follow CONN_PAIR_LABEL's per-language shape.
+const KBD_FOCUS_TEXT = {
+    en: { auto: 'Auto', always: 'Always', tap: 'Only when I tap',
+          desc: 'Auto opens it on its own on a computer, or on a touch screen once a hardware keyboard is in use.' },
+    zh: { auto: '自动', always: '始终', tap: '仅在我点按时',
+          desc: '自动：在电脑上，或在已使用实体键盘的触屏设备上自行打开。' },
+    fr: { auto: 'Auto', always: 'Toujours', tap: 'Seulement quand je touche',
+          desc: 'Auto l’ouvre seul sur un ordinateur, ou sur un écran tactile dès qu’un clavier physique est utilisé.' },
+    de: { auto: 'Automatisch', always: 'Immer', tap: 'Nur wenn ich tippe',
+          desc: 'Automatisch öffnet sie selbst am Computer oder am Touchscreen, sobald eine Hardware-Tastatur genutzt wird.' },
+    es: { auto: 'Automático', always: 'Siempre', tap: 'Solo cuando toco',
+          desc: 'Automático lo abre solo en un ordenador, o en una pantalla táctil cuando se usa un teclado físico.' },
+};
+function kbdFocusText() { return KBD_FOCUS_TEXT[_connLang()] || KBD_FOCUS_TEXT.en; }
+
+function kbdFocusSelect(id) {
+    const txt = kbdFocusText();
+    const sel = el('select', { id });
+    const cur = getAutoFocusPref();
+    for (const v of AUTOFOCUS_PREFS) {
+        const o = el('option', { value: v, text: txt[v] });
+        if (v === cur) o.selected = true;
+        sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => setAutoFocusPref(sel.value));
+    return sel;
+}
+
 function buildMiscPane(s) {
     return el('div', { class: 'settings-list' }, [
             kvRow('clockHours', '', hoursSelect('set-clockHours', s.clockHours)),
@@ -389,6 +423,7 @@ function buildMiscPane(s) {
                 el('input', { id: 'set-clockZones', type: 'text', value: s.clockZones.join(', '),
                               placeholder: 'America/New_York, Europe/London' })),
             kvRow('lang',       '', langSelect('set-lang')),
+            setRow('kbdFocus', kbdFocusText().desc, kbdFocusSelect('set-kbdFocus')),
     ]);
 }
 
@@ -409,7 +444,7 @@ function buildConnPane() {
     // link has a camera and nowhere to use it.
     const pair = el('button', { class: 'soa-modal-copy', text: CONN_PAIR_LABEL[_connLang()] || CONN_PAIR_LABEL.en });
     pair.addEventListener('click', () => {
-        import('/assets/pairScan.js?v=pair-scan-20260930')
+        import('/assets/pairScan.js?v=kbd-20261029')
             .then(m => m.openPairSheet())
             .catch(() => {});
     });

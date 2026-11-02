@@ -6,6 +6,8 @@
  * the mobile WEB view. Reuses the .soa-modal scrim styling.
  */
 
+import { maybeFocus } from '/m/focusPolicy.js?v=kbd-20261029';
+
 const el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(props)) {
@@ -146,5 +148,5 @@ export function openPreviewModal(app, initialTarget) {
 
     // Pre-open a target handed in by the new-tab chooser (a bare port or a URL).
     if (initialTarget) { urlInp.value = initialTarget; resolveAndOpen(initialTarget); }
-    urlInp.focus();
+    maybeFocus(urlInp);
 }

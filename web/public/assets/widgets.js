@@ -1510,7 +1510,7 @@ class NetStatWidget extends Widget {
                 onclick: async () => {
                     if (mine) return;
                     try {
-                        const wp = await import('/assets/previewPanel.js?v=3');
+                        const wp = await import('/assets/previewPanel.js?v=kbd-20261029');
                         wp.openPreviewModal(null, String(p.port));
                     } catch (_) {}
                 },
@@ -2029,13 +2029,13 @@ class MobileQRWidget extends Widget {
         const scan = $el('button', {
             class: 'widget-btn',
             text: MQR_SCAN_LABEL[_mqrLang()] || MQR_SCAN_LABEL.en,
-            onclick: () => import('/assets/pairScan.js?v=pair-scan-20260930').then(m => m.openPairSheet()).catch(() => {}),
+            onclick: () => import('/assets/pairScan.js?v=kbd-20261029').then(m => m.openPairSheet()).catch(() => {}),
         });
         this.body.replaceChildren(
             $el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') }),
             scan,
         );
-        import('/assets/pairScan.js?v=pair-scan-20260930')
+        import('/assets/pairScan.js?v=kbd-20261029')
             .then((m) => { if (!m.cameraLikely()) scan.remove(); })
             .catch(() => scan.remove());
     }
