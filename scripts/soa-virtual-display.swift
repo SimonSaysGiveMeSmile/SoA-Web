@@ -13,8 +13,15 @@
 // through the Objective-C runtime so this file builds with a plain `swiftc`.
 //
 // stdin, one command per line; every command answers ONE JSON line on stdout:
-//   create <pxW> <pxH> <hiDPI 0|1> [name…]   new display; {"ok","id","bounds","mode"}
-//   resize <pxW> <pxH> <hiDPI 0|1>          new mode for the same display (no re-create)
+//   create <pxW> <pxH> <hiDPI 0|1> [maxpx <n>] [set <w>x<h>,…] [name…]   new display; {"ok","id","bounds","mode","offered"}
+//                                           (maxpx: the largest framebuffer a later resize may ask, default 3840;
+//                                           set: as for resize)
+//   resize <pxW> <pxH> <hiDPI 0|1> [set <w>x<h>,…]   new mode for the same display (no re-create);
+//                                           `set` offers more modes (pixel sizes, same hiDPI) alongside,
+//                                           so a later `select` among them needs no new mode list;
+//                                           the reply says what is offered ({"offered":["WxH",…]})
+//   select <pxW> <pxH>                      switch to a mode the display already offers (no applySettings);
+//                                           "not offered" when it does not (the caller then resizes)
 //   mirror on|off                           built-in (the original main) mirrors the virtual one
 //   extend left|right                       place ONLY the virtual display beside the existing desktop
 //   state                                   displays, main id, modes, mirroring
@@ -27,6 +34,10 @@
 //   --restore [id]    unmirror every display that mirrors virtual display <id>
 //                     or any display this helper makes (a crashed helper's
 //                     leftovers); with no id at all, every mirrored display
+//   --plan-modes <pxW> <pxH> <hiDPI> [set <w>x<h>,…]   the modes a resize would
+//                     offer, as [[ptW,ptH,pxW,pxH],…] (pure: touches nothing)
+// SOA_VDISPLAY_SETTLE=quick: after create/resize, select our mode as soon as
+// macOS lists it instead of first waiting 0.4 s for macOS to choose it.
 // <pxW> x <pxH> is the framebuffer in pixels; with hiDPI=1 the display "looks
 // like" half of that in points (2x backing), with 0 it is 1:1.
 // SOA_VDISPLAY_DRY=1: never touches the display configuration. Commands are
@@ -35,7 +46,10 @@
 // SOA_VDISPLAY_DRY_STATE so the one-shot --query / --restore of a later run
 // see it, and every action (and every way out: EOF, a signal, the parent
 // gone) appended to SOA_VDISPLAY_DRY_LOG. SOA_VDISPLAY_DRY_CREATE_MS makes a
-// create take that long, abortable like a real one. For tests of the service.
+// create take that long, abortable like a real one; _RESIZE_MS and
+// _SELECT_MS the same for those (the window server's share of a change);
+// SOA_VDISPLAY_DRY_REFUSE_HIDPI=<area>,<long> refuses 2x below those points
+// (the window server's 2x floor). For tests of the service.
 import Foundation
 import CoreGraphics
 
@@ -134,6 +148,9 @@ var vdisplay: AnyObject?          // the CGVirtualDisplay: the display lives whi
 var vid: CGDirectDisplayID = 0
 var mirroredFrom: CGDirectDisplayID = 0   // the display that mirrors the virtual one
 var maxPx = (w: 0, h: 0)
+var offered: [[Int]] = []         // the modes the display offers now: [ptW, ptH, pxW, pxH]
+var offeredHidpi = false
+let quickSettle = env["SOA_VDISPLAY_SETTLE"] == "quick"
 var destroying = false            // our own release: its termination callback is expected
 let originalMain = dry ? dryBuiltin : CGMainDisplayID()
 
@@ -198,33 +215,60 @@ func freshSelect(_ id: CGDirectDisplayID, _ pxW: Int, _ pxH: Int, _ hidpi: Bool)
 // display's initial mode itself (often 1x), so select ours when it did not.
 func settle(_ id: CGDirectDisplayID, _ pxW: Int, _ pxH: Int, _ hidpi: Bool) -> Bool {
     // The mode list takes a moment to be published after create/applySettings.
-    if waitFor({ freshIsAt(id, pxW, pxH, hidpi) }, 0.4) { return true }
+    // Quick: no grace for macOS to pick our mode by itself (it often starts at
+    // 1x anyway); the loop below selects it the moment it is listed.
+    if !quickSettle && waitFor({ freshIsAt(id, pxW, pxH, hidpi) }, 0.4) { return true }
     let w = hidpi ? pxW / 2 : pxW, h = hidpi ? pxH / 2 : pxH
-    for _ in 0..<15 {
+    // Quick: the list read right after applySettings may still be the OLD
+    // one, so "ours is not listed" only counts as a refusal after this long.
+    let listedBy = Date().addingTimeInterval(0.5)
+    for _ in 0..<(quickSettle ? 30 : 15) {
         if aborting() { return false }
         // Modes published but ours is not among them, or listed but not
         // usable for a desktop ("not GUI"): the window server refused that
         // scale (it then runs the display at 1x). Do not wait on it.
-        let list = (fresh(id)["modes"] as? [[Int]]) ?? []
+        let f = fresh(id)
+        if quickSettle, let m = f["mode"] as? [String: Any], (m["pixelWidth"] as? Int) == pxW, (m["pixelHeight"] as? Int) == pxH, (m["width"] as? Int) == w { return true }
+        let list = (f["modes"] as? [[Int]]) ?? []
         let ours = list.first(where: { $0.count >= 5 && $0[0] == w && $0[1] == h && $0[2] == pxW && $0[3] == pxH })
-        if !list.isEmpty && (ours == nil || ours![4] == 0) { return false }
-        if ours != nil && freshSelect(id, pxW, pxH, hidpi) { return waitFor({ freshIsAt(id, pxW, pxH, hidpi) }, 2) }
-        _ = waitFor({ false }, 0.1)
+        if !list.isEmpty && (ours == nil || ours![4] == 0) && (!quickSettle || Date() > listedBy) { return false }
+        if ours != nil && ours![4] != 0 && freshSelect(id, pxW, pxH, hidpi) { return waitFor({ freshIsAt(id, pxW, pxH, hidpi) }, 2) }
+        _ = waitFor({ false }, quickSettle ? 0.03 : 0.1)
     }
     return false
 }
 
 // ── operations ──────────────────────────────────────────────────────────
-func settingsFor(_ pxW: Int, _ pxH: Int, _ hidpi: Bool) -> AnyObject? {
-    guard let sc = cls("CGVirtualDisplaySettings") as? NSObject.Type else { return nil }
+// The modes a resize offers: the one asked for first, then any extra pixel
+// sizes from `set` that are valid at the same scale and fit the maximum
+// (duplicates dropped, at most 6). Pure.
+func planModes(_ pxW: Int, _ pxH: Int, _ hidpi: Bool, _ extra: [(Int, Int)], _ max: (w: Int, h: Int)) -> [[Int]] {
+    var out: [[Int]] = []
+    for (w, h) in [(pxW, pxH)] + extra {
+        if out.count >= 6 { break }
+        if valid(w, h, hidpi) != nil || w > max.w || h > max.h { continue }
+        let m = [hidpi ? w / 2 : w, hidpi ? h / 2 : h, w, h]
+        if !out.contains(m) { out.append(m) }
+    }
+    return out
+}
+// "1170x2532,2532x1170" → [(1170, 2532), (2532, 1170)]; anything malformed is skipped.
+func parseSet(_ s: String) -> [(Int, Int)] {
+    s.split(separator: ",").compactMap { t -> (Int, Int)? in
+        let p = t.split(separator: "x"); guard p.count == 2, let w = Int(p[0]), let h = Int(p[1]) else { return nil }; return (w, h)
+    }
+}
+func settingsFor(_ modes: [[Int]], _ hidpi: Bool) -> AnyObject? {
+    guard let sc = cls("CGVirtualDisplaySettings") as? NSObject.Type, !modes.isEmpty else { return nil }
     let s = sc.init()
     // Mode sizes are in POINTS; hiDPI=1 makes the window server back each one
     // at 2x (it needs maxPixels >= 2x the mode). The 1x variant of each point
-    // size is offered too, so ask only for what we want: one mode.
-    let w = hidpi ? pxW / 2 : pxW, h = hidpi ? pxH / 2 : pxH
-    guard let mode = makeMode(w, h, 60) else { return nil }
+    // size is offered too; settle selects ours explicitly, so a set of several
+    // still lands on the one asked for.
+    var list: [AnyObject] = []
+    for m in modes { guard let mode = makeMode(m[0], m[1], 60) else { return nil }; list.append(mode) }
     s.setValue(hidpi ? 1 : 0, forKey: "hiDPI")
-    s.setValue([mode], forKey: "modes")
+    s.setValue(list, forKey: "modes")
     return s
 }
 // HiDPI (2x) is only offered as a desktop mode from about 800x600 points:
@@ -258,20 +302,36 @@ func waitFor(_ cond: () -> Bool, _ seconds: Double, abortable: Bool = true) -> B
     return cond()
 }
 
-func create(_ pxW: Int, _ pxH: Int, _ hidpi: Bool, _ name: String) -> [String: Any] {
+// DRY: the window server's 2x floor, simulated (SOA_VDISPLAY_DRY_REFUSE_HIDPI=<area>,<long>).
+func dryRefuses2x(_ pxW: Int, _ pxH: Int, _ hidpi: Bool) -> Bool {
+    guard hidpi, let v = env["SOA_VDISPLAY_DRY_REFUSE_HIDPI"] else { return false }
+    let n = v.split(separator: ",").compactMap { Int($0) }
+    guard n.count == 2 else { return false }
+    return (pxW / 2) * (pxH / 2) < n[0] || max(pxW, pxH) / 2 < n[1]
+}
+func dryMs(_ key: String, _ def: Int) -> Int { max(0, Int(env[key] ?? "") ?? def) }
+
+func create(_ pxW: Int, _ pxH: Int, _ hidpi: Bool, _ maxAsk: Int, _ extra: [(Int, Int)], _ name: String) -> [String: Any] {
     if vdisplay != nil { return ["ok": false, "error": "already created", "id": Int(vid)] }
     if let e = valid(pxW, pxH, hidpi) { return ["ok": false, "error": e] }
+    // Room for a later `resize` to any shape up to maxAsk (default 4K) on either side.
+    let room = min(8192, max(3840, maxAsk))
     if dry {
-        let ms = max(0, Int(env["SOA_VDISPLAY_DRY_CREATE_MS"] ?? "") ?? 300)
-        dryLog("create \(pxW)x\(pxH) hiDPI=\(hidpi ? 1 : 0) (dry: no display is created)")
+        let ms = dryMs("SOA_VDISPLAY_DRY_CREATE_MS", 300)
+        dryLog("create \(pxW)x\(pxH) hiDPI=\(hidpi ? 1 : 0) maxpx=\(room) (dry: no display is created)")
         _ = waitFor({ false }, Double(ms) / 1000)
         if aborting() { dryLog("create aborted"); return ["ok": false, "dry": true, "error": "aborted"] }
         vid = 0x5000 + (UInt32(getpid()) & 0xFFF)
         vdisplay = NSObject()
-        maxPx = (max(pxW, 3840), max(pxH, 3840))
-        dryWrite(["vid": Int(vid), "pxW": pxW, "pxH": pxH, "hidpi": hidpi, "mirroredFrom": 0, "pid": Int(getpid())])
+        maxPx = (max(pxW, room), max(pxH, room))
+        let refused = dryRefuses2x(pxW, pxH, hidpi)
+        let on2x = hidpi && !refused
+        dryWrite(["vid": Int(vid), "pxW": on2x || !hidpi ? pxW : pxW / 2, "pxH": on2x || !hidpi ? pxH : pxH / 2, "hidpi": on2x, "mirroredFrom": 0, "pid": Int(getpid())])
+        offered = planModes(pxW, pxH, hidpi, extra, maxPx); offeredHidpi = hidpi
         let q = dryQuery(vid)
-        return ["ok": true, "dry": true, "id": Int(vid), "bounds": q["bounds"] ?? [:], "mode": q["mode"] ?? [:], "ms": ms]
+        if refused { dryLog("create: 2x refused (dry)") }
+        return ["ok": !refused, "dry": true, "id": Int(vid), "bounds": q["bounds"] ?? [:], "mode": q["mode"] ?? [:], "ms": ms, "offered": offeredJSON(),
+                "error": refused ? "display did not come up at the requested size" as Any : NSNull()]
     }
     guard let dc = cls("CGVirtualDisplayDescriptor") as? NSObject.Type, let vc = cls("CGVirtualDisplay") else {
         return ["ok": false, "error": "CGVirtualDisplay not available on this macOS"]
@@ -280,8 +340,7 @@ func create(_ pxW: Int, _ pxH: Int, _ hidpi: Bool, _ name: String) -> [String: A
     let d = dc.init()
     d.setValue(DispatchQueue(label: "vdisplay"), forKey: "queue")
     d.setValue(name, forKey: "name")
-    // Room for a later `resize` to any shape up to 4K on either side.
-    maxPx = (max(pxW, 3840), max(pxH, 3840))
+    maxPx = (max(pxW, room), max(pxH, room))
     d.setValue(maxPx.w, forKey: "maxPixelsWide")
     d.setValue(maxPx.h, forKey: "maxPixelsHigh")
     // ~110 dpi at 1x / ~220 at 2x: only affects what System Settings shows.
@@ -306,30 +365,63 @@ func create(_ pxW: Int, _ pxH: Int, _ hidpi: Bool, _ name: String) -> [String: A
     }
     let id = (obj.value(forKey: "displayID") as? NSNumber)?.uint32Value ?? 0
     guard id != 0 else { return ["ok": false, "error": "no display id"] }
-    guard let s = settingsFor(pxW, pxH, hidpi), apply(obj, s) else { return ["ok": false, "error": "applySettings refused \(pxW)x\(pxH) hiDPI=\(hidpi)"] }
+    let modes = planModes(pxW, pxH, hidpi, extra, maxPx)
+    guard let s = settingsFor(modes, hidpi), apply(obj, s) else { return ["ok": false, "error": "applySettings refused \(pxW)x\(pxH) hiDPI=\(hidpi)"] }
     vdisplay = obj; vid = id
+    offered = modes; offeredHidpi = hidpi
     let up = settle(id, pxW, pxH, hidpi)
     let q = fresh(id)
-    return ["ok": up, "id": Int(id), "bounds": q["bounds"] ?? [:], "mode": q["mode"] ?? [:], "ms": Int(Date().timeIntervalSince(t0) * 1000),
+    return ["ok": up, "id": Int(id), "bounds": q["bounds"] ?? [:], "mode": q["mode"] ?? [:], "ms": Int(Date().timeIntervalSince(t0) * 1000), "offered": offeredJSON(),
             "error": up ? NSNull() : "display did not come up at the requested size" as Any]
 }
 
-func resize(_ pxW: Int, _ pxH: Int, _ hidpi: Bool) -> [String: Any] {
+func offeredJSON() -> [String] { offered.map { "\($0[2])x\($0[3])" } }
+
+func resize(_ pxW: Int, _ pxH: Int, _ hidpi: Bool, _ extra: [(Int, Int)]) -> [String: Any] {
     guard let obj = vdisplay else { return ["ok": false, "error": "no display"] }
     if let e = valid(pxW, pxH, hidpi) { return ["ok": false, "error": e] }
     if pxW > maxPx.w || pxH > maxPx.h { return ["ok": false, "error": "larger than the display's maximum; destroy and create"] }
+    let modes = planModes(pxW, pxH, hidpi, extra, maxPx)
     if dry {
-        dryLog("resize \(pxW)x\(pxH) hiDPI=\(hidpi ? 1 : 0) (dry)")
+        let ms = dryMs("SOA_VDISPLAY_DRY_RESIZE_MS", 0)
+        dryLog("resize \(pxW)x\(pxH) hiDPI=\(hidpi ? 1 : 0)\(modes.count > 1 ? " set \(modes.dropFirst().map { "\($0[2])x\($0[3])" }.joined(separator: ","))" : "") (dry)")
+        _ = waitFor({ false }, Double(ms) / 1000)
+        if aborting() { dryLog("resize aborted"); return ["ok": false, "dry": true, "error": "aborted"] }
+        if dryRefuses2x(pxW, pxH, hidpi) { dryLog("resize: 2x refused (dry)"); return ["ok": false, "dry": true, "id": Int(vid), "error": "display did not come up at the requested size"] }
         var st = dryRead(); st["pxW"] = pxW; st["pxH"] = pxH; st["hidpi"] = hidpi; dryWrite(st)
+        offered = modes; offeredHidpi = hidpi
         let f = dryQuery(vid)
-        return ["ok": true, "dry": true, "id": Int(vid), "main": f["main"] ?? 0, "bounds": f["bounds"] ?? [:], "mode": f["mode"] ?? [:], "ms": 0]
+        return ["ok": true, "dry": true, "id": Int(vid), "main": f["main"] ?? 0, "bounds": f["bounds"] ?? [:], "mode": f["mode"] ?? [:], "ms": ms, "offered": offeredJSON()]
     }
     let t0 = Date()
-    guard let s = settingsFor(pxW, pxH, hidpi), apply(obj, s) else { return ["ok": false, "error": "applySettings refused"] }
+    guard let s = settingsFor(modes, hidpi), apply(obj, s) else { return ["ok": false, "error": "applySettings refused"] }
+    offered = modes; offeredHidpi = hidpi
     let id = vid
     let up = settle(id, pxW, pxH, hidpi)
     let f = fresh(id)
-    return ["ok": up, "id": Int(vid), "main": f["main"] ?? 0, "bounds": f["bounds"] ?? [:], "mode": f["mode"] ?? [:], "ms": Int(Date().timeIntervalSince(t0) * 1000)]
+    return ["ok": up, "id": Int(vid), "main": f["main"] ?? 0, "bounds": f["bounds"] ?? [:], "mode": f["mode"] ?? [:], "ms": Int(Date().timeIntervalSince(t0) * 1000), "offered": offeredJSON()]
+}
+
+// A switch among the modes the display already offers: one mode selection
+// (CGConfigureDisplayWithDisplayMode, in a fresh process), no applySettings.
+func select(_ pxW: Int, _ pxH: Int) -> [String: Any] {
+    guard vdisplay != nil else { return ["ok": false, "error": "no display"] }
+    guard let m = offered.first(where: { $0[2] == pxW && $0[3] == pxH }) else { return ["ok": false, "error": "not offered"] }
+    let hidpi = offeredHidpi
+    if dry {
+        let ms = dryMs("SOA_VDISPLAY_DRY_SELECT_MS", 0)
+        dryLog("select \(pxW)x\(pxH) (\(m[0])x\(m[1]) pt, dry)")
+        _ = waitFor({ false }, Double(ms) / 1000)
+        if aborting() { dryLog("select aborted"); return ["ok": false, "dry": true, "error": "aborted"] }
+        var st = dryRead(); st["pxW"] = pxW; st["pxH"] = pxH; st["hidpi"] = hidpi; dryWrite(st)
+        let f = dryQuery(vid)
+        return ["ok": true, "dry": true, "id": Int(vid), "main": f["main"] ?? 0, "bounds": f["bounds"] ?? [:], "mode": f["mode"] ?? [:], "ms": ms]
+    }
+    let t0 = Date(), id = vid
+    let up = freshSelect(id, pxW, pxH, hidpi) && waitFor({ freshIsAt(id, pxW, pxH, hidpi) }, 2)
+    let f = fresh(id)
+    return ["ok": up, "id": Int(vid), "main": f["main"] ?? 0, "bounds": f["bounds"] ?? [:], "mode": f["mode"] ?? [:], "ms": Int(Date().timeIntervalSince(t0) * 1000),
+            "error": up ? NSNull() : "mode switch did not take" as Any]
 }
 
 func configure(_ body: (CGDisplayConfigRef) -> CGError) -> CGError {
@@ -450,6 +542,11 @@ if dry && argv.count > 1 && argv[1].hasPrefix("--") {
     case "--set-mode":
         dryLog("set-mode \(argv.dropFirst(2).joined(separator: " ")) (dry)")
         emit(["ok": true, "gui": true, "dry": true])
+    case "--plan-modes":  // --plan-modes <pxW> <pxH> <hiDPI> [set <w>x<h>,…] — pure
+        let n = argv.dropFirst(2).prefix(3).compactMap { Int($0) }
+        guard n.count == 3 else { emit(["ok": false, "error": "usage"]); exit(2) }
+        let extra = argv.count > 6 && argv[5] == "set" ? parseSet(argv[6]) : []
+        emit(["ok": true, "modes": planModes(n[0], n[1], n[2] != 0, extra, (3840, 3840)), "valid": valid(n[0], n[1], n[2] != 0) ?? NSNull()])
     case "--restore":
         let only = argv.count > 2 ? Int(argv[2]) ?? 0 : -1
         var st = dryRead()
@@ -484,6 +581,11 @@ if argv.count > 1 && argv[1].hasPrefix("--") {
         }
         let e = configure { CGConfigureDisplayWithDisplayMode($0, id, m, nil) }
         emit(["ok": e == .success, "gui": m.isUsableForDesktopGUI(), "error": e == .success ? NSNull() : "set mode failed (\(e.rawValue))" as Any])
+    case "--plan-modes":  // --plan-modes <pxW> <pxH> <hiDPI> [set <w>x<h>,…] — pure
+        let n = argv.dropFirst(2).prefix(3).compactMap { Int($0) }
+        guard n.count == 3 else { emit(["ok": false, "error": "usage"]); exit(2) }
+        let extra = argv.count > 6 && argv[5] == "set" ? parseSet(argv[6]) : []
+        emit(["ok": true, "modes": planModes(n[0], n[1], n[2] != 0, extra, (3840, 3840)), "valid": valid(n[0], n[1], n[2] != 0) ?? NSNull()])
     case "--restore":     // undo mirroring left behind by a crashed helper
         // With an id: only displays mirroring that (virtual) display, so a
         // mirror the user set up (a TV) is left alone. Without: every one.
@@ -529,8 +631,16 @@ func handle(_ line: String) {
     busy = true
     autoreleasepool {
         switch cmd {
-        case "create": r = create(int(1), int(2), int(3) != 0, p.count > 4 ? p[4...].joined(separator: " ") : "SoA Remote")
-        case "resize": r = resize(int(1), int(2), int(3) != 0)
+        case "create":
+            // create <pxW> <pxH> <hiDPI> [maxpx <n>] [set <w>x<h>,…] [name…]
+            var i = 4, mx = 3840, extra: [(Int, Int)] = []
+            while i + 1 < p.count && (p[i] == "maxpx" || p[i] == "set") {
+                if p[i] == "maxpx" { mx = Int(p[i + 1]) ?? 3840 } else { extra = parseSet(p[i + 1]) }
+                i += 2
+            }
+            r = create(int(1), int(2), int(3) != 0, mx, extra, p.count > i ? p[i...].joined(separator: " ") : "SoA Remote")
+        case "resize": r = resize(int(1), int(2), int(3) != 0, p.count > 5 && p[4] == "set" ? parseSet(p[5]) : [])
+        case "select": r = p.count == 3 ? select(int(1), int(2)) : ["ok": false, "error": "usage: select <pxW> <pxH>"]
         case "mirror": r = (p.count > 1 && (p[1] == "on" || p[1] == "off")) ? mirror(p[1] == "on") : ["ok": false, "error": "usage: mirror on|off"]
         case "extend": r = p.count == 2 ? extend(p[1]) : ["ok": false, "error": "usage: extend left|right"]
         case "state": r = ["ok": true, "state": sub(["--state", String(vid), String(mirroredFrom)])]
@@ -540,7 +650,7 @@ func handle(_ line: String) {
     }
     busy = false
     r["cmd"] = cmd
-    if dry && cmd != "create" && cmd != "resize" && cmd != "mirror" { dryLog("\(cmd) → ok=\((r["ok"] as? Bool) ?? false)") }
+    if dry && cmd != "create" && cmd != "resize" && cmd != "mirror" && cmd != "select" { dryLog("\(cmd) → ok=\((r["ok"] as? Bool) ?? false)") }
     emit(r)
     if cmd == "quit" { exit(0) }
     if let why = exitPending { shutdown(why) }

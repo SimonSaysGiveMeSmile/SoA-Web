@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="connect-src 'self' ws: wss: blob: data:">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -229,6 +230,17 @@
   .switch .txt { display: flex; flex-direction: column; gap: 2px; padding-right: 12px; }
   .switch .sub { font-size: 13px; color: var(--ink-dim); }
   #fz-msg { min-height: 1.4em; }
+  /* display scaling: a 100–200 % slider, its value, and what the Mac then looks like */
+  .scale { padding: 8px 14px 10px; }
+  .scale-hd { display: flex; align-items: center; gap: 10px; min-height: 36px; }
+  .scale-hd .cap { flex: 1 1 auto; font-size: 15px; }
+  #fz-scale-v { font-variant-numeric: tabular-nums; font-size: 15px; color: var(--ink); min-width: 4.5ch; text-align: right; }
+  #fz-auto { min-height: 32px; padding: 0 12px; border-radius: 8px; background: var(--ctl); font-size: 13px; }
+  #fz-auto[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  #fz-scale-r { width: 100%; height: 44px; margin: 0; accent-color: var(--accent); touch-action: none; }
+  .scale-ends { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-dim); margin-top: -6px; }
+  #fz-scale-out { margin: 6px 0 0; min-height: 1.4em; font-variant-numeric: tabular-nums; }
+  .scale.off { opacity: .45; }
   #fz-msg.ok { color: var(--ink); }
   .chips.off { opacity: .45; }
   #d-list .opt[disabled] { opacity: .45; }
@@ -238,6 +250,38 @@
     #pad.click { animation: none; }
   }
   @media (forced-colors: active) { .k, #pad, .sb, .seg button { border: 1px solid CanvasText; } .k.armed, .k.locked { outline: 2px solid Highlight; } }
+  /* ── Air trackpad (experimental, off until asked for) ─────────────────
+     The front camera points the Mac's pointer. The strip button only shows
+     where it can run; the panel says the camera is on for as long as it is. */
+  #b-air { position: relative; }
+  #b-air .rec { position: absolute; top: 8px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: #FF3B30; box-shadow: 0 0 0 1.5px var(--hinge); display: none; }
+  #b-air[aria-pressed="true"] .rec { display: block; }
+  [data-layout="overlay"] #b-air .rec { box-shadow: 0 0 0 1.5px #000; }
+  #air { position: fixed; top: calc(8px + env(safe-area-inset-top, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); z-index: 4; width: 176px; max-width: calc(100vw - 16px); display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 14px; background: rgba(30,30,32,.9); color: #F2F2F4; font-size: 12px; line-height: 1.3; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: 0 4px 18px rgba(0,0,0,.35); touch-action: manipulation; }
+  /* under the picture (over the deck) where there is a deck: the picture is what you watch while pointing */
+  [data-layout="stack"] #air { top: auto; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+  #air .hd { display: flex; align-items: center; gap: 6px; font-size: 12.5px; white-space: nowrap; }
+  #air .hd .rec { width: 8px; height: 8px; border-radius: 50%; background: #FF3B30; flex: 0 0 auto; }
+  #air .hd .beta { margin-left: auto; color: #A2A2A7; font-size: 11px; }
+  #air-cam { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 9px; overflow: hidden; background: #000; }
+  /* mirrored, so the hand on screen moves the way the real one does */
+  #air-cam video, #air-cam canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  /* preview off: the video stays in the page (iOS stops feeding a video that is not), just out of sight */
+  #air.nopv #air-cam { position: absolute; width: 2px; height: 2px; opacity: .01; pointer-events: none; }
+  #air.nopv .help, #air.nopv .priv { display: none; }
+  #air-state { min-height: 16px; color: #ECECEE; }
+  #air-state.paused { color: #FFB340; }
+  #air .row { display: flex; align-items: center; gap: 6px; }
+  #air input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: #0A84FF; }
+  #air button { min-height: 44px; border-radius: 10px; padding: 0 10px; font-weight: 600; }
+  #air-pv { background: rgba(255,255,255,.12); }
+  #air-pv[aria-pressed="true"] { background: rgba(255,255,255,.24); }
+  #air-off { flex: 1 1 auto; background: #FF3B30; color: #fff; font-size: 16px; }
+  /* the strip has room for the button only once the resolution label is short: the × height goes first */
+  @media (max-width: 400px) { [data-airpad="yes"][data-layout="stack"]:not([data-fit="on"]) #res-t .resh { display: none; } }
+  [data-airpad="yes"][data-pane="narrow"]:not([data-fit="on"]) #res-t .resh { display: none; }
+  #air .help, #air .priv { margin: 0; color: #A2A2A7; font-size: 11px; }
+  @media (forced-colors: active) { #air { border: 1px solid CanvasText; } #air-off { border: 2px solid ButtonText; } }
 </style>
 </head>
 <body>
@@ -264,8 +308,18 @@
   <button class="sb" id="b-keys" aria-pressed="false" aria-label="Show keyboard" title="Keyboard"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="1.8" y="5" width="16.4" height="10" rx="1.6"/><path d="M5 8h.01M8 8h.01M11 8h.01M14 8h.01M5 11h.01M15 11h.01M7.5 12h5"/></svg></button>
   <button class="sb ovonly" id="b-pad" aria-pressed="false" aria-label="Show trackpad" title="Trackpad"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/></svg></button>
   <button class="sb" id="b-ime" aria-label="System keyboard, for long text and dictation" title="System keyboard (dictation, autocorrect)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 15.5 7 4.5l4 11M4.4 12h5.2"/><path d="M13 9.5c.6-.6 1.3-.9 2.1-.9 1.3 0 2 .7 2 2v4.9M17.1 12.6c-2.6 0-4.2.6-4.2 1.7 0 .8.6 1.3 1.6 1.3 1.6 0 2.6-1 2.6-2.4"/></svg></button>
+  <button class="sb" id="b-air" aria-pressed="false" aria-label="Air trackpad (experimental, uses the camera)" title="Air trackpad: point with your hand (camera, experimental)" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.2 10.4V4.6a1.25 1.25 0 0 1 2.5 0v4.8M9.7 9.2V3.4a1.25 1.25 0 0 1 2.5 0v5.9M12.2 9.4V5a1.25 1.25 0 0 1 2.5 0v6.2c0 3.4-2.2 5.6-5.2 5.6H8.7c-1.5 0-2.8-.7-3.6-1.9l-2.4-3.6a1.2 1.2 0 0 1 1.9-1.4l2.6 2.4"/></svg><span class="rec" aria-hidden="true"></span></button>
   <button class="sb ovonly" id="b-full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 7.5V3h4.5M17 7.5V3h-4.5M3 12.5V17h4.5M17 12.5V17h-4.5"/></svg></button>
 </nav>
+<section id="air" aria-label="Air trackpad (experimental)" hidden>
+  <div class="hd"><span class="rec" aria-hidden="true"></span><strong>Camera on</strong><span class="beta">beta</span></div>
+  <div id="air-cam"><video id="air-video" playsinline webkit-playsinline muted autoplay disablepictureinpicture></video><canvas id="air-skel" width="4" height="3" aria-hidden="true"></canvas></div>
+  <div id="air-state" role="status" aria-live="polite">Starting the camera…</div>
+  <p class="help">Index finger up moves. Pinch clicks; pinch and move drags. Two fingers up or down scroll. A fist lifts. Open hand 1 s pauses.</p>
+  <label class="row"><span>Speed</span><input type="range" id="air-sens" min="0.4" max="2.5" step="0.1" value="1" aria-label="Air trackpad speed"></label>
+  <div class="row"><button id="air-pv" aria-pressed="true" title="Show or hide the camera picture">Preview</button><button id="air-off" aria-label="Turn the camera off">Off</button></div>
+  <p class="priv">On this device only: no video or hand data is sent, just the pointer moves, clicks and scrolls.</p>
+</section>
 <div id="slow" role="status" hidden><span id="slow-t"></span></div>
 <div id="fz-other" role="status" hidden><span class="t" id="fz-other-t">The Mac is fitted to another screen</span><button id="fz-other-take">Fit here</button><button id="fz-other-x" aria-label="Hide this message">✕</button></div>
 <section id="deck" aria-label="Keyboard and trackpad">
@@ -300,7 +354,13 @@
     <h3 id="h-mac" tabindex="-1">Mac resolution</h3>
     <div class="group">
       <label class="switch"><span class="txt"><span>Fit the Mac to this screen</span><span class="sub" id="fz-sub">The Mac takes this screen's shape</span></span><input type="checkbox" role="switch" id="fz-on" aria-describedby="fz-msg"></label>
-      <div class="chips" id="fz-text" role="radiogroup" aria-labelledby="fz-text-cap"><span class="cap" id="fz-text-cap">Text size</span><button role="radio" data-fz-text="smaller" aria-checked="false">Smaller</button><button role="radio" data-fz-text="default" aria-checked="true">Default</button><button role="radio" data-fz-text="larger" aria-checked="false">Larger</button></div>
+      <div class="scale" id="fz-scale" role="group" aria-labelledby="fz-scale-cap">
+        <div class="scale-hd"><span class="cap" id="fz-scale-cap">Display scaling</span><output id="fz-scale-v" for="fz-scale-r" aria-live="off">Auto</output><button id="fz-auto" aria-pressed="true" title="Scaling chosen for this screen's pixel density">Auto</button></div>
+        <input type="range" id="fz-scale-r" min="100" max="200" step="10" value="150" aria-label="Display scaling, percent" aria-describedby="fz-scale-out">
+        <div class="scale-ends" aria-hidden="true"><span>More space</span><span>Larger text</span></div>
+        <p class="note" id="fz-scale-out" role="status" aria-live="polite"></p>
+      </div>
+      <div class="chips" id="fz-full" role="radiogroup" aria-labelledby="fz-full-cap" hidden><span class="cap" id="fz-full-cap">Picture (upright)</span><button role="radio" data-fz-full="0" aria-checked="true">Above the controls</button><button role="radio" data-fz-full="1" aria-checked="false">Full screen</button></div>
       <label class="switch" id="fz-keep-row" hidden><span class="txt"><span>Keep after I leave</span><span class="sub">The fitted screen ends 30 seconds after you leave, unless you keep it</span></span><input type="checkbox" role="switch" id="fz-keep"></label>
     </div>
     <p class="note" id="fz-msg" role="status" aria-live="polite"></p>
@@ -336,6 +396,16 @@
   const base = new URL('.', document.baseURI);
   const query = location.search || '';            // keeps ?t=<pairing token> for the daemon's gate
   let ws = null, screen = { width: 1728, height: 1117 }, quality = null;
+  // pic: the Mac geometry the picture on screen shows (see toMac). picWait:
+  // a newer geometry waiting for its first frame — {s, at, ts} (ts: the
+  // capture time of the first frame of the new screen, when known).
+  let pic = screen, picWait = null, picTimer = 0;
+  const PIC_WAIT_MS = 1500;                        // never mapped with an old geometry for longer
+  function picPromote() {
+    if (!picWait) return;
+    pic = picWait.s; picWait = null; clearTimeout(picTimer); picTimer = 0;
+    if (typeof drawCursor === 'function') drawCursor();
+  }
   let fps = 0, frameCount = 0, backoff = 1000;
   // Armed modifiers (one-shot: spent by the next key or click) and locked ones
   // (double-tapped: stay until tapped again). 'fn' never leaves this page: it
@@ -357,15 +427,54 @@
     try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') || {}; } catch (_) { return {}; }
   })());
   function savePrefs() { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) {} }
-  // "Fit the Mac to this screen", remembered on this device.
+  let airActive = false;                          // the air trackpad (camera) is pointing: see "Air trackpad"
+  // Display scaling for the fitted screen: the SAME pure function as the
+  // service's (a test pins the two copies), so the read-out follows the
+  // slider at once; the Mac's answer is authoritative once it arrives.
+  /* scaleSpec:begin */
+  const SCALE = Object.freeze({ min: 100, max: 200, minLong: 480, minShort: 360, hiArea: 480000, hiLong: 800, maxPx: 3840 });
+  const autoScalePct = (dpr) => Math.max(SCALE.min, Math.min(SCALE.max, Math.round((75 + 25 * (+dpr || 1)) / 5) * 5));
+  function scaleSpec(px, pct, maxPx = SCALE.maxPx) {
+      const fl5 = (n) => Math.floor(n / 5) * 5, ev = (n) => Math.max(2, Math.floor(n / 2) * 2), evUp = (n) => Math.max(2, Math.ceil(n / 2) * 2);
+      const cap = Math.min(1, maxPx / Math.max(2, px.w, px.h)), W = ev(px.w * cap), H = ev(px.h * cap), L = Math.max(W, H), S = Math.min(W, H);
+      const asked = Number.isFinite(+pct) ? Math.round(+pct) : SCALE.min;
+      let p = Math.max(SCALE.min, Math.min(SCALE.max, asked));
+      const why = cap < 1 ? ['max-px'] : [];
+      if (L < SCALE.minLong || S < SCALE.minShort) {
+          const k = Math.min(Math.max(SCALE.minLong / L, SCALE.minShort / S), maxPx / L), w = Math.min(evUp(W * k), ev(maxPx)), h = Math.min(evUp(H * k), ev(maxPx));
+          return { asked, p: 100, w, h, pxW: w, pxH: h, hidpi: false, why: 'min-pt', src: { w: W, h: H } };
+      }
+      const pMin = Math.min(100 * L / SCALE.minLong, 100 * S / SCALE.minShort);
+      if (p > pMin) { p = Math.max(SCALE.min, fl5(pMin)); why.push('min-pt'); }
+      const pHi = Math.min(100 * Math.sqrt(W * H / SCALE.hiArea), 100 * L / SCALE.hiLong);
+      if (p > SCALE.min && p > pHi && pHi >= 105) { p = fl5(pHi); why.push('hidpi-floor'); }
+      for (let i = 0; ; i++) {
+          const w = p === 100 ? W : ev(W * 100 / p), h = p === 100 ? H : ev(H * 100 / p);
+          const floors = w * h >= SCALE.hiArea && Math.max(w, h) >= SCALE.hiLong, room = 2 * w <= maxPx && 2 * h <= maxPx;
+          // rounding to even points dipped under the 2x floor: one step down
+          if (p > 105 && !floors && room && pHi >= 105 && i < 2) { p -= 5; continue; }
+          const hidpi = p > 100 && floors && room;
+          if (p > 100 && !hidpi) why.push(room ? '1x' : 'max-px');
+          return { asked, p, w, h, pxW: hidpi ? 2 * w : w, pxH: hidpi ? 2 * h : h, hidpi, why: why.join(','), src: { w: W, h: H } };
+      }
+  }
+  /* scaleSpec:end */
+  // "Fit the Mac to this screen", remembered on this device: on, the display
+  // scaling ('auto' or 100..200 %), and whether an upright picture takes the
+  // full screen (the controls then slide over it) or sits above them.
   const FIT_KEY = 'soa-desktop-remote:fit';
-  const FIT_TEXTS = ['smaller', 'default', 'larger'];
-  const fitPref = Object.assign({ on: false, text: 'default' }, (() => {
-    try { return JSON.parse(localStorage.getItem(FIT_KEY) || '{}') || {}; } catch (_) { return {}; }
-  })());
-  if (!FIT_TEXTS.includes(fitPref.text)) fitPref.text = 'default';
-  fitPref.on = fitPref.on === true;
-  function saveFitPref() { try { localStorage.setItem(FIT_KEY, JSON.stringify({ on: fitPref.on, text: fitPref.text })); } catch (_) {} }
+  const fitPref = (() => {
+    let s = {};
+    try { s = JSON.parse(localStorage.getItem(FIT_KEY) || '{}') || {}; } catch (_) {}
+    const p = { on: s.on === true, scale: 'auto', full: s.full === true };
+    if (typeof s.scale === 'number' && s.scale >= 100 && s.scale <= 200) p.scale = Math.round(s.scale / 10) * 10;
+    else if (s.scale === undefined && (s.text === 'smaller' || s.text === 'larger')) {   // the old text sizes, once
+      const a = autoScalePct(window.devicePixelRatio || 1);
+      p.scale = Math.max(100, Math.min(200, Math.round((a + (s.text === 'smaller' ? -30 : 30)) / 10) * 10));
+    }
+    return p;
+  })();
+  function saveFitPref() { try { localStorage.setItem(FIT_KEY, JSON.stringify({ on: fitPref.on, scale: fitPref.scale, full: fitPref.full })); } catch (_) {} }
   // This device, to the Mac: the fit belongs to one screen, and a reconnect
   // (a network blip) must still be that screen. Random, kept on this device.
   const DEV = (() => {
@@ -489,17 +598,21 @@
     view.x = w <= sw ? (sw - w) / 2 : Math.min(0, Math.max(sw - w, view.x));
     view.y = h <= sh ? (sh - h) / 2 : Math.min(0, Math.max(sh - h, view.y));
   }
-  // stage-local pixel → Mac point
+  // stage-local pixel → Mac point. Mapped with the geometry of the picture
+  // ON SCREEN (pic), not the newest one the Mac reported: when the Mac's
+  // screen changes size, frames of the old screen keep arriving for a moment
+  // (until the stream's first frame of the new one), and a tap on one of them
+  // is aimed at the old layout.
   function toMac(cx, cy) {
     const fx = (cx - view.x) / view.s, fy = (cy - view.y) / view.s;
-    return { x: Math.round(fx / view.nat.w * screen.width), y: Math.round(fy / view.nat.h * screen.height) };
+    return { x: Math.round(fx / view.nat.w * pic.width), y: Math.round(fy / view.nat.h * pic.height) };
   }
   function inFrame(cx, cy) {
     const fx = (cx - view.x) / view.s, fy = (cy - view.y) / view.s;
     return fx >= 0 && fy >= 0 && fx <= view.nat.w && fy <= view.nat.h;
   }
-  function macToStage(p) { return { x: view.x + p.x / screen.width * view.nat.w * view.s, y: view.y + p.y / screen.height * view.nat.h * view.s }; }
-  const ptPerPx = () => screen.width / (view.nat.w * view.s);   // Mac points per stage pixel at this zoom
+  function macToStage(p) { return { x: view.x + p.x / pic.width * view.nat.w * view.s, y: view.y + p.y / pic.height * view.nat.h * view.s }; }
+  const ptPerPx = () => pic.width / (view.nat.w * view.s);   // Mac points per stage pixel at this zoom
   // client (viewport) → stage-local; the stage is no longer at the origin
   let stageRect = { left: 0, top: 0 };
   const loc = (e) => [e.clientX - stageRect.left, e.clientY - stageRect.top];
@@ -577,6 +690,9 @@
         }
         if (m.t === 'extend') onExtendInfo(m);
         if (m.t === 'fit') onFitInfo(m);
+        if (m.t === 'fitFrame') onFitFrame(m);
+        if ((m.t === 'fitFrame' || m.t === 'screenFrame') && picWait && typeof m.ts === 'number' && (picWait.ts == null || m.ts < picWait.ts)) picWait.ts = m.ts;
+        if (m.t === 'tip' && typeof m.text === 'string') showTip(m.text.slice(0, 160), 2400);
         if (m.t === 'input') onInputInfo(m);
         if (m.t === 'drag-permission') {
           const was = dragPermitted; dragPermitted = !!m.granted;
@@ -613,6 +729,11 @@
     if (!s || !(s.width > 0) || !(s.height > 0)) return;
     const changed = s.width !== screen.width || s.height !== screen.height;
     screen = s;
+    if (changed && mode === 'h264' && pictureReady && !E.selected && !extendWanted && (pic.width !== s.width || pic.height !== s.height)) {
+      if (!picWait) { clearTimeout(picTimer); picTimer = setTimeout(picPromote, PIC_WAIT_MS); }
+      picWait = { s, at: performance.now(), ts: null };
+    } else if (changed || !picWait) { picWait = null; clearTimeout(picTimer); picTimer = 0; pic = s; }
+    else if (picWait) picWait.s = s;
     if (changed) {
       cur.x = Math.min(cur.x, screen.width - 1); cur.y = Math.min(cur.y, screen.height - 1);
       layout(); if (ws) askCursor();
@@ -643,6 +764,7 @@
     if (V.dec) { try { V.dec.close(); } catch (_) {} }
     V.setGen++;                                     // a decoder setup still in flight is abandoned
     Object.assign(V, { dec: null, setting: false, conf: null, next: null, pending: null, hold: [], needKey: true, lastSeq: -1, recvSeq: -1, ackedSeq: -1 });
+    picPromote();
     while (paintQ.length) paintQ.shift().close();
   }
   function b64(s) { const bin = atob(s), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
@@ -650,7 +772,10 @@
     const conf = { codec: m.codec, description: b64(m.description), hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true };
     V.codec = m.codec;
     if (V.setting) { V.pending = conf; return; }
-    if (V.dec) { V.next = conf; return; }           // applied at the keyframe that follows
+    // Applied at the keyframe that follows, with the acceleration the running
+    // decoder was set up with (a browser that has no hardware H.264 decoder
+    // refuses a 'prefer-hardware' configure outright).
+    if (V.dec) { V.next = V.conf && V.conf.hardwareAcceleration ? { ...conf, hardwareAcceleration: V.conf.hardwareAcceleration } : conf; return; }
     setupDecoder(conf);
   }
   async function setupDecoder(conf) {
@@ -690,7 +815,11 @@
   }
   function decodeChunk(c) {
     if (!V.dec || V.dec.state === 'closed') return;
-    if (c.key && V.next) { try { V.dec.configure(V.next); V.conf = V.next; } catch (e) { onDecodeError(e); return; } V.next = null; }
+    if (c.key && V.next) {
+      try { V.dec.configure(V.next); V.conf = V.next; } catch (e) { onDecodeError(e); return; }
+      V.next = null;
+      if (picWait && picWait.ts == null) picWait.ts = c.ts;   // a new stream: its first keyframe
+    }
     if (!c.key && (V.needKey || V.dec.decodeQueueSize > 6)) { askKey(); return; }   // a slow decoder catches up at a keyframe
     try {
       V.dec.decode(new EncodedVideoChunk({ type: c.key ? 'key' : 'delta', timestamp: Math.round(c.ts * 1000), data: c.data }));
@@ -699,6 +828,7 @@
   }
   function onDecoded(f) {
     decCount++;
+    fitLatDecoded(f);
     paintQ.push(f);
     while (paintQ.length > 2) paintQ.shift().close();
     if (!rafId) rafId = requestAnimationFrame(paint);
@@ -709,6 +839,7 @@
     if (!f) return;
     if (paintQ.length) rafId = requestAnimationFrame(paint);
     try {
+      if (picWait && ((picWait.ts != null && f.timestamp / 1000 >= picWait.ts - 0.5) || f.displayWidth !== frame.width || f.displayHeight !== frame.height)) picPromote();
       sizeCanvas(f.displayWidth, f.displayHeight);
       ctx.drawImage(f, 0, 0, f.displayWidth, f.displayHeight);
       frameCount++; V.total++;
@@ -927,7 +1058,7 @@
     // picture takes the whole screen and the deck slides over it on demand.
     // Fitted, a portrait touch screen keeps the deck below a picture of the
     // room left above it.
-    const stack = fitOn ? touchFirst && ah > aw && ah - STRIP - need.h - (slowOn ? SLOW_H : 0) >= 200
+    const stack = fitOn ? touchFirst && ah > aw && !fitPref.full && ah - STRIP - need.h - (slowOn ? SLOW_H : 0) >= 200
       : touchFirst && ah - stackH - STRIP >= Math.max(250, ah * 0.34);
     root.dataset.layout = stack ? 'stack' : 'overlay';
     root.dataset.fit = fitOn ? 'on' : 'off';
@@ -997,7 +1128,7 @@
     stageRect = stage.getBoundingClientRect();
     $('b-full').hidden = stack || !(document.fullscreenEnabled || document.webkitFullscreenEnabled);
     syncToggles();
-    lay = { kind: stack ? 'stack' : 'overlay', rail: root.dataset.rail, area };
+    lay = { kind: stack ? 'stack' : 'overlay', rail: root.dataset.rail, area, vw: innerWidth, vh: innerHeight };
     onResize();
     drawCursor();
     if (fitPref.on) fitAreaChanged();
@@ -1066,7 +1197,7 @@
     stageW = sw; stageH = sh; reportDisplay();
   }
   window.addEventListener('resize', () => { layout(); setTimeout(layout, 250); });
-  window.addEventListener('orientationchange', () => setTimeout(layout, 300));
+  window.addEventListener('orientationchange', () => { layout(); setTimeout(layout, 300); });
   // folding and unfolding: segments change with a resize, posture on its own
   try { if (navigator.devicePosture && navigator.devicePosture.addEventListener) navigator.devicePosture.addEventListener('change', () => layout()); } catch (_) {}
   for (const q of ['(vertical-viewport-segments: 2)', '(horizontal-viewport-segments: 2)', '(device-posture: folded)']) {
@@ -1154,12 +1285,22 @@
   });
 
   // ── "Fit the Mac to this screen" ─────────────────────────────────────
-  // The Mac makes a screen shaped like this page's picture area (a virtual
-  // display its own screen mirrors) and streams that. This page says how
-  // much room it has — {t:'fit', on, area:{w,h,dpr}, text} on connect, and
-  // again when the area changes (rotation, keyboard shown or hidden); the Mac
-  // re-fits only when the shape really changed. F is what the Mac reports:
-  // {state:'off'|'fitting'|'on'|'error', w, h, pxW, pxH, hidpi, keep, op, target, message}.
+  // The Mac makes a screen shaped like this page's picture box (a virtual
+  // display its own screen mirrors) and streams that. This page says how big
+  // the box is in PHYSICAL pixels, and the display scaling, whenever either
+  // changes — {t:'fit', v:2, on, seq, px, area, scr, scale, auto, why} — and the
+  // Mac changes its screen at once, in place. F is what the Mac reports:
+  // {state:'off'|'fitting'|'on'|'error', w, h, pxW, pxH, hidpi, keep, op, target,
+  //  scale{asked,applied,auto,why}, look, src, enc, seq, tm, message}.
+  //
+  // Real time, without chasing noise: a change is measured every FIT_TICK_MS
+  // until the box has held still for FIT_STABLE_MS (at most FIT_SETTLE_MS:
+  // a rotation reports intermediate sizes on its way), then sent at once for
+  // a discrete change (rotation, fold, deck, scaling) or FIT_DEBOUNCE_MS
+  // after the last step of a continuous one (a split-screen drag collapses
+  // to one request). The OS keyboard and a sliding address bar never
+  // re-shape the Mac: the cause is known here (classifyFit). Bursts the
+  // page lets through are coalesced by the Mac (latest wins, rate-capped).
   let F = { state: 'off' };
   // fitPending: when this page last asked for a fit (an 'off' already on its
   // way is not the answer). fitAuto: area changes may re-ask; off after an
@@ -1167,41 +1308,169 @@
   // fitBlocked: the Mac said no to an automatic ask because another screen
   // is watching it (it is not re-shaped under someone else); by hand it fits.
   let fitPending = 0, fitAuto = true, fitSent = null, fitT = 0, fitOffNote = '', fitBlocked = false, otherHidden = false, fitAskAt = -1e9;
+  // (a timer, not animation frames: a browser may paint nothing for a while
+  // during a rotation, and the box is plain arithmetic on the window's size)
+  const FIT_STABLE_MS = 80, FIT_SETTLE_MS = 300, FIT_DEBOUNCE_MS = 180, FIT_SLIDE_MS = 120, FIT_TICK_MS = 16;
+  let fitSeq = 0, fitRaf = 0, fitSettle = null, fitTrigAt = 0, fitStableAt = 0, fitHint = '', fitBase = null, kbBlurAt = -1e9;
   // The Mac is fitted, and the fit is another screen's: this page only sees
   // it (letterboxed); its own area does not shape the Mac.
   const elsewhere = () => (F.state === 'on' || (F.state === 'fitting' && F.op !== 'off')) && F.mine === false;
-  function sendFit(take = false) {
-    clearTimeout(fitT); fitT = 0;
+  // Latency of each request, trigger → first decoded frame of the new screen
+  // (window.__soaDeck().fitLatency: the last 20, per stage).
+  const fitLat = new Map(), fitLatency = [];
+  const epochOf = (t) => performance.timeOrigin + t;
+  // The picture box in physical pixels, and what this device looks like now.
+  function fitMeasure() {
     const a = lay.area;
-    if (extendWanted || E.selected || !ws || ws.readyState !== 1 || !fitPref.on || !fitAuto || !a) return;
-    const dpr = window.devicePixelRatio || 1;
-    fitSent = { w: a.w, h: a.h, text: fitPref.text };
-    if (!elsewhere() || take) fitPending = performance.now();
-    fitAskAt = performance.now();
-    send({ t: 'fit', on: true, area: { w: a.w, h: a.h, dpr: +dpr.toFixed(2) }, text: fitPref.text, dev: DEV, ...(take ? { take: true } : {}) });
+    if (!a || !(a.w > 0) || !(a.h > 0)) return null;
+    const dpr = window.devicePixelRatio || 1, ds = window.screen || {}, so = ds.orientation;
+    const px = { w: Math.max(2, Math.floor(a.w * dpr / 2) * 2), h: Math.max(2, Math.floor(a.h * dpr / 2) * 2) };
+    const angle = so && typeof so.angle === 'number' ? so.angle : +(window.orientation || 0);
+    const env = { iw: innerWidth, ih: innerHeight, angle, type: so && so.type ? so.type : (innerWidth > innerHeight ? 'landscape' : 'portrait'),
+      sw: ds.width || 0, sh: ds.height || 0, seg: root.dataset.fold || 'none', pane: lay.kind + ':' + (lay.rail || ''), dpr };
+    return { px, area: { w: Math.round(a.w * 100) / 100, h: Math.round(a.h * 100) / 100, dpr: +dpr.toFixed(3) }, env };
   }
-  // Called after every layout: re-ask once the area has settled (a rotation
-  // reports several sizes on its way). The Mac decides whether it re-fits.
-  function fitAreaChanged() {
+  const editable = (el) => !!el && (el === kb || el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !/^(range|checkbox|radio|button)$/.test(el.type)));
+  document.addEventListener('focusout', (e) => { if (editable(e.target)) kbBlurAt = performance.now(); }, true);
+  // Why the box changed, judged against what was last sent: the cause decides
+  // whether the Mac re-shapes. keyboard and chrome never do.
+  function classifyFit(m) {
+    if (fitHint) return fitHint;                    // known here: by hand, scaling, the deck, the picture option
+    const b = fitBase, e = m.env;
+    if (!b) return 'connect';
+    if (e.angle !== b.angle || (e.iw > e.ih) !== (b.iw > b.ih) || e.type.split('-')[0] !== b.type.split('-')[0]) return 'orient';
+    if (e.seg !== b.seg) return 'fold';
+    if (e.iw === b.iw && e.ih !== b.ih) {
+      // Taller than when last sent, by more than a bar: the box was sent with
+      // the OS keyboard up (a rotation while typing, on a browser whose
+      // keyboard shrinks the window) and it has gone — the Mac grows back.
+      // (A keyboard coming up only ever makes the window shorter.)
+      if (e.ih > b.ih + 80) return 'kbgone';
+      // Height alone: the OS keyboard (a field has focus, or just had it, or
+      // the visual viewport is short of the layout one) or the browser's own
+      // bars sliding (a small step, the screen unchanged).
+      const vv = window.visualViewport;
+      if (editable(document.activeElement) || performance.now() - kbBlurAt < 1000 || (vv && vv.height < innerHeight - 100)) return 'keyboard';
+      if (Math.abs(e.ih - b.ih) <= 80 && e.sw === b.sw && e.sh === b.sh) return 'chrome';
+    }
+    return e.iw !== b.iw ? 'split' : 'layout';
+  }
+  // After every layout (and from the strip, the slider, a connect): measure on
+  // the next frames until the box holds still, then send once it has settled.
+  function fitAreaChanged(why) {
     extendAreaChanged();
-    const a = lay.area;
-    if (!a || !fitAuto || !ws) return;
-    if (fitSent && Math.abs(fitSent.w - a.w) < 2 && Math.abs(fitSent.h - a.h) < 2 && fitSent.text === fitPref.text) return;
-    clearTimeout(fitT); fitT = setTimeout(sendFit, 400);
+    if (why && (!fitHint || why === 'hand')) fitHint = why;
+    if (!lay.area || !fitAuto || !ws || !fitPref.on || extendWanted || E.selected) return;
+    const now = performance.now();
+    if (!fitTrigAt) fitTrigAt = now;
+    if (!fitSettle) fitSettle = { key: '', since: now, t0: now };
+    if (!fitRaf) fitRaf = setTimeout(fitSettleTick, FIT_TICK_MS);
+  }
+  function fitSettleTick() {
+    fitRaf = 0;
+    if (!fitSettle) return;
+    // The window has a newer size than the last layout used: lay it out
+    // again (that measures again, from here).
+    if (innerWidth !== lay.vw || innerHeight !== lay.vh) { layout(); if (!fitRaf) fitRaf = setTimeout(fitSettleTick, FIT_TICK_MS); return; }
+    const m = fitMeasure(), now = performance.now();
+    const k = m ? `${m.px.w}x${m.px.h}:${m.env.angle}:${m.env.seg}` : '';
+    if (k !== fitSettle.key) { fitSettle.key = k; fitSettle.since = now; }
+    if (now - fitSettle.since < FIT_STABLE_MS && now - fitSettle.t0 < FIT_SETTLE_MS) { fitRaf = setTimeout(fitSettleTick, FIT_TICK_MS); return; }
+    fitSettle = null;
+    fitStableAt = now;
+    if (m && !fitHint && fitSent && Math.abs(fitSent.px.w - m.px.w) <= 2 && Math.abs(fitSent.px.h - m.px.h) <= 2 && fitSent.scale === fitPref.scale) {
+      clearTimeout(fitT); fitT = 0; fitTrigAt = 0; fitBase = m.env;   // a re-layout that changed nothing
+      return;
+    }
+    // A discrete change goes now; a continuous one (a drag) once it stops.
+    const why = m ? classifyFit(m) : '';
+    clearTimeout(fitT); fitT = setTimeout(fitSendAuto, why === 'split' || why === 'layout' ? FIT_DEBOUNCE_MS : 0);
+  }
+  function fitSendAuto() {
+    fitT = 0;
+    const m = fitMeasure();
+    if (!m) return;
+    const why = classifyFit(m);
+    if (why === 'keyboard' || why === 'chrome') { fitHint = ''; fitTrigAt = 0; return; }   // never a re-shape
+    sendFit(false, why, m);
+  }
+  // Old text sizes, for a service from before display scaling.
+  const legacyText = (scale, auto) => (scale === 'auto' ? 'default' : scale <= auto - 20 ? 'smaller' : scale >= auto + 20 ? 'larger' : 'default');
+  function sendFit(take = false, why = 'hand', m = fitMeasure()) {
+    clearTimeout(fitT); fitT = 0;
+    if (extendWanted || E.selected || !ws || ws.readyState !== 1 || !fitPref.on || !fitAuto || !m) return;
+    const scale = fitPref.scale, auto = autoScalePct(m.area.dpr);
+    fitHint = '';
+    // The same box and scale as last sent (±2 px): nothing to ask.
+    if (!take && fitSent && Math.abs(fitSent.px.w - m.px.w) <= 2 && Math.abs(fitSent.px.h - m.px.h) <= 2 && fitSent.scale === scale) { fitTrigAt = 0; fitBase = m.env; return; }
+    const now = performance.now(), seq = ++fitSeq, trig = fitTrigAt || now;
+    fitTrigAt = 0;
+    fitSent = { px: m.px, scale, seq };
+    fitBase = m.env;
+    fitLat.set(seq, { seq, why, trig, stable: fitStableAt && fitStableAt >= trig ? fitStableAt : now, sent: now, px: m.px, scale });
+    while (fitLat.size > 30) fitLat.delete(fitLat.keys().next().value);
+    if (!elsewhere() || take) fitPending = now;
+    fitAskAt = now;
+    const ds = window.screen || {}, e = m.env;
+    send({ t: 'fit', v: 2, on: true, seq, at: Math.round(epochOf(trig) * 10) / 10, px: m.px, area: m.area,
+      scr: { w: ds.width || 0, h: ds.height || 0, dpr: m.area.dpr, angle: e.angle, type: e.type, seg: e.seg, pane: lay.kind },
+      scale, auto, why, text: legacyText(scale, auto), dev: DEV, ...(take ? { take: true } : {}) });
+    renderScale();
+  }
+  // The Mac answered request `seq`, or its stream showed the new screen:
+  // close that request's latency record once both are in.
+  function fitLatAnswer(f) {
+    const L = f && f.seq ? fitLat.get(f.seq) : null;
+    if (!L || L.on) return;
+    L.on = performance.now(); L.tm = f.tm || null; L.enc = f.enc || null;
+    if (!f.tm || f.tm.same) {
+      // The same screen as a change still on its way (a repeat): it is done
+      // when that one's first frame shows.
+      const older = [...fitLat.values()].filter((x) => !x.done && x.seq < L.seq && !(x.tm && x.tm.same) && performance.now() - x.sent < 5000).pop();
+      if (older) { L.after = older.seq; return; }
+      fitLatDone(L, performance.now(), 'same');
+    }
+  }
+  function onFitFrame(m) {
+    const L = fitLat.get(m.seq);
+    if (!L || L.done) return;
+    L.srvFrame = m.at; L.ts = m.ts; L.encW = m.w; L.encH = m.h;
+    if (mode !== 'h264') fitLatDone(L, performance.now(), 'jpeg');
+  }
+  function fitLatDecoded(f) {
+    if (!fitLat.size) return;
+    const ts = f.timestamp / 1000, now = performance.now();
+    for (const L of fitLat.values()) {
+      if (L.done || L.ts == null || ts < L.ts - 1 || f.displayWidth !== L.encW || f.displayHeight !== L.encH) continue;
+      fitLatDone(L, now, '');
+    }
+  }
+  function fitLatDone(L, at, note) {
+    L.done = true;
+    const tm = L.tm || {}, r = { seq: L.seq, why: L.why, op: tm.op || '', px: L.px, scale: L.scale, note,
+      total: Math.round(at - L.trig), trigAt: Math.round(epochOf(L.trig)), doneAt: Math.round(epochOf(at)), A_settle: Math.round(L.stable - L.trig), B_debounce: Math.round(L.sent - L.stable) };
+    if (tm.recv) {
+      Object.assign(r, { C_ws: Math.round(tm.recv - epochOf(L.sent)), D_queue: Math.round((tm.cmd || tm.recv) - tm.recv),
+        E_helper: Math.round((tm.reply || tm.cmd || tm.recv) - (tm.cmd || tm.recv)), F_post: Math.round((tm.geom || tm.reply || tm.recv) - (tm.reply || tm.cmd || tm.recv)) });
+      if (L.srvFrame) Object.assign(r, { G_encoder: Math.round(L.srvFrame - (tm.geom || L.srvFrame)), H_transit_decode: Math.round(epochOf(at) - L.srvFrame) });
+    }
+    fitLatency.push(r); while (fitLatency.length > 20) fitLatency.shift();
+    for (const v of [...fitLat.values()]) if (v.after === L.seq && !v.done) fitLatDone(v, at, 'same as ' + L.seq);
+    for (const [k, v] of fitLat) if (v.done || k < L.seq) fitLat.delete(k);   // older requests were overtaken
   }
   // A new socket: this device's choice is asked for again (by itself: it
   // does not take a fit another screen holds).
   function fitConnected(f) {
-    fitSent = null; fitPending = 0; fitBlocked = false;
+    fitSent = null; fitPending = 0; fitBlocked = false; fitBase = null;
     if (f) onFitInfo(f, true);
-    if (fitPref.on) { fitAuto = true; fitOffNote = ''; layout(); sendFit(); }
+    if (fitPref.on) { fitAuto = true; fitOffNote = ''; layout(); sendFit(false, 'connect'); }
     renderFit();
   }
   // By hand: fit the Mac to this screen, taking it over from another screen.
   function takeFit() {
     fitPref.on = true; saveFitPref();
     fitAuto = true; fitOffNote = ''; fitBlocked = false; otherHidden = false; fitSent = null;
-    layout(); sendFit(true); renderFit();
+    layout(); sendFit(true, 'hand'); renderFit();
   }
   function onFitInfo(f, quiet) {
     if (!f || typeof f.state !== 'string') return;
@@ -1216,13 +1485,15 @@
     if (f.ok === false && f.message) f = { ...f, state: 'error' };              // this request was refused
     if (f.state === 'off' && fitPending && performance.now() - fitPending < 20000) return;   // sent before our request landed
     const prev = F, wasLayout = fitLayout(), wasElse = elsewhere();
-    F = { state: f.state, w: f.w, h: f.h, pxW: f.pxW, pxH: f.pxH, hidpi: f.hidpi, keep: !!f.keep, op: f.op || '', target: f.target || null, message: f.message || '', text: f.text,
+    F = { state: f.state, w: f.w, h: f.h, pxW: f.pxW, pxH: f.pxH, hidpi: f.hidpi, keep: !!f.keep, op: f.op || '', target: f.target || null, message: f.message || '',
+      scale: f.scale || null, look: f.look || null, src: f.src || null, seq: f.seq || 0,
       mine: typeof f.mine === 'boolean' ? f.mine : true, owner: f.owner || 'none' };
     if (f.state !== 'off') fitPending = 0;
     if (F.state !== 'off') fitBlocked = false;
+    if (f.state === 'on' && F.mine) fitLatAnswer(f);
     if (!quiet) {
       if (f.state === 'error' && prev.state !== 'error') { fitAuto = false; showTip(F.message || "The Mac couldn't fit its screen to this one.", 3200); }
-      if (f.state === 'on' && F.mine && (prev.state !== 'on' || (!prev.mine && prev.owner !== 'away') || prev.w !== f.w || prev.h !== f.h)) showTip(prev.mine === false && prev.state === 'on' ? `Fitted to this screen: ${f.w} × ${f.h}` : `Fitted: ${f.w} × ${f.h}`);
+      if (f.state === 'on' && F.mine && (prev.state !== 'on' || (!prev.mine && prev.owner !== 'away'))) showTip(prev.mine === false && prev.state === 'on' ? `Fitted to this screen: ${f.w} × ${f.h}` : `Fitted: ${f.w} × ${f.h}`);
       if (f.state === 'off' && (prev.state === 'on' || prev.state === 'fitting') && prev.mine && fitPref.on && !fitPending) {
         fitAuto = false; fitOffNote = 'Fit was turned off from another screen. Turn the switch on to fit again.';
         showTip('Fit was turned off from another screen');
@@ -1252,16 +1523,74 @@
   $('fz-other-take').addEventListener('click', takeFit);
   $('fz-other-x').addEventListener('click', () => { otherHidden = true; renderOther(); });
   $('fz-take').addEventListener('click', takeFit);
+  // The scaling read-out: this screen's box → what the Mac looks like, from
+  // the local copy of the Mac's own rule (instant while dragging), and the
+  // Mac's answer once it is in for the newest request.
+  const pct = (v) => (v === 'auto' ? autoScalePct(window.devicePixelRatio || 1) : v);
+  function renderScale() {
+    const box = $('fz-scale'), r = $('fz-scale-r'), out = $('fz-scale-out'), auto = $('fz-auto');
+    const isAuto = fitPref.scale === 'auto', p = pct(fitPref.scale), m = fitMeasure();
+    auto.setAttribute('aria-pressed', String(isAuto));
+    if (document.activeElement !== r) r.value = String(Math.round(p / 10) * 10);
+    $('fz-scale-v').textContent = isAuto ? `Auto (${p}%)` : `${p}%`;
+    r.setAttribute('aria-valuetext', isAuto ? `Auto, ${p} percent` : `${p} percent`);
+    const other = elsewhere();
+    r.disabled = auto.disabled = !ws || other;
+    box.classList.toggle('off', !ws || other);
+    if (other) { out.textContent = 'The Mac is matched to another screen; its scaling is set there.'; return; }
+    if (!m) { out.textContent = ''; return; }
+    if (F.state === 'on' && F.mine && !F.scale) {   // a service from before display scaling: it fits by text size
+      out.textContent = `Looks like ${F.w}×${F.h}. Exact scaling starts once the Mac's remote service restarts.`;
+      return;
+    }
+    const s = scaleSpec(m.px, p);
+    // the Mac's answer for the newest request wins over the local estimate
+    const mac = F.state === 'on' && F.mine && F.scale && fitSent && F.seq === fitSent.seq ? F : null;
+    const lw = mac ? F.w : s.w, lh = mac ? F.h : s.h, hd = mac ? F.hidpi : s.hidpi, applied = mac ? F.scale.applied : s.p, why = mac ? F.scale.why : s.why;
+    let t = `${m.px.w}×${m.px.h} → looks like ${lw}×${lh}` + (hd ? ' (sharp, 2×)' : p > 100 || applied > 100 ? ' (standard resolution: softer)' : ' (pixel for pixel)');
+    if (applied !== p) t += /hidpi-floor/.test(why) ? ` · ${applied}% is the most this picture size allows` : /min-pt/.test(why) ? ` · ${applied}% keeps a usable desktop` : '';
+    out.textContent = t;
+  }
+  function setScale(v, live) {
+    fitPref.scale = v; saveFitPref();
+    renderScale();
+    if (!fitPref.on || !ws || elsewhere()) return;
+    fitAuto = true; fitOffNote = '';
+    if (live) {                                     // dragging: at most one request per FIT_SLIDE_MS
+      const now = performance.now();
+      if (!fitTrigAt) fitTrigAt = now;
+      if (now - (setScale.at || 0) >= FIT_SLIDE_MS) { setScale.at = now; clearTimeout(setScale.t); sendFit(true, 'scale'); }
+      else { clearTimeout(setScale.t); setScale.t = setTimeout(() => { setScale.at = performance.now(); sendFit(true, 'scale'); }, FIT_SLIDE_MS - (now - setScale.at)); }
+    } else {
+      clearTimeout(setScale.t);
+      if (fitSent && fitSent.scale === v) { const m = fitMeasure(); if (m && Math.abs(fitSent.px.w - m.px.w) <= 2 && Math.abs(fitSent.px.h - m.px.h) <= 2) return; }
+      if (!fitTrigAt) fitTrigAt = performance.now(); setScale.at = performance.now(); sendFit(true, 'scale');
+    }
+  }
+  $('fz-scale-r').addEventListener('input', (e) => setScale(Math.max(100, Math.min(200, +e.target.value || 100)), true));
+  $('fz-scale-r').addEventListener('change', (e) => setScale(Math.max(100, Math.min(200, +e.target.value || 100)), false));
+  $('fz-auto').addEventListener('click', () => setScale(fitPref.scale === 'auto' ? Math.round(pct('auto') / 10) * 10 : 'auto', false));
+  // Upright: the picture above the controls, or the full screen with the
+  // controls sliding over it (as on its side). The Mac takes the new shape.
+  $('fz-full').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-fz-full]'); if (!b) return;
+    const full = b.dataset.fzFull === '1';
+    if (full === fitPref.full) return;
+    fitPref.full = full; saveFitPref();
+    fitHint = 'deck'; layout(); renderFit();
+  });
   function renderFit() {
-    const on = $('fz-on'), msg = $('fz-msg'), chips = $('fz-text'), other = elsewhere();
+    const on = $('fz-on'), msg = $('fz-msg'), other = elsewhere();
     // Checked = this page has the Mac fitted (or is asking for it) now. After
     // another screen turned it off, took it over, or an error, it reads off;
     // switching it on fits the Mac to this screen again.
     on.checked = fitPref.on && fitAuto && !other && !fitBlocked;
     on.disabled = !ws || E.state === 'on' || E.state === 'starting' || E.state === 'resizing';
-    chips.hidden = !on.checked;
+    $('fz-scale').hidden = !on.checked && !other;
+    const fullRow = $('fz-full');
+    fullRow.hidden = !on.checked || !touchFirst || innerWidth > innerHeight || !!root.dataset.fold;
+    for (const b of fullRow.querySelectorAll('[data-fz-full]')) b.setAttribute('aria-checked', String((b.dataset.fzFull === '1') === fitPref.full));
     const kr = $('fz-keep-row'); kr.hidden = !(F.state === 'on' && F.mine); $('fz-keep').checked = !!F.keep; $('fz-keep').disabled = !ws;
-    for (const b of chips.querySelectorAll('[data-fz-text]')) b.setAttribute('aria-checked', b.dataset.fzText === fitPref.text ? 'true' : 'false');
     $('fz-take-g').hidden = !ws || !(other || (fitBlocked && F.state === 'off'));
     $('fz-take-m').textContent = other ? 'Takes it over' : '';
     let t = '', cls = '';
@@ -1269,13 +1598,14 @@
     else if (other) t = `The Mac is fitted to another screen${F.state === 'on' && F.w ? ` (${F.w} × ${F.h})` : ''}. You see that screen here, letterboxed; this screen's shape doesn't change it.`;
     else if (fitBlocked && F.state === 'off') t = 'Another screen is watching the Mac, so it was not re-shaped for this one.';
     else if (F.state === 'fitting') t = F.op === 'off' ? "Going back to the Mac's own screen…" : F.target ? `Fitting… (${F.target.w} × ${F.target.h})` : 'Fitting…';
-    else if (F.state === 'on') { t = `Fitted: ${F.w} × ${F.h}` + (F.hidpi === false ? ' (standard resolution: softer text)' : ''); cls = 'ok'; }
+    else if (F.state === 'on') { t = `Fitted: ${F.w} × ${F.h}` + (F.hidpi === false && (!F.scale || F.scale.applied > 100) ? ' (standard resolution: softer text)' : ''); cls = 'ok'; }
     else if (F.state === 'error' && fitPref.on) { t = F.message || "This Mac couldn't create a fitted screen; showing its own screen instead."; cls = 'err'; }
     else if (fitPref.on && fitOffNote) t = fitOffNote;
     else if (fitPref.on && fitAuto && fitPending) t = 'Fitting…';
-    else t = "Off. When it's on, the Mac's own display mirrors a screen shaped like this one while you're connected.";
+    else t = "Off. When it's on, the Mac's own display mirrors a screen shaped like this one while you're connected, and follows it as you turn or resize it.";
     msg.textContent = t; msg.className = 'note' + (cls ? ' ' + cls : '');
     $('fz-sub').textContent = F.state === 'on' && F.mine ? 'Menu bar, Dock and windows fit this screen' : "The Mac takes this screen's shape";
+    renderScale();
   }
   $('fz-keep').addEventListener('change', async (e) => {
     const r = await soaDisplay.keep(e.target.checked);
@@ -1286,21 +1616,9 @@
   $('fz-on').addEventListener('change', (e) => {
     if (e.target.checked) { takeFit(); return; }      // by hand: this screen, even if another holds the fit
     fitPref.on = false; saveFitPref();
-    fitOffNote = ''; fitBlocked = false; fitPending = 0; clearTimeout(fitT); fitT = 0;
+    fitOffNote = ''; fitBlocked = false; fitPending = 0; clearTimeout(fitT); fitT = 0; fitSent = null;
     if (!elsewhere()) send({ t: 'fit', on: false, dev: DEV });   // another screen's fit is not this page's to end
     layout(); renderFit(); renderOther();
-  });
-  $('fz-text').addEventListener('click', (e) => {
-    const b = e.target.closest('[data-fz-text]'); if (!b || !fitPref.on) return;
-    if (fitPref.text === b.dataset.fzText) return;
-    fitPref.text = b.dataset.fzText; saveFitPref();
-    fitAuto = true; fitOffNote = ''; sendFit(true); renderFit();
-  });
-  $('fz-text').addEventListener('keydown', (e) => {
-    if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key)) return;
-    e.preventDefault();
-    const i = FIT_TEXTS.indexOf(fitPref.text), j = Math.max(0, Math.min(2, i + (/Left|Up/.test(e.key) ? -1 : 1)));
-    const b = $('fz-text').querySelector(`[data-fz-text="${FIT_TEXTS[j]}"]`); b.click(); b.focus();
   });
 
   // ── strip toggles ────────────────────────────────────────────────────
@@ -1315,7 +1633,7 @@
     $('m-pad').setAttribute('aria-checked', prefs.mode === 'pad' ? 'true' : 'false');
   }
   $('b-keys').addEventListener('click', () => {
-    if (root.dataset.layout === 'stack') prefs.stackKb = !prefs.stackKb; else prefs.ovKb = !prefs.ovKb;
+    if (root.dataset.layout === 'stack') { prefs.stackKb = !prefs.stackKb; fitHint = 'deck'; } else prefs.ovKb = !prefs.ovKb;
     savePrefs(); layout();
   });
   $('b-pad').addEventListener('click', () => { prefs.ovPad = !prefs.ovPad; savePrefs(); layout(); });
@@ -1377,7 +1695,7 @@
     cur.known = true; drawCursor();
   }
   const clampX = (x) => Math.max(0, Math.min(screen.width - 1, x)), clampY = (y) => Math.max(0, Math.min(screen.height - 1, y));
-  function cursorShown() { return cur.known && (prefs.mode === 'pad' || !pad.hidden && (root.dataset.layout === 'stack' || deck.classList.contains('open'))) && view.nat.w > 1; }
+  function cursorShown() { return cur.known && (prefs.mode === 'pad' || airActive || !pad.hidden && (root.dataset.layout === 'stack' || deck.classList.contains('open'))) && view.nat.w > 1; }
   function drawCursor() {
     if (!cursorEl) return;
     const show = cursorShown();
@@ -1821,6 +2139,377 @@
     P.contacts.clear(); P.pts.clear(); P.g = null;
   }
 
+  // ── Air trackpad (experimental, opt-in) ──────────────────────────────
+  // The front camera watches one hand and drives the same pointer as the
+  // trackpad, relative like a trackpad: index finger up moves, a quick
+  // thumb–index pinch clicks, a held pinch that moves drags, index + middle
+  // up or down scrolls, an open hand held 1 s pauses / resumes, a fist lifts.
+  // MediaPipe's HandLandmarker runs in this page (WASM, WebGL when there is
+  // one) from files the daemon serves; no camera frame and no hand point
+  // leaves this device. What leaves is what the trackpad sends: moveCursorBy,
+  // the click / drag senders, addScroll. Nothing runs until the strip button
+  // is pressed; the camera stops on Off, a hidden page, or 2 min with no hand.
+  const AIR_PKG = 'mediapipe-tasks-vision-1.2.0';
+  const AIR_MODEL = 'models/hand_landmarker-float16-v1.task';
+  // The files sit with the daemon's static assets; this page reaches them
+  // only through the daemon's /preview/<port>/ proxy (same origin).
+  const AIR_BASE = (() => {
+    try { const b = new URL(document.baseURI); return /^\/preview\/\d+\//.test(b.pathname) ? new URL('/assets/vendor/' + AIR_PKG + '/', b).href : ''; } catch (_) { return ''; }
+  })();
+  const airSupported = !!(AIR_BASE && window.isSecureContext && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function'
+    && typeof WebAssembly === 'object' && typeof WebAssembly.instantiate === 'function');
+  const AIR_IDLE_MS = 120000, AIR_DBL_MS = 450;
+  let airFiles = false;   // set once a probe finds the files (see airFits)
+
+  // One-Euro filter (Casiez et al. 2012): heavy smoothing when the hand is
+  // still, little lag when it moves fast. t in ms.
+  function oneEuro(minCutoff, beta, dCutoff) {
+    let xp = null, dxp = 0, tp = 0;
+    const alpha = (fc, dt) => 1 / (1 + 1 / (2 * Math.PI * fc * dt));
+    return {
+      reset() { xp = null; dxp = 0; },
+      filter(x, t) {
+        if (xp == null) { xp = x; tp = t; dxp = 0; return x; }
+        const dt = Math.max(1e-3, (t - tp) / 1000); tp = t;
+        const ad = alpha(dCutoff, dt); dxp = ad * ((x - xp) / dt) + (1 - ad) * dxp;
+        const a = alpha(minCutoff + beta * Math.abs(dxp), dt);
+        xp = a * x + (1 - a) * xp; return xp;
+      },
+    };
+  }
+  // The gesture engine: hand landmarks in, trackpad intents out. Pure (no
+  // DOM, no clock of its own), so a test can feed it a recorded or made-up
+  // sequence. feed(t ms, landmarks[21] {x,y} 0..1 in the camera picture | null,
+  // aspect = picture h / w). Emits {k:'move',dx,dy,dt} (trackpad px),
+  // {k:'click'}, {k:'down'}, {k:'up'}, {k:'scroll',dy} (Mac points, +y = down),
+  // {k:'scrollEnd'}, {k:'rollback',since}, {k:'pause'}, {k:'resume'}.
+  function createAirEngine(opts) {
+    const cfg = Object.assign({
+      sens: 1, base: 900, scrollBase: 2400, mirror: true,
+      dead: 0.006, stillSpeed: 0.03, stillMs: 160,
+      pinchOn: 0.33, pinchOff: 0.5, clickMs: 600, clickFrames: 2, dragSlop: 0.025, rollbackMs: 130,
+      palmMs: 1000, palmDrift: 0.08, lostMs: 160,
+      minCutoff: 1.0, beta: 6, dCutoff: 1.0,
+      emit: () => {},
+    }, opts || {});
+    const S = { pose: 'none', paused: false, lostSince: null, pinch: null, scrolled: false, recent: [], palm: null, tr: null, lastT: 0 };
+    const fx = oneEuro(cfg.minCutoff, cfg.beta, cfg.dCutoff), fy = oneEuro(cfg.minCutoff, cfg.beta, cfg.dCutoff);
+    const emit = (e) => cfg.emit(e);
+    const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    function classify(h) {
+      const scale = d2(h[0], h[9]) || 1e-6;
+      const ext = (tip, pip) => d2(h[0], h[tip]) > d2(h[0], h[pip]) * 1.12;
+      const iE = ext(8, 6), mE = ext(12, 10), rE = ext(16, 14), pE = ext(20, 18);
+      const gap = d2(h[4], h[8]) / scale;
+      // a pinch keeps the index finger off the palm; a fist (thumb over a curled index) does not
+      const reach = d2(h[0], h[8]) > d2(h[0], h[5]) * 1.15;
+      if (reach && gap < (S.pose === 'pinch' ? cfg.pinchOff : cfg.pinchOn)) return 'pinch';
+      if (iE && mE && rE && pE && gap > 0.6) return 'palm';
+      if (iE && mE && !rE && !pE) return 'scroll';
+      if (iE && !mE) return 'point';
+      return 'rest';
+    }
+    // the camera picture in one unit both ways (its width), mirrored like a mirror
+    let aspect = 0.75;
+    const P = (a, b) => ({ x: (b ? (a.x + b.x) / 2 : a.x) * (cfg.mirror ? -1 : 1), y: (b ? (a.y + b.y) / 2 : a.y) * aspect });
+    const posOf = (pose, h) => pose === 'pinch' ? P(h[4], h[8]) : pose === 'scroll' ? P(h[8], h[12]) : P(h[8]);
+    function smooth(p, t) { return { x: fx.filter(p.x, t), y: fy.filter(p.y, t) }; }
+    function newTracker() { fx.reset(); fy.reset(); return { anchor: null, prev: null, still: true, slowSince: 0, t: 0 }; }
+    // Relative motion with a rest dead zone: a hand at rest is anchored and
+    // must leave a small circle before anything moves; once moving it moves
+    // 1:1 until it has been slow for stillMs, then it is anchored again.
+    function step(tr, p, t, axisY) {
+      if (!tr.anchor) { tr.anchor = p; tr.prev = p; tr.t = t; return null; }
+      const dt = Math.max(1, t - tr.t); tr.t = t;
+      let dx, dy;
+      if (tr.still) {
+        const ex = axisY ? 0 : p.x - tr.anchor.x, ey = p.y - tr.anchor.y, d = Math.hypot(ex, ey);
+        if (d <= cfg.dead) return null;
+        const k = (d - cfg.dead) / d; dx = ex * k; dy = ey * k; tr.still = false; tr.slowSince = 0;
+      } else { dx = axisY ? 0 : p.x - tr.prev.x; dy = p.y - tr.prev.y; }
+      tr.prev = p;
+      const v = Math.hypot(dx, dy) / (dt / 1000);
+      if (v < cfg.stillSpeed) { if (!tr.slowSince) tr.slowSince = t; else if (t - tr.slowSince >= cfg.stillMs) { tr.still = true; tr.anchor = p; } }
+      else tr.slowSince = 0;
+      return { dx, dy, dt };
+    }
+    function move(d, t) {
+      const g = cfg.base * cfg.sens, e = { k: 'move', dx: d.dx * g, dy: d.dy * g, dt: d.dt };
+      S.recent.push({ t }); while (S.recent.length && t - S.recent[0].t > cfg.rollbackMs * 2) S.recent.shift();
+      emit(e);
+    }
+    function endPinch(t, cancelled) {
+      const pi = S.pinch; S.pinch = null; if (!pi) return;
+      if (pi.dragging) emit({ k: 'up' });
+      // one stray frame of "pinch" (tracking jitter) is not a click
+      else if (!cancelled && pi.n >= cfg.clickFrames && t - pi.t0 <= cfg.clickMs) { if (pi.rb != null) emit({ k: 'rollback', since: pi.rb }); emit({ k: 'click' }); }
+    }
+    function endScroll() { if (S.scrolled) { S.scrolled = false; emit({ k: 'scrollEnd' }); } }
+    function leave(t, cancelled) {
+      if (S.pose === 'pinch') endPinch(t, cancelled);
+      else if (S.pose === 'scroll') endScroll();
+      S.palm = null;
+    }
+    function enter(pose, t, h) {
+      S.tr = newTracker();
+      if (pose === 'pinch') {
+        // the index finger travels a little as it closes on the thumb: the
+        // click (or drag) belongs where the pointer was before that. Applied
+        // only once the pinch turns out real, so a flicker does not jump it.
+        const since = t - cfg.rollbackMs;
+        const rb = S.recent.some((r) => r.t >= since) ? since : null;
+        S.recent = [];
+        S.pinch = { t0: t, start: null, dragging: false, n: 0, rb };
+      }
+      if (pose === 'palm') S.palm = { since: t, w: { x: h[0].x, y: h[0].y }, latched: false };
+    }
+    function palmTick(t, h) {
+      const pm = S.palm; if (!pm) return;
+      if (Math.hypot(h[0].x - pm.w.x, h[0].y - pm.w.y) > cfg.palmDrift) { pm.since = t; pm.w = { x: h[0].x, y: h[0].y }; return; }
+      if (!pm.latched && t - pm.since >= cfg.palmMs) {
+        pm.latched = true; S.paused = !S.paused; emit({ k: S.paused ? 'pause' : 'resume' });
+      }
+    }
+    function lose(t) {
+      if (S.pose !== 'none') { leave(t, true); S.pose = 'none'; S.tr = null; }
+    }
+    function feed(t, h, asp) {
+      S.lastT = t;
+      if (asp > 0) aspect = asp;
+      if (!h || h.length < 21) {
+        if (S.lostSince == null) S.lostSince = t;
+        if (t - S.lostSince >= cfg.lostMs) lose(t);
+        return;
+      }
+      S.lostSince = null;
+      let pose = classify(h);
+      if (S.paused && pose !== 'palm') pose = 'rest';     // paused: only an open hand is heard
+      if (pose !== S.pose) { leave(t, false); S.pose = pose; enter(pose, t, h); }
+      if (pose === 'palm') { palmTick(t, h); return; }
+      if (pose === 'rest' || S.paused) return;
+      const p = smooth(posOf(pose, h), t);
+      if (pose === 'point') { const d = step(S.tr, p, t); if (d) move(d, t); return; }
+      if (pose === 'scroll') {
+        const d = step(S.tr, p, t, true);
+        if (d && d.dy) { S.scrolled = true; emit({ k: 'scroll', dy: -d.dy * cfg.scrollBase * cfg.sens }); }   // natural: fingers up shows what is below
+        return;
+      }
+      // pinch: held still it is a click in waiting; travelling past dragSlop it is a drag
+      const pi = S.pinch; pi.n++;
+      if (!pi.start) { pi.start = p; return; }
+      if (!pi.dragging) {
+        if (Math.hypot(p.x - pi.start.x, p.y - pi.start.y) < cfg.dragSlop) return;
+        pi.dragging = true; if (pi.rb != null) emit({ k: 'rollback', since: pi.rb }); emit({ k: 'down' });
+        S.tr = { anchor: pi.start, prev: pi.start, still: false, slowSince: 0, t: pi.t0 };
+      }
+      const d = step(S.tr, p, t); if (d) move(d, t);
+    }
+    return {
+      feed,
+      set(o) { Object.assign(cfg, o); },
+      // off / page hidden: nothing stays held
+      reset() { lose(S.lastT); S.paused = false; S.lostSince = null; S.recent = []; },
+      // frames stopped coming (camera stalled): let go of anything held
+      release() { lose(S.lastT); S.lostSince = null; },
+      state: () => ({ pose: S.pose, paused: S.paused, dragging: !!(S.pinch && S.pinch.dragging), scrolling: S.scrolled }),
+      cfg,
+    };
+  }
+
+  // The adapter: the engine's intents on the trackpad's own senders.
+  const air = { gen: 0, lastDetAt: 0, on: false, starting: false, stream: null, model: null, raf: 0, idleT: 0, vt: -1, ts: 0, lastHandAt: 0, frames: 0, hands: 0,
+    scrollAt: null, hist: [], video: $('air-video'), skel: $('air-skel'), err: '', idleMs: AIR_IDLE_MS };
+  if (!(prefs.airSens >= 0.4 && prefs.airSens <= 2.5)) prefs.airSens = 1;
+  if (typeof prefs.airPv !== 'boolean') prefs.airPv = true;
+  function airClick() {
+    const p = curPt(), now = performance.now(), t = pendingTap;
+    showMark(p, 'left');
+    // a second pinch soon after is ONE double click (see DBL_MS); a pinch is slower than a tap, so the window is longer
+    if (t && t.air && now - t.at < AIR_DBL_MS && !mods.size) { pendingTap = null; clearTimeout(t.timer); clickNow(t.p, 'left', 2, t.mods); return; }
+    flushTap();
+    if (mods.size) { clickNow(p, 'left', 1, takeMods()); return; }
+    pendingTap = { p, cx: p.x, cy: p.y, at: now, mods: [], pad: true, air: true, timer: setTimeout(flushTap, AIR_DBL_MS) };
+  }
+  function airEmit(e) {
+    switch (e.k) {
+      case 'move':
+        air.hist.push({ t: air.ts, x: cur.x, y: cur.y }); if (air.hist.length > 40) air.hist.shift();
+        moveCursorBy(e.dx, e.dy, e.dt); break;
+      case 'rollback': {
+        const h = air.hist.find((r) => r.t >= e.since); air.hist = [];
+        if (h && !dragging) { cur.x = h.x; cur.y = h.y; cur.movedAt = performance.now(); drawCursor(); queueMove(); }
+        break;
+      }
+      case 'click': airClick(); break;
+      case 'down': flushTap(); dragStartMac(curPt(), 'left'); drawCursor(); break;
+      case 'up': if (dragging) dragEndMac(curPt()); break;
+      case 'scroll': if (!air.scrollAt) { air.scrollAt = curPt(); showMark(air.scrollAt, 'left'); } addScroll(0, e.dy / PT_PER_LINE, air.scrollAt); break;
+      case 'scrollEnd': endScroll(); air.scrollAt = null; break;
+      case 'pause': showTip('Air trackpad paused. Hold an open hand for 1 s to resume.', 2200); break;
+      case 'resume': showTip('Air trackpad on', 1400); break;
+    }
+  }
+  const airEngine = createAirEngine({ emit: airEmit, sens: prefs.airSens });
+  const AIR_BONES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [17, 18], [18, 19], [19, 20], [0, 17]];
+  function airDraw(hand) {
+    const c = air.skel, v = air.video;
+    if (!prefs.airPv || !v.videoWidth) return;
+    if (c.width !== v.videoWidth || c.height !== v.videoHeight) { c.width = v.videoWidth; c.height = v.videoHeight; }
+    const g = c.getContext('2d'); g.clearRect(0, 0, c.width, c.height);
+    if (!hand) return;
+    const st = airEngine.state(), W = c.width, H = c.height;
+    g.lineWidth = Math.max(2, W / 160); g.strokeStyle = st.paused ? '#FFB340' : st.dragging ? '#0A84FF' : '#30D158';
+    g.beginPath(); for (const [a, b] of AIR_BONES) { g.moveTo(hand[a].x * W, hand[a].y * H); g.lineTo(hand[b].x * W, hand[b].y * H); } g.stroke();
+    g.fillStyle = '#fff'; for (const i of [4, 8, 12]) { g.beginPath(); g.arc(hand[i].x * W, hand[i].y * H, g.lineWidth * 1.6, 0, 7); g.fill(); }
+  }
+  const AIR_SAY = { none: 'No hand in view. Hold one up, index finger raised.', rest: 'Hand lifted (fist). Raise your index finger to move.', point: 'Moving', pinch: 'Pinch', scroll: 'Scrolling', palm: 'Open hand: hold still 1 s to pause' };
+  let airSaid = '';
+  function airStatus() {
+    const st = airEngine.state(), el = $('air-state');
+    const s = air.err || (!air.model ? 'Loading the hand model (first time ≈ 22 MB)…' : st.paused ? (st.pose === 'palm' ? 'Paused. Keep the hand open to resume' : 'Paused. Hold an open hand for 1 s to resume') : st.dragging ? 'Dragging' : AIR_SAY[st.pose] || '');
+    if (s !== airSaid) { airSaid = s; el.textContent = s; el.classList.toggle('paused', st.paused); }
+  }
+  function syncAir() {
+    const b = $('b-air'), on = air.on || air.starting;
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    $('air').hidden = !on;
+    $('air').classList.toggle('nopv', !prefs.airPv);
+    $('air-pv').setAttribute('aria-pressed', prefs.airPv ? 'true' : 'false');
+    $('air-sens').value = String(prefs.airSens);
+    airActive = air.on;
+    drawCursor();
+  }
+  // @mediapipe/tasks-vision 1.2.0 builds a usage logger into every task that
+  // POSTs graph timings and the OS to odml.pa.googleapis.com once a minute.
+  // Nothing about the camera is in it, but nothing leaves this device: the
+  // pinned build's logger (task.o.m) is switched off here, and the page's CSP
+  // (connect-src) refuses any other origin should a logger escape this.
+  function airNoTelemetry(lm) {
+    const m = lm && lm.o && lm.o.m;
+    if (!m || typeof m.flush !== 'function' || !Array.isArray(m.i)) return;
+    clearInterval(m.h); m.h = undefined; m.i = []; m.error = new Error('telemetry off');
+  }
+  function airLoadModel() {
+    if (!airLoadModel.p) airLoadModel.p = (async () => {
+      const vision = await import(AIR_BASE + 'vision_bundle.mjs');
+      const files = await vision.FilesetResolver.forVisionTasks(AIR_BASE + 'wasm');
+      const opts = (delegate) => ({ baseOptions: { modelAssetPath: AIR_BASE + AIR_MODEL, delegate }, runningMode: 'VIDEO', numHands: 1,
+        minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.6, minTrackingConfidence: 0.5 });
+      let lm, delegate = 'GPU';
+      try { lm = await vision.HandLandmarker.createFromOptions(files, opts('GPU')); }
+      catch (_) { delegate = 'CPU'; lm = await vision.HandLandmarker.createFromOptions(files, opts('CPU')); }
+      airNoTelemetry(lm);
+      return { lm, delegate };
+    })().catch((e) => { airLoadModel.p = null; throw e; });
+    return airLoadModel.p;
+  }
+  async function airStart() {
+    if (air.on || air.starting) return;
+    const gen = ++air.gen;
+    air.starting = true; air.err = ''; airSaid = ''; syncAir();
+    $('air-state').textContent = 'Starting the camera…';
+    let stream;
+    try {
+      // asked for first, inside the tap (iOS wants the user gesture)
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } } });
+    } catch (e) {
+      if (gen !== air.gen) return;
+      air.starting = false; syncAir();
+      showTip(e && e.name === 'NotAllowedError' ? 'Camera permission was not given, so the air trackpad is off' : 'No camera for the air trackpad (' + ((e && (e.name || e.message)) || 'error') + ')', 3200);
+      return;
+    }
+    if (gen !== air.gen || !air.starting) { for (const tr of stream.getTracks()) tr.stop(); return; }   // turned off while asking
+    air.stream = stream; air.starting = false; air.on = true;
+    // the camera taken away (another app, a call, unplugged): off, nothing held
+    for (const tr of stream.getVideoTracks()) tr.addEventListener('ended', () => { if (gen === air.gen) airStop('The camera stopped, so the air trackpad is off'); });
+    const v = air.video; v.muted = true; v.setAttribute('playsinline', ''); v.srcObject = stream;
+    try { await v.play(); } catch (_) {}
+    if (gen !== air.gen) return;
+    air.lastHandAt = performance.now(); air.frames = 0; air.hands = 0; air.vt = -1;
+    syncAir(); airStatus(); maybeReconcile();
+    clearInterval(air.idleT);
+    air.idleT = setInterval(() => {
+      if (!air.on || !air.model) return;
+      const now = performance.now();
+      if (now - air.lastHandAt > air.idleMs) { airStop('No hand for 2 minutes, so the camera is off'); return; }
+      // frames stopped coming (camera stalled, tab throttled): a held drag must not stay held
+      if (air.lastDetAt && now - air.lastDetAt > 1000) airEngine.release();
+    }, Math.min(500, air.idleMs / 2));
+    let model;
+    try { model = await airLoadModel(); }
+    catch (e) { if (gen === air.gen) airStop('Hand tracking could not start (' + ((e && e.message) || 'error').slice(0, 80) + ')'); return; }
+    if (gen !== air.gen || !air.on) return;
+    air.model = model; air.lastHandAt = performance.now(); air.lastDetAt = 0; airStatus(); airTick();
+  }
+  function airNext() {
+    const v = air.video;
+    air.raf = v.requestVideoFrameCallback ? v.requestVideoFrameCallback(airTick) : requestAnimationFrame(airTick);
+  }
+  function airTick() {
+    air.raf = 0;
+    if (!air.on || !air.model) return;
+    const v = air.video;
+    // a new camera frame, at most ~30 a second (rAF runs at 60-120 Hz)
+    if (v.readyState >= 2 && v.videoWidth && v.currentTime !== air.vt && performance.now() - air.lastDetAt >= 28) {
+      const now = Math.max(performance.now(), air.ts + 1);   // the landmarker wants rising timestamps
+      air.vt = v.currentTime; air.ts = now; air.lastDetAt = performance.now();
+      try {
+        const res = air.model.lm.detectForVideo(v, now);
+        const hand = (res && res.landmarks && res.landmarks[0]) || null;
+        air.frames++; if (hand) { air.hands++; air.lastHandAt = performance.now(); }
+        airEngine.feed(now, hand, v.videoHeight / v.videoWidth);
+        airDraw(hand); airStatus();
+      } catch (e) { airStop('Hand tracking stopped (' + ((e && e.message) || 'error').slice(0, 80) + ')'); return; }
+    }
+    airNext();
+  }
+  function airStop(why) {
+    const was = air.on || air.starting;
+    air.gen++; air.starting = false; air.on = false; air.lastDetAt = 0;
+    if (air.raf) { const v = air.video; try { if (v.cancelVideoFrameCallback) v.cancelVideoFrameCallback(air.raf); } catch (_) {} cancelAnimationFrame(air.raf); air.raf = 0; }
+    clearInterval(air.idleT); air.idleT = 0;
+    airEngine.reset();                                   // a held drag is released, a scroll ended
+    if (air.stream) { for (const tr of air.stream.getTracks()) tr.stop(); air.stream = null; }
+    air.video.srcObject = null;
+    syncAir();
+    if (was && why) showTip(why, 2600);
+  }
+  // The strip is full on the narrowest phones: the button shows only where it
+  // fits (never hidden while the camera is on: it is also the way to stop it).
+  function airFits() {
+    const b = $('b-air');
+    if (!airSupported || !airFiles) { b.hidden = true; return; }
+    if (air.on || air.starting) { b.hidden = false; return; }
+    b.hidden = false;
+    if (strip.scrollWidth > strip.clientWidth + 1 || strip.scrollHeight > strip.clientHeight + 1) b.hidden = true;
+  }
+  if (airSupported) {
+    root.dataset.airpad = 'yes';
+    // The MediaPipe files are not in the repo (scripts/soa-fetch-mediapipe
+    // installs them); the button stays hidden until both are found.
+    Promise.all(['vision_bundle.mjs', AIR_MODEL].map((f) => fetch(AIR_BASE + f, { method: 'HEAD', credentials: 'same-origin', cache: 'no-store' })))
+      .then((rs) => { airFiles = rs.every((r) => r.ok); airFits(); }, () => {});
+    if (window.ResizeObserver) new ResizeObserver(() => airFits()).observe(strip);
+    if (window.MutationObserver) { const mo = new MutationObserver(() => airFits()); for (const id of ['res-t', 'conn-t']) mo.observe($(id), { childList: true, characterData: true, subtree: true }); }
+  }
+  airFits();
+  $('b-air').addEventListener('click', () => { if (air.on || air.starting) airStop('Camera off'); else airStart(); });
+  $('air-off').addEventListener('click', () => airStop('Camera off'));
+  $('air-pv').addEventListener('click', () => { prefs.airPv = !prefs.airPv; savePrefs(); syncAir(); if (!prefs.airPv) air.skel.getContext('2d').clearRect(0, 0, air.skel.width, air.skel.height); });
+  $('air-sens').addEventListener('input', (e) => { const s = Math.max(0.4, Math.min(2.5, +e.target.value || 1)); prefs.airSens = s; airEngine.set({ sens: s }); savePrefs(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) airStop('Camera off while this page is hidden'); });
+  window.addEventListener('pagehide', () => airStop(''));
+  // Test hook: the engine on its own, and the page's own adapter fed with
+  // made-up landmarks (the same path the camera takes, minus the camera).
+  window.__soaAirpad = {
+    supported: airSupported, base: AIR_BASE, files: () => airFiles, createEngine: createAirEngine,
+    feed(t, hand, aspect) { air.ts = t; airEngine.feed(t, hand, aspect); },
+    setSens(s) { prefs.airSens = s; airEngine.set({ sens: s }); },
+    setIdle(ms) { air.idleMs = ms > 0 ? ms : AIR_IDLE_MS; },   // tests: the 2-minute no-hand stop, sooner
+    reset() { airEngine.reset(); },
+    state: () => ({ ...airEngine.state(), on: air.on, starting: air.starting, model: air.model ? air.model.delegate : null, frames: air.frames, hands: air.hands, err: air.err, camera: !!air.stream, cursor: { x: cur.x, y: cur.y } }),
+  };
+
   // ── the keyboard ─────────────────────────────────────────────────────
   // US ANSI MacBook layout. Letters and symbols are typed as text (so the
   // Mac's own layout cannot turn them into something else); with ⌘ ⌃ or ⌥
@@ -2052,6 +2741,7 @@
     const t = e.target;
     if (t.closest && t.closest('#strip, #keyboard') && (e.key === 'Enter' || e.key === ' ' || e.key === 'Tab')) return;   // activating or moving between controls
     if (t.closest && t.closest('.seg') && /^Arrow/.test(e.key)) return;
+    if (t.closest && t.closest('#air')) return;   // the air trackpad's own controls (its slider takes arrows)
     onKeyDown(e, false);
     kb.focus({ preventScroll: true });
   });
@@ -2074,7 +2764,7 @@
   });
   // While the sheet is open everything behind it is inert: nothing there can
   // take focus or a key, so a key typed into the sheet never reaches the Mac.
-  const BEHIND = ['strip', 'deck', 'stage', 'slow', 'kb', 'overlay'];
+  const BEHIND = ['strip', 'deck', 'stage', 'slow', 'kb', 'overlay', 'air'];
   function setBehind(on) { for (const id of BEHIND) { const el = $(id); if (on) el.setAttribute('inert', ''); else el.removeAttribute('inert'); } }
   function openSheet(from, focusId) {
     sheetFrom = from;
@@ -2216,7 +2906,7 @@
       }
     } else if (!ws) { backoff = 1000; connect(); }
   });
-  window.__soaDeck = () => ({ fit: { pref: { ...fitPref }, state: F.state, w: F.w, h: F.h, area: lay.area, pending: !!fitPending, auto: fitAuto, mine: F.mine, owner: F.owner, elsewhere: elsewhere(), blocked: fitBlocked }, stage: { w: stage.clientWidth, h: stage.clientHeight }, frame: { w: frame.width, h: frame.height }, layout: root.dataset.layout, rail: root.dataset.rail, mode: prefs.mode, cursor: { x: cur.x, y: cur.y, known: cur.known, shown: !cursorEl.hasAttribute('hidden') }, mods: [...mods], locked: [...locked], caps, view: { ...view, zoom: zoomRel() }, dragging, deckOpen: deck.classList.contains('open'), kb: !keyboard.hidden, pad: !pad.hidden });
+  window.__soaDeck = () => ({ fit: { pref: { ...fitPref }, state: F.state, w: F.w, h: F.h, pxW: F.pxW, pxH: F.pxH, hidpi: F.hidpi, scale: F.scale, seq: F.seq, area: lay.area, px: (fitMeasure() || {}).px, sent: fitSent, pending: !!fitPending, auto: fitAuto, mine: F.mine, owner: F.owner, elsewhere: elsewhere(), blocked: fitBlocked, readout: $('fz-scale-out').textContent }, fitLatency: fitLatency.slice(), stage: { w: stage.clientWidth, h: stage.clientHeight }, frame: { w: frame.width, h: frame.height }, layout: root.dataset.layout, rail: root.dataset.rail, mode: prefs.mode, cursor: { x: cur.x, y: cur.y, known: cur.known, shown: !cursorEl.hasAttribute('hidden') }, mods: [...mods], locked: [...locked], caps, view: { ...view, zoom: zoomRel() }, pic: { w: pic.width, h: pic.height, waiting: !!picWait }, screen: { w: screen.width, h: screen.height }, dragging, deckOpen: deck.classList.contains('open'), kb: !keyboard.hidden, pad: !pad.hidden });
   if (!prefs.hint) $('pad-hint').hidden = true;
   if (!touchFirst) $('pad-hint').textContent = 'Click to click, right-click to right-click. Hold the button and drag to move the pointer.';
   syncMods();

@@ -499,6 +499,7 @@ function sourceFor(ws) {
 }
 function clampPoint(m, ws) { return globalPoint(sourceFor(ws) || screen, m.x, m.y); }
 const INPUT_TYPES = new Set(['move', 'click', 'scroll', 'type', 'key', 'down', 'drag', 'up']);
+const FIT_DROP_INPUT = new Set(['move', 'click', 'scroll', 'down', 'drag', 'up']);
 function releaseDrag(ws) {
     if (!ws || !ws.drag) return;
     const { x, y, mods } = ws.drag; ws.drag = null;
@@ -522,6 +523,17 @@ function handleInput(m, from) {
         const s = sourceFor(from);
         if (!s || (from.extended && (m.displayId !== s.displayId || m.revision !== s.revision))
             || (!from.extended && m.displayId !== undefined && m.displayId !== s.displayId)) return;
+        // The fitted screen is changing shape under this input: a point aimed
+        // at the old layout would land somewhere else once windows reflow.
+        // Pointing input is dropped (a release only if no press got through);
+        // keys and text are not positional and pass.
+        if (!from.extended && fit.busy && (fit.op === 'select' || fit.op === 'resize') && FIT_DROP_INPUT.has(m.t) && !(m.t === 'up' && from.drag)) {
+            if (m.t === 'click' || m.t === 'down' || m.t === 'scroll') {
+                const now = Date.now();
+                if (now - (from.fitTipAt || 0) > 1500) { from.fitTipAt = now; reply(from, { t: 'tip', text: 'The Mac screen is changing shape — tap again in a moment' }); }
+            }
+            return;
+        }
     }
     switch (m.t) {
         case 'move': {
@@ -656,7 +668,7 @@ function handleInput(m, from) {
             break;
         case 'mode': if (from) setMode(from, m.mode === 'h264' ? 'h264' : 'jpeg', m); break;
         case 'pref': if (from) { from.pref = prefOf(m.pref); reconcileVideo(); } break;
-        case 'display': if (from) { from.display = cleanDisplay(m); reconcileVideo(); } break;
+        case 'display': if (from) { from.display = ownerBox(from, cleanDisplay(m)); reconcileVideo(); } break;
         case 'vack': if (from) videoAck(from, m); break;
         case 'keyframe':
             if (from && from.mode === 'h264' && from.enc) { from.vs.needKey = true; from.vs.idrAsked = true; requestIdr(from.enc); }
@@ -856,6 +868,7 @@ function setGeometry(s, why, force = false) {
         if (e.dead) continue;
         const t = targetFor(e, e.owner || prewarm || { pref: 'auto' });
         clearTimeout(e.resizeTimer); e.resizeTimer = null;
+        clearTimeout(e.sizeDog); e.sizeDog = null; e.sizeAsk = null;
         const c = e.child; e.child = null; e.config = null;
         if (c) endChild(c);
         Object.assign(e, { w: t.w, h: t.h, bps: t.bps });
@@ -863,6 +876,75 @@ function setGeometry(s, why, force = false) {
     }
     if (viewers.size) broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
     if (ffmpeg || jpegViewers().length) { stopCapture(); ensureCapture(); }   // the JPEG stream's scale follows the new aspect
+}
+// The fitted screen changed size or scale IN PLACE (same display): every
+// running helper stream gets its new output size on stdin — the capture is
+// reconfigured (SCStream.updateConfiguration) and the encoder restarts with
+// a keyframe at the new size, which the viewer's decoder takes without a
+// reconnect. A stream that shows no frame of the new screen within
+// FIT_STREAM_WATCHDOG_MS (or exits) is restarted the old way. ffmpeg (no live
+// resize) and a stream still starting are restarted at once.
+function resizeStreamsInPlace(g, why, seq, tm) {
+    const s = { width: g.width, height: g.height, scale: g.scale || 1 };
+    if (s.width !== screen.width || s.height !== screen.height || s.scale !== screen.scale) log('screen geometry', `${screen.width}x${screen.height} → ${s.width}x${s.height}`, `(${why})`);
+    screen = s;
+    const at = Date.now();
+    for (const e of [...encoders]) {
+        if (e.dead || e.extended) continue;
+        const t = targetFor(e, e.owner || prewarm || { pref: 'auto' });
+        clearTimeout(e.resizeTimer); e.resizeTimer = null;
+        clearTimeout(e.sizeDog); e.sizeDog = null;
+        if (!e.child || e.kind !== 'helper') {
+            const c = e.child; e.child = null; e.config = null;
+            if (c) endChild(c);
+            Object.assign(e, { w: t.w, h: t.h, bps: t.bps });
+            e.sizeAsk = { w: t.w, h: t.h, at, seq, gen: -1, tm };
+            startEncoder(e);
+            continue;
+        }
+        const resized = t.w !== e.w || t.h !== e.h;
+        // Same output size (a new scale on the same box): the capture still
+        // follows the display; the first frame captured after the change ends it.
+        e.sizeAsk = { w: t.w, h: t.h, at, seq, gen: resized ? (e.config ? e.config.gen : 0) : null, tm };
+        if (resized) {
+            try { e.child.stdin.write(`size ${t.w} ${t.h}\n`); } catch (_) {}
+            log('video resize (in place)', `${e.w}x${e.h} → ${t.w}x${t.h}`);
+            e.w = t.w; e.h = t.h;
+        }
+        if (t.bps !== e.bps) setVideoBitrate(e, t.bps);
+        e.sizeDog = setTimeout(() => sizeWatchdog(e), FIT_STREAM_WATCHDOG_MS);
+    }
+    if (viewers.size) broadcastStatus(ffmpeg || encoders.size ? 'live' : 'ready');
+    if (ffmpeg || jpegViewers().length) { stopCapture(); ensureCapture(); }
+}
+function sizeWatchdog(e) {
+    e.sizeDog = null;
+    if (e.dead || !e.sizeAsk || e.sizeAsk.done) return;
+    // Only a stream that was asked to change SIZE is restarted: a same-size
+    // stream on a still screen may simply have nothing new to send.
+    if (e.sizeAsk.gen === null) { if (e.child && e.kind === 'helper') requestIdr(e); return; }
+    log('video: no frame at the new size within', FIT_STREAM_WATCHDOG_MS, 'ms — restarting that stream');
+    e.sizeAsk.restarted = true; e.sizeAsk.gen = -1;
+    const c = e.child; e.child = null; e.config = null;
+    if (c) endChild(c);
+    startEncoder(e);
+}
+// The first frame of the new screen reached this encoder: timing, and the
+// owner hears it ({t:'fitFrame'}) so it can close its own measurement.
+function sizeArrived(e, ts) {
+    const a = e.sizeAsk; a.done = true;
+    clearTimeout(e.sizeDog); e.sizeDog = null;
+    const now = nowMs(), tm = a.tm;
+    // Every viewer of this stream: frames from `ts` on show the new screen, so
+    // its taps are mapped with the new geometry from that frame (not from the
+    // status that announced it, while old frames are still on their way).
+    if (e.owner && !fitIsOwner(e.owner)) reply(e.owner, { t: 'screenFrame', ts, w: e.w, h: e.h });
+    if (e.owner && fitIsOwner(e.owner)) {
+        if (tm && fit.tm === tm) tm.frame = now;
+        reply(e.owner, { t: 'fitFrame', seq: a.seq, at: now, ts, w: e.w, h: e.h });
+        if (tm && tm.recv) log('fit: seq', a.seq, 'first frame of the new screen', `${e.w}x${e.h}`, a.restarted ? '(stream restarted)' : '(in place)',
+            `+${Math.round(now - (tm.geom || now))} ms after the change, ${Math.round(now - tm.recv)} ms since the request`);
+    }
 }
 async function setDisplayMode(ws, m) {
     if (ws.extended) { reply(ws, { t: 'displayMode', req: m.req, ok: false, error: 'extended', ...displayInfoMsg() }); return; }
@@ -933,13 +1015,19 @@ function restoreDisplayNow() {
 // DISPLAY_RESTORE_MS (unless kept), this service stopping, or the helper
 // dying all put the Mac back on its own screen.
 //
-//   viewer  → {t:'fit', on:true, area:{w,h,dpr}, text:'smaller'|'default'|'larger', dev, take?}
+//   viewer  → {t:'fit', v:2, on:true, seq, at, px:{w,h} (physical pixels of
+//             the picture box), area:{w,h,dpr} (CSS px), scr:{…}, scale:100..200|'auto',
+//             auto (what Auto is on that device), why, dev, take?}
+//             (v1: {area, text:'smaller'|'default'|'larger'} — mapped to a scale)
 //             {t:'fit', on:false, dev}
 //   service → {t:'fit', state:'off'|'fitting'|'on'|'error', w, h (points),
-//             pxW, pxH, hidpi, text, keep, mine, owner:'you'|'other'|'away'|'none',
+//             pxW, pxH, hidpi, keep, mine, owner:'you'|'other'|'away'|'none',
+//             scale{asked,applied,auto,why}, look{w,h}, src{w,h}, enc{w,h},
+//             seq + tm{recv,cmd,reply,geom} (the owner's request it answers),
 //             target?{w,h}, reason?, message?}
 //             to every viewer whenever it changes (and in hello / status),
-//             each told whether the fit is its own.
+//             each told whether the fit is its own; then {t:'fitFrame', seq,
+//             at} to the owner once its stream has a frame of the new screen.
 //
 // Who owns the fit. The fitted screen is ONE Mac screen shared by every
 // viewer, so it belongs to one of them: the viewer that turned it on, or
@@ -948,10 +1036,13 @@ function restoreDisplayNow() {
 // owner; `take` marks a request the user made by hand (the switch, a text
 // size, "Fit to this screen instead"), as opposed to one the page sends by
 // itself (on connect, after a rotation or a keyboard change).
-//  - Only the owner's area shapes the Mac: its own rotation or deck change
-//    re-fits, debounced (FIT_DEBOUNCE_MS) and only on a real change of shape
-//    (FIT_ASPECT_TOL); a height-only change of up to FIT_BAR_PX (a phone's
-//    address bar sliding) never does.
+//  - Only the owner's area shapes the Mac: its own rotation, fold, split or
+//    deck change, or its scaling, re-fits AT ONCE (the viewer settles and
+//    debounces its own measurement, and filters its keyboard and address
+//    bar, where the cause is known). Requests coalesce latest-wins: one
+//    change runs, the newest waits, a stale size is never applied after a
+//    newer one; past FIT_RATE_N changes in FIT_RATE_MS the newest waits
+//    FIT_RATE_WAIT_MS (a flapping sensor).
 //  - Every other viewer's area is ignored for fitting; it sees the fitted
 //    screen letterboxed in its own picture and is told the fit is another
 //    screen's (owner:'other'). Its automatic requests are only remembered,
@@ -970,22 +1061,115 @@ function restoreDisplayNow() {
 // The helper owns the CGVirtualDisplay object: the display lives exactly as
 // long as that process, which unmirrors and removes it on stdin EOF or any
 // catchable signal (macOS undoes both by itself after a kill -9). One change
-// runs at a time; requests that arrive meanwhile coalesce to the latest. A
-// re-fit (rotation, deck shown or hidden) waits FIT_DEBOUNCE_MS and happens
-// only when the shape changes by more than FIT_ASPECT_TOL.
+// runs at a time; requests that arrive meanwhile coalesce to the latest, and
+// a change of size or scale is made IN PLACE on the same display
+// (applySettings, or with SOA_FIT_MODE_SET=1 a switch to a mode it already
+// offers), with every running stream resized in place too (no reconnect).
 const VD_SRC = path.join(__dirname, 'soa-virtual-display.swift');
 const VD_BIN = process.env.SOA_VDISPLAY_BIN || path.join(WORK_DIR, 'virtual-display');
 const VD_STATE = path.join(WORK_DIR, 'virtual-display.json');   // exists while a fitted screen may be up
-const FIT_DEBOUNCE_MS = 1500, FIT_ASPECT_TOL = 0.08, FIT_BAR_PX = 64;
+// The owner's device back after a blip: a short grace, so a page reconnecting
+// mid-rotation sends one request, not two.
+const FIT_BACK_MS = 250;
+// Latest wins; a flapping sensor is capped (see "who owns the fit").
+const FIT_RATE_N = 6, FIT_RATE_MS = 5000, FIT_RATE_WAIT_MS = 1000;
+// Helper timeouts per change: a switch between offered modes, a resize.
+const FIT_SELECT_TIMEOUT_MS = 3000, FIT_RESIZE_TIMEOUT_MS = 8000;
+// A stream resized in place that shows no frame of the new size in this long
+// is restarted the old way (stop + start).
+const FIT_STREAM_WATCHDOG_MS = 700;
+// SOA_FIT_MODE_SET=1: offer a few neighbouring modes with every resize, so the
+// next scale step (or the exact rotation) is a pure mode switch. Off until
+// verified on a live Mac.
+const FIT_MODE_SET = process.env.SOA_FIT_MODE_SET === '1';
 // Mac points per CSS pixel of the viewer's area, by text size: more points
-// per pixel is a bigger desktop with smaller text.
+// per pixel is a bigger desktop with smaller text. (Extend's spec, and the
+// v1 mapping of a text size to a scale.)
 const FIT_K = Object.freeze({ smaller: 2.0, default: 1.6, larger: 1.3 });
 // macOS backs a virtual display at 2x only from about 800x600 points: at
 // least that area AND a long side of 800 (measured: 640x821, 585x1266,
 // 800x600, 624x938 pt accepted; 680x706, 585x750, 800x500 refused).
 const FIT_HIDPI_MIN_AREA = 480000, FIT_HIDPI_MIN_LONG = 800;
-const FIT_MAX_PX = 3840;                       // the helper keeps room for resizes up to this
+// The helper keeps room for resizes up to this (maxPixels at create; more
+// than 3840 is unverified on a live Mac, so it is opt-in).
+const FIT_MAX_PX = Math.max(3840, Math.min(8192, parseInt(process.env.SOA_FIT_MAX_PX || '3840', 10) || 3840));
 const FIT_MIN_PT = Object.freeze({ long: 480, short: 360 });   // smaller is not a usable desktop
+const nowMs = () => performance.timeOrigin + performance.now();   // epoch ms, sub-ms (timing only)
+
+// ── display scaling (100–200 %) ──
+// The fitted screen for a viewer's picture box in PHYSICAL pixels at a
+// scaling of p %, as macOS / Windows display scaling: 100 % is the most space
+// (one Mac point per phone pixel, 1x, pixel for pixel), 200 % the biggest UI
+// (one point per two pixels, 2x). In between, points = pixels / (p/100),
+// backed at 2x (HiDPI) and downscaled by the stream, so text stays crisp.
+// Clamped to what a usable desktop and the window server allow:
+//   min-pt       at least 480 x 360 points (a smaller box gets more points
+//                than pixels, at 1x, and the viewer scales it down);
+//   hidpi-floor  macOS gives 2x only from 480 000 pt² and an 800 pt long
+//                side: p is capped where the points would dip under that;
+//   max-px       2 x the points must fit the display's maximum (maxPx), else
+//                1x at the same points (softer: the viewer upscales by p/100);
+//   1x           the box is too small for 2x at any step above 100 %.
+// Points are even. The viewer carries a byte-identical copy of this block
+// (for its live read-out); a test pins the two.
+/* scaleSpec:begin */
+const SCALE = Object.freeze({ min: 100, max: 200, minLong: 480, minShort: 360, hiArea: 480000, hiLong: 800, maxPx: 3840 });
+const autoScalePct = (dpr) => Math.max(SCALE.min, Math.min(SCALE.max, Math.round((75 + 25 * (+dpr || 1)) / 5) * 5));
+function scaleSpec(px, pct, maxPx = SCALE.maxPx) {
+    const fl5 = (n) => Math.floor(n / 5) * 5, ev = (n) => Math.max(2, Math.floor(n / 2) * 2), evUp = (n) => Math.max(2, Math.ceil(n / 2) * 2);
+    const cap = Math.min(1, maxPx / Math.max(2, px.w, px.h)), W = ev(px.w * cap), H = ev(px.h * cap), L = Math.max(W, H), S = Math.min(W, H);
+    const asked = Number.isFinite(+pct) ? Math.round(+pct) : SCALE.min;
+    let p = Math.max(SCALE.min, Math.min(SCALE.max, asked));
+    const why = cap < 1 ? ['max-px'] : [];
+    if (L < SCALE.minLong || S < SCALE.minShort) {
+        const k = Math.min(Math.max(SCALE.minLong / L, SCALE.minShort / S), maxPx / L), w = Math.min(evUp(W * k), ev(maxPx)), h = Math.min(evUp(H * k), ev(maxPx));
+        return { asked, p: 100, w, h, pxW: w, pxH: h, hidpi: false, why: 'min-pt', src: { w: W, h: H } };
+    }
+    const pMin = Math.min(100 * L / SCALE.minLong, 100 * S / SCALE.minShort);
+    if (p > pMin) { p = Math.max(SCALE.min, fl5(pMin)); why.push('min-pt'); }
+    const pHi = Math.min(100 * Math.sqrt(W * H / SCALE.hiArea), 100 * L / SCALE.hiLong);
+    if (p > SCALE.min && p > pHi && pHi >= 105) { p = fl5(pHi); why.push('hidpi-floor'); }
+    for (let i = 0; ; i++) {
+        const w = p === 100 ? W : ev(W * 100 / p), h = p === 100 ? H : ev(H * 100 / p);
+        const floors = w * h >= SCALE.hiArea && Math.max(w, h) >= SCALE.hiLong, room = 2 * w <= maxPx && 2 * h <= maxPx;
+        // rounding to even points dipped under the 2x floor: one step down
+        if (p > 105 && !floors && room && pHi >= 105 && i < 2) { p -= 5; continue; }
+        const hidpi = p > 100 && floors && room;
+        if (p > 100 && !hidpi) why.push(room ? '1x' : 'max-px');
+        return { asked, p, w, h, pxW: hidpi ? 2 * w : w, pxH: hidpi ? 2 * h : h, hidpi, why: why.join(','), src: { w: W, h: H } };
+    }
+}
+/* scaleSpec:end */
+const round5 = (n) => Math.round(n / 5) * 5;
+const clampPct = (n) => Math.max(SCALE.min, Math.min(SCALE.max, n));
+// One viewer request, checked: the physical box (px, validated against the
+// CSS area × dpr), the scale asked for (a number, or 'auto' resolved on the
+// viewer's device), and the request's bookkeeping. null: no usable size.
+function fitRequest(m) {
+    const area = cleanArea(m.area);
+    let px = null;
+    if (m.px && typeof m.px === 'object') {
+        const w = Math.floor(+m.px.w), h = Math.floor(+m.px.h);
+        if (w >= 100 && w <= 8192 && h >= 100 && h <= 8192) px = { w: w - (w % 2), h: h - (h % 2) };
+    }
+    if (area) {
+        const ax = { w: Math.min(8192, Math.floor(area.w * area.dpr / 2) * 2), h: Math.min(8192, Math.floor(area.h * area.dpr / 2) * 2) };
+        // a px that does not agree with area × dpr (±3 %) is not trusted
+        if (!px || Math.abs(px.w / ax.w - 1) > 0.03 || Math.abs(px.h / ax.h - 1) > 0.03) px = ax;
+    }
+    if (!px || px.w < 100 || px.h < 100) return null;
+    if (Math.max(px.w, px.h) > 5 * Math.min(px.w, px.h)) return null;   // longer than 5:1 is not a screen (stretching it to the minimum desktop would be huge)
+    const dpr = area ? area.dpr : 1;
+    const auto = typeof m.auto === 'number' && Number.isFinite(m.auto) ? clampPct(Math.round(m.auto)) : autoScalePct(dpr);
+    let scale = 'auto';
+    if (typeof m.scale === 'number' && Number.isFinite(m.scale)) scale = clampPct(Math.round(m.scale));
+    else if (m.scale === undefined && (m.text === 'smaller' || m.text === 'larger')) scale = clampPct(round5(100 * dpr / FIT_K[m.text]));   // v1
+    const seq = Number.isSafeInteger(m.seq) && m.seq >= 0 ? m.seq : 0;
+    const why = typeof m.why === 'string' && /^[a-z]{1,12}$/.test(m.why) ? m.why : '';
+    const at = typeof m.at === 'number' && Number.isFinite(m.at) ? m.at : 0;
+    return { px, area, dpr, scale, auto, pct: scale === 'auto' ? auto : scale, seq, why, at };
+}
+const specFor = (req) => scaleSpec(req.px, req.pct, FIT_MAX_PX);
 const FIT_MESSAGES = Object.freeze({
     unavailable: "This Mac can't make a fitted screen; showing its own screen instead.",
     create: "This Mac couldn't create a fitted screen; showing its own screen instead.",
@@ -994,9 +1178,15 @@ const FIT_MESSAGES = Object.freeze({
     area: 'This screen did not say how much room it has for the picture.',
     others: 'Another screen is watching the Mac, so it was not re-shaped. Fit it to this screen by hand if you want to.',
 });
-const fit = { up: false, id: 0, w: 0, h: 0, pxW: 0, pxH: 0, hidpi: true, text: 'default', busy: false, transition: false,
+const fit = { up: false, id: 0, w: 0, h: 0, pxW: 0, pxH: 0, hidpi: true, busy: false, transition: false,
     op: '', want: null, timer: null, keep: false, restoreTimer: null, error: null, buildFailedAt: 0,
-    area: null,                                 // the CSS area the Mac is fitted to now
+    req: null,                                  // the request the Mac is fitted to now (fitRequest)
+    spec: null,                                 // ...the spec it asked for (before any 1x fallback): what a new request is compared with
+    setHidpi: true,                             // the scale flag of the modes the display offers now
+    offered: [],                                // the modes it offers ({pxW, pxH}); a switch among them is a `select`
+    cur: null,                                  // the change being made now: {seq, spec}
+    seq: 0, tm: null,                           // the owner's request the fitted screen answers, and its timing
+    recent: [],                                 // when the last changes started (the rate cap)
     owner: null, ownerDev: '', ownerTimer: null }; // who the fit belongs to (see above)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const evenPt = (n) => Math.max(2, Math.round(n / 2) * 2);
@@ -1033,9 +1223,19 @@ function fitInfo(ws = null) {
     const held = fit.up || fit.busy;
     const owner = !held ? 'none' : mine ? 'you' : fit.owner ? 'other' : fit.ownerDev ? 'away' : 'none';
     const o = { state, keep: fit.keep, mine, owner };
-    if (fit.up) Object.assign(o, { w: fit.w, h: fit.h, pxW: fit.pxW, pxH: fit.pxH, hidpi: fit.hidpi, text: fit.text });
+    if (fit.up) {
+        Object.assign(o, { w: fit.w, h: fit.h, pxW: fit.pxW, pxH: fit.pxH, hidpi: fit.hidpi, look: { w: fit.w, h: fit.h } });
+        if (fit.spec && fit.req) o.scale = { asked: fit.req.scale, applied: fit.spec.p, auto: fit.req.auto, why: fit.spec.why || '' };
+        if (fit.req) o.src = { ...fit.req.px };
+        const e = fit.owner && fit.owner.enc;
+        if (e && !e.dead) o.enc = { w: e.w, h: e.h };
+        if (mine) { o.seq = fit.seq; if (fit.tm) o.tm = fit.tm; }
+    }
     if (fit.busy) o.op = fit.op || 'on';
-    if (fit.busy && fit.want && fit.want.on) { const t = fitSpec(fit.want.area, fit.want.text); o.target = { w: t.w, h: t.h }; }
+    if (fit.busy && fit.op !== 'off') {
+        const t = fit.want && fit.want.on ? specFor(fit.want.req) : fit.cur && fit.cur.spec;
+        if (t) o.target = { w: t.w, h: t.h };
+    }
     if (err) { o.reason = err.code; o.message = err.message; }
     return o;
 }
@@ -1069,7 +1269,10 @@ function vdStart() {
     if (vd.child) return true;
     if (!buildVd()) return false;
     let c;
-    try { c = spawn(VD_BIN, [], { stdio: ['pipe', 'pipe', 'pipe'] }); } catch (e) { log('virtual-display failed to start:', e.message); return false; }
+    // SOA_VDISPLAY_SETTLE=quick: the helper selects our mode as soon as macOS
+    // lists it, instead of first waiting 0.4 s for macOS to pick it.
+    try { c = spawn(VD_BIN, [], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, SOA_VDISPLAY_SETTLE: process.env.SOA_VDISPLAY_SETTLE || 'quick' } }); }
+    catch (e) { log('virtual-display failed to start:', e.message); return false; }
     Object.assign(vd, { child: c, buf: '', wait: [], ending: false });
     c.stdout.setEncoding('utf8');
     c.stdout.on('data', (d) => {
@@ -1157,6 +1360,7 @@ function pauseVideo() {
     fit.transition = true;
     for (const e of encoders) {
         clearTimeout(e.resizeTimer); e.resizeTimer = null;
+        clearTimeout(e.sizeDog); e.sizeDog = null; e.sizeAsk = null;
         const c = e.child; e.child = null; e.config = null;
         if (c) endChild(c);
     }
@@ -1165,7 +1369,24 @@ function pauseVideo() {
 function endTransition(g, why) { fit.transition = false; setGeometry(g || screen, why, true); }
 
 // ── requests ──
+// The owner's box is also its encode target from now on: the stream follows
+// the new screen in place, with no wait for the viewer's own display report.
+function ownerDisplay(ws, req) {
+    const zoom = ws.display && ws.display.zoom ? ws.display.zoom : 1;
+    ws.fitBox = { w: req.px.w, h: req.px.h, dpr: req.dpr };
+    ws.display = cleanDisplay({ ...ws.fitBox, zoom });
+}
+// ...and stays its encode target while the fit is its own: the stage it
+// reports (`display`) is the picture as laid out NOW, which mid-rotation is
+// the old screen letterboxed in the new window — taken, it sized the first
+// frames of the new screen at about half the box, and a second resize
+// followed. Only the zoom is taken from the report then.
+function ownerBox(ws, d) {
+    if (ws.fitBox && (fit.up || fit.busy) && fitIsOwner(ws)) return cleanDisplay({ ...ws.fitBox, zoom: d.zoom });
+    return d;
+}
 function onFitMsg(ws, m) {
+    const recv = nowMs();
     if (m.on && extension.held) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'extend', message: 'End the second display before fitting the Mac.' }); return; }
     if (typeof m.dev === 'string' && /^[\w-]{6,64}$/.test(m.dev)) ws.dev = m.dev;
     const take = m.take === true, mine = fitIsOwner(ws);
@@ -1176,10 +1397,10 @@ function onFitMsg(ws, m) {
         fitTurnOff(mine ? 'turned off' : 'turned off from another screen');
         return;
     }
-    const area = cleanArea(m.area);
-    if (!area) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'area', message: FIT_MESSAGES.area }); return; }
-    const text = Object.prototype.hasOwnProperty.call(FIT_K, m.text) ? m.text : 'default';
-    ws.fitAsk = { area, text, at: Date.now() };
+    const req = fitRequest(m);
+    if (!req) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'area', message: FIT_MESSAGES.area }); return; }
+    req.recv = recv;
+    ws.fitAsk = { req, at: Date.now() };
     if (!held) {
         // Nobody's fit: a page asking by itself must not re-shape the Mac
         // under another viewer (the same device's older socket does not count).
@@ -1187,7 +1408,8 @@ function onFitMsg(ws, m) {
         if (!take && others) { reply(ws, { t: 'fit', ...fitInfo(ws), ok: false, reason: 'others', message: FIT_MESSAGES.others }); return; }
         setOwner(ws, take ? 'turned on' : 'turned on (remembered)');
         clearTimeout(fit.timer); fit.timer = null;
-        fit.want = { on: true, area, text }; fit.error = null;
+        fit.want = { on: true, req }; fit.error = null;
+        ownerDisplay(ws, req);
         fitRun();
         return;
     }
@@ -1198,41 +1420,52 @@ function onFitMsg(ws, m) {
         if (!take && !back) { reply(ws, { t: 'fit', ...fitInfo(ws) }); return; }
         setOwner(ws, take ? 'taken over' : 'its viewer is back');
         clearTimeout(fit.timer); fit.timer = null;
-        fit.want = { on: true, area, text }; fit.error = null;
+        fit.want = { on: true, req }; fit.error = null;
+        ownerDisplay(ws, req);
         broadcastFit();                         // everyone hears whose it is now
-        if (take) fitRun(); else fit.timer = setTimeout(() => { fit.timer = null; fitRun(); }, FIT_DEBOUNCE_MS);
+        if (take) fitRun(); else fit.timer = setTimeout(() => { fit.timer = null; fitRun(); }, FIT_BACK_MS);
         return;
     }
-    // The owner's own change.
-    clearTimeout(fit.timer); fit.timer = null;
-    fit.want = { on: true, area, text };
-    if (!fit.busy && (take || text !== fit.text)) fitRun();                  // by hand: at once
-    else fit.timer = setTimeout(() => { fit.timer = null; fitRun(); }, FIT_DEBOUNCE_MS);   // a re-shape: once it settles
+    // The owner's own change (rotation, fold, split, deck, scaling): at once.
+    // A change already running picks this up next; one waiting is replaced.
+    if (fit.up && !fit.busy && !fit.timer && !fitDiffers(specFor(req))) {
+        fit.want = null; fit.req = req; fit.seq = req.seq; fit.tm = { recv: req.recv, cmd: 0, reply: 0, geom: 0, same: true };
+        reply(ws, { t: 'fit', ...fitInfo(ws) });
+        return;
+    }
+    fit.want = { on: true, req };
+    ownerDisplay(ws, req);
+    if (!fit.timer) fitRun();
 }
-// Turning off ends the fit now: a debounced re-fit is dropped, and a change
-// still being made (a create can take seconds) is cut short — the helper,
-// signalled, stops waiting, restores the Mac and exits.
+// Turning off ends the fit now: a re-fit still waiting is dropped, and a
+// change still being made (a create can take seconds) is cut short — the
+// helper, signalled, stops waiting, restores the Mac and exits.
 function fitTurnOff(why) {
     clearTimeout(fit.timer); fit.timer = null;
     clearOwner();
     fit.want = { on: false, why }; fit.error = null;
-    if (fit.busy && (fit.op === 'on' || fit.op === 'resize') && vd.child) {
+    if (fit.busy && (fit.op === 'on' || fit.op === 'resize' || fit.op === 'select') && vd.child) {
         log('fit: turned off while a change was still running — cutting it short');
         const c = vd.child; vdEnd();             // moved to `dying`: its exit is expected
         try { c.kill('SIGTERM'); } catch (_) {}
     }
     fitRun();
 }
-// Is `spec` (for request `w`) a different screen from the fitted one?
-function fitDiffers(spec, w) {
-    if (w.text !== fit.text) return true;
-    // A phone's address bar or a tab strip sliding in and out changes the
-    // height (or, on its side, the width) a little: never a re-fit.
-    const a = fit.area;
-    if (a && ((Math.abs(w.area.w - a.w) <= 2 && Math.abs(w.area.h - a.h) <= FIT_BAR_PX)
-        || (Math.abs(w.area.h - a.h) <= 2 && Math.abs(w.area.w - a.w) <= FIT_BAR_PX))) return false;
-    return Math.abs((spec.w / spec.h) / (fit.w / fit.h) - 1) > FIT_ASPECT_TOL;
+// Is `spec` a different screen from the one the Mac was last asked for?
+// Exact, with a 2-point dead band (the viewer filters address bars and its
+// keyboard itself, where the cause is known).
+function fitDiffers(spec) {
+    const a = fit.spec;
+    return !a || spec.hidpi !== a.hidpi || Math.abs(spec.w - a.w) > 2 || Math.abs(spec.h - a.h) > 2;
 }
+// The `set` argument offering extra modes (SOA_FIT_MODE_SET), '' without.
+function setArg(spec, req) {
+    const set = FIT_MODE_SET ? modeSet(spec, req).filter((x) => !(x.pxW === spec.pxW && x.pxH === spec.pxH)) : [];
+    return set.length ? ' set ' + set.map((x) => `${x.pxW}x${x.pxH}`).join(',') : '';
+}
+const offeredOf = (r, spec) => (r && Array.isArray(r.offered)
+    ? r.offered.map((s) => { const m = /^(\d+)x(\d+)$/.exec(String(s)); return m ? { pxW: +m[1], pxH: +m[2] } : null; }).filter(Boolean)
+    : [{ pxW: spec.pxW, pxH: spec.pxH }]);
 // The owner left. It has DISPLAY_RESTORE_MS to come back; then the fit goes
 // to the viewer that asked for it most recently (shaped to that viewer), or
 // ends — unless it was kept. With nobody left at all, scheduleFitRestore
@@ -1247,7 +1480,8 @@ function scheduleOwnerHandoff() {
         const next = [...viewers].filter((v) => v.readyState === WebSocket.OPEN && v.fitAsk).sort((a, b) => b.fitAsk.at - a.fitAsk.at)[0];
         if (next) {
             setOwner(next, 'handed over: its viewer did not come back');
-            fit.want = { on: true, area: next.fitAsk.area, text: next.fitAsk.text };
+            fit.want = { on: true, req: next.fitAsk.req };
+            ownerDisplay(next, next.fitAsk.req);
             broadcastFit(); fitRun();
             return;
         }
@@ -1263,25 +1497,63 @@ function fitViewerLeft(ws) {
     log('fit: its viewer left — it has', Math.round(DISPLAY_RESTORE_MS / 1000), 's to come back');
     if (viewers.size) { scheduleOwnerHandoff(); broadcastFit(); }
 }
+// Can `spec` be reached by switching to a mode the display already offers?
+function canSelect(spec) {
+    return FIT_MODE_SET && fit.up && spec.hidpi === fit.setHidpi && !(spec.pxW === fit.pxW && spec.pxH === fit.pxH)
+        && fit.offered.some((o) => o.pxW === spec.pxW && o.pxH === spec.pxH);
+}
+// The modes offered with a resize (SOA_FIT_MODE_SET): the target, its rotated
+// twin, and the neighbouring scale steps — all at the target's 2x/1x flag
+// (a 1x↔2x switch is always a resize), at most 6.
+function modeSet(spec, req) {
+    const out = [spec], add = (s) => {
+        if (!s || s.hidpi !== spec.hidpi || out.length >= 6 || out.some((o) => o.pxW === s.pxW && o.pxH === s.pxH)) return;
+        if (s.pxW > FIT_MAX_PX || s.pxH > FIT_MAX_PX) return;
+        out.push(s);
+    };
+    const rot = { w: req.px.h, h: req.px.w };
+    add(scaleSpec(rot, spec.p, FIT_MAX_PX));
+    for (const d of [-10, 10, -20, 20]) { const p = spec.p + d; if (p >= SCALE.min && p <= SCALE.max) add(scaleSpec(req.px, p, FIT_MAX_PX)); }
+    return out;
+}
 async function fitRun() {
     if (fit.busy) return;                       // the running change picks the latest request up
     fit.busy = true;
     try {
-        for (let n = 0; n < 4 && fit.want && !fit.timer; n++) {
+        while (fit.want && !fit.timer) {
             const w = fit.want;
-            if (!w.on) { fit.want = null; fit.op = 'off'; if (fit.up) broadcastFit(); await fitOff(w.why || 'turned off'); continue; }
-            const spec = fitSpec(w.area, w.text);
-            if (fit.up && !fitDiffers(spec, w)) { fit.want = null; continue; }
-            fit.op = fit.up ? 'resize' : 'on';
+            if (!w.on) { fit.want = null; fit.op = 'off'; fit.cur = null; if (fit.up) broadcastFit(); await fitOff(w.why || 'turned off'); continue; }
+            const spec = specFor(w.req);
+            if (fit.up && !fitDiffers(spec)) {
+                // Same screen (a 2 px wobble, or a scale that clamps to the same
+                // size): nothing to change; the request is answered.
+                fit.want = null; fit.req = w.req; fit.seq = w.req.seq; fit.tm = { recv: w.req.recv, cmd: 0, reply: 0, geom: 0, same: true };
+                broadcastFit();
+                continue;
+            }
+            const now = Date.now();
+            fit.recent = fit.recent.filter((t) => now - t < FIT_RATE_MS);
+            if (fit.up && fit.recent.length >= FIT_RATE_N) {
+                log('fit: changing too often —', FIT_RATE_N, 'changes in', FIT_RATE_MS / 1000, 's; the newest waits for the window');
+                const wait = Math.max(FIT_RATE_WAIT_MS, FIT_RATE_MS - (now - fit.recent[0]) + 5);
+                fit.timer = setTimeout(() => { fit.timer = null; fitRun(); }, wait);
+                break;
+            }
+            fit.recent.push(now);
+            fit.op = !fit.up ? 'on' : canSelect(spec) ? 'select' : 'resize';
+            fit.cur = { seq: w.req.seq, spec };
             broadcastFit();                     // "Fitting…"
-            const ok = fit.up ? await fitResize(spec, w) : await fitOn(spec, w);
+            const tm = { recv: w.req.recv, cmd: 0, reply: 0, geom: 0 };
+            const ok = fit.op === 'on' ? await fitOn(spec, w, tm) : fit.op === 'select' ? await fitSelect(spec, w, tm) : await fitResize(spec, w, tm);
+            fit.cur = null;
             if (fit.want === w) fit.want = null;
             if (!ok) { if (fit.want && fit.want.on) fit.want = null; break; }   // a failure is not retried by itself
+            broadcastFit();                     // this request is answered, even if a newer one runs next
         }
     } catch (e) { log('fit failed:', e.message); }
     finally {
         if (fit.transition) endTransition(screen, 'fit');
-        fit.busy = false; fit.op = '';
+        fit.busy = false; fit.op = ''; fit.cur = null;
         if (!fit.up && !(fit.want && fit.want.on)) clearOwner();   // no fit, nobody's
         broadcastFit();
         if (!viewers.size) scheduleFitRestore();
@@ -1290,8 +1562,22 @@ async function fitRun() {
     if (fit.up && !vd.child) { fitLost(); return; }        // the helper went while this ran
     if (fit.want && !fit.timer) fitRun();
 }
-async function fitOn(spec, w) {
-    const t0 = Date.now();
+// A change made: the geometry the helper read back (fresh, in its reply), the
+// fit's bookkeeping, and every stream resized in place.
+function fitApplied(r, asked, spec, w, tm, op, t0) {
+    const g = geomOf(r && r.mode) || { width: spec.w, height: spec.h, scale: spec.hidpi ? 2 : 1 };
+    Object.assign(fit, { w: g.width, h: g.height, pxW: Math.round(g.width * g.scale), pxH: Math.round(g.height * g.scale),
+        hidpi: g.scale >= 2, error: null, req: w.req, spec: asked, seq: w.req.seq });
+    tm.geom = nowMs(); tm.op = op;
+    fit.tm = tm;
+    resizeStreamsInPlace(g, `fit ${op}`, w.req.seq, tm);
+    log(`fit: ${op}`, `seq ${w.req.seq}`, `${g.width}x${g.height} pt`, `${fit.pxW}x${fit.pxH} px`,
+        `(box ${w.req.px.w}x${w.req.px.h} px, ${w.req.scale === 'auto' ? `auto ${w.req.auto}` : w.req.scale}% → ${spec.p}%${spec.why ? ' ' + spec.why : ''}${w.req.why ? ', ' + w.req.why : ''})`,
+        `helper ${Math.round(tm.reply - tm.cmd)} ms, ${Math.round(tm.geom - tm.recv)} ms since the request`, r && r.dry ? '(dry)' : '');
+    return true;
+}
+async function fitOn(spec, w, tm) {
+    const t0 = Date.now(), asked = spec;
     // Fit wins over a borrowed resolution: the Mac's own mode goes back first,
     // so the built-in returns to it when the fitted screen ends.
     for (let i = 0; disp.busy && i < 75; i++) await sleep(200);
@@ -1306,14 +1592,19 @@ async function fitOn(spec, w) {
     const c = vd.child, alive = () => vd.child === c;
     pauseVideo();
     saveFitState(0);
-    let r = await vdCmd(`create ${spec.pxW} ${spec.pxH} ${spec.hidpi ? 1 : 0} SoA Remote`, 25000);
+    tm.cmd = nowMs();
+    const maxArg = FIT_MAX_PX > 3840 ? ` maxpx ${FIT_MAX_PX}` : '';
+    let r = await vdCmd(`create ${spec.pxW} ${spec.pxH} ${spec.hidpi ? 1 : 0}${maxArg}${setArg(spec, w.req)} SoA Remote`, 25000);
+    let offered = offeredOf(r, spec);
     if (r && r.id) saveFitState(r.id);
     if (r && r.dry && !r.id) return fitFail('unavailable', 'dry run');
     if (r && !r.ok && r.id && spec.hidpi) {
         // The window server would not back this size at 2x: the same points at 1x.
         log('fit: 2x refused at', `${spec.w}x${spec.h} pt`, '— using 1x');
         spec = { ...spec, hidpi: false, pxW: spec.w, pxH: spec.h };
-        r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} 0`, 15000);
+        r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} 0`, FIT_RESIZE_TIMEOUT_MS);
+        if (r && r.ok) r.id = r.id || fit.id || (readFitState() || {}).id;
+        offered = offeredOf(r, spec);
     }
     if (!r || !r.ok || !r.id) return fitFail(!alive() ? 'lost' : r && /not available/.test(r.error || '') ? 'unavailable' : 'create', r ? r.error : 'no answer', r && r.id);
     const id = r.id;
@@ -1321,39 +1612,61 @@ async function fitOn(spec, w) {
     if (!alive()) return fitFail('lost', 'helper gone after mirror', id);
     if (!m || !m.ok) return fitFail('mirror', m ? m.error : 'no answer', id);
     const q = await vdOnce(['--query', String(id)]);
+    tm.reply = nowMs();
     // The helper can die (or macOS drop the display) while this ran: never
     // report a fitted screen that is not there, or map taps into it.
     if (!alive() || (q && q.online === false)) return fitFail('lost', 'display gone', id);
     if (q && q.main !== id) return fitFail('mirror', `the fitted screen is not the main display (main is ${q.main})`, id);
     const g = geomOf(q && q.mode) || { width: spec.w, height: spec.h, scale: spec.hidpi ? 2 : 1 };
     Object.assign(fit, { up: true, id, w: g.width, h: g.height, pxW: Math.round(g.width * g.scale), pxH: Math.round(g.height * g.scale),
-        hidpi: g.scale >= 2, text: w.text, error: null, keep: false, area: w.area });
+        hidpi: g.scale >= 2, error: null, keep: false, req: w.req, spec: asked, seq: w.req.seq, setHidpi: spec.hidpi, offered });
+    tm.geom = nowMs(); tm.op = 'on';
+    fit.tm = tm;
     endTransition(g, 'fit');
-    log('fit: on' + (r.dry ? ' (dry run: no display was made)' : ''), `${g.width}x${g.height} pt`, `${fit.pxW}x${fit.pxH} px`, `display ${id}`, `(area ${w.area.w}x${w.area.h} css, ${w.text})`, `${Date.now() - t0} ms`);
+    for (const e of encoders) if (!e.dead && !e.extended) e.sizeAsk = { w: e.w, h: e.h, at: Date.now(), seq: w.req.seq, gen: -1, tm, first: true };
+    log('fit: on' + (r.dry ? ' (dry run: no display was made)' : ''), `seq ${w.req.seq}`, `${g.width}x${g.height} pt`, `${fit.pxW}x${fit.pxH} px`, `display ${id}`,
+        `(box ${w.req.px.w}x${w.req.px.h} px, ${spec.p}%${spec.why ? ' ' + spec.why : ''})`, `${Date.now() - t0} ms`);
     return true;
 }
-async function fitResize(spec, w) {
+// A switch to a mode the display already offers (SOA_FIT_MODE_SET): no new
+// mode list for the window server to publish. Refused (not offered after
+// all): a resize instead.
+async function fitSelect(spec, w, tm) {
     const t0 = Date.now();
     const c = vd.child, alive = () => !!c && vd.child === c;
     if (!alive()) return fitFail('lost', 'no helper', fit.id);
-    pauseVideo();
-    let r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} ${spec.hidpi ? 1 : 0}`, 15000);
+    tm.cmd = nowMs();
+    const r = await vdCmd(`select ${spec.pxW} ${spec.pxH}`, FIT_SELECT_TIMEOUT_MS);
+    if (!alive()) return fitFail('lost', 'helper gone during a mode switch', fit.id);
+    if (!r || !r.ok) { log('fit: mode switch to', `${spec.pxW}x${spec.pxH}`, 'refused —', r ? r.error : 'no answer', '— resizing instead'); fit.offered = []; return fitResize(spec, w, tm); }
+    tm.reply = nowMs();
+    if (r.main && r.main !== fit.id) return fitFail('mirror', `the fitted screen is not the main display (main is ${r.main})`, fit.id);
+    return fitApplied(r, spec, spec, w, tm, 'select', t0);
+}
+async function fitResize(spec, w, tm) {
+    const t0 = Date.now(), asked = spec;
+    const c = vd.child, alive = () => !!c && vd.child === c;
+    if (!alive()) return fitFail('lost', 'no helper', fit.id);
+    const line = (s) => `resize ${s.pxW} ${s.pxH} ${s.hidpi ? 1 : 0}${setArg(s, w.req)}`;
+    tm.cmd = tm.cmd || nowMs();
+    let r = await vdCmd(line(spec), FIT_RESIZE_TIMEOUT_MS);
     if (r && !r.ok && spec.hidpi && vd.child && !/maximum/.test(r.error || '')) {
         log('fit: 2x refused at', `${spec.w}x${spec.h} pt`, '— using 1x');
-        spec = { ...spec, hidpi: false, pxW: spec.w, pxH: spec.h };
-        r = await vdCmd(`resize ${spec.pxW} ${spec.pxH} 0`, 15000);
+        spec = { ...spec, hidpi: false, pxW: spec.w, pxH: spec.h, why: [spec.why, '1x'].filter(Boolean).join(',') };
+        r = await vdCmd(line(spec), FIT_RESIZE_TIMEOUT_MS);
     }
-    if (r && !r.ok && /maximum/.test(r.error || '')) { await fitOff('re-create'); return fitOn(spec, w); }
+    if (r && !r.ok && /maximum/.test(r.error || '')) { log('fit: larger than the display allows — making a new one'); await fitOff('re-create'); return fitOn(asked, w, tm); }
     if (!alive()) return fitFail('lost', 'helper gone during resize', fit.id);
     if (!r || !r.ok) return fitFail('create', r ? r.error : 'no answer', fit.id);
-    const q = await vdOnce(['--query', String(fit.id)]);
+    tm.reply = nowMs();
+    // The helper's reply carries its own fresh read of the display; an older
+    // helper's does not, so ask.
+    let q = r.mode && r.mode.width ? r : await vdOnce(['--query', String(fit.id)]);
     if (!alive() || (q && q.online === false)) return fitFail('lost', 'display gone', fit.id);
-    if (q && q.main !== fit.id) return fitFail('mirror', `the fitted screen is not the main display (main is ${q.main})`, fit.id);
-    const g = geomOf(q && q.mode) || { width: spec.w, height: spec.h, scale: spec.hidpi ? 2 : 1 };
-    Object.assign(fit, { w: g.width, h: g.height, pxW: Math.round(g.width * g.scale), pxH: Math.round(g.height * g.scale), hidpi: g.scale >= 2, text: w.text, error: null, area: w.area });
-    endTransition(g, 'fit resize');
-    log('fit: resized', `${g.width}x${g.height} pt`, `${fit.pxW}x${fit.pxH} px`, `(area ${w.area.w}x${w.area.h} css, ${w.text})`, `${Date.now() - t0} ms`);
-    return true;
+    if (q && q.main && q.main !== fit.id) return fitFail('mirror', `the fitted screen is not the main display (main is ${q.main})`, fit.id);
+    fit.setHidpi = spec.hidpi;
+    fit.offered = offeredOf(r, spec);
+    return fitApplied(q, asked, spec, w, tm, 'resize', t0);
 }
 async function fitOff(why, knownId) {
     const id = knownId || fit.id || (readFitState() || {}).id || 0;
@@ -1370,7 +1683,7 @@ async function fitOff(why, knownId) {
     vdEnd();
     if (!r || r.unmirror === false) { await vdDrain(); const x = await vdOnce(restoreArgs(id)); log('fit: restore', JSON.stringify(x)); }
     clearFitState();
-    Object.assign(fit, { up: false, id: 0, keep: false, area: null });
+    Object.assign(fit, { up: false, id: 0, keep: false, req: null, spec: null, offered: [], tm: null });
     const g = geomOf(r && r.mainMode) || await systemScreen();
     endTransition(g, 'fit off');
     log('fit: off', `(${why})`, g ? `main ${r && r.main} ${g.width}x${g.height}` : '', `${Date.now() - t0} ms`);
@@ -1398,7 +1711,7 @@ function fitLost() {
             const x = await vdOnce(restoreArgs(fit.id));
             log('fit: helper lost — restore', JSON.stringify(x));
             clearFitState();
-            Object.assign(fit, { up: false, id: 0, keep: false, area: null, error: { code: 'lost', message: FIT_MESSAGES.lost, ws: fit.owner, dev: fit.ownerDev } });
+            Object.assign(fit, { up: false, id: 0, keep: false, req: null, spec: null, offered: [], tm: null, error: { code: 'lost', message: FIT_MESSAGES.lost, ws: fit.owner, dev: fit.ownerDev } });
             endTransition(await systemScreen(), 'fit lost');
         } catch (e) { log('fit: restore after a lost helper failed:', e.message); }
         finally {
@@ -1710,16 +2023,23 @@ function cleanDisplay(d) {
 function sourcePx(src) { const s = sourceFor(src) || screen, k = s.scale || 1; return { w: Math.round(s.width * k), h: Math.round(s.height * k) }; }
 // Fit the Mac's aspect into the viewer's physical pixels; zooming in asks for
 // more pixels (the visible part would otherwise be upscaled), up to the cap.
+// W_MIN and W_MAX bound the LONG side (a portrait fitted screen asked 1280
+// wide was taller than the phone). The fit's owner is never sent more than
+// its own picture box: the Mac has that shape, so this is pixel for pixel.
 function sizeFor(src) {
     const s = sourceFor(src) || screen, aspect = s.width / s.height;
-    const cap = Math.min(W_MAX, sourcePx(src).w);
+    const sp = sourcePx(src), longOf = (w) => Math.max(w, w / aspect);
     let w;
     if (isPreset(src.pref)) w = PRESETS[src.pref].h * aspect;
     else {
         const d = src.display || { w: 1920, h: 1080, zoom: 1 };
-        w = Math.max(W_MIN, Math.min(d.w, d.h * aspect) * Math.max(1, d.zoom || 1));
+        w = Math.min(d.w, d.h * aspect) * Math.max(1, d.zoom || 1);
+        const matched = fit.up && !src.extended && fitIsOwner(src);
+        if (!matched && longOf(w) < W_MIN) w *= W_MIN / longOf(w);
     }
-    w = even(Math.min(cap, w));
+    w = Math.min(w, sp.w, sp.h * aspect);
+    if (longOf(w) > W_MAX) w *= W_MAX / longOf(w);
+    w = even(w);
     return { w, h: even(w / aspect) };
 }
 function targetFor(e, src) {
@@ -1805,7 +2125,7 @@ function stopEncoder(e) {
     if (e.dead) return;
     e.dead = true;
     encoders.delete(e);
-    clearTimeout(e.resizeTimer); clearTimeout(e.idrTimer); clearTimeout(e.retryTimer);
+    clearTimeout(e.resizeTimer); clearTimeout(e.idrTimer); clearTimeout(e.retryTimer); clearTimeout(e.sizeDog);
     if (e.owner && e.owner.enc === e) e.owner.enc = null;
     const c = e.child; e.child = null; e.config = null;
     if (c) { endChild(c); log('video stopped', `(${encoders.size} running)`); }
@@ -1952,6 +2272,15 @@ function startEncoder(e) {
         if (e.child !== child) return;
         e.child = null; e.config = null;
         log('video', kind, 'stopped', code, stderr.trim().slice(-300));
+        // The display it captured changed size under it (a fit in place) and
+        // the capture ended: expected, restarted at once and not held against it.
+        if (e.sizeAsk && !e.sizeAsk.done && !e.sizeAsk.restarted && Date.now() - e.sizeAsk.at < 3000 && !e.dead) {
+            clearTimeout(e.sizeDog); e.sizeDog = null;
+            e.sizeAsk.restarted = true; e.sizeAsk.gen = -1;
+            log('video: the stream ended on the screen change — restarting it');
+            startEncoder(e);
+            return;
+        }
         videoFailed(e, kind, stderr.trim() || `exit ${code}`, e.gotFrame);
     });
     log('video started', kind, `${e.w}x${e.h}`, `${Math.round(e.bps / 1000)} kb/s`, `${VIDEO_FPS} fps`, `(${encoders.size} running)`);
@@ -2185,6 +2514,10 @@ function onAccessUnit(e, child, nals, key, ts) {
         if (sent !== sps && !spsPatchedLogged && (spsPatchedLogged = true)) log('video: SPS lacks bitstream_restriction — told the decoder not to wait for reordering');
     }
     if (!e.config || !keep.length) return;
+    if (e.sizeAsk && !e.sizeAsk.done) {
+        const a = e.sizeAsk;
+        if (a.gen === null ? ts >= a.at : a.gen === -1 || e.config.gen !== a.gen) sizeArrived(e, ts);
+    }
     let len = VIDEO_HDR;
     for (const n of keep) len += 4 + n.length;
     e.stat.frames++; e.stat.bytes += len;
