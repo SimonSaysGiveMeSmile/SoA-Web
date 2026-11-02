@@ -1,0 +1,720 @@
+#!/usr/bin/env node
+/**
+ * soa-dictate — on-device dictation engine for the dashboard and the phone.
+ *
+ * A loopback-only service (default 127.0.0.1:6082) reached through the
+ * daemon's /preview/<port>/ proxy, so it rides the same tunnel and the same
+ * pairing gate as everything else and needs no daemon restart:
+ *
+ *     GET  /health          engine + queue state            (no transcripts)
+ *     GET  /token           a 10-minute socket token        (daemon: gated)
+ *     POST /transcribe      one-shot: body = WAV or raw PCM16 16 kHz mono
+ *     WS   /ws?token=…      streaming dictation (protocol below)
+ *
+ * The HTTP side sits behind the daemon's gate; a WebSocket upgrade is gated
+ * here as well, by a token that only /token mints. The page's own t / u
+ * query params may ride along on the socket URL and are ignored.
+ *
+ * Recognizer: whisper.cpp (`whisper-server`, Metal) kept WARM as a
+ * long-lived child on a private loopback port — never a process per
+ * utterance. A fallback model is started only if the primary cannot run.
+ *
+ * Socket protocol (all JSON text frames, except audio):
+ *   client → {t:'start', lang?:'auto'|'en'|'zh'|<iso>, silenceMs?, partials?, prompt?}
+ *            binary: PCM16 little-endian, mono, 16 000 Hz, any frame size
+ *            (20–40 ms recommended); only accepted between start and stop
+ *            {t:'end'}    the client marks the end of an utterance now
+ *            {t:'stop'}   finish: the open utterance is finalised, then
+ *                         {t:'stopped'} is sent
+ *            {t:'ping'}   → {t:'pong'}
+ *   server → {t:'hello', sampleRate:16000, engine, langs, maxUtteranceMs}
+ *            {t:'started', lang}       lang: an unknown code falls back to 'auto'
+ *            {t:'vad', speaking:true|false}
+ *            {t:'partial', id, text}           optional, while speaking
+ *            {t:'final', id, text, ms, lang, audioMs}
+ *                 ms = from the end of speech (VAD or 'end') to this send
+ *                 text may be '' (a non-speech segment that was filtered);
+ *                 skipped:'too_short' (<200 ms) or 'noise' (flat-energy audio:
+ *                 hum, fan, white noise) marks a segment that was never decoded
+ *            {t:'error', code, message}        codes: bad_message, not_started,
+ *                 overloaded, engine_unavailable, engine_error
+ *            {t:'stopped'}
+ *
+ * Env: SOA_DICTATE_PORT, SOA_DICTATE_MODELS (comma list, first runnable wins),
+ * SOA_DICTATE_SILENCE_MS, SOA_DICTATE_MAX_UTTER_MS, SOA_DICTATE_MAX_SOCKETS,
+ * SOA_DICTATE_TOKEN_TTL_MS, SOA_DICTATE_THREADS, SOA_WHISPER_SERVER.
+ *
+ * Segmentation is server-side (an adaptive energy VAD); a client that does
+ * its own can send {t:'end'} at each pause — both may be used together.
+ */
+'use strict';
+
+const http = require('node:http');
+const net = require('node:net');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn, execFile } = require('node:child_process');
+const WebSocket = require('ws');
+
+// ── config ───────────────────────────────────────────────────────────────
+const env = process.env;
+const PORT = parseInt(env.SOA_DICTATE_PORT || '6082', 10);
+const HOST = '127.0.0.1';
+const STATE_DIR = env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
+const MODEL_DIR = env.SOA_DICTATE_MODEL_DIR || path.join(STATE_DIR, 'dictate', 'models');
+const WHISPER_SERVER = env.SOA_WHISPER_SERVER || 'whisper-server';
+const OPENCC = env.SOA_OPENCC || 'opencc';
+const MODELS = (env.SOA_DICTATE_MODELS || 'ggml-small.bin,ggml-base.bin')
+    .split(',').map((s) => s.trim()).filter(Boolean);          // first runnable one wins
+const THREADS = String(parseInt(env.SOA_DICTATE_THREADS || '4', 10));
+const TOKEN_TTL_MS = clampInt(env.SOA_DICTATE_TOKEN_TTL_MS, 10 * 60 * 1000, 5000, 60 * 60 * 1000);
+const SR = 16000;
+const FRAME = 320;                                              // 20 ms analysis frames
+const SILENCE_MS = clampInt(env.SOA_DICTATE_SILENCE_MS, 400, 150, 3000);
+const PREROLL_MS = 240;
+const MIN_SPEECH_MS = 200;
+const MAX_UTTER_MS = clampInt(env.SOA_DICTATE_MAX_UTTER_MS, 20000, 3000, 30000);
+const PARTIAL_EVERY_MS = 900;
+const MAX_SOCKETS = clampInt(env.SOA_DICTATE_MAX_SOCKETS, 8, 1, 64);
+const MAX_PENDING = 4;                                          // finals queued per socket
+const MAX_RSS_MB = clampInt(env.SOA_DICTATE_MAX_RSS_MB, 3000, 500, 16000);
+const INFER_TIMEOUT_MS = 20000;
+const ZH_PROMPT = '以下是普通话的句子。';
+// Languages whisper knows. Anything else is decoded as 'auto': an unknown code
+// makes whisper.cpp emit seconds of garbage and blocks the engine for everyone.
+const WHISPER_LANGS = new Set(('en zh de es ru ko fr ja pt tr pl ca nl ar sv it id hi fi vi he uk el ms cs ro da hu ta no th ur hr bg lt la mi ml cy sk te fa lv bn sr az sl kn et mk br eu is hy ne mn bs kk sq sw gl mr pa si km sn yo so af oc ka be tg sd gu am yi lo uz fo ht ps tk nn mt sa lb my bo tl mg as tt haw ln ha ba jw su yue').split(' '));
+function pickLang(v) { return typeof v === 'string' && (v === 'auto' || WHISPER_LANGS.has(v)) ? v : 'auto'; }
+// Only loopback Host headers are served (the daemon's /preview proxy rewrites
+// Host to 127.0.0.1:<port>), so a web page that rebinds its own DNS name to
+// 127.0.0.1 cannot read /token or open the socket.
+function hostOk(req) {
+    const h = String(req.headers.host || '').toLowerCase();
+    return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `[::1]:${PORT}`;
+}
+const TEST_KEY = (() => {
+    const f = path.join(STATE_DIR, 'dictate', 'test-key');
+    try { fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 }); } catch (_) {}
+    try { return fs.readFileSync(f, 'utf8').trim(); } catch (_) {}
+    try { const k = crypto.randomBytes(18).toString('base64url'); fs.writeFileSync(f, k, { mode: 0o600 }); return k; } catch (_) { return ''; }
+})();
+
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+function clampInt(v, d, lo, hi) { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; }
+
+// ── engine: a warm whisper-server child ──────────────────────────────────
+const engine = {
+    model: null, multilingual: false, port: 0, proc: null, ready: false, starting: false,
+    restarts: 0, failures: 0, lastError: '', rssMB: 0, startedAt: 0, coldMs: 0, busy: false,
+};
+
+function freePort() {
+    return new Promise((resolve, reject) => {
+        const s = net.createServer(); s.unref();
+        s.on('error', reject);
+        s.listen(0, HOST, () => { const p = s.address().port; s.close(() => resolve(p)); });
+    });
+}
+
+function runnableModels() {
+    return MODELS.map((m) => (path.isAbsolute(m) ? m : path.join(MODEL_DIR, m)))
+        .filter((m) => { try { return fs.statSync(m).size > 1e6; } catch (_) { return false; } });
+}
+
+// A service killed with SIGKILL cannot take its engine down with it; the
+// orphan (re-parented to launchd, ~700 MB resident) is reaped on the next boot.
+function reapOrphans() {
+    return new Promise((resolve) => {
+        execFile('/bin/ps', ['-axo', 'pid=,ppid=,command='], (err, out) => {
+            if (err) return resolve();
+            for (const line of String(out).split('\n')) {
+                const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+                if (!m || m[2] !== '1') continue;
+                if (/(^|\/)whisper-server\s/.test(m[3]) && m[3].includes(MODEL_DIR + path.sep)) {
+                    try { process.kill(+m[1], 'SIGKILL'); log('engine: reaped an orphaned engine', m[1]); } catch (_) {}
+                }
+            }
+            resolve();
+        });
+    });
+}
+
+let modelCursor = 0;
+async function startEngine() {
+    if (engine.starting || engine.ready) return;
+    const models = runnableModels();
+    if (!models.length) { engine.lastError = 'no model files in ' + path.basename(MODEL_DIR); log('engine: no model'); setTimeout(startEngine, 30000); return; }
+    // After repeated failures on one model, move on to the next (fallback).
+    const model = models[Math.min(modelCursor, models.length - 1)];
+    engine.starting = true;
+    engine.port = await freePort();
+    engine.model = path.basename(model);
+    engine.multilingual = !/\.en(\.|-|_)/.test(engine.model);
+    const t0 = Date.now();
+    const args = ['-m', model, '-t', THREADS, '--host', HOST, '--port', String(engine.port),
+        '-l', engine.multilingual ? 'auto' : 'en', '-nt', '-sns', '-nth', '0.6'];
+    log('engine: starting', engine.model, 'port', engine.port);
+    const proc = spawn(WHISPER_SERVER, args, { stdio: ['ignore', 'ignore', 'pipe'], cwd: os.tmpdir() });
+    engine.proc = proc;
+    let errTail = '';
+    proc.stderr.on('data', (d) => { errTail = (errTail + d.toString()).slice(-2000); });
+    proc.on('error', (e) => { engine.lastError = e.message; });
+    proc.on('exit', (code, sig) => {
+        const wasReady = engine.ready;
+        engine.ready = false; engine.starting = false; engine.proc = null;
+        if (shuttingDown) return;
+        engine.failures++;
+        engine.lastError = `exit ${code ?? sig}` + (wasReady ? '' : ' during start: ' + errTail.split('\n').filter(Boolean).slice(-1)[0]);
+        log('engine: exited', engine.model, code ?? sig, wasReady ? '(was ready)' : '(during start)');
+        if (!wasReady && engine.failures >= 3 && modelCursor < runnableModels().length - 1) { modelCursor++; engine.failures = 0; log('engine: falling back to the next model'); }
+        engine.restarts++;
+        setTimeout(startEngine, Math.min(30000, 1000 * 2 ** Math.min(engine.failures, 5)));
+    });
+    // Ready when the HTTP side answers; the first decode allocates the graph,
+    // so warm it with a short silent clip before declaring the engine ready.
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline && engine.proc === proc) {
+        if (await probe(engine.port)) break;
+        await sleep(150);
+    }
+    if (engine.proc !== proc) return;
+    try { await inferRaw(new Int16Array(SR / 2), { lang: engine.multilingual ? 'en' : 'en' }); } catch (_) {}
+    if (engine.proc !== proc) return;
+    engine.ready = true; engine.starting = false; engine.startedAt = Date.now(); engine.coldMs = Date.now() - t0; engine.failures = 0;
+    log('engine: ready', engine.model, `cold ${engine.coldMs} ms`);
+    for (const ws of sockets) send(ws, { t: 'engine', engine: engineInfo() });
+    pump();
+}
+
+function probe(port) {
+    return new Promise((resolve) => {
+        const r = http.get({ host: HOST, port, path: '/', timeout: 1000 }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+        r.on('timeout', () => r.destroy()); r.on('error', () => resolve(false));
+    });
+}
+
+function engineInfo() {
+    return { name: 'whisper.cpp', model: engine.model, ready: engine.ready, multilingual: engine.multilingual,
+        device: 'on-device (this Mac, Metal)' };
+}
+
+function wavFrom(pcm) {
+    const data = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVE', 8);
+    h.write('fmt ', 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+    h.writeUInt32LE(SR, 24); h.writeUInt32LE(SR * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+    h.write('data', 36); h.writeUInt32LE(data.length, 40);
+    return Buffer.concat([h, data]);
+}
+
+// Plain 'json' is the fast path (verbose_json costs ~100 ms more per decode on
+// this class of Mac); the verbose form, with its confidence figures, is asked
+// for only to vet a result that looks like a silence hallucination.
+// One multipart POST over a kept-alive loopback socket (node:http rather
+// than fetch: the latter's per-request native buffers grew the RSS by a few
+// MB per hundred decodes in the soak test).
+const agent = new http.Agent({ keepAlive: true, maxSockets: 2 });
+function inferRaw(pcm, { lang, prompt, verbose }) {
+    const l = engine.multilingual ? (lang || 'auto') : 'en';
+    const p = prompt || (l === 'zh' ? ZH_PROMPT : '');
+    const fields = { response_format: verbose ? 'verbose_json' : 'json', temperature: '0', temperature_inc: '0.2', language: l };
+    if (p) fields.prompt = p.slice(0, 400);
+    const B = '----soa' + crypto.randomBytes(8).toString('hex');
+    const parts = [];
+    for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+    parts.push(Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n`));
+    parts.push(wavFrom(pcm), Buffer.from(`\r\n--${B}--\r\n`));
+    const body = Buffer.concat(parts);
+    return new Promise((resolve, reject) => {
+        const req = http.request({ host: HOST, port: engine.port, path: '/inference', method: 'POST', agent,
+            headers: { 'content-type': `multipart/form-data; boundary=${B}`, 'content-length': body.length } }, (res) => {
+            const chunks = [];
+            res.on('data', (d) => chunks.push(d));
+            res.on('end', () => {
+                if (res.statusCode !== 200) return reject(new Error('inference http ' + res.statusCode));
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(new Error('inference bad json')); }
+            });
+            res.on('error', reject);
+        });
+        req.setTimeout(INFER_TIMEOUT_MS, () => req.destroy(new Error('inference timeout')));
+        req.on('error', reject);
+        req.end(body);
+    });
+}
+
+// ── output clean-up ─────────────────────────────────────────────────────
+// Whisper, fed silence or noise, invents subtitles. Tags are always removed;
+// whole-line stock phrases are dropped only when the decode itself is weak
+// (so a clearly spoken "thank you" survives).
+const TAG_RE = /\[[^\]]{0,40}\]|\((?:music|applause|laughter|laughs|silence|noise|inaudible|blank_audio|upbeat music|static|wind|sighs|coughs|beep)[^)]{0,20}\)|\*[^*]{0,30}\*|[♪♫]+/gi;
+const STOCK = [
+    /^(thank you|thanks)( (so|very) much)?( for (watching|listening))?[.!]*$/i,
+    /^(please )?(like and )?subscribe.*$/i, /^bye[.!]*$/i, /^you[.!]*$/i, /^(uh|um|hmm|oh|ah|so)[.!]*$/i, /^(beep|bip|ding)[.!]*$/i,
+    /^\.+$/, /^-+$/, /^subtitles? by.*$/i, /^transcri(bed|ption) by.*$/i, /^www\.\S+$/i,
+    /^(谢谢|謝謝)(大家|观看|觀看|收看)?[。！!]*$/, /^字幕.*$/, /^.*(点赞|點贊|订阅|訂閱).*(转发|轉發|打赏|打賞).*$/, /^请不吝.*$/, /^明镜.*$/,
+];
+const ALWAYS_DROP = [/^subtitles? by.*$/i, /^.*(点赞|點贊).*(订阅|訂閱).*$/, /^字幕(由|提供|製作|制作).*$/, /^www\.\S+$/i];
+
+function stripTags(text, prompt) {
+    text = String(text || '').replace(TAG_RE, ' ').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    if (prompt && text.replace(/\s/g, '') === prompt.replace(/\s/g, '')) return '';
+    if (ALWAYS_DROP.some((re) => re.test(text))) return '';
+    // A decode that loops one phrase ("the the the …") is a known failure.
+    const words = text.split(' ');
+    if (words.length >= 8 && new Set(words.map((w) => w.toLowerCase())).size <= 2) return '';
+    return text;
+}
+const looksStock = (text) => STOCK.some((re) => re.test(text));
+
+// Is a stock-phrase result real speech? Ask the decoder how sure it was.
+function weakDecode(j) {
+    const segs = Array.isArray(j.segments) ? j.segments : [];
+    if (!segs.length) return true;
+    const lp = segs.reduce((a, s) => a + (s.avg_logprob ?? 0), 0) / segs.length;
+    const nsp = Math.max(...segs.map((s) => s.no_speech_prob ?? 0));
+    return lp < -0.55 || nsp > 0.5;
+}
+
+function noiseDecode(j) {
+    const segs = Array.isArray(j.segments) ? j.segments : [];
+    if (!segs.length) return true;
+    const lp = segs.reduce((a, s) => a + (s.avg_logprob ?? 0), 0) / segs.length;
+    const nsp = Math.max(...segs.map((s) => s.no_speech_prob ?? 0));
+    return lp < -0.5 || nsp > 0.6;
+}
+
+// The plain json form carries no language; read it off the script.
+function scriptLang(text, asked) {
+    if (/[\u3040-\u30ff]/.test(text)) return 'ja';
+    if (/[\uac00-\ud7af]/.test(text)) return 'ko';
+    if (/[\u3400-\u9fff]/.test(text)) return 'zh';
+    return asked && asked !== 'auto' ? asked : 'en';
+}
+
+function toSimplified(text) {
+    if (!/[㐀-鿿]/.test(text)) return Promise.resolve(text);
+    return new Promise((resolve) => {
+        const p = execFile(OPENCC, ['-c', 't2s'], { timeout: 2000 }, (err, out) => resolve(err ? text : String(out).trim() || text));
+        p.stdin.end(text);
+    });
+}
+
+
+// ── fair queue across sockets ───────────────────────────────────────────
+// Each socket keeps its own FIFO; the scheduler takes one job per socket in
+// rotation — finals, then speculative finals, then partials — so one chatty
+// client never starves the others. whisper-server decodes one at a time.
+//
+// Speculative final: SPEC_MS into a pause (well before the VAD hangover
+// ends) the utterance is decoded while the engine is idle. If the speaker
+// stays silent, that result IS the final and goes out the moment the pause
+// is confirmed, so the decode is off the critical path; if they resume, it
+// is discarded.
+const SPEC_MS = 160;
+const sockets = new Set();
+let rr = [];
+let inflight = null;
+const stats = { utterances: 0, partials: 0, specHits: 0, dropped: 0, errors: 0, noise: 0, lat: [] };
+const TIERS = ['final', 'spec', 'partial'];
+
+function enqueue(ws, job) {
+    if (job.kind === 'partial') {
+        if (ws.jobs.length) return;                                  // anything else waiting wins
+    } else if (job.kind === 'final' && ws.jobs.filter((j) => j.kind === 'final').length >= MAX_PENDING) {
+        stats.dropped++;
+        send(ws, { t: 'error', code: 'overloaded', message: 'too many utterances waiting; one was dropped', id: job.id });
+        return;
+    } else if (job.kind === 'final') ws.jobs = ws.jobs.filter((j) => j.kind !== 'partial');
+    if (job.kind === 'final') ws.awaiting++;
+    ws.jobs.push(job);
+    pump();
+}
+
+function nextJob() {
+    for (const kind of TIERS) {
+        for (let i = 0; i < rr.length; i++) {
+            const ws = rr[i];
+            if (!sockets.has(ws)) continue;
+            const k = ws.jobs.findIndex((j) => j.kind === kind && !(j.spec && j.spec.dead));
+            if (k >= 0) { rr.splice(i, 1); rr.push(ws); return { ws, job: ws.jobs.splice(k, 1)[0] }; }
+        }
+    }
+    for (const ws of sockets) ws.jobs = ws.jobs.filter((j) => !(j.spec && j.spec.dead));
+    return null;
+}
+
+async function recognise(ws, job) {
+    // Flat-energy audio (a fan, traffic, a hum under the voice) is where whisper
+    // invents text, so such an utterance is decoded in the verbose form and
+    // vetted by the decoder's own confidence: clear speech scores near -0.1
+    // avg logprob, noise -0.6 and below. Partials of it are not shown at all.
+    const flat = job.spread != null && job.spread < VET_SPREAD_DB;
+    if (flat && job.kind === 'partial') return { text: '', lang: job.lang };
+    const j = await inferRaw(job.pcm, { lang: job.lang, prompt: job.prompt, verbose: flat });
+    let text = stripTags(j.text, job.prompt || (job.lang === 'zh' ? ZH_PROMPT : ''));
+    if (text && flat && noiseDecode(j)) text = '';
+    if (text && looksStock(text)) {
+        if (job.kind === 'partial') text = '';
+        else if (weakDecode(flat ? j : await inferRaw(job.pcm, { lang: job.lang, prompt: job.prompt, verbose: true }))) text = '';
+    }
+    const lang = scriptLang(text, job.lang);
+    if (lang === 'zh' && ws.zhScript !== 'hant') text = await toSimplified(text);
+    return { text, lang };
+}
+
+function emitFinal(ws, { id, text, lang, endAt, audioMs, inferMs, spec }) {
+    const ms = Math.max(0, Date.now() - endAt);
+    stats.utterances++; stats.lat.push(ms); if (stats.lat.length > 200) stats.lat.shift();
+    if (spec) stats.specHits++;
+    send(ws, { t: 'final', id, text, ms, inferMs, lang, audioMs });
+    log('final', `sock ${ws.n}`, `audio ${audioMs} ms`, `infer ${inferMs} ms`, `total ${ms} ms`, `chars ${text.length}`, lang, spec ? 'spec' : '');
+    settle(ws);
+}
+
+function settle(ws) {
+    ws.awaiting = Math.max(0, ws.awaiting - 1);
+    if (ws.stopPending && ws.awaiting === 0) { ws.stopPending = false; send(ws, { t: 'stopped' }); }
+}
+
+async function pump() {
+    if (inflight || !engine.ready) return;
+    const n = nextJob();
+    if (!n) return;
+    const { ws, job } = n;
+    inflight = { ws, job };
+    engine.busy = true;
+    const t0 = Date.now();
+    try {
+        const r = await recognise(ws, job);
+        const inferMs = Date.now() - t0;
+        if (job.kind === 'final') emitFinal(ws, { ...r, id: job.id, endAt: job.endAt, audioMs: job.audioMs, inferMs });
+        else if (job.kind === 'spec') {
+            const s = job.spec;
+            s.result = { ...r, inferMs }; s.state = 'done';
+            if (s.promote && !s.dead) emitFinal(ws, { ...s.result, ...s.promote, spec: true });
+        } else if (ws.utterId === job.id && r.text) {
+            stats.partials++;
+            send(ws, { t: 'partial', id: job.id, text: r.text });
+        }
+    } catch (e) {
+        stats.errors++;
+        log('inference failed', e.message);
+        const promoted = job.kind === 'spec' && job.spec.promote && !job.spec.dead;
+        if (job.kind === 'final' || promoted) {
+            send(ws, { t: 'error', code: 'engine_error', message: 'recognition failed for one utterance', id: job.id });
+            settle(ws);
+        } else if (job.kind === 'spec') job.spec.state = 'failed';
+        if (engine.proc && /timeout|abort/i.test(e.message)) { log('engine: hung, restarting'); engine.proc.kill('SIGKILL'); }
+    } finally {
+        inflight = null; engine.busy = false;
+        setImmediate(pump);
+    }
+}
+
+// ── per-socket VAD + utterance assembly ─────────────────────────────────
+function newStream(ws, m) {
+    const lang = pickLang(m.lang);
+    ws.lang = lang;
+    ws.prompt = typeof m.prompt === 'string' ? m.prompt.slice(0, 400) : '';
+    ws.silenceMs = clampInt(m.silenceMs, SILENCE_MS, 150, 3000);
+    ws.partials = m.partials !== false;
+    ws.zhScript = m.zhScript === 'hant' ? 'hant' : 'hans';
+    ws.active = true;
+    ws.floor = -60;                    // adaptive noise floor, dBFS
+    ws.carry = new Int16Array(0);      // samples not yet in a full frame
+    ws.pre = [];                       // pre-roll frames while silent
+    ws.utter = null;                   // {frames, id, speechFrames, silentRun, spec}
+    ws.onRun = 0;
+    ws.speaking = false;
+    ws.lastPartialAt = 0;
+    ws.audioIn = 0; ws.t0 = Date.now(); ws.rateWarned = false;
+}
+
+function frameDb(f) {
+    let s = 0;
+    for (let i = 0; i < f.length; i++) s += f[i] * f[i];
+    return 10 * Math.log10(s / f.length / (32768 * 32768) + 1e-12);
+}
+
+function onAudio(ws, buf) {
+    if (!ws.active) return;
+    if (buf.length % 2) buf = buf.subarray(0, buf.length - 1);
+    // Rate guard: a client may not push audio much faster than real time.
+    ws.audioIn += buf.length / 2;
+    const allowed = ((Date.now() - ws.t0) / 1000 + 5) * SR * (ws.fast ? 50 : 3);
+    if (ws.audioIn > allowed) { if (!ws.rateWarned) { ws.rateWarned = true; send(ws, { t: 'error', code: 'overloaded', message: 'audio arriving faster than real time; frames dropped' }); } return; }
+    const a = new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+    let all = a;
+    if (ws.carry.length) { all = new Int16Array(ws.carry.length + a.length); all.set(ws.carry); all.set(a, ws.carry.length); }
+    let off = 0;
+    for (; off + FRAME <= all.length; off += FRAME) vadFrame(ws, all.slice(off, off + FRAME));
+    ws.carry = all.slice(off);
+}
+
+function newUtter(ws, frames, speechFrames, pre) {
+    ws.utter = { frames, id: crypto.randomBytes(4).toString('hex'), speechFrames, silentRun: 0, spec: null, pre: pre || 0 };
+    ws.utterId = ws.utter.id;
+    ws.lastPartialAt = Date.now();
+    if (!ws.speaking) { ws.speaking = true; send(ws, { t: 'vad', speaking: true, id: ws.utter.id }); }
+}
+
+function vadFrame(ws, f) {
+    const db = frameDb(f);
+    const onThresh = Math.max(ws.floor + 12, -50);
+    const offThresh = Math.max(ws.floor + 7, -55);
+    if (!ws.utter) {
+        // Silence: track the floor (fast down, slow up) and keep a pre-roll.
+        ws.floor = db < ws.floor ? ws.floor * 0.9 + db * 0.1 : ws.floor * 0.995 + db * 0.005;
+        ws.floor = Math.min(Math.max(ws.floor, -90), -30);
+        ws.pre.push(f); if (ws.pre.length > PREROLL_MS / 20) ws.pre.shift();
+        ws.onRun = db > onThresh ? ws.onRun + 1 : 0;
+        if (ws.onRun >= 3) { newUtter(ws, ws.pre.slice(), ws.onRun, Math.max(0, ws.pre.length - ws.onRun)); ws.pre = []; ws.onRun = 0; }   // 60 ms of voice
+        return;
+    }
+    const u = ws.utter;
+    u.frames.push(f);
+    if (db > offThresh) {
+        u.speechFrames++; u.silentRun = 0;
+        if (u.spec) { u.spec.dead = true; u.spec = null; }          // they kept talking
+    } else u.silentRun++;
+    const durMs = u.frames.length * 20;
+    if (u.silentRun * 20 >= ws.silenceMs) { closeUtterance(ws, 'vad'); return; }
+    // A long ramble is cut at a breath, not mid-word: in the last SOFT_MS before
+    // the cap any 120 ms dip ends the utterance; at the cap it is split at the
+    // quietest frame of the last 1.5 s and the rest carries into the next one.
+    if (durMs >= MAX_UTTER_MS - SOFT_MS && u.silentRun >= 6) { closeUtterance(ws, 'vad'); return; }
+    if (durMs >= MAX_UTTER_MS) { splitAtQuietest(ws); return; }
+    if (!u.spec && u.silentRun * 20 >= Math.min(SPEC_MS, ws.silenceMs / 2) && u.speechFrames * 20 >= MIN_SPEECH_MS && !inflight) {
+        u.spec = { state: 'pending', dead: false, promote: null, result: null };
+        enqueue(ws, { kind: 'spec', id: u.id, spec: u.spec, pcm: trimmedPcm(u), lang: ws.lang, prompt: ws.prompt, spread: voicedSpread(u) });
+        return;
+    }
+    if (ws.partials && u.silentRun === 0 && durMs >= 1200 && Date.now() - ws.lastPartialAt >= PARTIAL_EVERY_MS && !inflight) {
+        ws.lastPartialAt = Date.now();
+        enqueue(ws, { kind: 'partial', id: u.id, pcm: joinFrames(u.frames), lang: ws.lang, prompt: ws.prompt, spread: voicedSpread(u) });
+    }
+}
+
+const SOFT_MS = 5000;
+// Speech rises and falls by 15-30 dB between syllables and pauses; stationary
+// noise and hum stay within a few dB. Spread = p90 - p10 of the frame levels.
+const NOISE_SPREAD_DB = 5;          // below: not speech, never decoded
+const VET_SPREAD_DB = 12;           // below: decoded, then vetted for confidence
+// Measured over the voiced span only: the silent pre-roll and the closing
+// pause would otherwise make noise that starts abruptly look like speech.
+function voicedSpread(u) { return spreadDb(u.frames.slice(u.pre, Math.max(u.pre, u.frames.length - u.silentRun))); }
+function spreadDb(frames) {
+    const d = frames.map(frameDb).filter((x) => x > -70).sort((a, b) => a - b);
+    if (d.length < 5) return 0;
+    return d[Math.floor(0.9 * (d.length - 1))] - d[Math.floor(0.1 * (d.length - 1))];
+}
+function splitAtQuietest(ws) {
+    const u = ws.utter;
+    if (u.spec) { u.spec.dead = true; u.spec = null; }
+    const look = Math.min(75, u.frames.length - 1);
+    let best = u.frames.length - 1, bestDb = Infinity;
+    for (let i = u.frames.length - look; i < u.frames.length; i++) { const d = frameDb(u.frames[i]); if (d < bestDb) { bestDb = d; best = i; } }
+    const rest = u.frames.slice(best + 1);
+    u.frames = u.frames.slice(0, best + 1);
+    u.silentRun = 0;
+    closeUtterance(ws, 'max');
+    newUtter(ws, rest, rest.length);
+}
+
+function joinFrames(frames) {
+    const out = new Int16Array(frames.length * FRAME);
+    frames.forEach((f, i) => out.set(f, i * FRAME));
+    return out;
+}
+
+// The utterance without its trailing silence (keeping ~160 ms for the
+// decoder), so a speculative decode and the final see the same audio.
+function trimmedPcm(u) {
+    const cut = Math.max(0, u.silentRun - 8);
+    return joinFrames(cut ? u.frames.slice(0, u.frames.length - cut) : u.frames);
+}
+
+function closeUtterance(ws, why) {
+    const u = ws.utter;
+    ws.utter = null;
+    if (ws.speaking) { ws.speaking = false; send(ws, { t: 'vad', speaking: false, id: u && u.id }); }
+    if (!u) return false;
+    if (u.speechFrames * 20 < MIN_SPEECH_MS) {
+        if (u.spec) u.spec.dead = true;
+        send(ws, { t: 'final', id: u.id, text: '', ms: 0, lang: ws.lang, audioMs: 0, skipped: 'too_short' });
+        return false;
+    }
+    // Latency is measured from the moment speech ended, not from detection.
+    // (A loopback test stream runs faster than real time: there, from now.)
+    const endAt = ws.fast || why !== 'vad' ? Date.now() : Date.now() - u.silentRun * 20;
+    const pcm = trimmedPcm(u);
+    const audioMs = Math.round(pcm.length / 16);
+    const spread = voicedSpread(u);
+    if (spread < NOISE_SPREAD_DB) {
+        if (u.spec) u.spec.dead = true;
+        stats.noise++;
+        send(ws, { t: 'final', id: u.id, text: '', ms: 0, lang: ws.lang, audioMs, skipped: 'noise' });
+        return false;
+    }
+    const s = u.spec;
+    if (s && !s.dead && s.state !== 'failed') {
+        ws.awaiting++;
+        if (s.state === 'done') emitFinal(ws, { ...s.result, id: u.id, endAt, audioMs, spec: true });
+        else s.promote = { id: u.id, endAt, audioMs };                // emitted when the decode lands
+        return true;
+    }
+    enqueue(ws, { kind: 'final', id: u.id, pcm, lang: ws.lang, prompt: ws.prompt, endAt, audioMs, spread });
+    return true;
+}
+
+// ── tokens ──────────────────────────────────────────────────────────────
+const tokens = new Map();
+function mintToken() {
+    const t = crypto.randomBytes(24).toString('base64url');
+    tokens.set(t, Date.now() + TOKEN_TTL_MS);
+    for (const [k, exp] of tokens) if (exp < Date.now()) tokens.delete(k);
+    return t;
+}
+function tokenOk(t) { return !!t && tokens.has(t) && tokens.get(t) > Date.now(); }
+
+// ── http + ws ───────────────────────────────────────────────────────────
+function send(ws, m) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); }
+function json(res, code, obj) { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(obj)); }
+const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
+
+const server = http.createServer((req, res) => {
+    if (!hostOk(req)) { res.writeHead(403); res.end('forbidden'); return; }
+    const url = new URL(req.url, 'http://x');
+    const p = url.pathname.replace(/\/+$/, '') || '/';
+    if (p === '/health' || p === '/') {
+        return json(res, 200, { ok: engine.ready, service: 'soa-dictate', engine: { ...engineInfo(), coldMs: engine.coldMs, restarts: engine.restarts,
+            rssMB: engine.rssMB, busy: engine.busy, lastError: engine.ready ? '' : engine.lastError, models: runnableModels().map((m) => path.basename(m)) },
+            sockets: sockets.size, streaming: [...sockets].filter((s) => s.active).length, queued: [...sockets].reduce((a, s) => a + s.jobs.length, 0),
+            stats: { utterances: stats.utterances, partials: stats.partials, specHits: stats.specHits, noise: stats.noise, dropped: stats.dropped, errors: stats.errors, p50ms: pct(stats.lat, 0.5), p95ms: pct(stats.lat, 0.95) },
+            sampleRate: SR, rssMB: Math.round(process.memoryUsage().rss / 1048576), heapMB: Math.round(process.memoryUsage().heapUsed / 1048576), buffersMB: Math.round(process.memoryUsage().arrayBuffers / 1048576) });
+    }
+    if (p === '/token') {
+        return json(res, 200, { token: mintToken(), ttl: TOKEN_TTL_MS, ws: 'ws', sampleRate: SR, engine: engineInfo() });
+    }
+    if (p === '/transcribe' && req.method === 'POST') {
+        const chunks = []; let size = 0;
+        req.on('data', (d) => { size += d.length; if (size > MAX_UTTER_MS * 32 + 1024) { req.destroy(); return; } chunks.push(d); });
+        req.on('end', () => {
+            let b = Buffer.concat(chunks);
+            if (b.slice(0, 4).toString() === 'RIFF') { const i = b.indexOf('data'); b = i > 0 ? b.subarray(i + 8) : b.subarray(44); }
+            if (b.length % 2) b = b.subarray(0, b.length - 1);
+            const pcm = new Int16Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.length));
+            const lang = pickLang(url.searchParams.get('lang'));
+            if (!engine.ready) return json(res, 503, { t: 'error', code: 'engine_unavailable' });
+            if (pcm.length < SR * MIN_SPEECH_MS / 1000) return json(res, 200, { t: 'final', id: 'http', text: '', ms: 0, lang, audioMs: Math.round(pcm.length / 16), skipped: 'too_short' });
+            // A one-shot request rides the same fair queue as a socket.
+            const done = () => { sockets.delete(ws); rr = rr.filter((x) => x !== ws); };
+            const ws = { readyState: WebSocket.OPEN, jobs: [], awaiting: 0, n: 'http', zhScript: 'hans',
+                send: (s) => { const m = JSON.parse(s); if (m.t === 'final' || m.t === 'error') { done(); json(res, m.t === 'final' ? 200 : 502, m); } } };
+            sockets.add(ws); rr.push(ws);
+            res.on('close', done);
+            const fr = []; for (let o = 0; o + FRAME <= pcm.length; o += FRAME) fr.push(pcm.subarray(o, o + FRAME));
+            const spread = spreadDb(fr);
+            if (spread < NOISE_SPREAD_DB) { done(); stats.noise++; return json(res, 200, { t: 'final', id: 'http', text: '', ms: 0, lang, audioMs: Math.round(pcm.length / 16), skipped: 'noise' }); }
+            enqueue(ws, { kind: 'final', id: 'http', pcm, lang, endAt: Date.now(), audioMs: Math.round(pcm.length / 16), spread });
+        });
+        return;
+    }
+    res.writeHead(404); res.end('not found');
+});
+
+const wss = new WebSocket.Server({ noServer: true, maxPayload: 64 * 1024 });
+let sockN = 0;
+server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => {});
+    if (!hostOk(req)) { refuse(socket, '403 Forbidden'); return; }
+    let url; try { url = new URL(req.url, 'http://x'); } catch (_) { socket.destroy(); return; }
+    const p = url.pathname.replace(/\/+$/, '');
+    if (!/(^|\/)ws$/.test(p) || !tokenOk(url.searchParams.get('token'))) {
+        refuse(socket, '401 Unauthorized'); return;
+    }
+    if (sockets.size >= MAX_SOCKETS) { refuse(socket, '503 Service Unavailable'); return; }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.n = ++sockN; ws.jobs = []; ws.awaiting = 0; ws.active = false; ws.alive = true;
+        // Faster-than-real-time audio is for the local soak test only: it needs
+        // a key that exists solely in the state dir (0600), never sent anywhere.
+        ws.fast = !!TEST_KEY && url.searchParams.get('test') === TEST_KEY;
+        sockets.add(ws); rr.push(ws);
+        log('socket open', ws.n, 'sockets', sockets.size);
+        send(ws, { t: 'hello', sampleRate: SR, format: 'pcm_s16le', channels: 1, engine: engineInfo(),
+            langs: engine.multilingual ? ['auto', 'en', 'zh', '…'] : ['en'], maxUtteranceMs: MAX_UTTER_MS, silenceMs: SILENCE_MS });
+        ws.on('pong', () => { ws.alive = true; });
+        ws.on('message', (data, isBinary) => {
+            ws.alive = true;
+            try {
+                if (isBinary) { if (!ws.active) return; onAudio(ws, data); return; }
+                let m; try { m = JSON.parse(data); } catch (_) { send(ws, { t: 'error', code: 'bad_message', message: 'not JSON' }); return; }
+                if (!m || typeof m !== 'object') return;
+                if (m.t === 'start') {
+                    if (ws.active && ws.utter) closeUtterance(ws, 'restart');
+                    newStream(ws, m);
+                    send(ws, { t: 'started', lang: ws.lang, engine: engineInfo() });
+                    if (!engine.ready) send(ws, { t: 'error', code: 'engine_unavailable', message: 'the recognizer is starting; audio will be queued' });
+                } else if (m.t === 'end') {
+                    if (ws.active) { if (ws.carry.length) { vadFrameTail(ws); } closeUtterance(ws, 'end'); }
+                } else if (m.t === 'stop') {
+                    if (ws.active) { if (ws.carry.length) vadFrameTail(ws); closeUtterance(ws, 'stop'); }
+                    ws.active = false;
+                    ws.jobs = ws.jobs.filter((j) => j.kind === 'final' || (j.spec && j.spec.promote));
+                    if (ws.awaiting > 0) ws.stopPending = true;
+                    else send(ws, { t: 'stopped' });
+                } else if (m.t === 'ping') send(ws, { t: 'pong', at: m.at });
+                else send(ws, { t: 'error', code: 'bad_message', message: 'unknown type' });
+            } catch (e) { log('message error', e.message); }
+        });
+        ws.on('close', () => { sockets.delete(ws); rr = rr.filter((s) => s !== ws); log('socket closed', ws.n, 'sockets', sockets.size); });
+        ws.on('error', () => {});
+    });
+});
+
+function refuse(socket, status) {
+    try { socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch (_) {}
+    setTimeout(() => { try { socket.destroy(); } catch (_) {} }, 1000).unref();
+}
+
+function vadFrameTail(ws) {
+    if (!ws.utter || !ws.carry.length) { ws.carry = new Int16Array(0); return; }
+    const f = new Int16Array(FRAME); f.set(ws.carry.subarray(0, FRAME));
+    ws.utter.frames.push(f); ws.carry = new Int16Array(0);
+}
+
+// Heartbeat: a socket that stops answering pings for 45 s is dropped.
+setInterval(() => {
+    for (const ws of sockets) {
+        if (!ws.ping) continue;                                       // the HTTP pseudo-socket
+        if (!ws.alive) { ws.terminate(); continue; }
+        ws.alive = false; try { ws.ping(); } catch (_) {}
+    }
+}, 20000).unref();
+
+// Memory guard: sample the engine; restart it (when idle) past the cap.
+setInterval(() => {
+    if (!engine.proc) return;
+    execFile('/bin/ps', ['-o', 'rss=', '-p', String(engine.proc.pid)], (err, out) => {
+        if (err) return;
+        engine.rssMB = Math.round(parseInt(out, 10) / 1024);
+        if (engine.rssMB > MAX_RSS_MB && !engine.busy) { log('engine: rss', engine.rssMB, 'MB over cap, restarting'); engine.proc.kill('SIGTERM'); }
+    });
+    const own = process.memoryUsage().rss / 1048576;
+    if (own > 1024) { log('service rss', Math.round(own), 'MB over cap; exiting for a clean restart'); process.exit(1); }
+}, 30000).unref();
+
+let shuttingDown = false;
+function shutdown() { shuttingDown = true; try { engine.proc && engine.proc.kill('SIGTERM'); } catch (_) {} setTimeout(() => process.exit(0), 300); }
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+process.on('uncaughtException', (e) => { log('uncaught', e && e.stack || e); });
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// A port already taken (a second copy, a stray test instance) must be a hard
+// exit so launchd retries, not a live process that never listens.
+server.on('error', (e) => { log('listen failed:', e.code || e.message); try { engine.proc && engine.proc.kill('SIGTERM'); } catch (_) {} process.exit(1); });
+server.listen(PORT, HOST, async () => { log('soa-dictate listening on', `${HOST}:${PORT}`); await reapOrphans(); startEngine(); });
