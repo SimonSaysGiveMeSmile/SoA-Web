@@ -1694,6 +1694,25 @@ class Shell {
         }
 
 
+        // Reload app (⋯ MORE): a fresh copy of the UI without quitting. Only
+        // this page reloads — the server, tabs and every saved setting, token
+        // and unlock in storage are left alone. If a service worker controls
+        // the page (the web build), ask it for an update first so the reload
+        // is not served from a stale cache.
+        const reloadBtn = $('#reload-app');
+        if (reloadBtn) reloadBtn.addEventListener('click', async () => {
+            reloadBtn.disabled = true;
+            try {
+                const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+                if (reg) {
+                    await Promise.race([reg.update(), new Promise(r => setTimeout(r, 3000))]);
+                    const next = reg.waiting || reg.installing;
+                    if (next) next.postMessage({ type: 'SKIP_WAITING' });
+                }
+            } catch (_) {}
+            location.reload();
+        });
+
         // Restart the SoA server (⋯ MORE menu). Interrupts every tab's in-flight
         // turn for a few seconds, but tabs + tunnel + Claude sessions re-adopt on
         // boot (boot-resume respawns PTYs and auto-resumes Claude), so it's safe.

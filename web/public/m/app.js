@@ -4036,6 +4036,8 @@ class App {
             this._showWelcome('Scan the desktop QR code to reconnect this phone.');
             this._openScanner();
         });
+        const reloadBtn = document.getElementById('btn-reload-app');
+        if (reloadBtn) reloadBtn.addEventListener('click', () => this._reloadApp());
         if (this.overflowOverlay) {
             this.overflowOverlay.addEventListener('click', (e) => {
                 if (e.target === this.overflowOverlay) this._closeOverflow();
@@ -4047,13 +4049,51 @@ class App {
             // Settings closes this sheet and opens the settings overlay.
             const grid = this.overflowOverlay.querySelector('.overflow-grid');
             if (grid) grid.addEventListener('click', (e) => {
-                if (e.target.closest('.overflow-btn')) this._closeOverflow();
+                if (e.target.closest('.overflow-btn')) { this._closeOverflow(); return; }
+                // The whole tile is the target, caption included — not just the
+                // icon square in its middle.
+                const tile = e.target.closest('.overflow-tile');
+                const btn = tile && tile.querySelector('.overflow-btn');
+                if (btn && !btn.disabled) btn.click();
             });
         }
     }
 
     _openOverflow() {
         if (this.overflowOverlay) this.overflowOverlay.classList.add('open');
+    }
+
+    // Reload app (⋯ sheet): a fresh UI without quitting the home-screen app.
+    // Unlike Force reload in Settings this keeps the cache and every key in
+    // storage (token, unlock, saved links, preferred door); it only asks the
+    // service worker for an update, lets a new one take over, then reloads.
+    async _reloadApp() {
+        if (this._reloadingApp) return;
+        if ((this._chatSending || this._chatAttachments?.drafts.size)
+            && !confirm('A message or image is still being sent. Reload anyway?')) return;
+        this._reloadingApp = true;
+        this._voiceStatus?.('Reloading…');
+        try { this._saveHistory(); } catch (_) {}
+        try {
+            const sw = navigator.serviceWorker;
+            const reg = sw && !window.Capacitor ? await sw.getRegistration() : null;
+            if (reg) {
+                const wait = (ms) => new Promise(r => setTimeout(r, ms));
+                await Promise.race([reg.update().catch(() => {}), wait(3000)]);
+                const next = reg.waiting || reg.installing;
+                if (next) {
+                    // Let the new worker take over before reloading, or the
+                    // reload is answered from the old worker's cache.
+                    next.postMessage({ type: 'SKIP_WAITING' });
+                    await Promise.race([new Promise(r => {
+                        const done = () => { if (next.state === 'activated' || next.state === 'redundant') r(); };
+                        next.addEventListener('statechange', done);
+                        done();
+                    }), wait(4000)]);
+                }
+            }
+        } catch (_) {}
+        location.reload();
     }
 
     _closeOverflow() {

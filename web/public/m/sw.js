@@ -51,6 +51,11 @@ self.addEventListener('install', (e) => {
     );
 });
 
+// The ⋯ sheet's Reload app asks a waiting worker to take over at once.
+self.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
 self.addEventListener('activate', (e) => {
     e.waitUntil((async () => {
         const keys = await caches.keys();
