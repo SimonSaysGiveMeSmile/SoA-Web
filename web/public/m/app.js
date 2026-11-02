@@ -25,10 +25,10 @@ import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
 import { VoiceChat } from './voice-chat.js';
 import { Dictation } from './dictation.js';
+import { openHealthSheet, sameOrigin, parseHealthLink, healthLinkHash } from './health.js';
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
-import { openHealthSheet, sameOrigin } from './health.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
@@ -438,6 +438,11 @@ const INITIAL_VIEW = (() => {
         return VIEW_ALIASES[raw] || null;
     } catch (_) { return null; }
 })();
+
+// A health notification opens  …/m/#health=<alert id>&pid=&name=&why=  (see
+// scripts/soa-health healthDeepLink). Captured at load, like INITIAL_VIEW,
+// because readToken() rewrites the hash away; opened once the backend is known.
+let PENDING_HEALTH = (() => { try { return parseHealthLink(location.hash); } catch (_) { return null; } })();
 
 const NATIVE_BACKEND_KEY = 'soa.native.backend';
 function nativeBackend() {
@@ -887,6 +892,9 @@ class App {
             altUrls: [startDoor && primaryOrigin, altOrigin].filter(Boolean).map(wsBaseFromHttp),
             token,
         });
+        // A health notification's deep link: health is plain HTTP through the
+        // proxy, so it need not wait for the terminal socket.
+        if (PENDING_HEALTH) setTimeout(() => this._openPendingHealth(), 600);
 
         // Typing or dictating here makes this phone the device that sizes the
         // terminal, so the agent wraps what you write at phone width instead
@@ -3581,17 +3589,12 @@ class App {
         });
         // System health (⋯ → Health): temperature, heavy processes and the
         // monitor / auto-stop switches, from soa-health via /preview/6084/.
-        // That service refuses cross-site requests and sends no CORS, so when
-        // this page is not served by the paired Mac (the public site), the sheet
-        // only points at the Mac's own companion link instead of calling it.
         const healthTile = document.getElementById('btn-health');
-        if (healthTile) healthTile.addEventListener('click', () => {
-            const urlFor = p => this._proxyUrl('/preview/6084' + p);
-            // No socket yet means no paired Mac: never call this page's own
-            // origin (on the public site that answers with the landing page).
-            const paired = !!(this.socket && this.socket.baseUrl);
-            const away = paired && sameOrigin(urlFor('/status')) ? null : { href: paired ? this._healthHomeUrl() : null };
-            openHealthSheet({ urlFor, away });
+        if (healthTile) healthTile.addEventListener('click', () => this._openHealth(null));
+        // A second notification tapped while this page is already open.
+        window.addEventListener('hashchange', () => {
+            const f = parseHealthLink(location.hash);
+            if (f) { this._clearHealthHash(); this._openHealth(f); }
         });
 
         // Tap the live agent view → forward as a click at the page's coords.
@@ -3700,22 +3703,57 @@ class App {
         this._openWeb(this._resolveWebTarget(u));
     }
 
-    // Build an absolute /preview/ URL against the BACKEND origin (not the page
-    // origin — the client may be served from Vercel or a cached SW, where a
-    // relative /preview/ would 404 to the SoA landing page). Carry the session
-    // token so the proxy is reachable from a remote device.
-    // The paired Mac's own companion (/m/ on the daemon's origin) with this
-    // session's token: where the health panel can actually reach its service.
-    _healthHomeUrl() {
+    // ⋯ → Health, or a notification's deep link (focus = parseHealthLink()).
+    // On the Mac's own origin the sheet calls soa-health same-origin. On another
+    // origin (the public companion) it calls the paired Mac's /preview/6084/
+    // cross-origin: the daemon answers CORS for that origin and soa-health takes
+    // a cross-site request from it through the proxy. If the Mac's soa-health
+    // refuses (an older one), the sheet shows the alert and a link to the Mac's
+    // own companion with the same alert preselected.
+    _openHealth(focus) {
+        const urlFor = p => this._proxyUrl('/preview/6084' + p);
+        // No socket yet means no paired Mac: never call this page's own origin
+        // when it is not the Mac (on the public site that is the landing page).
+        const paired = !!(this.socket && this.socket.baseUrl);
+        const local = sameOrigin(urlFor('/status'));
+        const home = paired && !local ? this._healthHomeUrl(focus) : null;
+        if (!paired && !local) return openHealthSheet({ urlFor, away: { href: null }, focus });
+        openHealthSheet({ urlFor, focus, fallback: home ? { href: home } : null });
+    }
+
+    _openPendingHealth() {
+        const f = PENDING_HEALTH;
+        if (!f) return;
+        PENDING_HEALTH = null;
+        this._clearHealthHash();
+        this._openHealth(f);
+    }
+
+    _clearHealthHash() {
+        try {
+            if (/(?:^#|&)health=/.test(location.hash) && history.replaceState) {
+                history.replaceState(history.state, '', location.pathname + location.search);
+            }
+        } catch (_) {}
+    }
+
+    // The paired Mac's own companion (same alert preselected), for when this
+    // origin cannot use the monitor. An in-app hand-off only; push links never
+    // carry a token.
+    _healthHomeUrl(focus) {
         const b = this.socket && this.socket.baseUrl;
         if (!b) return null;
         try {
             const u = new URL('/m/', b.replace(/^ws(s?):\/\//, 'http$1://'));
             if (this.socket.token) u.searchParams.set('t', this.socket.token);
-            return u.toString();
+            return u.toString() + healthLinkHash(focus);
         } catch (_) { return null; }
     }
 
+    // Build an absolute /preview/ URL against the BACKEND origin (not the page
+    // origin — the client may be served from Vercel or a cached SW, where a
+    // relative /preview/ would 404 to the SoA landing page). Carry the session
+    // token so the proxy is reachable from a remote device.
     _proxyUrl(path) {
         const base = (this.socket && this.socket.baseUrl)
             ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '')

@@ -295,3 +295,125 @@ test('HTTP guard: forged Host, forwarded headers, cross-site, missing token', as
     const mode = fs.statSync(path.join(dir, 'health', 'settings.json')).mode & 0o777;
     assert.equal(mode, 0o600);
 });
+
+// ── notification delivery: retry, dedupe, reasons ──
+function fakeClock() {
+    let t = 1_000_000; const q = [];
+    return {
+        now: () => t,
+        timer: (fn, ms) => { q.push({ at: t + ms, fn }); return { unref() {} }; },
+        async advance(ms) {
+            t += ms;
+            for (;;) {
+                q.sort((a, b) => a.at - b.at);
+                if (!q.length || q[0].at > t) break;
+                const j = q.shift(); j.fn();
+                await new Promise((r) => setImmediate(r));
+            }
+        },
+    };
+}
+const flush = () => new Promise((r) => setImmediate(r));
+test('notifier: a transient failure is retried with backoff and the real reason logged', async () => {
+    const c = fakeClock(); const logs = []; const calls = [];
+    const results = [{ ok: false, reason: 'exit 1: ntfy POST failed (HTTP 000: Could not resolve host: ntfy.sh)' }, { ok: true }];
+    const n = new H.Notifier({ run: async (ch, a) => { calls.push([ch, a]); return results.shift(); }, log: (m) => logs.push(m), delays: [0, 20000, 90000], now: c.now, timer: c.timer });
+    assert.equal(n.send('push', ['-t', 'x', 'hello'], { title: 'x', text: 'hello' }), 'queued');
+    await flush();
+    assert.equal(calls.length, 1);
+    assert.match(logs.join('\n'), /attempt 1\/3 failed \(exit 1: ntfy POST failed \(HTTP 000: Could not resolve host: ntfy\.sh\)\); retry in 20 s/);
+    await c.advance(19000); assert.equal(calls.length, 1);
+    await c.advance(1000); assert.equal(calls.length, 2);
+    assert.match(logs.join('\n'), /delivered on attempt 2\/3/);
+    assert.equal(n.pending.size, 0);
+});
+test('notifier: gives up after the last attempt, never more than delays.length tries', async () => {
+    const c = fakeClock(); const logs = []; let calls = 0;
+    const n = new H.Notifier({ run: async () => { calls++; return { ok: false, reason: 'timed out' }; }, log: (m) => logs.push(m), delays: [0, 20000, 90000], now: c.now, timer: c.timer });
+    n.send('push', ['a'], { title: 't', text: 'a' });
+    await flush(); await c.advance(20000); await c.advance(90000); await c.advance(600000);
+    assert.equal(calls, 3);
+    assert.match(logs.join('\n'), /FAILED after 3 attempts: timed out/);
+    assert.equal(n.pending.size, 0);
+});
+test('notifier: dedupe while pending and after delivery; distinct messages pass; pending is capped', async () => {
+    const c = fakeClock(); let calls = 0;
+    let fail = true;
+    const n = new H.Notifier({ run: async () => { calls++; return { ok: !fail }; }, delays: [0, 20000], dedupeMs: 600000, maxPending: 2, now: c.now, timer: c.timer });
+    assert.equal(n.send('push', ['a'], { title: 't', text: 'a' }), 'queued');
+    await flush();
+    assert.equal(n.send('push', ['a'], { title: 't', text: 'a' }), 'duplicate');    // same alert while its retry is pending
+    assert.equal(n.send('chat', ['a'], { title: 't', text: 'a' }), 'queued');        // another channel is its own job
+    assert.equal(n.send('push', ['b'], { title: 't', text: 'b' }), 'dropped');       // cap reached
+    fail = false; await c.advance(20000);
+    assert.equal(n.send('push', ['a'], { title: 't', text: 'a' }), 'duplicate');    // delivered moments ago
+    await c.advance(600001);
+    assert.equal(n.send('push', ['a'], { title: 't', text: 'a' }), 'queued');       // after the window it is a new alert
+    await flush();
+    assert.equal(calls, 5);
+});
+test('notifier: a sender that throws is a failed attempt, not a crash', async () => {
+    const c = fakeClock(); const logs = [];
+    const n = new H.Notifier({ run: async () => { throw new Error('spawn ENOENT'); }, log: (m) => logs.push(m), delays: [0], now: c.now, timer: c.timer });
+    n.send('chat', ['x'], { text: 'x' }); await flush();
+    assert.match(logs.join('\n'), /FAILED after 1 attempts: spawn ENOENT/);
+});
+test('failure reason: stderr preferred, topic URL redacted, timeouts named', () => {
+    const e = Object.assign(new Error('Command failed: soa-notify -t x --click https://h/preview/6084/confirm?c=abc body'), { code: 1 });
+    const r = H.failureReason(e, 'soa-notify: ntfy POST failed (HTTP 000: Could not resolve host: ntfy.sh) → https://ntfy.sh/secret-topic-123\n');
+    assert.equal(r, 'exit 1: soa-notify: ntfy POST failed (HTTP 000: Could not resolve host: ntfy.sh)');
+    assert.ok(!r.includes('secret-topic'));
+    const t = H.failureReason(Object.assign(new Error('Command failed: x'), { killed: true, signal: 'SIGTERM' }), '');
+    assert.match(t, /^timed out/);
+    assert.ok(!H.failureReason(e, '').includes('https://'));
+});
+
+// ── the link a push opens ──
+test('deep link: the companion with the alert id, display details, never a token', () => {
+    const c = { pid: 41332, startTime: 1, app: 'Google Chrome', name: 'Google Chrome Helper', reasons: [{ detail: 'memory grew +1228 MB in 11 min' }] };
+    const u = new URL(H.healthDeepLink('https://www.s0a.app/', 'DX_qbQDJO0Zz', c));
+    assert.equal(u.origin + u.pathname, 'https://www.s0a.app/m/');
+    assert.equal(u.search, '');
+    const q = new URLSearchParams(u.hash.slice(1));
+    assert.equal(q.get('health'), 'DX_qbQDJO0Zz'); assert.equal(q.get('pid'), '41332');
+    assert.equal(q.get('name'), 'Google Chrome'); assert.equal(q.get('why'), 'memory grew +1228 MB in 11 min');
+    assert.ok(!q.has('t') && !q.has('u') && !q.has('token'));
+    assert.ok(H.healthDeepLink('https://x', 'id1', { pid: 2, name: 'n', reasons: [{ detail: 'z'.repeat(500) }] }).length < 260);
+});
+
+// ── cross-site through the daemon proxy ──
+function fakeReq(headers, method = 'GET') { return { method, headers: Object.assign({ host: '127.0.0.1:6084' }, headers), socket: { remoteAddress: '127.0.0.1' } }; }
+test('guard: cross-site is accepted only from the public front end AND through a forwarding proxy', () => {
+    const fwd = { 'x-forwarded-for': '203.0.113.9' };
+    const xs = { 'sec-fetch-site': 'cross-site' };
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd, origin: 'https://www.s0a.app' }), 6084), null);
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd, origin: 'https://s0a.app' }, 'POST'), 6084), null);
+    assert.equal(H.guardReason(fakeReq({ ...xs, 'cf-connecting-ip': '1.2.3.4', origin: 'https://www.s0a.app' }, 'POST'), 6084), null);
+    // not proxied: a page on the Mac itself talking to the port directly
+    assert.equal(H.guardReason(fakeReq({ ...xs, origin: 'https://www.s0a.app' }), 6084), 'cross-site request');
+    // proxied but another origin, a look-alike, or none
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd, origin: 'https://evil.example' }), 6084), 'cross-site request');
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd, origin: 'https://www.s0a.app.evil.example' }), 6084), 'cross-site request');
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd, origin: 'http://www.s0a.app' }), 6084), 'cross-site request');
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd }), 6084), 'cross-site request');
+    assert.equal(H.guardReason(fakeReq({ 'sec-fetch-site': 'same-site', ...fwd, origin: 'https://evil.s0a.app' }, 'POST'), 6084), 'cross-site request');
+    // the other gates still apply
+    assert.equal(H.guardReason(fakeReq({ ...xs, ...fwd, origin: 'https://www.s0a.app', host: 'evil:6084' }), 6084), 'bad host');
+    // a proxy header the daemon does NOT treat as remote (so its /preview gate let a
+    // loopback caller through as local, no token) does not open the cross-site path
+    for (const k of ['via', 'cf-ray', 'x-forwarded-proto', 'x-forwarded-host', 'x-soa-local-key', 'true-client-ip', 'x-original-url']) {
+        assert.equal(H.guardReason(fakeReq({ ...xs, [k]: '1', origin: 'https://www.s0a.app' }), 6084), 'cross-site request', k);
+    }
+});
+
+test('companion: parseHealthLink reads the push link; healthLinkHash round-trips; junk is ignored', async () => {
+    const m = await import(path.join(__dirname, '..', '..', 'web', 'public', 'm', 'health.js'));
+    const link = new URL(H.healthDeepLink('https://www.s0a.app', 'DX_qbQDJO0Zz', { pid: 41332, app: 'Google Chrome', reasons: [{ detail: 'memory grew' }] }));
+    const f = m.parseHealthLink(link.hash);
+    assert.deepEqual(f, { id: 'DX_qbQDJO0Zz', pid: 41332, name: 'Google Chrome', why: 'memory grew' });
+    assert.deepEqual(m.parseHealthLink(m.healthLinkHash(f)), f);
+    assert.equal(m.parseHealthLink('#view=chat'), null);
+    assert.equal(m.parseHealthLink('#health=<script>'), null);
+    assert.equal(m.parseHealthLink(''), null);
+    assert.equal(m.parseHealthLink('#health=abcd&pid=1').pid, null);
+});

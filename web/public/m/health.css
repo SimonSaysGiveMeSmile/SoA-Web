@@ -131,3 +131,19 @@
 @media (prefers-reduced-motion: reduce) {
     #health-overlay, .health-sheet, .hl-phone .hl-meter-fill, .hl-phone .hl-switch::before, .hl-phone .hl-switch::after { transition: none; }
 }
+
+/* Another origin that cannot reach the monitor: where it can be used instead. */
+.hl-phone .hl-away { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; }
+.hl-phone .hl-away-t { font-size: 17px; line-height: 1.4; }
+.hl-phone .hl-away-d { font-size: 15px; line-height: 1.45; color: var(--fg-dim); }
+.hl-phone a.hl-btn { align-self: flex-start; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+
+/* The alert a notification opened the sheet on (…/m/#health=<id>). */
+.hl-phone .hl-alert { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.hl-phone .hl-alert.done { border-color: var(--line); background: transparent; }
+.hl-phone .hl-alert-k { font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-dim); }
+.hl-phone .hl-alert-t { font-size: 16px; line-height: 1.4; }
+.hl-phone .hl-alert-s { margin-top: 3px; font-size: 14px; color: var(--fg-dim); }
+.hl-phone .hl-alert .hl-proc { border-bottom: 0; padding: 4px 0 0; }
+.hl-phone .hl-alert .hl-confirm { margin-top: 6px; }
+.hl-phone .hl-proc.focus { box-shadow: inset 3px 0 0 var(--warn); padding-left: 10px; }

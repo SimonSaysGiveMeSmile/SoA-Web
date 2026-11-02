@@ -12,6 +12,16 @@
  *   - A POST body is JSON sent as text/plain: the daemon's global express.json()
  *     swallows application/json bodies before /preview can forward them.
  *
+ * A page on another origin (the public companion at www.s0a.app, paired with
+ * the Mac over its tunnel) calls the same proxied URLs cross-origin: the daemon
+ * answers CORS for its allowlisted origins, and soa-health accepts a cross-site
+ * request only from those front ends and only through that proxy. An older
+ * soa-health refuses it (403); the panel then shows where it can be used.
+ *
+ * A notification opens the companion at  …/m/#health=<alert id>&pid=&name=&why=
+ * (parseHealthLink). The sheet then leads with that alert — what was heavy,
+ * whether it still runs — and a Stop that goes through the normal token path.
+ *
  * Nothing here can stop a process by itself. Stop and auto-stop both sit
  * behind an inline confirmation, and the service re-checks every protection
  * rule (system processes, SoA and all its tabs/agents, tunnels, terminals, the
@@ -26,13 +36,38 @@ const TOKEN_MARGIN_MS = 60000;          // refresh a token a minute before it la
 const AUTO_CONFIRM = 'auto-terminate';  // the service's confirm phrase for auto mode
 
 /**
- * True when `url` is on this page's own origin. soa-health refuses any
- * cross-site request (and the proxy adds no CORS for it), so a page served by
- * another origin — the public site talking to a paired Mac over its tunnel —
- * cannot use the panel and shows where it can be used instead.
+ * True when `url` is on this page's own origin.
  */
 export function sameOrigin(url) {
     try { return new URL(url, location.href).origin === location.origin; } catch (_) { return false; }
+}
+
+/**
+ * A notification's deep link: '#health=<id>&pid=…&name=…&why=…' → {id, pid, name, why}
+ * or null. The id selects the alert on the Mac; the rest is only what the push
+ * already said, shown while the Mac is asked (and if it cannot be reached).
+ * Display-only: a Stop always uses the pid + start time the service returns.
+ */
+export function parseHealthLink(hash) {
+    try {
+        const q = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+        const id = q.get('health');
+        if (!id || !/^[A-Za-z0-9_-]{4,64}$/.test(id)) return null;
+        const pid = parseInt(q.get('pid'), 10);
+        const clip = (v, n) => (v ? String(v).slice(0, n) : null);
+        return { id, pid: pid > 1 ? pid : null, name: clip(q.get('name'), 60), why: clip(q.get('why'), 160) };
+    } catch (_) { return null; }
+}
+
+/** The '#health=…' fragment for a parsed link (used to hand it to another origin). */
+export function healthLinkHash(f) {
+    if (!f || !f.id) return '';
+    const q = new URLSearchParams();
+    q.set('health', f.id);
+    if (f.pid) q.set('pid', String(f.pid));
+    if (f.name) q.set('name', f.name);
+    if (f.why) q.set('why', f.why);
+    return '#' + q.toString();
 }
 
 export class HealthError extends Error {
@@ -54,8 +89,13 @@ export class HealthClient {
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
         let r;
+        // Cross-origin (the public companion → the Mac's tunnel): ngrok's free
+        // tier answers a browser request with an HTML warning page unless this
+        // header is present; the daemon's CORS preflight lets it through.
+        const headers = Object.assign({}, init.headers || {});
+        if (!sameOrigin(url)) headers['ngrok-skip-browser-warning'] = '1';
         try {
-            r = await fetch(url, { credentials: 'include', cache: 'no-store', ...init, signal: ac.signal });
+            r = await fetch(url, { credentials: 'include', cache: 'no-store', ...init, headers, signal: ac.signal });
         } catch (_) {
             throw new HealthError('down', 'unreachable');
         } finally { clearTimeout(timer); }
@@ -101,6 +141,13 @@ export class HealthClient {
     }
 
     status() { return this.get('/status'); }
+    /** One notification's alert. Resolves null when it has expired (links last an hour). */
+    async link(id) {
+        const { ok, status, json } = await this._fetch('/link?c=' + encodeURIComponent(id));
+        if (status === 404) return null;
+        if (!ok) throw new HealthError('http', (json && json.error) || 'error ' + status, status);
+        return json;
+    }
     history(minutes = 60) { return this.get('/history?minutes=' + minutes); }
     setEnabled(on) { return this.post('/settings', { enabled: !!on }); }
     setAuto(on) { return this.post('/settings', on ? { mode: 'auto', confirm: AUTO_CONFIRM } : { mode: 'notify' }); }
@@ -242,13 +289,21 @@ function meter(label, pct, detail, warn) {
  */
 export class HealthPanel {
     /**
-     * away: { href } when this page cannot reach the service (another origin):
-     * the panel never calls it and shows a short note with a link to the Mac's
-     * own address instead. href may be null when there is no link to offer.
+     * away:     { href } when this page cannot reach the service at all (not paired,
+     *           or another origin known not to work): the panel never calls it and
+     *           shows where it can be used. href may be null.
+     * focus:    a parsed notification link (parseHealthLink) to lead with.
+     * fallback: { href } offered if the service refuses this origin (an older
+     *           soa-health) — the panel then switches to the away note, with the
+     *           focused alert's details.
      */
-    constructor({ client, root, switchClass = '', variant = 'desk', away = null }) {
+    constructor({ client, root, switchClass = '', variant = 'desk', away = null, focus = null, fallback = null }) {
         this.client = client;
         this.away = away;
+        this.focus = focus && focus.id ? focus : null;
+        this.fallback = fallback;
+        this.alert = null;          // /link reply for focus, or { expired: true }
+        this._alertErr = null;
         this.root = root;
         this.switchClass = switchClass;
         this.variant = variant;
@@ -275,6 +330,12 @@ export class HealthPanel {
             const st = await this.client.status();
             if (this._destroyed || seq !== this._seq) return;
             this.st = st; this.err = null;
+            if (this.focus) {
+                try {
+                    const a = await this.client.link(this.focus.id);
+                    if (!this._destroyed && seq === this._seq) { this.alert = a || { expired: true }; this._alertErr = null; }
+                } catch (e) { this._alertErr = e; }
+            }
             const t = st.sample && st.sample.t;
             if (t && t !== this._histFor) {
                 try {
@@ -285,6 +346,13 @@ export class HealthPanel {
         } catch (e) {
             if (this._destroyed || seq !== this._seq) return;
             this.err = e instanceof HealthError ? e : new HealthError('down', String(e && e.message));
+            // This origin is refused (an soa-health that predates cross-origin
+            // use, or a request that did not come through the tunnel): say where
+            // it works instead of retrying a door that will stay shut.
+            if (this.err.kind === 'forbidden' && this.fallback && !this.st) {
+                this.away = { href: this.fallback.href || null, refused: true };
+                this.onAway && this.onAway();
+            }
         }
         if (!this.busy) this.render();
     }
@@ -324,6 +392,7 @@ export class HealthPanel {
 
     _stop(p) {
         this.confirmKey = null;
+        if (this.alert && this.alert.pid === p.pid && this.alert.startTime === p.startTime) this.alert.stopped = true;
         return this._act(async () => {
             const r = await this.client.terminate(p);
             const j = r.json || {};
@@ -350,10 +419,11 @@ export class HealthPanel {
     _view() {
         if (this.away) return this._awayView();
         const st = this.st;
-        if (this.err && !st) return this._downView();
-        if (!st) return [h('div', { class: 'hl-note', text: 'Checking the Mac…' })];
+        if (this.err && !st) return [this.focus ? this._alertPreview() : null, ...this._downView()];
+        if (!st) return [this.focus ? this._alertPreview() : null, h('div', { class: 'hl-note', text: 'Checking the Mac…' })];
         const out = [];
         if (this.err) out.push(this._banner(this._errText(this.err), 'bad'));
+        if (this.focus) out.push(this._alertView(st));
         out.push(this._headView(st));
         out.push(sparkline(this.hist));
         out.push(this._metersView(st));
@@ -372,14 +442,79 @@ export class HealthPanel {
         return 'Health monitor isn’t running.';
     }
 
+    // What the notification said, before (or without) the Mac's answer.
+    _alertPreview() {
+        const f = this.focus;
+        return h('div', { class: 'hl-alert', role: 'group', 'aria-label': 'Alert from your notification' }, [
+            h('div', { class: 'hl-alert-k', text: 'From your notification' }),
+            h('div', { class: 'hl-proc-name' }, [
+                h('span', { class: 'hl-proc-n', text: f.name || 'A heavy process' }),
+                f.pid ? h('span', { class: 'hl-proc-pid hl-num', text: `pid ${f.pid}` }) : null,
+            ]),
+            f.why ? h('div', { class: 'hl-proc-why', text: f.why }) : null,
+        ]);
+    }
+
+    // The alert the notification was about, as the Mac reports it now, with a
+    // Stop that uses the pid + start time from the service (never from the link).
+    _alertView(st) {
+        const f = this.focus, a = this.alert;
+        if (!a) return this._alertPreview();
+        if (a.expired) {
+            return h('div', { class: 'hl-alert done' }, [
+                h('div', { class: 'hl-alert-k', text: 'From your notification' }),
+                h('div', { class: 'hl-alert-t', text: `${f.name || 'That alert'}${f.pid ? ' (pid ' + f.pid + ')' : ''}: this alert has expired.` }),
+                h('div', { class: 'hl-proc-why', text: 'Alerts last an hour. Anything still heavy is listed below.' }),
+            ]);
+        }
+        const key = `${a.pid}:${a.startTime}`;
+        const c = { pid: a.pid, startTime: a.startTime, comm: a.comm, name: a.name, app: a.name, reasons: a.reasons };
+        const why = (a.current && a.current.reasons && a.current.reasons.length ? a.current.reasons : a.reasons || []).map(r => r.detail).filter(Boolean).join('; ');
+        const gone = !a.running || a.stopped;
+        const confirming = this.confirmKey === key;
+        const card = h('div', { class: 'hl-alert' + (gone ? ' done' : '') + (confirming ? ' confirming' : ''), role: 'group', 'aria-label': `Alert: ${a.name}` }, [
+            h('div', { class: 'hl-alert-k', text: 'From your notification' }),
+            h('div', { class: 'hl-proc' }, [
+                h('div', { class: 'hl-proc-main' }, [
+                    h('div', { class: 'hl-proc-name' }, [
+                        h('span', { class: 'hl-proc-n', text: a.name || 'process', title: a.args || a.comm || '' }),
+                        h('span', { class: 'hl-proc-pid hl-num', text: `pid ${a.pid}` }),
+                    ]),
+                    h('div', { class: 'hl-proc-why', text: why || 'Was using a lot.' }),
+                    h('div', { class: 'hl-alert-s', text: gone ? 'No longer running.' : a.stillHeavy ? 'Still heavy right now.' : 'Still running, no longer over the limits.' }),
+                ]),
+                gone || confirming ? null : h('button', {
+                    type: 'button', class: 'hl-btn hl-btn-stop', 'data-k': 'alert-stop', disabled: this.busy || null,
+                    'aria-label': `Stop ${a.name}, pid ${a.pid}`, text: 'Stop',
+                    onclick: () => { this.confirmKey = key; this.confirmAuto = false; this.render(); this.root.querySelector('[data-k="alert-yes"]')?.focus(); },
+                }),
+            ]),
+        ]);
+        if (confirming && !gone) {
+            card.append(h('div', { class: 'hl-confirm', role: 'group', 'aria-label': `Confirm stopping ${a.name}` }, [
+                h('p', { text: `Stop ${a.name} (pid ${a.pid})? It is asked to quit first and forced after 10 seconds if it does not. Unsaved work in it is lost.` }),
+                h('div', { class: 'hl-actions' }, [
+                    h('button', { type: 'button', class: 'hl-btn hl-btn-danger', 'data-k': 'alert-yes', disabled: this.busy || null,
+                        text: 'Stop it', onclick: () => this._stop(c) }),
+                    h('button', { type: 'button', class: 'hl-btn', 'data-k': 'alert-no', text: 'Cancel',
+                        onclick: () => { this.confirmKey = null; this.render(); } }),
+                ]),
+            ]));
+        }
+        return card;
+    }
+
     _awayView() {
         const href = this.away && this.away.href;
         return [
+            this.focus ? this._alertPreview() : null,
             h('div', { class: 'hl-away', role: 'note' }, [
                 h('div', { class: 'hl-away-t', text: href
-                    ? 'Open on your Mac’s link to manage system health.'
+                    ? (this.focus ? 'Open on your Mac’s link to stop it.' : 'Open on your Mac’s link to manage system health.')
                     : 'Pair with your Mac to see its system health.' }),
-                h('div', { class: 'hl-away-d', text: 'Its monitor only answers pages opened from the Mac itself.' }),
+                h('div', { class: 'hl-away-d', text: this.away && this.away.refused
+                    ? 'The Mac’s health monitor did not accept this page. Its own link opens the same sheet on this alert.'
+                    : 'Its monitor only answers pages opened from the Mac itself.' }),
                 href ? h('a', { class: 'hl-btn hl-away-link', href, target: '_blank', rel: 'noopener noreferrer', 'data-k': 'away',
                     text: 'Open on the Mac’s link' }) : null,
             ]),
@@ -459,8 +594,9 @@ export class HealthPanel {
         }
         for (const c of cands) {
             const key = `${c.pid}:${c.startTime}`;
-            const confirming = this.confirmKey === key;
-            const row = h('div', { class: 'hl-proc' + (confirming ? ' confirming' : '') }, [
+            const confirming = this.confirmKey === key && !(this.alert && `${this.alert.pid}:${this.alert.startTime}` === key);
+            const focused = !!(this.alert && this.alert.pid === c.pid && this.alert.startTime === c.startTime);
+            const row = h('div', { class: 'hl-proc' + (confirming ? ' confirming' : '') + (focused ? ' focus' : '') }, [
                 h('div', { class: 'hl-proc-main' }, [
                     h('div', { class: 'hl-proc-name' }, [
                         h('span', { class: 'hl-proc-n', text: procName(c), title: c.args || c.comm || '' }),
@@ -564,7 +700,7 @@ let _sheet = null;
  * The phone's health sheet (⋯ → Health). Polls only while open.
  * @param {{urlFor: function(string):string}} o  service path → proxied URL
  */
-export function openHealthSheet({ urlFor, away = null }) {
+export function openHealthSheet({ urlFor, away = null, focus = null, fallback = null }) {
     if (!_sheet) {
         const overlay = h('div', { id: 'health-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'health-title' });
         const body = h('div', { class: 'health-body' });
@@ -594,7 +730,8 @@ export function openHealthSheet({ urlFor, away = null }) {
     const s = _sheet;
     s.client = new HealthClient(urlFor);   // the backend may have changed since last open
     if (s.panel) s.panel.destroy();
-    s.panel = new HealthPanel({ client: s.client, root: s.body, variant: 'phone', away });
+    s.panel = new HealthPanel({ client: s.client, root: s.body, variant: 'phone', away, focus, fallback });
+    s.panel.onAway = () => { clearInterval(s.timer); s.timer = null; };
     s.overlay.classList.add('visible');
     clearInterval(s.timer); s.timer = null;
     if (!away) {
