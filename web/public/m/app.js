@@ -28,6 +28,7 @@ import { Dictation } from './dictation.js';
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
+import { openHealthSheet, sameOrigin } from './health.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
@@ -3578,6 +3579,20 @@ class App {
         if (macTile) macTile.addEventListener('click', () => {
             window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
         });
+        // System health (⋯ → Health): temperature, heavy processes and the
+        // monitor / auto-stop switches, from soa-health via /preview/6084/.
+        // That service refuses cross-site requests and sends no CORS, so when
+        // this page is not served by the paired Mac (the public site), the sheet
+        // only points at the Mac's own companion link instead of calling it.
+        const healthTile = document.getElementById('btn-health');
+        if (healthTile) healthTile.addEventListener('click', () => {
+            const urlFor = p => this._proxyUrl('/preview/6084' + p);
+            // No socket yet means no paired Mac: never call this page's own
+            // origin (on the public site that answers with the landing page).
+            const paired = !!(this.socket && this.socket.baseUrl);
+            const away = paired && sameOrigin(urlFor('/status')) ? null : { href: paired ? this._healthHomeUrl() : null };
+            openHealthSheet({ urlFor, away });
+        });
 
         // Tap the live agent view → forward as a click at the page's coords.
         if (this._agentFrame) {
@@ -3689,6 +3704,18 @@ class App {
     // origin — the client may be served from Vercel or a cached SW, where a
     // relative /preview/ would 404 to the SoA landing page). Carry the session
     // token so the proxy is reachable from a remote device.
+    // The paired Mac's own companion (/m/ on the daemon's origin) with this
+    // session's token: where the health panel can actually reach its service.
+    _healthHomeUrl() {
+        const b = this.socket && this.socket.baseUrl;
+        if (!b) return null;
+        try {
+            const u = new URL('/m/', b.replace(/^ws(s?):\/\//, 'http$1://'));
+            if (this.socket.token) u.searchParams.set('t', this.socket.token);
+            return u.toString();
+        } catch (_) { return null; }
+    }
+
     _proxyUrl(path) {
         const base = (this.socket && this.socket.baseUrl)
             ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '')

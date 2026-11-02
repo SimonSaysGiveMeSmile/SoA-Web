@@ -15,6 +15,7 @@ import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=des
 import { AnimatedWorldView } from '/assets/animated-world-view.js?v=world-view-animated-20260928';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
 import { Dictation, isEditable } from '/m/dictation.js?v=dictate-20261031';
+import { HealthClient, HealthPanel, HEALTH_PREFIX, sameOrigin } from '/m/health.js?v=health-20261031';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -3473,6 +3474,56 @@ function _daemonServesPage() {
     return !!b && b === location.origin;
 }
 
+// ── SYSTEM HEALTH ─────────────────────────────────────────────────────
+// Temperature, CPU/memory and runaway processes from the Mac's soa-health
+// service, reached through the daemon's /preview/6084/ proxy. The panel itself
+// (m/health.js) is shared with the phone's ⋯ → Health sheet; this only gives
+// it a widget frame and a polling cadence. Its switch carries .minimal-switch
+// so the desktop packs paint it as their own.
+//
+// The service refuses cross-site requests and its replies carry no CORS, so a
+// page on another origin than the daemon (this public site, paired over the
+// tunnel) cannot use it: the widget then says so briefly and links to the
+// daemon's own dashboard (the ?backend=&t= deep link), and with no daemon at
+// all it stays hidden.
+class HealthWidget extends Widget {
+    constructor({ parent }) {
+        super({ title: 'SYSTEM HEALTH', parent, intervalMs: 15000 });
+        this.root.classList.add('health-widget');
+        this._panel = null;
+        if (isSandbox()) { this.root.hidden = true; return; }
+        let away = null;
+        const statusUrl = api(HEALTH_PREFIX + '/status');
+        if (!sameOrigin(statusUrl)) away = { href: _daemonDashboardUrl() };
+        else if (!_daemonServesPage()) { this.root.hidden = true; return; }
+        if (away && !away.href) { this.root.hidden = true; return; }
+        this._panel = new HealthPanel({
+            client: new HealthClient(p => api(HEALTH_PREFIX + p)),
+            root: $el('div', { class: 'health-panel' }),
+            switchClass: 'minimal-switch',
+            variant: 'desk',
+            away,
+        });
+        this.body.appendChild(this._panel.root);
+    }
+    tick() { if (this._panel) return this._panel.refresh(); }
+    destroy() { if (this._panel) this._panel.destroy(); super.destroy(); }
+}
+
+// The paired daemon's own dashboard, as the desktop deep link (?backend=&t=)
+// that boots it straight into server mode. Null without a remote backend.
+function _daemonDashboardUrl() {
+    const b = currentBackend();
+    if (!b || b === location.origin) return null;
+    try {
+        const u = new URL(b + '/');
+        u.searchParams.set('backend', b);
+        const t = currentToken();
+        if (t) u.searchParams.set('t', t);
+        return u.toString();
+    } catch (_) { return null; }
+}
+
 class VoiceLauncherWidget extends Widget {
     constructor({ parent, ctx }) {
         super({ titleKey: 'widget.voice', parent, intervalMs: 0 });
@@ -3487,6 +3538,7 @@ function _widgetRegistry() {
     return [
         { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
         { id: 'claude',    titleKey: 'widget.claude',      make: p => new ClaudeUsageWidget({ parent: p }) },
+        { id: 'health',    title: 'SYSTEM HEALTH',         make: p => new HealthWidget({ parent: p }) },
         { id: 'globe',     titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
         { id: 'mobile',    titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
         { id: 'account',  titleKey: 'widget.account',     make: p => new CloudAccountWidget({ parent: p }) },
@@ -3527,6 +3579,12 @@ function _loadLayout(key, ids) {
 // arrangement is respected again. Each migration runs a single time per key.
 const LAYOUT_MIGRATIONS = [
     { id: 'installer-last-20260929', apply: (l) => { const i = l.findIndex(e => e.id === 'installer'); if (i !== -1) l.push(...l.splice(i, 1)); } },
+    // SYSTEM HEALTH (2026-10-30) sits right under TOKEN USAGE, not at the end.
+    { id: 'health-after-usage-20261030', apply: (l) => {
+        const i = l.findIndex(e => e.id === 'health'); if (i === -1) return;
+        const [h] = l.splice(i, 1); const u = l.findIndex(e => e.id === 'claude');
+        l.splice(u === -1 ? 0 : u + 1, 0, h);
+    } },
 ];
 function _migrateLayout(key, layout) {
     let done = [];
@@ -3625,7 +3683,7 @@ function _openSidebarManager(reg, layout, apply) {
             const w = byId[e.id]; if (!w) return null;
             const row = $el('div', { class: 'smgr-row' + (e.on ? '' : ' off'), draggable: 'true' }, [
                 $el('span', { class: 'smgr-grip', title: tr('sidebar.drag'), text: '⠿' }),
-                $el('span', { class: 'smgr-name', text: tr(w.titleKey) }),
+                $el('span', { class: 'smgr-name', text: w.titleKey ? tr(w.titleKey) : w.title }),
                 $el('span', { class: 'smgr-btns' }, [
                     $el('button', { class: 'smgr-mv', text: '↑', title: tr('sidebar.up'), disabled: i === 0 ? '' : null, onclick: () => move(i, -1) }),
                     $el('button', { class: 'smgr-mv', text: '↓', title: tr('sidebar.down'), disabled: i === work.length - 1 ? '' : null, onclick: () => move(i, 1) }),

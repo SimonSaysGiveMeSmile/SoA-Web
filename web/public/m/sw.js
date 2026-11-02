@@ -22,6 +22,8 @@ const SHELL = [
     '/dictation.js',
     '/chat-attachments.js',
     '/voice-chat.css',
+    '/health.js',
+    '/health.css',
     '/session-history.js',
     '/vendor/xterm-headless.mjs',
     '/agentDetect.js',
