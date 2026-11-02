@@ -94,14 +94,17 @@ send_ntfy() {
     local -a H=(-H "Title: $TITLE" -H "Priority: $PRIORITY")
     [ -n "$TAGS" ]  && H+=(-H "Tags: $TAGS")
     [ -n "$CLICK" ] && H+=(-H "Click: $CLICK")
-    local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+    local out code err
+    # %{errormsg} (curl >= 7.75) carries the transport's own reason (DNS, TLS,
+    # timeout…) so a failed push says why instead of only "HTTP 000".
+    out="$(curl -s -o /dev/null -w '%{http_code}|%{errormsg}' --max-time 15 \
         "${H[@]}" -d "$BODY" "$url" 2>/dev/null)"
+    code="${out%%|*}"; err="${out#*|}"; [ "$err" = "$out" ] && err=""
     if [ "${code:0:1}" = "2" ]; then
         echo "soa-notify: sent via ntfy → $url (HTTP $code)"
         return 0
     fi
-    echo "soa-notify: ntfy POST failed (HTTP ${code:-000}) → $url" >&2
+    echo "soa-notify: ntfy POST failed (HTTP ${code:-000}${err:+: $err}) → $url" >&2
     return 1
 }
 

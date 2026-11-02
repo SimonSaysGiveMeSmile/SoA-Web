@@ -30,8 +30,8 @@
         // Design pack (nine supported skins) — same pre-paint treatment so
         // an alternate skin never flashes TRON first (each keys off data-ui).
         var _ui = s && s.uiLang;
-        document.documentElement.dataset.ui = ['tron', 'minimal', 'liquid', 'brutalist', 'classic', 'dos', 'macos27', 'windows11', 'neumorphism'].includes(_ui) ? _ui : 'tron';
-      } catch (e) { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.ui = 'tron'; }
+        document.documentElement.dataset.ui = ['tron', 'minimal', 'liquid', 'brutalist', 'classic', 'dos', 'macos27', 'windows11', 'neumorphism'].includes(_ui) ? _ui : 'windows11';
+      } catch (e) { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.ui = 'windows11'; }
     })();
   </script>
   <title>Son of Anton · Browser Terminal, Claude Code, and Desktop Pairing</title>
@@ -163,14 +163,15 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=session-models-20261029">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=usage-pace-20261014">
-  <link rel="stylesheet" href="/assets/minimal.css?v=usage-burn-range-20260929">
-  <link rel="stylesheet" href="/assets/liquid.css?v=14">
+  <link rel="stylesheet" href="/assets/styles.css?v=web-20261102">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=web-20261102">
+  <link rel="stylesheet" href="/assets/health.css?v=web-20261102">
+  <link rel="stylesheet" href="/assets/minimal.css?v=web-20261102">
+  <link rel="stylesheet" href="/assets/liquid.css?v=web-20261102">
   <script type="module" src="/assets/minimal-ui.js?v=desktop-packs-20260929"></script>
-  <link rel="stylesheet" href="/assets/design-packs.css?v=desktop-packs-20260930">
+  <link rel="stylesheet" href="/assets/design-packs.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/desktop-packs.css?v=desktop-packs-20261028">
-  <link rel="stylesheet" href="/assets/voice-control.css?v=3">
+  <link rel="stylesheet" href="/assets/voice-control.css?v=web-20261102">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="/_config.js"></script>
   <script>
@@ -188,8 +189,26 @@
             var s = new URLSearchParams(location.search);
             hasPairLink = !!s.get('backend');
         } catch (_) {}
+        // ?welcome=1 previews the welcome even after it was dismissed, without
+        // touching stored state (a pairing link still wins).
+        var preview = false;
+        try { preview = new URLSearchParams(location.search).get('welcome') === '1'; } catch (_) {}
+        // No saved theme yet: let the welcome alone follow the system scheme
+        // (read-only; the app keeps its dark default).
+        function markAutoTheme() {
+            try {
+                var st = JSON.parse(localStorage.getItem('soa-web:settings') || '{}');
+                if (!st || !st.theme || st.theme === 'auto') document.documentElement.dataset.welcomeAuto = '1';
+            } catch (_) { document.documentElement.dataset.welcomeAuto = '1'; }
+        }
         try {
             if (hasPairLink) return;
+            if (preview) {
+                markAutoTheme();
+                document.documentElement.dataset.welcomePreview = '1';
+                document.documentElement.dataset.welcome = '1';
+                return;
+            }
             // Phones AND tablets get the companion welcome from the boot path
             // (the install wizard can't run there) — skip the wizard gate. The
             // tell is a touch-only pointer, not the viewport: an iPad is wider
@@ -200,6 +219,7 @@
             if (/Mac/.test(navigator.platform || '') && navigator.maxTouchPoints > 1) return;
             if (localStorage.getItem('soa_web_welcomed') === '1') return;
         } catch (_) { /* private mode — treat as not yet welcomed */ }
+        markAutoTheme();
         document.documentElement.dataset.welcome = '1';
     })();
   </script>
@@ -207,172 +227,280 @@
 <body>
   <div id="welcome" class="welcome" aria-hidden="true">
     <div class="welcome-inner">
-      <nav class="welcome-lang" id="welcome-lang" role="tablist" aria-label="Language">
-        <button type="button" data-lang="en" aria-pressed="false">EN</button>
-        <button type="button" data-lang="zh" aria-pressed="false">中文</button>
-        <button type="button" data-lang="fr" aria-pressed="false">FR</button>
-        <button type="button" data-lang="de" aria-pressed="false">DE</button>
-        <button type="button" data-lang="es" aria-pressed="false">ES</button>
-      </nav>
-      <header class="welcome-head">
-        <h1 class="welcome-title"><a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a></h1>
-        <p class="welcome-sub">WEB TERMINAL · PROTOCOL v1</p>
-      </header>
+      <div class="wel-top">
+        <header class="welcome-head">
+          <h1 class="welcome-title"><a class="soa-name-link" id="wel-name" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" aria-label="Son of Anton (where the name comes from, opens YouTube)">Son of Anton</a></h1>
+        </header>
+        <!-- Star count for the public repo. Renders from the sidebar Contribute
+             widget's cache (localStorage soa-web:contrib-stats) at once, refreshes
+             at most hourly, and is a plain "GitHub" link whenever no count is known. -->
+        <a class="wel-star" id="wel-star" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" aria-label="Star on GitHub"><svg class="wel-star-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" hidden><path d="M8 1.6l1.93 3.92 4.32.63-3.13 3.05.74 4.3L8 11.47 4.14 13.5l.74-4.3L1.75 6.15l4.32-.63z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg><span class="wel-star-text" id="wel-star-text">GitHub</span></a>
+        <nav class="welcome-lang" id="welcome-lang" aria-label="Language">
+          <button type="button" data-lang="en" lang="en" aria-pressed="false">EN</button>
+          <button type="button" data-lang="zh" lang="zh" aria-pressed="false">中文</button>
+          <button type="button" data-lang="fr" lang="fr" aria-pressed="false">FR</button>
+          <button type="button" data-lang="de" lang="de" aria-pressed="false">DE</button>
+          <button type="button" data-lang="es" lang="es" aria-pressed="false">ES</button>
+        </nav>
+      </div>
 
-      <!-- Guided setup wizard — the primary, low-overwhelm first-run path.
-           One focused step at a time; the rich content lives in #wiz-more,
-           hidden until "What is this?". -->
-      <section class="wiz" id="wiz" data-step="1">
-        <ol class="wiz-progress" aria-hidden="true">
-          <li class="wiz-dot"></li>
-          <li class="wiz-dot"></li>
-          <li class="wiz-dot"></li>
-        </ol>
+      <div class="wel-hero">
+        <div class="wel-copy">
+          <p class="wel-headline" role="heading" aria-level="2" data-w="hero_title">Your AI agent keeps working at home. Answer it from your phone.</p>
+          <p class="welcome-sub" data-w="hero_sub">Son of Anton runs your terminal and AI coding agents (programs like Claude Code and Codex that write and fix code for you) on your own computer. Open them from any browser or your phone and carry on exactly where you left off.</p>
+          <button type="button" class="wiz-link wel-jump" id="wel-jump" aria-controls="wiz" data-w="jump_setup">Skip to setup</button>
+        </div>
 
-        <!-- Step 1 · Install -->
-        <div class="wiz-step wiz-step--1">
-          <h2 class="wiz-h" data-w="wiz1_title">Install the backend</h2>
-          <p class="wiz-p" data-w="wiz1_sub">One file. Double-click it. That’s the whole install.</p>
-          <button type="button" class="wiz-primary" id="welcome-run" data-w="wiz_download">⬇ Download installer</button>
-          <p class="wiz-meta" data-w="wiz1_meta">macOS / Linux · ~30 seconds · no account</p>
-          <p class="welcome-run-hint" id="welcome-run-hint" hidden></p>
-          <details class="wiz-alt">
-            <summary data-w="wiz_or_copy">Prefer to paste a command?</summary>
-            <div class="welcome-cmdwrap">
-              <pre class="welcome-cmd" id="welcome-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
-              <button type="button" class="welcome-copy" id="welcome-copy" data-w="copy">COPY</button>
+        <!-- The one illustration: a laptop terminal and a phone showing the
+             same shell. HTML + CSS only; the panes are decorative and the
+             story is read once from the visually hidden paragraph. -->
+        <figure class="wel-demo" id="wel-demo" aria-labelledby="wel-demo-cap">
+          <p class="sr-only" data-w="demo_story">A short demo. An AI agent is working in a terminal on your computer. You leave your desk. The agent asks whether to run the tests, and your phone shows a notification. You tap Yes on the phone, and the answer is typed into the same terminal on your computer. The tests pass, and a list shows which of your other agents need you.</p>
+          <div class="wel-stage" aria-hidden="true">
+            <div class="wel-laptop">
+              <div class="wel-bar">
+                <span class="wel-path">~/my-app</span>
+                <span class="wel-tabs">
+                  <span class="wel-tab"><i class="wel-dot" data-tab="a"></i>my-app</span>
+                  <span class="wel-tab"><i class="wel-dot" data-tab="b"></i>api</span>
+                  <span class="wel-tab"><i class="wel-dot" data-tab="c"></i>docs</span>
+                </span>
+              </div>
+              <div class="wel-term">
+                <div class="ln" data-in="0"><span class="dim">~/my-app $</span> git switch -c fix-checkout</div>
+                <div class="ln dim" data-in="0">Switched to a new branch 'fix-checkout'</div>
+                <div class="ln" data-in="0"><span class="dim">~/my-app $</span> npm install</div>
+                <div class="ln dim" data-in="0">added 214 packages in 6s</div>
+                <div class="ln" data-in="0"><span class="dim">~/my-app $</span> git pull</div>
+                <div class="ln dim" data-in="0">Already up to date.</div>
+                <div class="ln" data-in="10"><span class="dim">~/my-app $</span> claude</div>
+                <div class="ln dim" data-in="11">Reading src/cart.js…</div>
+                <div class="ln" data-in="12">✻ Editing checkout.js</div>
+                <div class="ln" data-in="20">✻ Updated 3 files</div>
+                <div class="ln q" data-in="30" data-w="demo_q">Run the tests now?</div>
+                <div class="ln" data-in="30">  1. <span data-w="demo_yes">Yes</span>   2. <span data-w="demo_no">No</span></div>
+                <div class="ln" data-in="31">&gt; <span class="wel-key">1</span><span class="wel-cur"></span></div>
+                <div class="ln ok" data-in="50">✓ 12 passed</div>
+                <div class="ln" data-in="51">Done.</div>
+              </div>
+              <span class="wel-away" data-w="demo_away">You've left your desk</span>
             </div>
-          </details>
-          <!-- A second computer (or a tablet on the desktop site) installs
-               nothing: it pairs with the daemon that already runs, by scanning
-               the QR the desktop shows — in this page — or pasting its link. -->
-          <div class="wiz-pair">
-            <p class="wiz-pair-p" data-w="wiz_pair_p">Already running it on another machine?</p>
-            <button type="button" class="wiz-pair-btn" id="wiz-scan">
-              <span class="wiz-pair-ico" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-              <span data-w="wiz_pair_scan">Scan its QR code</span>
-            </button>
-            <details class="wiz-alt wiz-pair-manual" id="wiz-pair-manual">
-              <summary data-w="wiz_pair_paste">Or paste the pairing link</summary>
-              <div class="welcome-cmdwrap">
-                <input class="wiz-pair-url" id="wiz-pair-url" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://…/m/?t=…" aria-label="Pairing link">
-                <button type="button" class="welcome-copy" id="wiz-pair-go" data-w="wiz_pair_go">CONNECT</button>
+            <div class="wel-phone">
+              <div class="wel-clock">9:41</div>
+              <div class="wel-mirror">
+                <div class="ln" data-in="0"><span class="dim">$</span> npm install</div>
+                <div class="ln dim" data-in="0">added 214 packages</div>
+                <div class="ln" data-in="0"><span class="dim">$</span> git pull</div>
+                <div class="ln dim" data-in="0">Already up to date.</div>
+                <div class="ln" data-in="10"><span class="dim">$</span> claude</div>
+                <div class="ln" data-in="12">✻ Editing…</div>
+                <div class="ln" data-in="20">✻ Updated 3 files</div>
+                <div class="ln" data-in="30" data-w="demo_q">Run the tests now?</div>
+                <div class="ln" data-in="31">&gt; <span class="wel-key">1</span></div>
+                <div class="ln ok" data-in="50">✓ 12 passed</div>
               </div>
-              <div class="welcome-cmdwrap wiz-pair-pwrow" id="wiz-pair-pwrow" hidden>
-                <input class="wiz-pair-url" id="wiz-pair-pw" type="password" autocapitalize="off" autocomplete="current-password" spellcheck="false" placeholder="pairing password" aria-label="Pairing password">
+              <div class="wel-status" data-show="2"><i class="wel-dot is-work"></i><span>my-app · <span data-w="demo_working">working</span></span></div>
+              <div class="wel-card wel-notify" data-show="3 4">
+                <b data-w="demo_notify">my-app needs your answer</b>
+                <span class="wel-notify-q" data-w="demo_q">Run the tests now?</span>
+                <span class="wel-btns"><span class="wel-btn yes" data-w="demo_yes">Yes</span><span class="wel-btn" data-w="demo_no">No</span></span>
               </div>
-            </details>
-            <button type="button" class="wiz-link" id="wiz-devhist" hidden data-w="wiz_devhist">Read history saved on this device</button>
-            <p class="wiz-pair-err" id="wiz-pair-err" role="alert" hidden></p>
+              <div class="wel-fleet" data-show="5">
+                <span class="wel-row"><i class="wel-dot is-done"></i><span class="nm">my-app</span><span class="st done" data-w="demo_done">done</span></span>
+                <span class="wel-row"><i class="wel-dot is-work"></i><span class="nm">api</span><span class="st" data-w="demo_working">working</span></span>
+                <span class="wel-row"><i class="wel-dot is-need"></i><span class="nm">docs</span><span class="st need" data-w="demo_needs">needs you</span></span>
+              </div>
+            </div>
+            <svg class="wel-trace" focusable="false"><line x1="0" y1="0" x2="0" y2="0"/></svg>
+          </div>
+          <figcaption>
+            <div class="wel-cap-row">
+              <p class="wel-cap" id="wel-demo-cap" data-w="demo_cap_4">Answer from your phone. It types into the same terminal.</p>
+              <div class="wel-ctrl">
+                <button type="button" class="wel-toggle" id="wel-demo-toggle" data-w="demo_pause">Pause</button>
+                <button type="button" class="wel-demo-dot" data-frame="1"></button>
+                <button type="button" class="wel-demo-dot" data-frame="2"></button>
+                <button type="button" class="wel-demo-dot" data-frame="3"></button>
+                <button type="button" class="wel-demo-dot" data-frame="4"></button>
+                <button type="button" class="wel-demo-dot" data-frame="5"></button>
+              </div>
+            </div>
+            <ol class="wel-caps-list">
+              <li data-w="demo_cap_1">Your agent works in a real terminal on your computer.</li>
+              <li data-w="demo_cap_2">Step away. It keeps going at home.</li>
+              <li data-w="demo_cap_3">When it needs you, your phone tells you.</li>
+              <li data-w="demo_cap_4">Answer from your phone. It types into the same terminal.</li>
+              <li data-w="demo_cap_5">Run several agents and see which one needs you.</li>
+            </ol>
+          </figcaption>
+        </figure>
+
+        <div class="wel-setup">
+          <!-- Guided setup wizard. #wiz[data-step] picks the open step; the
+               others show as one-line summaries (CSS only). -->
+          <section class="wiz" id="wiz" data-step="1" aria-labelledby="wiz-card-title">
+            <h2 class="wiz-card-title" id="wiz-card-title" data-w="wiz_card_title">Get it on this computer</h2>
+            <ol class="wiz-progress sr-only">
+              <li class="wiz-dot" data-w="wiz_dot1">Download</li>
+              <li class="wiz-dot" data-w="wiz_dot2">Start</li>
+              <li class="wiz-dot" data-w="wiz_dot3">Open</li>
+            </ol>
+            <div class="wiz-steps">
+              <!-- Step 1 · Download -->
+              <div class="wiz-step wiz-step--1">
+                <span class="wiz-n" aria-hidden="true">1</span>
+                <h3 class="wiz-h" data-w="wiz1_title">Download and open the installer</h3>
+                <div class="wiz-body">
+                  <p class="wiz-p" data-w="wiz1_sub">It installs Son of Anton for your user account only (no admin password) and starts it in the background. You only do this once.</p>
+                  <button type="button" class="wiz-primary" id="welcome-run" data-w="wiz_download">Download the installer</button>
+                  <p class="wiz-meta" data-w="wiz1_meta">For macOS and Linux. Takes about a minute.</p>
+                  <details class="wiz-alt">
+                    <summary data-w="wiz_or_copy">Prefer to paste a command into Terminal?</summary>
+                    <div class="welcome-cmdwrap">
+                      <pre class="welcome-cmd" id="welcome-cmd">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
+                      <button type="button" class="welcome-copy" id="welcome-copy" data-w="copy">Copy</button>
+                    </div>
+                  </details>
+                  <!-- A second computer (or a tablet on the desktop site) installs
+                       nothing: it pairs with the daemon that already runs, by scanning
+                       the QR the desktop shows — in this page — or pasting its link. -->
+                  <details class="wiz-alt wiz-pair-box" id="wiz-pair-box">
+                    <summary data-w="wiz_pair_title">Already set up on another computer?</summary>
+                    <div class="wiz-pair">
+                      <p class="wiz-pair-p" data-w="wiz_pair_p">Connect this browser to it instead of installing here.</p>
+                      <div class="wiz-pair-btns">
+                        <button type="button" class="wiz-pair-btn" id="wiz-scan">
+                          <span class="wiz-pair-ico" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                          <span data-w="wiz_pair_scan">Scan its QR code</span>
+                        </button>
+                      </div>
+                      <details class="wiz-alt wiz-pair-manual" id="wiz-pair-manual">
+                        <summary data-w="wiz_pair_paste">Paste its link</summary>
+                        <div class="welcome-cmdwrap">
+                          <input class="wiz-pair-url" id="wiz-pair-url" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://…/m/?t=…" aria-label="Pairing link">
+                          <button type="button" class="welcome-copy" id="wiz-pair-go" data-w="wiz_pair_go">Connect</button>
+                        </div>
+                        <div class="welcome-cmdwrap wiz-pair-pwrow" id="wiz-pair-pwrow" hidden>
+                          <input class="wiz-pair-url" id="wiz-pair-pw" type="password" autocapitalize="off" autocomplete="current-password" spellcheck="false" placeholder="Pairing password" aria-label="Pairing password">
+                        </div>
+                      </details>
+                      <button type="button" class="wiz-link" id="wiz-devhist" hidden data-w="wiz_devhist">Read history saved in this browser</button>
+                      <p class="wiz-pair-err" id="wiz-pair-err" role="alert" hidden></p>
+                    </div>
+                  </details>
+                </div>
+              </div>
+
+              <!-- Step 2 · Start -->
+              <div class="wiz-step wiz-step--2">
+                <span class="wiz-n" aria-hidden="true">2</span>
+                <h3 class="wiz-h" data-w="wiz2_title">Start it</h3>
+                <p class="wiz-sum" data-w="wiz2_summary">Open the file you downloaded. This page waits for it.</p>
+                <div class="wiz-body">
+                  <p class="wiz-p">
+                    <span data-w="wiz2_a">Open</span>
+                    <code class="wiz-file" id="wiz-file">soa-web-install.command</code>
+                    <span data-w="wiz2_b">from your Downloads. A Terminal window opens and runs the install.</span>
+                  </p>
+                  <p class="welcome-run-hint" id="welcome-run-hint" hidden></p>
+                  <p class="wiz-wait" id="welcome-wait">
+                    <span class="wiz-spin" aria-hidden="true"></span>
+                    <span class="wiz-checking" data-w="wiz2_checking">Checking…</span>
+                    <span data-w="wiz2_wait">This page will notice when it's running. Keep it open.</span>
+                  </p>
+                  <button type="button" class="wiz-link" id="wiz-back" data-w="wiz_back">Download it again</button>
+                </div>
+              </div>
+
+              <!-- Step 3 · Open -->
+              <div class="wiz-step wiz-step--3">
+                <span class="wiz-n" aria-hidden="true">3</span>
+                <h3 class="wiz-h"><span class="wiz-ok-mark" aria-hidden="true">✓</span><span data-w="wiz3_title">It's running</span></h3>
+                <p class="wiz-sum" data-w="wiz3_summary">Your terminal opens in this tab.</p>
+                <div class="wiz-body">
+                  <p class="wiz-p" data-w="wiz3_sub">Opening your terminal…</p>
+                  <button type="button" class="wiz-primary" id="welcome-enter" data-w="enter">Open my terminal</button>
+                  <p class="wiz-next" data-w="wiz3_next">Next, connect your phone: in the sidebar, open Mobile link and scan the QR code with your phone's camera.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div class="wel-sandbox">
+            <button type="button" class="wiz-secondary" id="wiz-sandbox" data-w="wiz_sandbox">Try it in this browser first</button>
+            <p class="wel-sandbox-note" data-w="wiz_sandbox_note">A practice shell that runs in this tab. It can't see your files or your computer.</p>
           </div>
         </div>
+      </div>
 
-        <!-- Step 2 · Run -->
-        <div class="wiz-step wiz-step--2">
-          <h2 class="wiz-h" data-w="wiz2_title">Run the installer</h2>
-          <p class="wiz-p">
-            <span data-w="wiz2_a">Double-click</span>
-            <code class="wiz-file" id="wiz-file">soa-web-install.command</code>
-            <span data-w="wiz2_b">in your Downloads — Terminal opens and installs it for you.</span>
-          </p>
-          <p class="wiz-wait" id="welcome-wait">
-            <span class="wiz-spin" aria-hidden="true"></span>
-            <span data-w="wiz2_wait">Waiting for your backend to come online…</span>
-          </p>
-          <button type="button" class="wiz-link" id="wiz-back" data-w="wiz_back">← back</button>
-        </div>
-
-        <!-- Step 3 · Connected -->
-        <div class="wiz-step wiz-step--3">
-          <h2 class="wiz-h wiz-ok" data-w="wiz3_title">✓ Connected</h2>
-          <p class="wiz-p" data-w="wiz3_sub">Your backend is online. Opening your terminal…</p>
-          <button type="button" class="wiz-primary" id="welcome-enter" data-w="enter">ENTER TERMINAL →</button>
+      <section class="wel-section wel-features" aria-labelledby="wel-feat-h">
+        <h2 class="wel-h2" id="wel-feat-h" data-w="feat_title">What it does for you</h2>
+        <div class="wel-groups">
+          <div>
+            <h3 class="wel-h3" data-w="feat_g1">At your desk</h3>
+            <ul class="wel-feats">
+              <li><b data-w="f_tabs_t">Nothing lost on reload or restart.</b><span data-w="f_tabs_d">Your tabs and their history come back after a page reload or a reboot.</span></li>
+              <li><b data-w="f_fleet_t">Every agent at a glance.</b><span data-w="f_fleet_d">Each tab shows whether its agent is working, needs you, seems stuck or is done.</span></li>
+              <li><b data-w="f_voice_t">Talk instead of type.</b><span data-w="f_voice_d">Voice commands and dictation, in five languages.</span></li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="wel-h3" data-w="feat_g2">Away from your desk</h3>
+            <ul class="wel-feats">
+              <li><b data-w="f_same_t">The same shell on your phone.</b><span data-w="f_same_d">Scan a QR code once and keep typing in the terminal you started on your laptop. No app to install.</span></li>
+              <li class="is-need"><b data-w="f_notify_t">A ping when it needs you.</b><span data-w="f_notify_d">Your phone gets a notification when an agent is waiting for an answer.</span></li>
+              <li><b data-w="f_chat_t">Chat with your agents.</b><span data-w="f_chat_d">Reply in a chat view, by typing or speaking.</span></li>
+              <li><b data-w="f_screen_t">Your Mac's screen, on your phone.</b><span data-w="f_screen_d">See and click your desktop when the terminal isn't enough.</span></li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="wel-h3" data-w="feat_g3">If something goes wrong</h3>
+            <ul class="wel-feats">
+              <li><b data-w="f_limits_t">Usage limits handled.</b><span data-w="f_limits_d">When Claude or Codex hits its limit, the agent waits for the reset, picks up again and replays what you typed meanwhile.</span></li>
+              <li><b data-w="f_backup_t">A spare way in.</b><span data-w="f_backup_d">If the link to your phone drops, backup links keep you connected.</span></li>
+              <li><b data-w="f_lock_t">A lock on the door.</b><span data-w="f_lock_d">Add a pairing password, and change it to lock out a lost phone.</span></li>
+            </ul>
+          </div>
         </div>
       </section>
 
-      <nav class="wiz-foot">
-        <button type="button" class="wiz-link" id="wiz-learn" data-w="wiz_learn">What is this?</button>
-        <span class="wiz-foot-sep" aria-hidden="true">·</span>
-        <button type="button" class="wiz-link" id="wiz-sandbox" data-w="wiz_sandbox">Try the sandbox</button>
-        <span class="wiz-foot-sep" aria-hidden="true">·</span>
-        <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">github</a>
-      </nav>
+      <section class="wel-section" aria-labelledby="wel-priv-h">
+        <h2 class="wel-h2" id="wel-priv-h" data-w="priv_title">It stays on your computer</h2>
+        <div class="wel-prose">
+          <p data-w="priv_p1">Your terminals, your code and your agents run on your own machine. You don't need an account.</p>
+          <p data-w="priv_p2">Your phone connects straight to your computer through a private link that only your QR code opens. An optional account can help your phone find this computer again if that link changes.</p>
+        </div>
+      </section>
 
-      <p class="welcome-credit">Made by <a href="https://github.com/SimonSaysGiveMeSmile" target="_blank" rel="noopener">Simon Says ↗</a></p>
-
-      <!-- Hidden until "What is this?" so the first-run screen stays calm. -->
-      <div class="wiz-more" id="wiz-more" hidden>
-        <section class="welcome-intro">
-          <p class="welcome-intro-p" data-w="intro_p1">A real terminal that runs in your browser. Open a tab on your laptop, scan the QR on your phone, keep typing in the same shell.</p>
-        </section>
-
-        <section class="welcome-compare welcome-compare--three">
-          <article class="welcome-col">
-            <h3 class="welcome-h3" data-w="col_web_title">Web <span class="welcome-tag" data-w="col_web_sub">this page</span></h3>
-            <ul class="welcome-list">
-              <li data-w="web_b1">Try it now — no install</li>
-              <li data-w="web_b2">Connects to a local backend once installed</li>
-              <li data-w="web_b4">5-language UI</li>
-              <li class="no" data-w="web_b3">Limited to a sandbox shell</li>
-            </ul>
-          </article>
-          <article class="welcome-col welcome-col--accent">
-            <h3 class="welcome-h3" data-w="col_desk_title">Desktop <span class="welcome-tag" data-w="col_desk_sub">installed</span></h3>
-            <ul class="welcome-list">
-              <li data-w="desk_b1">Real shells on your computer</li>
-              <li data-w="desk_b2">Phone pairing via QR code</li>
-              <li data-w="desk_b3">Live CPU, memory, and network</li>
-              <li data-w="desk_b4">Tabs survive restarts</li>
-            </ul>
-          </article>
-          <article class="welcome-col">
-            <h3 class="welcome-h3" data-w="col_phone_title">Phone <span class="welcome-tag" data-w="col_phone_sub">paired</span></h3>
-            <ul class="welcome-list">
-              <li data-w="phone_b1">Scan the QR — no app needed</li>
-              <li data-w="phone_b2">Type into your laptop from anywhere</li>
-              <li data-w="phone_b3">Touch-friendly tabs</li>
-              <li data-w="phone_b4">Encrypted by default</li>
-            </ul>
-          </article>
-        </section>
-
-        <section class="welcome-setup">
-          <h3 class="welcome-section-title" data-w="setup_title">Other ways to install</h3>
-          <div class="welcome-setup-grid">
-            <article class="welcome-step">
-              <header class="welcome-step-head">
-                <span class="welcome-step-num">B</span>
-                <span class="welcome-step-label" data-w="setup_b_label">Self-host</span>
-              </header>
-              <p class="welcome-step-desc" data-w="setup_b_desc">For tinkerers. Clone, set a password, run.</p>
-              <div class="welcome-cmdwrap">
-                <pre class="welcome-cmd" id="welcome-cmd-2">git clone https://github.com/SimonSaysGiveMeSmile/SoA-Web &amp;&amp; cd SoA-Web
+      <section class="wel-section" aria-labelledby="wel-faq-h">
+        <h2 class="wel-h2" id="wel-faq-h" data-w="faq_title">Questions</h2>
+        <div class="welcome-faq">
+          <details class="welcome-faq-item"><summary data-w="faq_q1">What's an AI coding agent?</summary><p data-w="faq_a1">A program like Claude Code or Codex that reads your project, writes code and runs commands when you ask, and checks with you before the risky steps.</p></details>
+          <details class="welcome-faq-item"><summary data-w="faq_q2">Do I need Claude Code or Codex?</summary><p data-w="faq_a2">No. Son of Anton is a full terminal on its own. If you use Claude Code or Codex in it, it recognises them and shows what each one is doing.</p></details>
+          <details class="welcome-faq-item"><summary data-w="faq_q3">I'm not comfortable with a terminal. Is this for me?</summary><p data-w="faq_a3">Yes. The installer does the setup, and once you start an agent you can talk to it in plain language.</p></details>
+          <details class="welcome-faq-item"><summary data-w="faq_q4">What if my phone can't connect?</summary><p data-w="faq_a4">Your agents keep running at home. Try a backup link from the same screen, or scan the QR code again.</p></details>
+          <details class="welcome-faq-item"><summary data-w="faq_q5">How do I uninstall it?</summary><p><span data-w="faq_a5a">Run</span> <code>~/.s0a-local/uninstall.sh</code><span data-w="faq_a5b"> in Terminal. It stops the service and removes what the installer added.</span></p></details>
+        </div>
+        <div class="wel-tech">
+          <button type="button" class="wiz-link" id="wiz-learn" aria-expanded="false" aria-controls="wiz-more" data-w="wiz_learn">Technical details</button>
+          <div class="wiz-more" id="wiz-more" hidden>
+            <div class="wel-prose"><p data-w="tech_p">The installer runs a small background service on this computer at 127.0.0.1:4010, using your user account only. Tabs and scrollback are saved to disk, so they survive restarts. Connecting from your phone uses an encrypted tunnel that the app starts for you.</p></div>
+            <h3 class="welcome-src-title" data-w="src_title">Install from the source code</h3>
+            <p class="welcome-src-desc" data-w="setup_b_desc">Clone the repository and run it yourself. For developers who want to read or change the code.</p>
+            <div class="welcome-cmdwrap">
+              <pre class="welcome-cmd" id="welcome-cmd-2">git clone https://github.com/SimonSaysGiveMeSmile/SoA-Web &amp;&amp; cd SoA-Web
 SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
-                <button type="button" class="welcome-copy" id="welcome-copy-2" data-w="copy">COPY</button>
-              </div>
-            </article>
+              <button type="button" class="welcome-copy" id="welcome-copy-2" data-w="copy">Copy</button>
+            </div>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section class="welcome-faq">
-          <details class="welcome-faq-item">
-            <summary data-w="faq_q1">Why does it use Cloudflare Tunnel?</summary>
-            <p data-w="faq_a1">So your phone can reach your laptop without LAN setup. The tunnel auto-starts and gives you an HTTPS URL. Disable with <code>SOA_WEB_AUTOPAIR=0</code>.</p>
-          </details>
-          <details class="welcome-faq-item">
-            <summary data-w="faq_q2">Is it safe to expose on the internet?</summary>
-            <p data-w="faq_a2">Only with a password. The server refuses to start in open mode on a public host. Set <code>SOA_WEB_PASSWORD</code> before exposing it.</p>
-          </details>
-          <details class="welcome-faq-item">
-            <summary data-w="faq_q3">Where do my tabs live?</summary>
-            <p data-w="faq_a3">In <code>~/.soa-web/tabs.json</code> on the machine running the server. Scrollback stays in memory and replays on reconnect.</p>
-          </details>
-          <details class="welcome-faq-item">
-            <summary data-w="faq_q4">Can I deploy on Vercel?</summary>
-            <p data-w="faq_a4">Vercel can host the page, but the server needs a long-running Node process. Run it on your own box and point <code>SOA_WEB_BACKEND</code> at the tunnel URL.</p>
-          </details>
-        </section>
-      </div>
+      <nav class="wiz-foot" aria-label="Links">
+        <a class="welcome-link" href="https://github.com/SimonSaysGiveMeSmile/SoA-Web" target="_blank" rel="noopener" data-w="github">GitHub</a>
+        <a class="welcome-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" data-w="why_name">Why the name?</a>
+        <p class="welcome-credit"><span data-w="credit">Made by</span> <a href="https://github.com/SimonSaysGiveMeSmile" target="_blank" rel="noopener">Simon Says</a></p>
+      </nav>
     </div>
   </div>
   <script>
@@ -384,302 +512,366 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
     (function wireWelcome() {
         var html = document.documentElement;
         if (html.dataset.welcome !== '1') return;
+        // Preview (?welcome=1): never auto-enter, never mark as welcomed.
+        var PREVIEW = html.dataset.welcomePreview === '1';
+        var welcomeEl = document.getElementById('welcome');
+        if (welcomeEl) welcomeEl.removeAttribute('aria-hidden');
 
         var DICT = {
             en: {
-                col_web_title: 'Web', col_web_sub: 'this page',
-                col_desk_title: 'Desktop', col_desk_sub: 'installed',
-                col_phone_title: 'Phone', col_phone_sub: 'paired',
-                intro_p1: "A real terminal that runs in your browser. Open a tab on your laptop, scan the QR on your phone, keep typing in the same shell.",
-                web_b1: 'Try it now — no install',
-                web_b2: 'Connects to a local backend once installed',
-                web_b3: "Limited to a sandbox shell",
-                web_b4: '5-language UI',
-                desk_b1: 'Real shells on your computer',
-                desk_b2: 'Phone pairing via QR code',
-                desk_b3: 'Live CPU, memory, and network',
-                desk_b4: 'Tabs survive restarts',
-                phone_b1: 'Scan the QR — no app needed',
-                phone_b2: "Type into your laptop from anywhere",
-                phone_b3: 'Touch-friendly tabs',
-                phone_b4: 'Encrypted by default',
-                setup_title: 'Setup · pick one',
-                setup_a_label: 'Install script',
-                setup_a_desc: 'Easiest. Works on macOS and Linux.',
-                setup_b_label: 'Self-host',
-                setup_b_desc: 'For tinkerers. Clone, set a password, run.',
-                setup_after: "Then open http://127.0.0.1:7332 — or scan the QR from your phone.",
-                faq_q1: 'Why does it use Cloudflare Tunnel?',
-                faq_a1: "So your phone can reach your laptop without LAN setup. The tunnel auto-starts and gives you an HTTPS URL. Disable with SOA_WEB_AUTOPAIR=0.",
-                faq_q2: 'Is it safe to expose on the internet?',
-                faq_a2: 'Only with a password. The server refuses to start in open mode on a public host. Set SOA_WEB_PASSWORD before exposing it.',
-                faq_q3: 'Where do my tabs live?',
-                faq_a3: 'In ~/.soa-web/tabs.json on the machine running the server. Scrollback stays in memory and replays on reconnect.',
-                faq_q4: 'Can I deploy on Vercel?',
-                faq_a4: 'Vercel can host the page, but the server needs a long-running Node process. Run it on your own box and point SOA_WEB_BACKEND at the tunnel URL.',
-                cmd_caption: 'Want real shells? Paste this in Terminal:',
-                copy: 'COPY', copied: 'COPIED', select_copy: 'select + copy',
-                run: 'RUN', downloaded: 'DOWNLOADED ↓',
-                run_hint_mac: 'Open soa-web-install.command from Downloads (double-click). Terminal will launch and run the installer. Reload this tab once it finishes.',
-                run_hint_win: 'Windows isn’t supported by the installer. Use WSL: open Ubuntu, then run the copied command.',
-                run_hint_nix: 'Open a terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — then reload this tab.',
-                github: 'source · github',
-                enter: 'ENTER TERMINAL →',
-                wiz1_title: 'Install the backend',
-                wiz1_sub: 'One file. Double-click it. That’s the whole install.',
-                wiz_download: '⬇ Download installer',
-                wiz1_meta: 'macOS / Linux · ~30 seconds · no account',
-                wiz_or_copy: 'Prefer to paste a command?',
-                wiz_pair_p: 'Already running it on another machine?', wiz_pair_scan: 'Scan its QR code', wiz_pair_paste: 'Or paste the pairing link', wiz_pair_go: 'CONNECT',
-                wiz_pair_cancel: 'Cancel', wiz_pair_hint: 'Point the camera at the QR code in the desktop sidebar (MOBILE LINK).', wiz_pair_torch: 'Light',
-                wiz_pair_err_code: 'That is not a Son of Anton pairing code.', wiz_pair_err_token: 'That link has no pairing token — open MOBILE LINK on the desktop and scan the QR it shows.', wiz_pair_err_cam: 'No camera here. Paste the pairing link instead.',
+                name_aria: 'Son of Anton (where the name comes from, opens YouTube)',
+                jump_setup: 'Skip to setup',
+                hero_title: 'Your AI agent keeps working at home. Answer it from your phone.',
+                hero_sub: 'Son of Anton runs your terminal and AI coding agents (programs like Claude Code and Codex that write and fix code for you) on your own computer. Open them from any browser or your phone and carry on exactly where you left off.',
+                demo_story: 'A short demo. An AI agent is working in a terminal on your computer. You leave your desk. The agent asks whether to run the tests, and your phone shows a notification. You tap Yes on the phone, and the answer is typed into the same terminal on your computer. The tests pass, and a list shows which of your other agents need you.',
+                demo_cap_1: 'Your agent works in a real terminal on your computer.',
+                demo_cap_2: 'Step away. It keeps going at home.',
+                demo_cap_3: 'When it needs you, your phone tells you.',
+                demo_cap_4: 'Answer from your phone. It types into the same terminal.',
+                demo_cap_5: 'Run several agents and see which one needs you.',
+                demo_pause: 'Pause', demo_play: 'Play', demo_replay: 'Replay', demo_step: 'Step {n} of 5',
+                demo_away: "You've left your desk", demo_notify: 'my-app needs your answer',
+                demo_q: 'Run the tests now?', demo_yes: 'Yes', demo_no: 'No',
+                demo_working: 'working', demo_needs: 'needs you', demo_done: 'done',
+                wiz_card_title: 'Get it on this computer',
+                wiz_dot1: 'Download', wiz_dot2: 'Start', wiz_dot3: 'Open',
+                wiz1_title: 'Download and open the installer',
+                wiz1_sub: 'It installs Son of Anton for your user account only (no admin password) and starts it in the background. You only do this once.',
+                wiz_download: 'Download the installer',
+                wiz1_meta: 'For macOS and Linux. Takes about a minute.',
+                wiz_or_copy: 'Prefer to paste a command into Terminal?',
+                copy: 'Copy', copied: 'Copied', select_copy: 'Selected. Press Cmd+C or Ctrl+C', downloaded: 'Downloaded',
+                run_hint_mac: "If macOS won't open the file, go back and paste the command into Terminal instead.",
+                run_hint_win: 'The installer runs on macOS and Linux. On Windows, open Ubuntu (WSL) and paste the command from step 1.',
+                run_hint_nix: 'In a terminal, run: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh',
+                wiz_pair_title: 'Already set up on another computer?',
+                wiz_pair_p: 'Connect this browser to it instead of installing here.',
+                wiz_pair_scan: 'Scan its QR code', wiz_pair_paste: 'Paste its link', wiz_pair_go: 'Connect',
+                wiz_pair_cancel: 'Cancel', wiz_pair_hint: 'Point the camera at the QR code in the sidebar of the other computer (Mobile link).', wiz_pair_torch: 'Light',
+                wiz_pair_err_code: 'That is not a Son of Anton pairing code.', wiz_pair_err_token: 'That link has no pairing token. On the other computer, open Mobile link and scan the QR code it shows.', wiz_pair_err_cam: 'No camera here. Paste the pairing link instead.',
                 wiz_pair_err_denied: 'Camera access was refused. Allow it in the browser, or paste the link.', wiz_pair_err_open: 'The camera could not start ({detail}). Paste the link instead.',
-                wiz_pair_pw_hint: 'This desktop takes its pairing password — enter it below.', wiz_pair_pw_ph: 'pairing password', wiz_pair_err_pw: 'Wrong password.', wiz_pair_err_nologin: 'The desktop accepted the password but does not allow password login. On the desktop: MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'Could not reach that desktop. Check the link and that it is online.', wiz_devhist: 'Read history saved on this device',
-                wiz2_title: 'Run the installer',
-                wiz2_a: 'Double-click',
-                wiz2_b: 'in your Downloads — Terminal opens and installs it for you.',
-                wiz2_wait: 'Waiting for your backend to come online…',
-                wiz_back: '← back',
-                wiz3_title: '✓ Connected',
-                wiz3_sub: 'Your backend is online. Opening your terminal…',
-                wiz_learn: 'What is this?',
-                wiz_sandbox: 'Try the sandbox',
+                wiz_pair_pw_hint: 'This computer asks for its pairing password. Enter it below.', wiz_pair_pw_ph: 'Pairing password', wiz_pair_err_pw: 'Wrong password.', wiz_pair_err_nologin: 'The password is right, but password login is off. On the other computer, open Mobile link and allow password login.', wiz_pair_err_unreach: "Couldn't reach that computer. Check the link and that it is online.",
+                wiz_devhist: 'Read history saved in this browser',
+                wiz2_title: 'Start it', wiz2_summary: 'Open the file you downloaded. This page waits for it.',
+                wiz2_a: 'Open', wiz2_b: 'from your Downloads. A Terminal window opens and runs the install.',
+                wiz2_wait: "This page will notice when it's running. Keep it open.", wiz2_checking: 'Checking…',
+                wiz_back: 'Download it again',
+                wiz3_title: "It's running", wiz3_summary: 'Your terminal opens in this tab.',
+                wiz3_sub: 'Opening your terminal…', enter: 'Open my terminal',
+                wiz3_next: "Next, connect your phone: in the sidebar, open Mobile link and scan the QR code with your phone's camera.",
+                wiz_sandbox: 'Try it in this browser first',
+                wiz_sandbox_note: "A practice shell that runs in this tab. It can't see your files or your computer.",
+                feat_title: 'What it does for you',
+                feat_g1: 'At your desk', feat_g2: 'Away from your desk', feat_g3: 'If something goes wrong',
+                f_tabs_t: 'Nothing lost on reload or restart.', f_tabs_d: 'Your tabs and their history come back after a page reload or a reboot.',
+                f_fleet_t: 'Every agent at a glance.', f_fleet_d: 'Each tab shows whether its agent is working, needs you, seems stuck or is done.',
+                f_voice_t: 'Talk instead of type.', f_voice_d: 'Voice commands and dictation, in five languages.',
+                f_same_t: 'The same shell on your phone.', f_same_d: 'Scan a QR code once and keep typing in the terminal you started on your laptop. No app to install.',
+                f_notify_t: 'A ping when it needs you.', f_notify_d: 'Your phone gets a notification when an agent is waiting for an answer.',
+                f_chat_t: 'Chat with your agents.', f_chat_d: 'Reply in a chat view, by typing or speaking.',
+                f_screen_t: "Your Mac's screen, on your phone.", f_screen_d: "See and click your desktop when the terminal isn't enough.",
+                f_limits_t: 'Usage limits handled.', f_limits_d: 'When Claude or Codex hits its limit, the agent waits for the reset, picks up again and replays what you typed meanwhile.',
+                f_backup_t: 'A spare way in.', f_backup_d: 'If the link to your phone drops, backup links keep you connected.',
+                f_lock_t: 'A lock on the door.', f_lock_d: 'Add a pairing password, and change it to lock out a lost phone.',
+                priv_title: 'It stays on your computer',
+                priv_p1: "Your terminals, your code and your agents run on your own machine. You don't need an account.",
+                priv_p2: 'Your phone connects straight to your computer through a private link that only your QR code opens. An optional account can help your phone find this computer again if that link changes.',
+                faq_title: 'Questions',
+                faq_q1: "What's an AI coding agent?", faq_a1: 'A program like Claude Code or Codex that reads your project, writes code and runs commands when you ask, and checks with you before the risky steps.',
+                faq_q2: 'Do I need Claude Code or Codex?', faq_a2: 'No. Son of Anton is a full terminal on its own. If you use Claude Code or Codex in it, it recognises them and shows what each one is doing.',
+                faq_q3: "I'm not comfortable with a terminal. Is this for me?", faq_a3: 'Yes. The installer does the setup, and once you start an agent you can talk to it in plain language.',
+                faq_q4: "What if my phone can't connect?", faq_a4: 'Your agents keep running at home. Try a backup link from the same screen, or scan the QR code again.',
+                faq_q5: 'How do I uninstall it?', faq_a5a: 'Run', faq_a5b: ' in Terminal. It stops the service and removes what the installer added.',
+                wiz_learn: 'Technical details', wiz_learn_hide: 'Hide technical details',
+                tech_p: 'The installer runs a small background service on this computer at 127.0.0.1:4010, using your user account only. Tabs and scrollback are saved to disk, so they survive restarts. Connecting from your phone uses an encrypted tunnel that the app starts for you.',
+                src_title: 'Install from the source code',
+                setup_b_desc: 'Clone the repository and run it yourself. For developers who want to read or change the code.',
+                github: 'GitHub', why_name: 'Why the name?', credit: 'Made by',
+                star: 'Star on GitHub', star_one: 'Star on GitHub, 1 star so far', star_n: 'Star on GitHub, {n} stars so far',
             },
             zh: {
-                col_web_title: '网页', col_web_sub: '本页面',
-                col_desk_title: '桌面', col_desk_sub: '已安装',
-                col_phone_title: '手机', col_phone_sub: '已配对',
-                intro_p1: '在浏览器中运行的真实终端。在笔记本上打开标签页,在手机上扫码,在同一个 shell 中继续输入。',
-                web_b1: '立即试用 —— 无需安装',
-                web_b2: '安装后自动连接本地后端',
-                web_b3: '仅限沙盒 shell',
-                web_b4: '5 种语言界面',
-                desk_b1: '在你的电脑上运行真实 shell',
-                desk_b2: '通过二维码配对手机',
-                desk_b3: '实时 CPU、内存与网络',
-                desk_b4: '标签页在重启后保留',
-                phone_b1: '扫码即用 —— 无需 App',
-                phone_b2: '随时随地操作笔记本',
-                phone_b3: '触屏友好的标签页',
-                phone_b4: '默认加密',
-                setup_title: '设置 · 任选其一',
-                setup_a_label: '安装脚本',
-                setup_a_desc: '最简单。支持 macOS 与 Linux。',
-                setup_b_label: '自托管',
-                setup_b_desc: '适合开发者。克隆、设密码、运行。',
-                setup_after: '然后打开 http://127.0.0.1:7332 —— 或在手机上扫描二维码。',
-                faq_q1: '为什么用 Cloudflare 隧道?',
-                faq_a1: '让手机无需 LAN 设置即可访问笔记本。隧道自动启动并提供 HTTPS URL。使用 SOA_WEB_AUTOPAIR=0 禁用。',
-                faq_q2: '在公网暴露安全吗?',
-                faq_a2: '需要密码才安全。服务器拒绝在公网主机上以开放模式启动。暴露前请设置 SOA_WEB_PASSWORD。',
-                faq_q3: '我的标签页存在哪?',
-                faq_a3: '在运行服务器的机器上的 ~/.soa-web/tabs.json 中。回滚记录保存在内存中,重连时重放。',
-                faq_q4: '可以部署到 Vercel 吗?',
-                faq_a4: 'Vercel 可以托管页面,但服务器需要长期运行的 Node 进程。在你自己的机器上运行服务器,并将 SOA_WEB_BACKEND 指向隧道 URL。',
-                cmd_caption: '想要真实 shell?在终端粘贴:',
-                copy: '复制', copied: '已复制', select_copy: '选中 + 复制',
-                run: '运行', downloaded: '已下载 ↓',
-                run_hint_mac: '在「下载」中双击打开 soa-web-install.command。终端将启动并运行安装程序。完成后刷新此页面。',
-                run_hint_win: '安装程序不支持 Windows。请使用 WSL:打开 Ubuntu,然后运行已复制的命令。',
-                run_hint_nix: '打开终端: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — 然后刷新此页面。',
-                github: '源代码 · GitHub',
-                enter: '进入终端 →',
-                wiz1_title: '安装后端',
-                wiz1_sub: '一个文件。双击它。安装就完成了。',
-                wiz_download: '⬇ 下载安装程序',
-                wiz1_meta: 'macOS / Linux · 约 30 秒 · 无需账号',
-                wiz_or_copy: '想用命令行?',
-                wiz_pair_p: '已经在另一台机器上运行？', wiz_pair_scan: '扫描它的二维码', wiz_pair_paste: '或粘贴配对链接', wiz_pair_go: '连接',
-                wiz_pair_cancel: '取消', wiz_pair_hint: '将相机对准桌面侧栏（MOBILE LINK）中的二维码。', wiz_pair_torch: '补光',
-                wiz_pair_err_code: '这不是 Son of Anton 的配对码。', wiz_pair_err_token: '该链接没有配对令牌——在桌面打开 MOBILE LINK 并扫描其二维码。', wiz_pair_err_cam: '此设备没有相机。请改为粘贴配对链接。',
+                name_aria: 'Son of Anton（名字的由来，在 YouTube 打开）',
+                jump_setup: '跳到安装步骤',
+                hero_title: '你的 AI 智能体在家里继续工作，你用手机回复它。',
+                hero_sub: 'Son of Anton 在你自己的电脑上运行终端和 AI 编程智能体（例如 Claude Code 和 Codex，它们能替你编写和修复代码）。在任意浏览器或手机上打开它们，从上次停下的地方继续。',
+                demo_story: '一段简短的演示。一个 AI 智能体正在你电脑上的终端里工作。你离开了座位。智能体询问是否运行测试，你的手机收到一条通知。你在手机上点了“是”，这个回答被输入到电脑上的同一个终端里。测试通过，一个列表显示你的其他智能体中哪个需要你。',
+                demo_cap_1: '你的智能体在你电脑上的真实终端里工作。',
+                demo_cap_2: '离开座位，它在家里继续工作。',
+                demo_cap_3: '需要你的时候，手机会提醒你。',
+                demo_cap_4: '在手机上回复，答案会输入到同一个终端里。',
+                demo_cap_5: '同时运行多个智能体，一眼看出哪个需要你。',
+                demo_pause: '暂停', demo_play: '播放', demo_replay: '重播', demo_step: '第 {n} 步，共 5 步',
+                demo_away: '你已离开座位', demo_notify: 'my-app 需要你的回复',
+                demo_q: '现在运行测试吗？', demo_yes: '是', demo_no: '否',
+                demo_working: '工作中', demo_needs: '需要你', demo_done: '已完成',
+                wiz_card_title: '安装到这台电脑',
+                wiz_dot1: '下载', wiz_dot2: '启动', wiz_dot3: '打开',
+                wiz1_title: '下载并打开安装程序',
+                wiz1_sub: '它只为你的用户账户安装 Son of Anton（不需要管理员密码），并在后台启动。只需要做一次。',
+                wiz_download: '下载安装程序',
+                wiz1_meta: '适用于 macOS 和 Linux，大约一分钟。',
+                wiz_or_copy: '想把命令粘贴到终端里？',
+                copy: '复制', copied: '已复制', select_copy: '已选中，请按 Cmd+C 或 Ctrl+C', downloaded: '已下载',
+                run_hint_mac: '如果 macOS 打不开这个文件，请返回上一步，把命令粘贴到终端里运行。',
+                run_hint_win: '安装程序支持 macOS 和 Linux。在 Windows 上，请打开 Ubuntu（WSL）并粘贴第 1 步中的命令。',
+                run_hint_nix: '在终端里运行：chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh',
+                wiz_pair_title: '已经在另一台电脑上装好了？',
+                wiz_pair_p: '把这个浏览器连接到那台电脑，而不是在这里安装。',
+                wiz_pair_scan: '扫描它的二维码', wiz_pair_paste: '粘贴它的链接', wiz_pair_go: '连接',
+                wiz_pair_cancel: '取消', wiz_pair_hint: '将相机对准另一台电脑侧栏中的二维码（Mobile Link）。', wiz_pair_torch: '补光',
+                wiz_pair_err_code: '这不是 Son of Anton 的配对码。', wiz_pair_err_token: '该链接没有配对令牌。请在另一台电脑上打开 Mobile Link，扫描它显示的二维码。', wiz_pair_err_cam: '此设备没有相机。请改为粘贴配对链接。',
                 wiz_pair_err_denied: '相机权限被拒绝。请在浏览器中允许，或粘贴链接。', wiz_pair_err_open: '相机无法启动（{detail}）。请改为粘贴链接。',
-                wiz_pair_pw_hint: '该桌面需要配对密码——请在下方输入。', wiz_pair_pw_ph: '配对密码', wiz_pair_err_pw: '密码错误。', wiz_pair_err_nologin: '桌面接受了密码，但未允许密码登录。请在桌面的 MOBILE LINK 中开启 ALLOW PASSWORD LOGIN。', wiz_pair_err_unreach: '无法连接该桌面。请检查链接并确认其在线。', wiz_devhist: '查看此设备上保存的历史',
-                wiz2_title: '运行安装程序',
-                wiz2_a: '双击',
-                wiz2_b: '(在「下载」中)——终端会自动打开并完成安装。',
-                wiz2_wait: '正在等待后端上线…',
-                wiz_back: '← 返回',
-                wiz3_title: '✓ 已连接',
-                wiz3_sub: '后端已上线。正在打开终端…',
-                wiz_learn: '这是什么?',
-                wiz_sandbox: '试用沙盒',
+                wiz_pair_pw_hint: '这台电脑需要配对密码，请在下方输入。', wiz_pair_pw_ph: '配对密码', wiz_pair_err_pw: '密码错误。', wiz_pair_err_nologin: '密码正确，但密码登录未开启。请在另一台电脑上打开 Mobile Link 并允许密码登录。', wiz_pair_err_unreach: '无法连接那台电脑。请检查链接，并确认它在线。',
+                wiz_devhist: '查看此浏览器中保存的历史',
+                wiz2_title: '启动它', wiz2_summary: '打开你下载的文件，这个页面会等待它完成。',
+                wiz2_a: '在“下载”文件夹中打开', wiz2_b: '，终端窗口会打开并运行安装。',
+                wiz2_wait: '安装完成后这个页面会自动发现，请保持打开。', wiz2_checking: '正在检查…',
+                wiz_back: '重新下载',
+                wiz3_title: '已在运行', wiz3_summary: '你的终端会在这个标签页中打开。',
+                wiz3_sub: '正在打开你的终端…', enter: '打开我的终端',
+                wiz3_next: '下一步，连接手机：在侧栏中打开 Mobile Link，用手机相机扫描二维码。',
+                wiz_sandbox: '先在浏览器里试试',
+                wiz_sandbox_note: '一个在本标签页中运行的练习用 shell，它看不到你的文件，也接触不到你的电脑。',
+                feat_title: '它能为你做什么',
+                feat_g1: '在电脑前', feat_g2: '离开电脑时', feat_g3: '出问题时',
+                f_tabs_t: '刷新或重启都不会丢失。', f_tabs_d: '页面刷新或电脑重启后，你的标签页和历史记录都会恢复。',
+                f_fleet_t: '所有智能体一目了然。', f_fleet_d: '每个标签页都会显示它的智能体是在工作、需要你、似乎卡住了，还是已完成。',
+                f_voice_t: '用说的代替打字。', f_voice_d: '语音命令和听写，支持五种语言。',
+                f_same_t: '手机上是同一个 shell。', f_same_d: '扫一次二维码，就能继续在笔记本上开始的终端里输入。无需安装 App。',
+                f_notify_t: '需要你时会提醒你。', f_notify_d: '当智能体在等待回复时，你的手机会收到通知。',
+                f_chat_t: '和你的智能体聊天。', f_chat_d: '在聊天视图里回复，打字或说话都可以。',
+                f_screen_t: '在手机上看 Mac 屏幕。', f_screen_d: '终端不够用时，可以查看并点击你的桌面。',
+                f_limits_t: '自动处理用量限制。', f_limits_d: '当 Claude 或 Codex 达到用量上限时，智能体会等到重置后继续，并重放你在此期间输入的内容。',
+                f_backup_t: '备用的连接方式。', f_backup_d: '如果手机的连接断了，备用链接能让你保持连接。',
+                f_lock_t: '给门加一把锁。', f_lock_d: '设置配对密码；手机丢了，改密码即可把它拒之门外。',
+                priv_title: '一切都留在你的电脑上',
+                priv_p1: '你的终端、代码和智能体都在你自己的机器上运行。不需要账户。',
+                priv_p2: '你的手机通过一条私有链接直接连接到你的电脑，只有你的二维码能打开它。如果链接发生变化，可选的账户能帮手机重新找到这台电脑。',
+                faq_title: '常见问题',
+                faq_q1: '什么是 AI 编程智能体？', faq_a1: '像 Claude Code 或 Codex 这样的程序：按你的要求阅读项目、编写代码、运行命令，并在有风险的步骤前先征求你的同意。',
+                faq_q2: '我需要 Claude Code 或 Codex 吗？', faq_a2: '不需要。Son of Anton 本身就是一个完整的终端。如果你在里面使用 Claude Code 或 Codex，它会识别它们并显示每个智能体在做什么。',
+                faq_q3: '我不太会用终端，适合我吗？', faq_a3: '适合。安装程序会完成设置；启动智能体后，你可以用日常语言和它交流。',
+                faq_q4: '手机连不上怎么办？', faq_a4: '你的智能体会在家里继续运行。在同一个界面上试试备用链接，或者重新扫描二维码。',
+                faq_q5: '怎么卸载？', faq_a5a: '在终端中运行', faq_a5b: '。它会停止服务，并删除安装程序添加的内容。',
+                wiz_learn: '技术细节', wiz_learn_hide: '隐藏技术细节',
+                tech_p: '安装程序会在这台电脑上的 127.0.0.1:4010 运行一个小型后台服务，只使用你的用户账户。标签页和回滚记录保存在磁盘上，因此重启后仍在。从手机连接时使用应用自动启动的加密隧道。',
+                src_title: '从源代码安装',
+                setup_b_desc: '克隆仓库并自己运行。适合想阅读或修改代码的开发者。',
+                github: 'GitHub', why_name: '名字的由来', credit: '作者',
+                star: '在 GitHub 上点星', star_one: '在 GitHub 上点星，已有 1 颗星', star_n: '在 GitHub 上点星，已有 {n} 颗星',
             },
             fr: {
-                col_web_title: 'Web', col_web_sub: 'cette page',
-                col_desk_title: 'Bureau', col_desk_sub: 'installé',
-                col_phone_title: 'Téléphone', col_phone_sub: 'appairé',
-                intro_p1: "Un vrai terminal qui tourne dans votre navigateur. Ouvrez un onglet sur le laptop, scannez le QR sur le téléphone, continuez à taper dans le même shell.",
-                web_b1: 'Essayez maintenant — sans install',
-                web_b2: 'Se connecte au backend local après install',
-                web_b3: "Limité à un shell bac-à-sable",
-                web_b4: 'Interface en 5 langues',
-                desk_b1: 'Vrais shells sur votre machine',
-                desk_b2: 'Appairage du téléphone via QR',
-                desk_b3: 'CPU, mémoire et réseau en direct',
-                desk_b4: 'Onglets persistants',
-                phone_b1: 'Scannez le QR — pas besoin d\'app',
-                phone_b2: "Tapez sur votre laptop d'où vous voulez",
-                phone_b3: 'Onglets adaptés au tactile',
-                phone_b4: 'Chiffré par défaut',
-                setup_title: 'Installation · au choix',
-                setup_a_label: "Script d'installation",
-                setup_a_desc: "Le plus simple. macOS et Linux.",
-                setup_b_label: 'Auto-hébergement',
-                setup_b_desc: 'Pour bricoleurs. Cloner, mot de passe, lancer.',
-                setup_after: "Puis ouvrez http://127.0.0.1:7332 — ou scannez le QR depuis votre téléphone.",
-                faq_q1: 'Pourquoi un tunnel Cloudflare ?',
-                faq_a1: "Pour que votre téléphone atteigne le laptop sans config LAN. Le tunnel démarre tout seul et fournit une URL HTTPS. Désactivez avec SOA_WEB_AUTOPAIR=0.",
-                faq_q2: "Sûr de l'exposer sur Internet ?",
-                faq_a2: "Seulement avec un mot de passe. Le serveur refuse de démarrer en mode ouvert sur un host public. Définissez SOA_WEB_PASSWORD avant.",
-                faq_q3: 'Où vivent mes onglets ?',
-                faq_a3: 'Dans ~/.soa-web/tabs.json sur la machine du serveur. Le scrollback reste en mémoire et rejoue à la reconnexion.',
-                faq_q4: 'Déployable sur Vercel ?',
-                faq_a4: "Vercel peut héberger la page, mais le serveur a besoin d'un process Node persistant. Lancez-le sur votre machine et pointez SOA_WEB_BACKEND vers l'URL du tunnel.",
-                cmd_caption: 'De vrais shells ? Collez ceci dans le Terminal :',
-                copy: 'COPIER', copied: 'COPIÉ', select_copy: 'sélectionner + copier',
-                run: 'LANCER', downloaded: 'TÉLÉCHARGÉ ↓',
-                run_hint_mac: 'Ouvrez soa-web-install.command depuis Téléchargements (double-clic). Terminal se lance et exécute l’installateur. Rechargez cet onglet une fois terminé.',
-                run_hint_win: 'Windows n’est pas pris en charge par l’installateur. Utilisez WSL : ouvrez Ubuntu, puis exécutez la commande copiée.',
-                run_hint_nix: 'Ouvrez un terminal : chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — puis rechargez cet onglet.',
-                github: 'source · github',
-                enter: 'OUVRIR LE TERMINAL →',
-                wiz1_title: 'Installer le backend',
-                wiz1_sub: 'Un fichier. Double-cliquez dessus. L’installation est finie.',
-                wiz_download: '⬇ Télécharger l’installateur',
-                wiz1_meta: 'macOS / Linux · ~30 secondes · sans compte',
-                wiz_or_copy: 'Vous préférez une commande ?',
-                wiz_pair_p: 'Déjà lancé sur une autre machine ?', wiz_pair_scan: 'Scanner son QR code', wiz_pair_paste: 'Ou coller le lien d’association', wiz_pair_go: 'CONNECTER',
-                wiz_pair_cancel: 'Annuler', wiz_pair_hint: 'Visez le QR code de la barre latérale du bureau (MOBILE LINK).', wiz_pair_torch: 'Lampe',
-                wiz_pair_err_code: 'Ce n’est pas un code d’association Son of Anton.', wiz_pair_err_token: 'Ce lien n’a pas de jeton — ouvrez MOBILE LINK sur le bureau et scannez son QR code.', wiz_pair_err_cam: 'Pas de caméra ici. Collez plutôt le lien.',
-                wiz_pair_err_denied: 'Accès caméra refusé. Autorisez-le dans le navigateur, ou collez le lien.', wiz_pair_err_open: 'La caméra n’a pas démarré ({detail}). Collez plutôt le lien.',
-                wiz_pair_pw_hint: 'Ce bureau demande son mot de passe d’association — saisissez-le ci-dessous.', wiz_pair_pw_ph: 'mot de passe d’association', wiz_pair_err_pw: 'Mot de passe incorrect.', wiz_pair_err_nologin: 'Le bureau a accepté le mot de passe mais n’autorise pas la connexion par mot de passe. Sur le bureau : MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'Impossible de joindre ce bureau. Vérifiez le lien et qu’il est en ligne.', wiz_devhist: 'Lire l’historique enregistré sur cet appareil',
-                wiz2_title: 'Lancer l’installateur',
-                wiz2_a: 'Double-cliquez sur',
-                wiz2_b: 'dans vos Téléchargements — Terminal s’ouvre et l’installe pour vous.',
-                wiz2_wait: 'En attente de votre backend…',
-                wiz_back: '← retour',
-                wiz3_title: '✓ Connecté',
-                wiz3_sub: 'Votre backend est en ligne. Ouverture du terminal…',
-                wiz_learn: 'Qu’est-ce que c’est ?',
-                wiz_sandbox: 'Essayer le bac à sable',
+                name_aria: 'Son of Anton (l’origine du nom, ouvre YouTube)',
+                jump_setup: 'Aller à l’installation',
+                hero_title: 'Votre agent IA continue de travailler chez vous. Répondez-lui depuis votre téléphone.',
+                hero_sub: 'Son of Anton fait tourner votre terminal et vos agents de code IA (des programmes comme Claude Code et Codex qui écrivent et corrigent du code pour vous) sur votre propre ordinateur. Ouvrez-les depuis n’importe quel navigateur ou votre téléphone et reprenez exactement là où vous en étiez.',
+                demo_story: 'Une courte démo. Un agent IA travaille dans un terminal sur votre ordinateur. Vous quittez votre bureau. L’agent demande s’il doit lancer les tests, et votre téléphone affiche une notification. Vous touchez Oui sur le téléphone, et la réponse est tapée dans le même terminal sur votre ordinateur. Les tests passent, et une liste montre lesquels de vos autres agents ont besoin de vous.',
+                demo_cap_1: 'Votre agent travaille dans un vrai terminal sur votre ordinateur.',
+                demo_cap_2: 'Partez. Il continue chez vous.',
+                demo_cap_3: 'Quand il a besoin de vous, votre téléphone vous prévient.',
+                demo_cap_4: 'Répondez depuis votre téléphone. La réponse arrive dans le même terminal.',
+                demo_cap_5: 'Lancez plusieurs agents et voyez lequel a besoin de vous.',
+                demo_pause: 'Pause', demo_play: 'Lecture', demo_replay: 'Revoir', demo_step: 'Étape {n} sur 5',
+                demo_away: 'Vous avez quitté votre bureau', demo_notify: 'my-app attend votre réponse',
+                demo_q: 'Lancer les tests maintenant ?', demo_yes: 'Oui', demo_no: 'Non',
+                demo_working: 'au travail', demo_needs: 'vous attend', demo_done: 'terminé',
+                wiz_card_title: 'L’installer sur cet ordinateur',
+                wiz_dot1: 'Télécharger', wiz_dot2: 'Démarrer', wiz_dot3: 'Ouvrir',
+                wiz1_title: 'Téléchargez et ouvrez l’installateur',
+                wiz1_sub: 'Il installe Son of Anton pour votre compte utilisateur uniquement (sans mot de passe administrateur) et le démarre en arrière-plan. Vous ne le faites qu’une fois.',
+                wiz_download: 'Télécharger l’installateur',
+                wiz1_meta: 'Pour macOS et Linux. Environ une minute.',
+                wiz_or_copy: 'Vous préférez coller une commande dans le Terminal ?',
+                copy: 'Copier', copied: 'Copié', select_copy: 'Sélectionné. Appuyez sur Cmd+C ou Ctrl+C', downloaded: 'Téléchargé',
+                run_hint_mac: 'Si macOS refuse d’ouvrir le fichier, revenez en arrière et collez plutôt la commande dans le Terminal.',
+                run_hint_win: 'L’installateur fonctionne sur macOS et Linux. Sous Windows, ouvrez Ubuntu (WSL) et collez la commande de l’étape 1.',
+                run_hint_nix: 'Dans un terminal, lancez : chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh',
+                wiz_pair_title: 'Déjà installé sur un autre ordinateur ?',
+                wiz_pair_p: 'Connectez ce navigateur à celui-ci au lieu d’installer ici.',
+                wiz_pair_scan: 'Scanner son QR code', wiz_pair_paste: 'Coller son lien', wiz_pair_go: 'Connecter',
+                wiz_pair_cancel: 'Annuler', wiz_pair_hint: 'Visez le QR code dans la barre latérale de l’autre ordinateur (Mobile Link).', wiz_pair_torch: 'Lampe',
+                wiz_pair_err_code: 'Ce n’est pas un code d’association Son of Anton.', wiz_pair_err_token: 'Ce lien n’a pas de jeton d’association. Sur l’autre ordinateur, ouvrez Mobile Link et scannez le QR code affiché.', wiz_pair_err_cam: 'Pas de caméra ici. Collez plutôt le lien.',
+                wiz_pair_err_denied: 'Accès à la caméra refusé. Autorisez-le dans le navigateur, ou collez le lien.', wiz_pair_err_open: 'La caméra n’a pas pu démarrer ({detail}). Collez plutôt le lien.',
+                wiz_pair_pw_hint: 'Cet ordinateur demande son mot de passe d’association. Saisissez-le ci-dessous.', wiz_pair_pw_ph: 'Mot de passe d’association', wiz_pair_err_pw: 'Mot de passe incorrect.', wiz_pair_err_nologin: 'Le mot de passe est bon, mais la connexion par mot de passe est désactivée. Sur l’autre ordinateur, ouvrez Mobile Link et autorisez-la.', wiz_pair_err_unreach: 'Impossible de joindre cet ordinateur. Vérifiez le lien et qu’il est en ligne.',
+                wiz_devhist: 'Lire l’historique enregistré dans ce navigateur',
+                wiz2_title: 'Démarrez-le', wiz2_summary: 'Ouvrez le fichier téléchargé. Cette page l’attend.',
+                wiz2_a: 'Ouvrez', wiz2_b: 'depuis vos Téléchargements. Une fenêtre Terminal s’ouvre et lance l’installation.',
+                wiz2_wait: 'Cette page le remarquera dès qu’il tourne. Gardez-la ouverte.', wiz2_checking: 'Vérification…',
+                wiz_back: 'Le télécharger à nouveau',
+                wiz3_title: 'Il tourne', wiz3_summary: 'Votre terminal s’ouvre dans cet onglet.',
+                wiz3_sub: 'Ouverture de votre terminal…', enter: 'Ouvrir mon terminal',
+                wiz3_next: 'Ensuite, connectez votre téléphone : dans la barre latérale, ouvrez Mobile Link et scannez le QR code avec l’appareil photo du téléphone.',
+                wiz_sandbox: 'L’essayer d’abord dans ce navigateur',
+                wiz_sandbox_note: 'Un shell d’entraînement qui tourne dans cet onglet. Il ne voit ni vos fichiers ni votre ordinateur.',
+                feat_title: 'Ce qu’il fait pour vous',
+                feat_g1: 'À votre bureau', feat_g2: 'Loin de votre bureau', feat_g3: 'Si quelque chose tourne mal',
+                f_tabs_t: 'Rien de perdu au rechargement ou au redémarrage.', f_tabs_d: 'Vos onglets et leur historique reviennent après un rechargement de la page ou un redémarrage.',
+                f_fleet_t: 'Tous vos agents d’un coup d’œil.', f_fleet_d: 'Chaque onglet indique si son agent travaille, vous attend, semble bloqué ou a terminé.',
+                f_voice_t: 'Parlez au lieu de taper.', f_voice_d: 'Commandes vocales et dictée, en cinq langues.',
+                f_same_t: 'Le même shell sur votre téléphone.', f_same_d: 'Scannez un QR code une fois et continuez à taper dans le terminal ouvert sur votre ordinateur portable. Aucune app à installer.',
+                f_notify_t: 'Une alerte quand il a besoin de vous.', f_notify_d: 'Votre téléphone reçoit une notification quand un agent attend une réponse.',
+                f_chat_t: 'Discutez avec vos agents.', f_chat_d: 'Répondez dans une vue de discussion, à l’écrit ou à la voix.',
+                f_screen_t: 'L’écran de votre Mac sur votre téléphone.', f_screen_d: 'Voyez et cliquez sur votre bureau quand le terminal ne suffit pas.',
+                f_limits_t: 'Limites d’utilisation gérées.', f_limits_d: 'Quand Claude ou Codex atteint sa limite, l’agent attend la réinitialisation, reprend et rejoue ce que vous avez tapé entre-temps.',
+                f_backup_t: 'Une autre porte d’entrée.', f_backup_d: 'Si le lien vers votre téléphone tombe, des liens de secours vous gardent connecté.',
+                f_lock_t: 'Un verrou sur la porte.', f_lock_d: 'Ajoutez un mot de passe d’association, et changez-le pour bloquer un téléphone perdu.',
+                priv_title: 'Tout reste sur votre ordinateur',
+                priv_p1: 'Vos terminaux, votre code et vos agents tournent sur votre propre machine. Aucun compte n’est nécessaire.',
+                priv_p2: 'Votre téléphone se connecte directement à votre ordinateur par un lien privé que seul votre QR code ouvre. Un compte facultatif peut aider votre téléphone à retrouver cet ordinateur si ce lien change.',
+                faq_title: 'Questions',
+                faq_q1: 'Qu’est-ce qu’un agent de code IA ?', faq_a1: 'Un programme comme Claude Code ou Codex qui lit votre projet, écrit du code et lance des commandes à votre demande, et vous consulte avant les étapes risquées.',
+                faq_q2: 'Ai-je besoin de Claude Code ou de Codex ?', faq_a2: 'Non. Son of Anton est un terminal complet à lui seul. Si vous y utilisez Claude Code ou Codex, il les reconnaît et montre ce que fait chacun.',
+                faq_q3: 'Je ne suis pas à l’aise avec un terminal. Est-ce pour moi ?', faq_a3: 'Oui. L’installateur s’occupe de la configuration, et une fois un agent lancé, vous pouvez lui parler en langage courant.',
+                faq_q4: 'Et si mon téléphone n’arrive pas à se connecter ?', faq_a4: 'Vos agents continuent de tourner chez vous. Essayez un lien de secours depuis le même écran, ou scannez à nouveau le QR code.',
+                faq_q5: 'Comment le désinstaller ?', faq_a5a: 'Lancez', faq_a5b: ' dans le Terminal. Cela arrête le service et supprime ce que l’installateur a ajouté.',
+                wiz_learn: 'Détails techniques', wiz_learn_hide: 'Masquer les détails techniques',
+                tech_p: 'L’installateur fait tourner un petit service en arrière-plan sur cet ordinateur, à l’adresse 127.0.0.1:4010, avec votre seul compte utilisateur. Les onglets et leur historique sont enregistrés sur le disque et survivent aux redémarrages. La connexion depuis le téléphone passe par un tunnel chiffré que l’application ouvre pour vous.',
+                src_title: 'Installer depuis le code source',
+                setup_b_desc: 'Clonez le dépôt et lancez-le vous-même. Pour les développeurs qui veulent lire ou modifier le code.',
+                github: 'GitHub', why_name: 'Pourquoi ce nom ?', credit: 'Créé par',
+                star: 'Ajouter une étoile sur GitHub', star_one: 'Ajouter une étoile sur GitHub, 1 étoile pour l’instant', star_n: 'Ajouter une étoile sur GitHub, {n} étoiles pour l’instant',
             },
             de: {
-                col_web_title: 'Web', col_web_sub: 'diese Seite',
-                col_desk_title: 'Desktop', col_desk_sub: 'installiert',
-                col_phone_title: 'Telefon', col_phone_sub: 'gekoppelt',
-                intro_p1: 'Ein echtes Terminal im Browser. Öffne einen Tab am Laptop, scanne den QR mit dem Telefon, tippe in derselben Shell weiter.',
-                web_b1: 'Jetzt ausprobieren — keine Installation',
-                web_b2: 'Verbindet sich nach Install mit dem lokalen Backend',
-                web_b3: 'Auf Sandbox-Shell beschränkt',
-                web_b4: 'Oberfläche in 5 Sprachen',
-                desk_b1: 'Echte Shells auf deinem Rechner',
-                desk_b2: 'Telefon-Kopplung per QR-Code',
-                desk_b3: 'Live CPU, Speicher und Netzwerk',
-                desk_b4: 'Tabs überleben Neustarts',
-                phone_b1: 'QR scannen — keine App nötig',
-                phone_b2: 'Vom Handy in den Laptop tippen',
-                phone_b3: 'Touch-freundliche Tabs',
-                phone_b4: 'Standardmäßig verschlüsselt',
-                setup_title: 'Setup · eines wählen',
-                setup_a_label: 'Installer-Skript',
-                setup_a_desc: 'Am einfachsten. macOS und Linux.',
-                setup_b_label: 'Selbst hosten',
-                setup_b_desc: 'Für Bastler. Klonen, Passwort, starten.',
-                setup_after: 'Dann http://127.0.0.1:7332 öffnen — oder den QR vom Telefon aus scannen.',
-                faq_q1: 'Warum Cloudflare Tunnel?',
-                faq_a1: 'Damit das Telefon den Laptop ohne LAN-Setup erreicht. Der Tunnel startet automatisch und liefert eine HTTPS-URL. Deaktivieren mit SOA_WEB_AUTOPAIR=0.',
-                faq_q2: 'Sicher im Internet?',
-                faq_a2: 'Nur mit Passwort. Der Server startet im offenen Modus nicht auf einem öffentlichen Host. Vor dem Veröffentlichen SOA_WEB_PASSWORD setzen.',
-                faq_q3: 'Wo leben meine Tabs?',
-                faq_a3: 'In ~/.soa-web/tabs.json auf der Server-Maschine. Scrollback liegt im Speicher und wird beim Reconnect erneut abgespielt.',
-                faq_q4: 'Vercel-fähig?',
-                faq_a4: 'Vercel kann die Seite hosten, aber der Server braucht einen langlebigen Node-Prozess. Auf eigener Maschine laufen lassen und SOA_WEB_BACKEND auf die Tunnel-URL zeigen.',
-                cmd_caption: 'Echte Shells? Das im Terminal einfügen:',
-                copy: 'KOPIEREN', copied: 'KOPIERT', select_copy: 'auswählen + kopieren',
-                run: 'STARTEN', downloaded: 'GELADEN ↓',
-                run_hint_mac: 'Öffne soa-web-install.command in „Downloads“ per Doppelklick. Terminal startet und führt den Installer aus. Lade diesen Tab nach Abschluss neu.',
-                run_hint_win: 'Windows wird vom Installer nicht unterstützt. Verwende WSL: öffne Ubuntu und führe den kopierten Befehl aus.',
-                run_hint_nix: 'Öffne ein Terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — danach diesen Tab neu laden.',
-                github: 'Quelle · GitHub',
-                enter: 'TERMINAL ÖFFNEN →',
-                wiz1_title: 'Backend installieren',
-                wiz1_sub: 'Eine Datei. Doppelklicken. Fertig ist die Installation.',
-                wiz_download: '⬇ Installer herunterladen',
-                wiz1_meta: 'macOS / Linux · ~30 Sekunden · kein Konto',
-                wiz_or_copy: 'Lieber einen Befehl einfügen?',
-                wiz_pair_p: 'Läuft es schon auf einem anderen Rechner?', wiz_pair_scan: 'Seinen QR-Code scannen', wiz_pair_paste: 'Oder den Kopplungslink einfügen', wiz_pair_go: 'VERBINDEN',
-                wiz_pair_cancel: 'Abbrechen', wiz_pair_hint: 'Kamera auf den QR-Code in der Desktop-Seitenleiste (MOBILE LINK) richten.', wiz_pair_torch: 'Licht',
-                wiz_pair_err_code: 'Das ist kein Son-of-Anton-Kopplungscode.', wiz_pair_err_token: 'Der Link hat kein Kopplungs-Token — MOBILE LINK am Desktop öffnen und dessen QR-Code scannen.', wiz_pair_err_cam: 'Keine Kamera hier. Füge stattdessen den Link ein.',
-                wiz_pair_err_denied: 'Kamerazugriff abgelehnt. Im Browser erlauben oder den Link einfügen.', wiz_pair_err_open: 'Die Kamera startet nicht ({detail}). Füge stattdessen den Link ein.',
-                wiz_pair_pw_hint: 'Dieser Desktop verlangt sein Kopplungspasswort — unten eingeben.', wiz_pair_pw_ph: 'Kopplungspasswort', wiz_pair_err_pw: 'Falsches Passwort.', wiz_pair_err_nologin: 'Der Desktop hat das Passwort angenommen, erlaubt aber keine Passwort-Anmeldung. Am Desktop: MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'Desktop nicht erreichbar. Link prüfen und ob er online ist.', wiz_devhist: 'Auf diesem Gerät gespeicherten Verlauf lesen',
-                wiz2_title: 'Installer ausführen',
-                wiz2_a: 'Doppelklicke',
-                wiz2_b: 'in deinen Downloads — Terminal öffnet sich und installiert es.',
-                wiz2_wait: 'Warte auf dein Backend…',
-                wiz_back: '← zurück',
-                wiz3_title: '✓ Verbunden',
-                wiz3_sub: 'Dein Backend ist online. Terminal wird geöffnet…',
-                wiz_learn: 'Was ist das?',
-                wiz_sandbox: 'Sandbox ausprobieren',
+                name_aria: 'Son of Anton (woher der Name kommt, öffnet YouTube)',
+                jump_setup: 'Direkt zur Einrichtung',
+                hero_title: 'Dein KI-Agent arbeitet zu Hause weiter. Antworte ihm vom Handy aus.',
+                hero_sub: 'Son of Anton führt dein Terminal und KI-Coding-Agenten (Programme wie Claude Code und Codex, die Code für dich schreiben und reparieren) auf deinem eigenen Computer aus. Öffne sie in jedem Browser oder auf dem Handy und mach genau dort weiter, wo du aufgehört hast.',
+                demo_story: 'Eine kurze Demo. Ein KI-Agent arbeitet in einem Terminal auf deinem Computer. Du verlässt deinen Schreibtisch. Der Agent fragt, ob er die Tests ausführen soll, und dein Handy zeigt eine Benachrichtigung. Du tippst auf dem Handy auf Ja, und die Antwort wird in dasselbe Terminal auf deinem Computer eingegeben. Die Tests bestehen, und eine Liste zeigt, welcher deiner anderen Agenten dich braucht.',
+                demo_cap_1: 'Dein Agent arbeitet in einem echten Terminal auf deinem Computer.',
+                demo_cap_2: 'Geh ruhig weg. Zu Hause läuft er weiter.',
+                demo_cap_3: 'Wenn er dich braucht, sagt dir dein Handy Bescheid.',
+                demo_cap_4: 'Antworte vom Handy. Die Antwort landet im selben Terminal.',
+                demo_cap_5: 'Lass mehrere Agenten laufen und sieh, welcher dich braucht.',
+                demo_pause: 'Pause', demo_play: 'Abspielen', demo_replay: 'Nochmal', demo_step: 'Schritt {n} von 5',
+                demo_away: 'Du bist nicht am Schreibtisch', demo_notify: 'my-app wartet auf deine Antwort',
+                demo_q: 'Tests jetzt ausführen?', demo_yes: 'Ja', demo_no: 'Nein',
+                demo_working: 'arbeitet', demo_needs: 'braucht dich', demo_done: 'fertig',
+                wiz_card_title: 'Auf diesem Computer einrichten',
+                wiz_dot1: 'Herunterladen', wiz_dot2: 'Starten', wiz_dot3: 'Öffnen',
+                wiz1_title: 'Installer herunterladen und öffnen',
+                wiz1_sub: 'Er installiert Son of Anton nur für dein Benutzerkonto (kein Administratorpasswort) und startet es im Hintergrund. Das machst du nur einmal.',
+                wiz_download: 'Installer herunterladen',
+                wiz1_meta: 'Für macOS und Linux. Dauert etwa eine Minute.',
+                wiz_or_copy: 'Lieber einen Befehl ins Terminal einfügen?',
+                copy: 'Kopieren', copied: 'Kopiert', select_copy: 'Markiert. Drücke Cmd+C oder Strg+C', downloaded: 'Heruntergeladen',
+                run_hint_mac: 'Wenn macOS die Datei nicht öffnet, geh zurück und füge stattdessen den Befehl ins Terminal ein.',
+                run_hint_win: 'Der Installer läuft unter macOS und Linux. Unter Windows öffne Ubuntu (WSL) und füge den Befehl aus Schritt 1 ein.',
+                run_hint_nix: 'Führe in einem Terminal aus: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh',
+                wiz_pair_title: 'Schon auf einem anderen Computer eingerichtet?',
+                wiz_pair_p: 'Verbinde diesen Browser damit, statt hier zu installieren.',
+                wiz_pair_scan: 'Seinen QR-Code scannen', wiz_pair_paste: 'Seinen Link einfügen', wiz_pair_go: 'Verbinden',
+                wiz_pair_cancel: 'Abbrechen', wiz_pair_hint: 'Richte die Kamera auf den QR-Code in der Seitenleiste des anderen Computers (Mobile Link).', wiz_pair_torch: 'Licht',
+                wiz_pair_err_code: 'Das ist kein Son-of-Anton-Kopplungscode.', wiz_pair_err_token: 'Dieser Link hat kein Kopplungs-Token. Öffne auf dem anderen Computer Mobile Link und scanne den angezeigten QR-Code.', wiz_pair_err_cam: 'Keine Kamera hier. Füge stattdessen den Link ein.',
+                wiz_pair_err_denied: 'Kamerazugriff abgelehnt. Erlaube ihn im Browser oder füge den Link ein.', wiz_pair_err_open: 'Die Kamera konnte nicht starten ({detail}). Füge stattdessen den Link ein.',
+                wiz_pair_pw_hint: 'Dieser Computer verlangt sein Kopplungspasswort. Gib es unten ein.', wiz_pair_pw_ph: 'Kopplungspasswort', wiz_pair_err_pw: 'Falsches Passwort.', wiz_pair_err_nologin: 'Das Passwort stimmt, aber die Anmeldung per Passwort ist aus. Öffne auf dem anderen Computer Mobile Link und erlaube sie.', wiz_pair_err_unreach: 'Dieser Computer ist nicht erreichbar. Prüfe den Link und ob er online ist.',
+                wiz_devhist: 'In diesem Browser gespeicherten Verlauf lesen',
+                wiz2_title: 'Starten', wiz2_summary: 'Öffne die heruntergeladene Datei. Diese Seite wartet darauf.',
+                wiz2_a: 'Öffne', wiz2_b: 'in deinen Downloads. Ein Terminalfenster öffnet sich und führt die Installation aus.',
+                wiz2_wait: 'Diese Seite merkt, sobald es läuft. Lass sie geöffnet.', wiz2_checking: 'Wird geprüft…',
+                wiz_back: 'Nochmal herunterladen',
+                wiz3_title: 'Es läuft', wiz3_summary: 'Dein Terminal öffnet sich in diesem Tab.',
+                wiz3_sub: 'Dein Terminal wird geöffnet…', enter: 'Mein Terminal öffnen',
+                wiz3_next: 'Verbinde als Nächstes dein Handy: Öffne in der Seitenleiste Mobile Link und scanne den QR-Code mit der Handykamera.',
+                wiz_sandbox: 'Erst in diesem Browser ausprobieren',
+                wiz_sandbox_note: 'Eine Übungs-Shell, die in diesem Tab läuft. Sie sieht weder deine Dateien noch deinen Computer.',
+                feat_title: 'Was es für dich tut',
+                feat_g1: 'Am Schreibtisch', feat_g2: 'Unterwegs', feat_g3: 'Wenn etwas schiefgeht',
+                f_tabs_t: 'Nichts geht beim Neuladen oder Neustart verloren.', f_tabs_d: 'Deine Tabs und ihr Verlauf kommen nach dem Neuladen der Seite oder einem Neustart zurück.',
+                f_fleet_t: 'Alle Agenten auf einen Blick.', f_fleet_d: 'Jeder Tab zeigt, ob sein Agent arbeitet, dich braucht, festzuhängen scheint oder fertig ist.',
+                f_voice_t: 'Sprechen statt tippen.', f_voice_d: 'Sprachbefehle und Diktat, in fünf Sprachen.',
+                f_same_t: 'Dieselbe Shell auf dem Handy.', f_same_d: 'Scanne einmal einen QR-Code und tippe im Terminal weiter, das du am Laptop gestartet hast. Keine App nötig.',
+                f_notify_t: 'Eine Nachricht, wenn er dich braucht.', f_notify_d: 'Dein Handy bekommt eine Benachrichtigung, wenn ein Agent auf eine Antwort wartet.',
+                f_chat_t: 'Chatte mit deinen Agenten.', f_chat_d: 'Antworte in einer Chat-Ansicht, getippt oder gesprochen.',
+                f_screen_t: 'Der Bildschirm deines Macs auf dem Handy.', f_screen_d: 'Sieh deinen Desktop und klicke darauf, wenn das Terminal nicht reicht.',
+                f_limits_t: 'Nutzungslimits im Griff.', f_limits_d: 'Wenn Claude oder Codex sein Limit erreicht, wartet der Agent auf das Zurücksetzen, macht weiter und spielt ab, was du inzwischen eingegeben hast.',
+                f_backup_t: 'Ein zweiter Weg hinein.', f_backup_d: 'Wenn die Verbindung zum Handy abbricht, halten dich Ersatzlinks verbunden.',
+                f_lock_t: 'Ein Schloss an der Tür.', f_lock_d: 'Lege ein Kopplungspasswort fest und ändere es, um ein verlorenes Handy auszusperren.',
+                priv_title: 'Es bleibt auf deinem Computer',
+                priv_p1: 'Deine Terminals, dein Code und deine Agenten laufen auf deinem eigenen Rechner. Du brauchst kein Konto.',
+                priv_p2: 'Dein Handy verbindet sich direkt mit deinem Computer, über einen privaten Link, den nur dein QR-Code öffnet. Ein optionales Konto hilft deinem Handy, diesen Computer wiederzufinden, wenn sich der Link ändert.',
+                faq_title: 'Fragen',
+                faq_q1: 'Was ist ein KI-Coding-Agent?', faq_a1: 'Ein Programm wie Claude Code oder Codex, das auf deine Bitte dein Projekt liest, Code schreibt und Befehle ausführt, und dich vor riskanten Schritten fragt.',
+                faq_q2: 'Brauche ich Claude Code oder Codex?', faq_a2: 'Nein. Son of Anton ist für sich schon ein vollständiges Terminal. Wenn du darin Claude Code oder Codex nutzt, erkennt es sie und zeigt, was jeder gerade tut.',
+                faq_q3: 'Ich fühle mich im Terminal nicht wohl. Ist das etwas für mich?', faq_a3: 'Ja. Der Installer übernimmt die Einrichtung, und sobald ein Agent läuft, kannst du mit ihm in normaler Sprache reden.',
+                faq_q4: 'Was, wenn sich mein Handy nicht verbindet?', faq_a4: 'Deine Agenten laufen zu Hause weiter. Probiere einen Ersatzlink auf demselben Bildschirm oder scanne den QR-Code erneut.',
+                faq_q5: 'Wie deinstalliere ich es?', faq_a5a: 'Führe', faq_a5b: ' im Terminal aus. Das stoppt den Dienst und entfernt, was der Installer hinzugefügt hat.',
+                wiz_learn: 'Technische Details', wiz_learn_hide: 'Technische Details ausblenden',
+                tech_p: 'Der Installer betreibt einen kleinen Hintergrunddienst auf diesem Computer unter 127.0.0.1:4010, nur mit deinem Benutzerkonto. Tabs und Verlauf werden auf der Festplatte gespeichert und überstehen Neustarts. Die Verbindung vom Handy läuft über einen verschlüsselten Tunnel, den die App für dich startet.',
+                src_title: 'Aus dem Quellcode installieren',
+                setup_b_desc: 'Klone das Repository und starte es selbst. Für Entwickler, die den Code lesen oder ändern möchten.',
+                github: 'GitHub', why_name: 'Warum der Name?', credit: 'Gemacht von',
+                star: 'Auf GitHub einen Stern geben', star_one: 'Auf GitHub einen Stern geben, bisher 1 Stern', star_n: 'Auf GitHub einen Stern geben, bisher {n} Sterne',
             },
             es: {
-                col_web_title: 'Web', col_web_sub: 'esta página',
-                col_desk_title: 'Escritorio', col_desk_sub: 'instalado',
-                col_phone_title: 'Móvil', col_phone_sub: 'vinculado',
-                intro_p1: 'Una terminal real que corre en tu navegador. Abre una pestaña en el portátil, escanea el QR en el móvil, sigue escribiendo en la misma shell.',
-                web_b1: 'Pruébalo ya — sin instalar',
-                web_b2: 'Conecta al backend local tras instalar',
-                web_b3: 'Limitado a una shell sandbox',
-                web_b4: 'Interfaz en 5 idiomas',
-                desk_b1: 'Shells reales en tu equipo',
-                desk_b2: 'Vinculación de móvil por QR',
-                desk_b3: 'CPU, memoria y red en vivo',
-                desk_b4: 'Las pestañas sobreviven reinicios',
-                phone_b1: 'Escanea el QR — sin app',
-                phone_b2: 'Escribe en tu portátil desde donde sea',
-                phone_b3: 'Pestañas adaptadas al táctil',
-                phone_b4: 'Cifrado por defecto',
-                setup_title: 'Instalación · elige una',
-                setup_a_label: 'Script de instalación',
-                setup_a_desc: 'Lo más fácil. macOS y Linux.',
-                setup_b_label: 'Auto-alojar',
-                setup_b_desc: 'Para curiosos. Clona, pon contraseña, ejecuta.',
-                setup_after: 'Luego abre http://127.0.0.1:7332 — o escanea el QR desde el móvil.',
-                faq_q1: '¿Por qué Cloudflare Tunnel?',
-                faq_a1: 'Para que el móvil llegue al portátil sin configurar la LAN. El túnel arranca solo y da una URL HTTPS. Desactívalo con SOA_WEB_AUTOPAIR=0.',
-                faq_q2: '¿Seguro en Internet?',
-                faq_a2: 'Solo con contraseña. El servidor se niega a arrancar en modo abierto en un host público. Define SOA_WEB_PASSWORD antes.',
-                faq_q3: '¿Dónde viven mis pestañas?',
-                faq_a3: 'En ~/.soa-web/tabs.json en la máquina del servidor. El scrollback vive en memoria y se reproduce al reconectar.',
-                faq_q4: '¿Sirve Vercel?',
-                faq_a4: 'Vercel puede alojar la página, pero el servidor necesita un proceso Node persistente. Córrelo en tu máquina y apunta SOA_WEB_BACKEND a la URL del túnel.',
-                cmd_caption: '¿Shells reales? Pega esto en Terminal:',
-                copy: 'COPIAR', copied: 'COPIADO', select_copy: 'seleccionar + copiar',
-                run: 'EJECUTAR', downloaded: 'DESCARGADO ↓',
-                run_hint_mac: 'Abre soa-web-install.command en Descargas (doble clic). Terminal se abrirá y ejecutará el instalador. Recarga esta pestaña al terminar.',
-                run_hint_win: 'Windows no es compatible con el instalador. Usa WSL: abre Ubuntu y ejecuta el comando copiado.',
-                run_hint_nix: 'Abre una terminal: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh — luego recarga esta pestaña.',
-                github: 'fuente · github',
-                enter: 'ABRIR TERMINAL →',
-                wiz1_title: 'Instalar el backend',
-                wiz1_sub: 'Un archivo. Haz doble clic. Eso es toda la instalación.',
-                wiz_download: '⬇ Descargar instalador',
-                wiz1_meta: 'macOS / Linux · ~30 segundos · sin cuenta',
-                wiz_or_copy: '¿Prefieres pegar un comando?',
-                wiz_pair_p: '¿Ya lo tienes en otra máquina?', wiz_pair_scan: 'Escanear su código QR', wiz_pair_paste: 'O pega el enlace de emparejamiento', wiz_pair_go: 'CONECTAR',
-                wiz_pair_cancel: 'Cancelar', wiz_pair_hint: 'Apunta la cámara al QR de la barra lateral del escritorio (MOBILE LINK).', wiz_pair_torch: 'Luz',
-                wiz_pair_err_code: 'Eso no es un código de emparejamiento de Son of Anton.', wiz_pair_err_token: 'Ese enlace no tiene token — abre MOBILE LINK en el escritorio y escanea su QR.', wiz_pair_err_cam: 'Aquí no hay cámara. Pega el enlace en su lugar.',
-                wiz_pair_err_denied: 'Acceso a la cámara denegado. Permítelo en el navegador o pega el enlace.', wiz_pair_err_open: 'La cámara no pudo iniciarse ({detail}). Pega el enlace en su lugar.',
-                wiz_pair_pw_hint: 'Este escritorio pide su contraseña de emparejamiento — escríbela abajo.', wiz_pair_pw_ph: 'contraseña de emparejamiento', wiz_pair_err_pw: 'Contraseña incorrecta.', wiz_pair_err_nologin: 'El escritorio aceptó la contraseña pero no permite iniciar sesión con contraseña. En el escritorio: MOBILE LINK → ALLOW PASSWORD LOGIN.', wiz_pair_err_unreach: 'No se pudo contactar con ese escritorio. Revisa el enlace y que esté en línea.', wiz_devhist: 'Leer el historial guardado en este dispositivo',
-                wiz2_title: 'Ejecutar el instalador',
-                wiz2_a: 'Haz doble clic en',
-                wiz2_b: 'en tus Descargas — Terminal se abre y lo instala por ti.',
-                wiz2_wait: 'Esperando a que tu backend se conecte…',
-                wiz_back: '← atrás',
-                wiz3_title: '✓ Conectado',
-                wiz3_sub: 'Tu backend está en línea. Abriendo tu terminal…',
-                wiz_learn: '¿Qué es esto?',
-                wiz_sandbox: 'Probar el sandbox',
+                name_aria: 'Son of Anton (de dónde viene el nombre, abre YouTube)',
+                jump_setup: 'Ir a la instalación',
+                hero_title: 'Tu agente de IA sigue trabajando en casa. Respóndele desde el móvil.',
+                hero_sub: 'Son of Anton ejecuta tu terminal y tus agentes de programación con IA (programas como Claude Code y Codex que escriben y corrigen código por ti) en tu propio ordenador. Ábrelos desde cualquier navegador o desde el móvil y sigue justo donde lo dejaste.',
+                demo_story: 'Una demo breve. Un agente de IA trabaja en una terminal de tu ordenador. Te levantas de tu mesa. El agente pregunta si debe ejecutar las pruebas y tu móvil muestra una notificación. Tocas Sí en el móvil y la respuesta se escribe en la misma terminal de tu ordenador. Las pruebas pasan y una lista muestra cuál de tus otros agentes te necesita.',
+                demo_cap_1: 'Tu agente trabaja en una terminal real de tu ordenador.',
+                demo_cap_2: 'Vete tranquilo. Sigue trabajando en casa.',
+                demo_cap_3: 'Cuando te necesita, tu móvil te avisa.',
+                demo_cap_4: 'Responde desde el móvil. Se escribe en la misma terminal.',
+                demo_cap_5: 'Ejecuta varios agentes y mira cuál te necesita.',
+                demo_pause: 'Pausar', demo_play: 'Reproducir', demo_replay: 'Repetir', demo_step: 'Paso {n} de 5',
+                demo_away: 'Te has ido de tu mesa', demo_notify: 'my-app espera tu respuesta',
+                demo_q: '¿Ejecuto las pruebas ahora?', demo_yes: 'Sí', demo_no: 'No',
+                demo_working: 'trabajando', demo_needs: 'te necesita', demo_done: 'listo',
+                wiz_card_title: 'Instálalo en este ordenador',
+                wiz_dot1: 'Descargar', wiz_dot2: 'Iniciar', wiz_dot3: 'Abrir',
+                wiz1_title: 'Descarga y abre el instalador',
+                wiz1_sub: 'Instala Son of Anton solo para tu cuenta de usuario (sin contraseña de administrador) y lo inicia en segundo plano. Solo lo haces una vez.',
+                wiz_download: 'Descargar el instalador',
+                wiz1_meta: 'Para macOS y Linux. Tarda alrededor de un minuto.',
+                wiz_or_copy: '¿Prefieres pegar un comando en Terminal?',
+                copy: 'Copiar', copied: 'Copiado', select_copy: 'Seleccionado. Pulsa Cmd+C o Ctrl+C', downloaded: 'Descargado',
+                run_hint_mac: 'Si macOS no abre el archivo, vuelve atrás y pega el comando en Terminal.',
+                run_hint_win: 'El instalador funciona en macOS y Linux. En Windows, abre Ubuntu (WSL) y pega el comando del paso 1.',
+                run_hint_nix: 'En una terminal, ejecuta: chmod +x ~/Downloads/soa-web-install.sh && ~/Downloads/soa-web-install.sh',
+                wiz_pair_title: '¿Ya lo tienes en otro ordenador?',
+                wiz_pair_p: 'Conecta este navegador a ese ordenador en lugar de instalarlo aquí.',
+                wiz_pair_scan: 'Escanear su código QR', wiz_pair_paste: 'Pegar su enlace', wiz_pair_go: 'Conectar',
+                wiz_pair_cancel: 'Cancelar', wiz_pair_hint: 'Apunta la cámara al código QR de la barra lateral del otro ordenador (Mobile Link).', wiz_pair_torch: 'Luz',
+                wiz_pair_err_code: 'Eso no es un código de emparejamiento de Son of Anton.', wiz_pair_err_token: 'Ese enlace no tiene token de emparejamiento. En el otro ordenador, abre Mobile Link y escanea el código QR que muestra.', wiz_pair_err_cam: 'Aquí no hay cámara. Pega el enlace en su lugar.',
+                wiz_pair_err_denied: 'Se denegó el acceso a la cámara. Permítelo en el navegador o pega el enlace.', wiz_pair_err_open: 'La cámara no pudo iniciarse ({detail}). Pega el enlace en su lugar.',
+                wiz_pair_pw_hint: 'Este ordenador pide su contraseña de emparejamiento. Escríbela abajo.', wiz_pair_pw_ph: 'Contraseña de emparejamiento', wiz_pair_err_pw: 'Contraseña incorrecta.', wiz_pair_err_nologin: 'La contraseña es correcta, pero el inicio de sesión con contraseña está desactivado. En el otro ordenador, abre Mobile Link y permítelo.', wiz_pair_err_unreach: 'No se pudo conectar con ese ordenador. Revisa el enlace y que esté en línea.',
+                wiz_devhist: 'Leer el historial guardado en este navegador',
+                wiz2_title: 'Inícialo', wiz2_summary: 'Abre el archivo que descargaste. Esta página lo espera.',
+                wiz2_a: 'Abre', wiz2_b: 'desde tus Descargas. Se abre una ventana de Terminal y ejecuta la instalación.',
+                wiz2_wait: 'Esta página notará cuando esté funcionando. Déjala abierta.', wiz2_checking: 'Comprobando…',
+                wiz_back: 'Descargarlo otra vez',
+                wiz3_title: 'Ya está funcionando', wiz3_summary: 'Tu terminal se abre en esta pestaña.',
+                wiz3_sub: 'Abriendo tu terminal…', enter: 'Abrir mi terminal',
+                wiz3_next: 'Después, conecta tu móvil: en la barra lateral, abre Mobile Link y escanea el código QR con la cámara del móvil.',
+                wiz_sandbox: 'Pruébalo primero en este navegador',
+                wiz_sandbox_note: 'Una shell de práctica que se ejecuta en esta pestaña. No puede ver tus archivos ni tu ordenador.',
+                feat_title: 'Lo que hace por ti',
+                feat_g1: 'En tu mesa', feat_g2: 'Lejos de tu mesa', feat_g3: 'Si algo sale mal',
+                f_tabs_t: 'Nada se pierde al recargar o reiniciar.', f_tabs_d: 'Tus pestañas y su historial vuelven tras recargar la página o reiniciar el ordenador.',
+                f_fleet_t: 'Todos tus agentes de un vistazo.', f_fleet_d: 'Cada pestaña muestra si su agente está trabajando, te necesita, parece atascado o ha terminado.',
+                f_voice_t: 'Habla en lugar de escribir.', f_voice_d: 'Comandos de voz y dictado, en cinco idiomas.',
+                f_same_t: 'La misma shell en tu móvil.', f_same_d: 'Escanea un código QR una vez y sigue escribiendo en la terminal que abriste en el portátil. Sin instalar ninguna app.',
+                f_notify_t: 'Un aviso cuando te necesita.', f_notify_d: 'Tu móvil recibe una notificación cuando un agente espera una respuesta.',
+                f_chat_t: 'Chatea con tus agentes.', f_chat_d: 'Responde en una vista de chat, escribiendo o hablando.',
+                f_screen_t: 'La pantalla de tu Mac en tu móvil.', f_screen_d: 'Mira y haz clic en tu escritorio cuando la terminal no basta.',
+                f_limits_t: 'Límites de uso bajo control.', f_limits_d: 'Cuando Claude o Codex llega a su límite, el agente espera al reinicio, continúa y reproduce lo que escribiste mientras tanto.',
+                f_backup_t: 'Otra forma de entrar.', f_backup_d: 'Si se cae el enlace con tu móvil, los enlaces de respaldo te mantienen conectado.',
+                f_lock_t: 'Un cerrojo en la puerta.', f_lock_d: 'Añade una contraseña de emparejamiento y cámbiala para dejar fuera un móvil perdido.',
+                priv_title: 'Todo se queda en tu ordenador',
+                priv_p1: 'Tus terminales, tu código y tus agentes se ejecutan en tu propia máquina. No necesitas una cuenta.',
+                priv_p2: 'Tu móvil se conecta directamente a tu ordenador mediante un enlace privado que solo abre tu código QR. Una cuenta opcional puede ayudar a tu móvil a encontrar de nuevo este ordenador si ese enlace cambia.',
+                faq_title: 'Preguntas',
+                faq_q1: '¿Qué es un agente de programación con IA?', faq_a1: 'Un programa como Claude Code o Codex que lee tu proyecto, escribe código y ejecuta comandos cuando se lo pides, y te consulta antes de los pasos arriesgados.',
+                faq_q2: '¿Necesito Claude Code o Codex?', faq_a2: 'No. Son of Anton es una terminal completa por sí sola. Si usas Claude Code o Codex en ella, los reconoce y muestra qué está haciendo cada uno.',
+                faq_q3: 'No me siento cómodo con una terminal. ¿Es para mí?', faq_a3: 'Sí. El instalador hace la configuración y, una vez que inicias un agente, puedes hablarle con lenguaje normal.',
+                faq_q4: '¿Y si mi móvil no se conecta?', faq_a4: 'Tus agentes siguen funcionando en casa. Prueba un enlace de respaldo desde la misma pantalla o vuelve a escanear el código QR.',
+                faq_q5: '¿Cómo lo desinstalo?', faq_a5a: 'Ejecuta', faq_a5b: ' en Terminal. Detiene el servicio y elimina lo que añadió el instalador.',
+                wiz_learn: 'Detalles técnicos', wiz_learn_hide: 'Ocultar detalles técnicos',
+                tech_p: 'El instalador ejecuta un pequeño servicio en segundo plano en este ordenador, en 127.0.0.1:4010, solo con tu cuenta de usuario. Las pestañas y su historial se guardan en el disco, así que sobreviven a los reinicios. La conexión desde el móvil usa un túnel cifrado que la aplicación abre por ti.',
+                src_title: 'Instalar desde el código fuente',
+                setup_b_desc: 'Clona el repositorio y ejecútalo tú mismo. Para desarrolladores que quieren leer o cambiar el código.',
+                github: 'GitHub', why_name: '¿Por qué el nombre?', credit: 'Hecho por',
+                star: 'Dar una estrella en GitHub', star_one: 'Dar una estrella en GitHub, 1 estrella por ahora', star_n: 'Dar una estrella en GitHub, {n} estrellas por ahora',
             },
         };
 
@@ -705,6 +897,16 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 if (strings[key] != null) node.textContent = strings[key];
             });
             if (enter) enter.textContent = strings.enter;
+            var nameLink = document.getElementById('wel-name');
+            if (nameLink && strings.name_aria) nameLink.setAttribute('aria-label', strings.name_aria);
+            var pwField = document.getElementById('wiz-pair-pw');
+            if (pwField && strings.wiz_pair_pw_ph) { pwField.placeholder = strings.wiz_pair_pw_ph; pwField.setAttribute('aria-label', strings.wiz_pair_pw_ph); }
+            var learn = document.getElementById('wiz-learn'), more = document.getElementById('wiz-more');
+            if (learn && more) learn.textContent = more.hidden ? strings.wiz_learn : (strings.wiz_learn_hide || strings.wiz_learn);
+            renderStar();
+            // The demo player (below) re-renders its caption and labels.
+            window.__soaWelcomeStrings = strings;
+            try { document.dispatchEvent(new CustomEvent('soa-welcome-lang', { detail: strings })); } catch (_) {}
             // Keep the language-bar pressed state in sync with the active
             // choice so the active button reads accent-underlined.
             document.querySelectorAll('#welcome-lang button').forEach(function (btn) {
@@ -712,7 +914,96 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 btn.setAttribute('aria-pressed', active ? 'true' : 'false');
             });
         }
+        // ── GitHub star count (header) ──
+        // Shares one cache with the sidebar Contribute widget (assets/widgets.js:
+        // key soa-web:contrib-stats, {stars, forks, issues, at}), so the two never
+        // spend the 60/h anonymous API quota twice. A cached count renders at
+        // once even when stale; a refresh is attempted at most once an hour, and
+        // a refused one (403 rate limit, 5xx) is remembered for an hour under a
+        // separate key so the shared shape stays exactly what the widget expects.
+        // No count known → the link is a plain "GitHub" link. It never errors,
+        // never blocks: the fetch starts after load, idle, with a timeout.
+        var STAR_REPO = 'SimonSaysGiveMeSmile/SoA-Web';
+        var STAR_KEY = 'soa-web:contrib-stats', STAR_MISS_KEY = 'soa-web:contrib-stats:miss';
+        var STAR_TTL = 60 * 60 * 1000;
+        var starStats = null;
+        function readStarCache() {
+            try {
+                var hit = JSON.parse(localStorage.getItem(STAR_KEY) || 'null');
+                if (hit && typeof hit.stars === 'number' && isFinite(hit.stars) && hit.stars >= 0) return hit;
+            } catch (_) {}
+            return null;
+        }
+        function fmtStars(n) {
+            if (n < 1000) return String(n);
+            try {
+                return new Intl.NumberFormat(lang === 'zh' ? 'zh-CN' : lang, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+            } catch (_) { return (Math.round(n / 100) / 10) + 'k'; }
+        }
+        function renderStar() {
+            var a = document.getElementById('wel-star');
+            var txt = document.getElementById('wel-star-text');
+            if (!a || !txt) return;
+            var icon = a.querySelector('.wel-star-icon');
+            var has = !!starStats;
+            // SVG has no .hidden property; toggle the attribute itself.
+            if (icon) { if (has) icon.removeAttribute('hidden'); else icon.setAttribute('hidden', ''); }
+            a.classList.toggle('has-count', has);
+            if (has) {
+                var n = starStats.stars;
+                txt.textContent = fmtStars(n);
+                var full = n === 1 ? strings.star_one : strings.star_n;
+                a.setAttribute('aria-label', (full || strings.star || 'Star on GitHub').replace('{n}', String(n)));
+            } else {
+                txt.textContent = strings.github || 'GitHub';
+                a.setAttribute('aria-label', strings.star || 'Star on GitHub');
+            }
+            a.title = a.getAttribute('aria-label');
+        }
+        function refreshStars() {
+            // Once the welcome is dismissed the dashboard's Contribute widget owns
+            // the refresh; firing here too would spend a second request.
+            if (document.documentElement.dataset.welcome !== '1') return;
+            var now = Date.now();
+            if (starStats && now - (starStats.at || 0) < STAR_TTL) return;
+            try {
+                var miss = +localStorage.getItem(STAR_MISS_KEY) || 0;
+                if (now - miss < STAR_TTL) return;
+            } catch (_) {}
+            if (typeof fetch !== 'function') return;
+            if (navigator.onLine === false) return;
+            var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+            var to = ctl ? setTimeout(function () { ctl.abort(); }, 8000) : 0;
+            fetch('https://api.github.com/repos/' + STAR_REPO, {
+                headers: { Accept: 'application/vnd.github+json' },
+                credentials: 'omit', signal: ctl ? ctl.signal : undefined,
+            }).then(function (r) {
+                if (!r.ok) {
+                    // Rate-limited or refused: back off an hour (shared with no one
+                    // else's data; the cached count, if any, stays on screen).
+                    try { localStorage.setItem(STAR_MISS_KEY, String(Date.now())); } catch (_) {}
+                    return null;
+                }
+                return r.json();
+            }).then(function (d) {
+                if (!d || typeof d.stargazers_count !== 'number') return;
+                starStats = { stars: d.stargazers_count, forks: d.forks_count || 0, issues: d.open_issues_count || 0, at: Date.now() };
+                try { localStorage.setItem(STAR_KEY, JSON.stringify(starStats)); localStorage.removeItem(STAR_MISS_KEY); } catch (_) {}
+                renderStar();
+            }).catch(function () { /* offline / blocked / timed out: keep what is shown */ })
+              .then(function () { if (to) clearTimeout(to); });
+        }
+        starStats = readStarCache();
+
         apply();
+        (function scheduleStars() {
+            var go = function () {
+                if (window.requestIdleCallback) requestIdleCallback(refreshStars, { timeout: 3000 });
+                else setTimeout(refreshStars, 600);
+            };
+            if (document.readyState === 'complete') go();
+            else window.addEventListener('load', go, { once: true });
+        })();
 
         // Wire the language picker. Persist to the same localStorage key the
         // main app (assets/i18n.js) reads, so choosing here also applies to
@@ -814,7 +1105,18 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         function gotoStep(n) {
             if (wizEl) wizEl.setAttribute('data-step', String(n));
             var dots = document.querySelectorAll('.wiz-progress .wiz-dot');
-            for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('is-on', i < n);
+            for (var i = 0; i < dots.length; i++) {
+                dots[i].classList.toggle('is-on', i < n);
+                if (i === n - 1) dots[i].setAttribute('aria-current', 'step'); else dots[i].removeAttribute('aria-current');
+            }
+            // The control that moved the wizard on (Download, Download it
+            // again) is now hidden; hand keyboard focus to the step that
+            // opened instead of dropping it on <body>.
+            var a = document.activeElement;
+            if (wizEl && a && wizEl.contains(a) && !a.getClientRects().length) {
+                var h = wizEl.querySelector('.wiz-step--' + n + ' .wiz-h');
+                if (h) { h.setAttribute('tabindex', '-1'); try { h.focus({ preventScroll: true }); } catch (_) {} }
+            }
         }
 
         function backendProbeUrl() {
@@ -844,10 +1146,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         }
         function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
-        function onBackendUp() { stopPoll(); gotoStep(3); setTimeout(doEnter, 1200); }
+        function onBackendUp() { stopPoll(); gotoStep(3); if (!PREVIEW) setTimeout(doEnter, 1200); }
 
         function doEnter() {
-            try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
+            if (!PREVIEW) { try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {} }
             stopPoll();
             if (window.__soaBootNow) {
                 html.removeAttribute('data-welcome');
@@ -863,11 +1165,21 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         var backBtn = document.getElementById('wiz-back');
         if (backBtn) backBtn.addEventListener('click', function () { stopPoll(); gotoStep(1); });
 
+        var jumpBtn = document.getElementById('wel-jump');
+        if (jumpBtn) jumpBtn.addEventListener('click', function () {
+            var card = document.getElementById('wiz'), t = document.getElementById('wiz-card-title');
+            if (!card) return;
+            var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+            card.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+            if (t) { t.setAttribute('tabindex', '-1'); try { t.focus({ preventScroll: true }); } catch (_) {} }
+        });
         var learnBtn = document.getElementById('wiz-learn');
         var moreEl = document.getElementById('wiz-more');
         if (learnBtn && moreEl) {
             learnBtn.addEventListener('click', function () {
                 moreEl.hidden = !moreEl.hidden;
+                learnBtn.setAttribute('aria-expanded', moreEl.hidden ? 'false' : 'true');
+                learnBtn.textContent = moreEl.hidden ? strings.wiz_learn : (strings.wiz_learn_hide || strings.wiz_learn);
                 if (!moreEl.hidden) { try { moreEl.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {} }
             });
         }
@@ -879,8 +1191,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         // steps aside and the terminal boots against the paired shell.
         var pairErr = document.getElementById('wiz-pair-err');
         var pairManual = document.getElementById('wiz-pair-manual');
+        var pairBox = document.getElementById('wiz-pair-box');
         function pairFail(msg) {
             if (pairErr) { pairErr.textContent = msg || ''; pairErr.hidden = !msg; }
+            if (msg && pairBox) pairBox.open = true;
             if (msg && pairManual) pairManual.open = true;
         }
         var pairPwRow = document.getElementById('wiz-pair-pwrow');
@@ -889,7 +1203,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
             var dest = new URL(location.origin + location.pathname);
             dest.searchParams.set('backend', backend);
             dest.searchParams.set('t', token);
-            try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {}
+            if (!PREVIEW) { try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {} }
             location.href = dest.toString();
             return true;
         }
@@ -903,6 +1217,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                     if (!ping || !ping.ok) { pairFail(strings.wiz_pair_err_unreach); return false; }
                     if (!ping.passwordLogin) { pairFail(strings.wiz_pair_err_token); return false; }
                     if (pairPwRow) pairPwRow.hidden = false;
+                    if (pairBox) pairBox.open = true;
                     if (pairManual) pairManual.open = true;
                     if (pairPw) pairPw.placeholder = strings.wiz_pair_pw_ph;
                     if (!pairPw || !pairPw.value) { pairFail(strings.wiz_pair_pw_hint); try { pairPw.focus(); } catch (_) {} return false; }
@@ -966,6 +1281,170 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         pingBackend().then(function (up) { if (up) onBackendUp(); });
     })();
   </script>
+  <script>
+    // Welcome demo player. Owns only .wel-demo: a ~14 s scripted loop of a
+    // laptop terminal and a phone showing the same shell. State is rendered
+    // from (frame, sub) so every frame can be shown as a still; motion is
+    // limited to transform/opacity and a single SVG trace. Pauses on hover,
+    // focus inside, when under half visible, and when the tab is hidden;
+    // stops on frame 4 after three loops. Reduced motion: no autoplay.
+    (function welcomeDemo() {
+        if (document.documentElement.dataset.welcome !== '1') return;
+        var root = document.getElementById('wel-demo');
+        if (!root) return;
+        var cap = document.getElementById('wel-demo-cap');
+        var toggle = document.getElementById('wel-demo-toggle');
+        var dotBtns = root.querySelectorAll('.wel-demo-dot');
+        var lines = root.querySelectorAll('[data-in]');
+        var cards = root.querySelectorAll('[data-show]');
+        var keys = root.querySelectorAll('.wel-key');
+        var tabDots = { a: root.querySelector('[data-tab="a"]'), b: root.querySelector('[data-tab="b"]'), c: root.querySelector('[data-tab="c"]') };
+        var notify = root.querySelector('.wel-notify');
+        var yesBtn = root.querySelector('.wel-btn.yes');
+        var trace = root.querySelector('.wel-trace');
+        var traceLine = trace && trace.querySelector('line');
+        var stage = root.querySelector('.wel-stage');
+        var reduce = false;
+        try { reduce = matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) {}
+
+        function S() { return window.__soaWelcomeStrings || {}; }
+
+        // [frame, sub, delay-before-next (ms)]
+        var TL = [
+            [1, 0, 700], [1, 1, 800], [1, 2, 1500],
+            [2, 0, 2000],
+            [3, 0, 600], [3, 1, 2400],
+            [4, 0, 2000],
+            [5, 0, 800], [5, 1, 2200],
+            [5, 2, 1000],
+        ];
+        var LAST_SUB = { 1: 2, 2: 0, 3: 1, 4: 0, 5: 1 };
+        var cur = { f: 4, s: 0 };
+        var idx = 0, loops = 0, timer = null;
+        var userPaused = reduce, ended = false;
+        var holds = { hover: false, focus: false, offscreen: false, hidden: false };
+
+        function setState(f, s) {
+            cur.f = f; cur.s = s;
+            var code = f * 10 + s;
+            for (var i = 0; i < lines.length; i++) lines[i].classList.toggle('on', +lines[i].getAttribute('data-in') <= code);
+            for (var j = 0; j < cards.length; j++) {
+                var fs = cards[j].getAttribute('data-show').split(' ');
+                cards[j].classList.toggle('on', fs.indexOf(String(f)) !== -1);
+            }
+            var answered = f >= 4;
+            for (var k = 0; k < keys.length; k++) keys[k].classList.toggle('on', answered);
+            root.classList.toggle('is-away', f === 2 || f === 3);
+            if (notify) notify.classList.toggle('is-open', f === 4 || (f === 3 && s >= 1));
+            if (yesBtn) yesBtn.classList.toggle('is-press', f === 4);
+            var a = f <= 2 ? 'is-work' : f === 3 ? 'is-need' : f === 4 ? 'is-work' : 'is-done';
+            setDot(tabDots.a, a);
+            setDot(tabDots.b, f === 5 ? 'is-work' : '');
+            setDot(tabDots.c, f === 5 ? 'is-need' : '');
+            var str = S();
+            if (cap && str['demo_cap_' + f]) cap.textContent = str['demo_cap_' + f];
+            for (var d = 0; d < dotBtns.length; d++) {
+                if (+dotBtns[d].getAttribute('data-frame') === f) dotBtns[d].setAttribute('aria-current', 'step');
+                else dotBtns[d].removeAttribute('aria-current');
+            }
+            runTrace(f === 4 && !reduce);
+        }
+        function setDot(el, cls) {
+            if (!el) return;
+            el.classList.remove('is-work', 'is-need', 'is-done');
+            if (cls) el.classList.add(cls);
+        }
+        // A thin amber line from the phone's Yes to the laptop cursor: the
+        // answer travels into the same shell.
+        function runTrace(on) {
+            if (!trace || !traceLine) return;
+            trace.classList.remove('is-run', 'is-fade');
+            if (!on) return;
+            var cursor = root.querySelector('.wel-term .wel-cur');
+            if (!cursor || !yesBtn || !stage) return;
+            var sr = stage.getBoundingClientRect(), yr = yesBtn.getBoundingClientRect(), cr = cursor.getBoundingClientRect();
+            if (!sr.width || !yr.width || !cr.width) return;
+            var x1 = yr.left - sr.left + yr.width / 2, y1 = yr.top - sr.top;
+            var x2 = cr.left - sr.left + cr.width / 2, y2 = cr.bottom - sr.top;
+            traceLine.setAttribute('x1', x1); traceLine.setAttribute('y1', y1);
+            traceLine.setAttribute('x2', x2); traceLine.setAttribute('y2', y2);
+            var len = Math.ceil(Math.hypot(x2 - x1, y2 - y1));
+            traceLine.style.setProperty('--len', len);
+            void trace.getBoundingClientRect();
+            requestAnimationFrame(function () {
+                trace.classList.add('is-run');
+                setTimeout(function () { trace.classList.add('is-fade'); }, 500);
+            });
+        }
+
+        function held() { return userPaused || ended || holds.hover || holds.focus || holds.offscreen || holds.hidden; }
+        function schedule() {
+            clearTimeout(timer); timer = null;
+            if (held()) return;
+            var step = TL[idx];
+            timer = setTimeout(advance, step[2]);
+        }
+        function advance() {
+            idx++;
+            if (idx >= TL.length) {
+                idx = 0; loops++;
+                if (loops >= 3) { ended = true; idx = 6; setState(4, 0); label(); return; }
+            }
+            setState(TL[idx][0], TL[idx][1]);
+            schedule();
+        }
+        function label() {
+            if (!toggle) return;
+            var str = S();
+            toggle.textContent = ended ? (str.demo_replay || 'Replay') : userPaused ? (str.demo_play || 'Play') : (str.demo_pause || 'Pause');
+            for (var d = 0; d < dotBtns.length; d++) {
+                var n = +dotBtns[d].getAttribute('data-frame');
+                var stepTxt = (str.demo_step || 'Step {n} of 5').replace('{n}', n);
+                dotBtns[d].setAttribute('aria-label', stepTxt + ': ' + (str['demo_cap_' + n] || ''));
+            }
+        }
+        function jumpTo(f) {
+            userPaused = true; ended = false;
+            clearTimeout(timer); timer = null;
+            for (var i = 0; i < TL.length; i++) if (TL[i][0] === f && TL[i][1] === LAST_SUB[f]) { idx = i; break; }
+            setState(f, LAST_SUB[f]);
+            label();
+        }
+
+        if (toggle) toggle.addEventListener('click', function () {
+            if (ended) { ended = false; loops = 0; userPaused = false; idx = 0; setState(1, 0); }
+            else userPaused = !userPaused;
+            // An explicit Play outranks the hover/focus holds: pressing it
+            // leaves the pointer and focus on the button, inside the demo.
+            // They re-arm on the next mouseenter / focus move.
+            if (!userPaused) { holds.hover = false; holds.focus = false; }
+            label(); schedule();
+        });
+        for (var d = 0; d < dotBtns.length; d++) (function (b) {
+            b.addEventListener('click', function () { jumpTo(+b.getAttribute('data-frame')); });
+        })(dotBtns[d]);
+        root.addEventListener('mouseenter', function () { holds.hover = true; schedule(); });
+        root.addEventListener('mouseleave', function () { holds.hover = false; schedule(); });
+        root.addEventListener('focusin', function () { holds.focus = true; schedule(); });
+        root.addEventListener('focusout', function (e) { if (!root.contains(e.relatedTarget)) { holds.focus = false; schedule(); } });
+        document.addEventListener('visibilitychange', function () { holds.hidden = document.hidden; schedule(); });
+        if ('IntersectionObserver' in window) {
+            new IntersectionObserver(function (es) {
+                holds.offscreen = !(es[0] && es[0].intersectionRatio >= 0.5);
+                schedule();
+            }, { threshold: [0, 0.5, 1] }).observe(root);
+        }
+        document.addEventListener('soa-welcome-lang', function () { setState(cur.f, cur.s); label(); });
+        // The welcome can leave (sandbox / enter) without a reload: stop.
+        new MutationObserver(function () {
+            if (document.documentElement.dataset.welcome !== '1') { ended = true; clearTimeout(timer); }
+        }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-welcome'] });
+
+        if (reduce) { setState(4, 0); }
+        else { idx = 0; setState(1, 0); schedule(); }
+        label();
+    })();
+  </script>
   <div id="boot" class="boot">
     <div class="boot-grid"></div>
     <div class="boot-inner">
@@ -1015,12 +1494,15 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <a id="release-link" class="more-item mi-download" role="menuitem" href="https://github.com/SimonSaysGiveMeSmile/SoA-Prod/releases" target="_blank" rel="noopener" aria-label="Download desktop app" data-i18n-title="topbar.release_title" data-label="Download desktop app" title="Download the desktop app">DOWNLOAD APP</a>
           <button id="toggle-audio" class="more-item mi-audio" role="menuitem" data-state="on" data-label="Mute sound FX" data-label-off="Unmute sound FX" data-i18n="topbar.audio_on" data-i18n-title="topbar.audio_title" title="Mute / unmute sound FX">♬ FX</button>
           <button id="toggle-tts" class="more-item mi-tts" role="menuitem" data-state="off" data-label="Stop speaking replies" data-label-off="Speak replies aloud" title="Speak Claude's replies aloud (text-to-speech)">🔊 SPEAK</button>
-          <button id="toggle-voice" class="more-item mi-voice voice-toggle" role="menuitem" type="button" data-state="off" data-label="Voice control: on" data-label-off="Voice control" aria-haspopup="dialog" aria-expanded="false" aria-controls="voice-panel" aria-label="Voice controls — microphone off" title="Voice controls — microphone off"><span class="voice-toggle-label">VOICE</span></button>
           <button id="timemachine" class="more-item mi-clock" role="menuitem" data-label="Time machine" title="Time machine — restore a prior IDE snapshot" aria-label="Time machine">TIME</button>
           <button id="desktop-remote" class="more-item mi-monitor" role="menuitem" data-label="Use the Mac desktop" title="Open the Mac's screen to view and control it" aria-label="Use the Mac desktop">MAC</button>
+          <button id="reload-app" class="more-item mi-reload" role="menuitem" type="button" data-label="Reload app" title="Reload this page to pick up a fresh UI — tabs, pairing and settings stay as they are" aria-label="Reload app">RELOAD</button>
           <button id="restart-daemon" class="more-item mi-restart" role="menuitem" data-label="Restart server" title="Restart the SoA server — flushes tabs + scrollback, re-adopts the tunnel, and auto-resumes every Claude session on boot" aria-label="Restart server">↻ RESTART</button>
         </div>
         <!-- Always visible, whether the tray is collapsed or open. -->
+        <!-- Mic: icon only. The label span stays (hidden) because widgets.js
+             rewrites its text on every status change. -->
+        <button id="toggle-voice" class="voice-toggle" type="button" data-state="off" aria-haspopup="dialog" aria-expanded="false" aria-controls="voice-panel" aria-label="Voice controls — microphone off" title="Voice controls — microphone off"><svg class="voice-toggle-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect class="voice-toggle-capsule" x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg><span class="voice-toggle-label" hidden>VOICE</span></button>
         <button id="toggle-theme" data-icon="☀" title="Switch light / dark theme (full options in Settings)" aria-pressed="false" aria-label="Toggle light or dark theme">☀ THEME</button>
         <button id="toggle-more" class="more-toggle" data-icon="⋯" title="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" aria-label="More actions">⋯ MORE</button>
         <button id="user-chip" class="user-chip" title="Profile &amp; settings (Ctrl+Shift+S)" aria-label="Profile and settings">
@@ -1161,7 +1643,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="/assets/voice-commands.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-audio.js?v=2"></script>
   <script src="/assets/voice-vision.js?v=2"></script>
-  <script type="module" src="/assets/app.js?v=session-models-20261029"></script>
+  <script type="module" src="/assets/app.js?v=web-20261102"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

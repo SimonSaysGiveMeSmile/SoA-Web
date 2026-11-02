@@ -1,13 +1,15 @@
 // One catalogue for settings, previews and the terminal palettes.
+// The first entry is the default for anyone without a stored choice.
+export const DEFAULT_PACK = 'windows11';
 export const DESIGN_PACKS = Object.freeze([
+    { id: 'windows11', name: 'Windows 11', detail: 'Mica, Fluent, Windows Terminal · Default', appearance: true },
+    { id: 'liquid', name: 'Liquid Glass', detail: 'Light, depth, clarity', appearance: true },
     { id: 'tron', name: 'Tron', detail: 'Light on the grid', appearance: true },
     { id: 'minimal', name: 'Minimal', detail: 'A little breathing room', appearance: true },
-    { id: 'liquid', name: 'Liquid Glass', detail: 'Light, depth, clarity', appearance: true },
     { id: 'brutalist', name: 'Brutalist', detail: 'Bold by construction', appearance: true },
     { id: 'classic', name: 'Classic XP', detail: 'A familiar blue horizon', appearance: false },
     { id: 'dos', name: 'MS-DOS', detail: 'Straight to the command', appearance: false },
     { id: 'macos27', name: 'macOS 27', detail: 'Liquid Glass, SF Pro, Terminal.app', appearance: true },
-    { id: 'windows11', name: 'Windows 11', detail: 'Mica, Fluent, Windows Terminal', appearance: true },
     { id: 'neumorphism', name: 'Neumorphism', detail: 'Soft UI on #E0E5EC, no strokes', appearance: true },
 ]);
 
@@ -72,7 +74,7 @@ export function designPackPicker(id, value, onChange) {
                 : `${pack.name} uses its signature palette.`;
         }
     };
-    select.value = DESIGN_PACKS.some(pack => pack.id === value) ? value : 'tron';
+    select.value = DESIGN_PACKS.some(pack => pack.id === value) ? value : DEFAULT_PACK;
     select.addEventListener('change', () => { onChange(select.value); reflect(); });
     reflect();
     queueMicrotask(reflect); // The appearance row is added after this field.

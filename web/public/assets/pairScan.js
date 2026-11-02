@@ -11,6 +11,8 @@
 // jsQR everywhere else, back-camera preference, torch) and ends the way the
 // wizard does — this page, pointed at the paired daemon.
 
+import { maybeFocus } from '/m/focusPolicy.js?v=web-20261102';
+
 const T = {
     en: { scan: 'Scan a desktop QR code', paste: 'Or paste the pairing link', connect: 'CONNECT', pw: 'pairing password',
           cancel: 'Cancel', hint: 'Point the camera at the QR code in the desktop sidebar (MOBILE LINK).', torch: 'Light',
@@ -184,6 +186,8 @@ export function openPairSheet({ title, lead } = {}) {
     for (const sel of ['.pair-url', '.pair-pw']) {
         q(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
     }
-    setTimeout(() => { try { q('.pair-url').focus(); } catch (_) {} }, 40);
+    // The sheet leads with Scan; on a touch screen the paste field waits for a
+    // tap instead of raising the keyboard over the camera (focusPolicy.js).
+    setTimeout(() => maybeFocus(q('.pair-url')), 40);
     return sheet;
 }

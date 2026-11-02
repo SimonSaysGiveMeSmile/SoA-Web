@@ -27,7 +27,8 @@
  *     POST /sample             take a sample now                      (token)
  *     GET  /actions?limit=N    the audit log, newest first
  *     GET  /                   a small control page
- *     GET  /confirm?c=<id>     the page a notification's link opens
+ *     GET  /link?c=<id>        one notification's alert (pid, start time, reasons, still running?)
+ *     GET  /confirm?c=<id>     a one-page stop link for that alert (local use)
  *
  * POST bodies are JSON sent as application/json OR text/plain — through the
  * /preview proxy only text/plain works (the daemon's express.json() swallows
@@ -35,7 +36,8 @@
  *
  * Auth: every request needs a loopback peer and a loopback Host for this port
  * (DNS-rebinding guard, like soa-dictate). A request whose Sec-Fetch-Site is
- * cross-site is refused. Mutating calls need `x-health-token: <token>` (from
+ * cross-site is refused, except from the public front end (www.s0a.app) through a
+ * forwarding proxy — see viaTrustedProxy(). Mutating calls need `x-health-token: <token>` (from
  * GET /token) or, from a direct local caller only (no proxy/forwarding
  * headers), `Authorization: Bearer <key>` with the per-install key in
  * <state>/health/key (0600; the CLI uses it). The preview proxy strips
@@ -49,6 +51,10 @@
  *      SOA_HEALTH_MIN_INTERVAL_S (30), SOA_HEALTH_TERM_GRACE_MS (10000),
  *      SOA_HEALTH_NO_HELPER=1 (never build/run the Swift helper),
  *      SOA_HEALTH_NOTIFY_DRY=1 (write notifications to the log instead of sending),
+ *      SOA_HEALTH_NOTIFY_RETRY_MS (0,20000,90000: delay before each delivery attempt),
+ *      SOA_HEALTH_NOTIFY_DEDUPE_MS (600000), SOA_HEALTH_CLICK_BASE (https://www.s0a.app:
+ *      the phone companion a push opens, as <base>/m/#health=<id>),
+ *      SOA_HEALTH_ALLOWED_ORIGINS (extra cross-site front ends, comma list),
  *      SOA_HEALTH_TEST_ALLOW_PIDS=a,b (TEST ONLY: refuse to signal any other pid),
  *      SOA_HEALTH_TEST_THERMAL=serious (TEST ONLY, needs the allowlist: fake thermal state).
  */
@@ -85,6 +91,13 @@ const LINK_TTL_MS = 60 * 60 * 1000;
 const MANUAL_MAX_PER_10M = 10;
 const NO_HELPER = env.SOA_HEALTH_NO_HELPER === '1';
 const NOTIFY_DRY = env.SOA_HEALTH_NOTIFY_DRY === '1';
+// The phone companion a notification opens (see healthDeepLink).
+const CLICK_BASE = (env.SOA_HEALTH_CLICK_BASE || 'https://www.s0a.app').replace(/\/+$/, '');
+// Front ends that may call this service cross-site — ONLY through the daemon's
+// authenticated /preview/<port>/ proxy (see guardReason). These are the
+// daemon's own default CORS origins for the public site.
+const CROSS_SITE_ORIGINS = new Set(['https://www.s0a.app', 'https://s0a.app',
+    ...String(env.SOA_HEALTH_ALLOWED_ORIGINS || '').split(',').map((x) => x.trim().replace(/\/+$/, '')).filter(Boolean)]);
 const TEST_ALLOW = parseTestAllow(env.SOA_HEALTH_TEST_ALLOW_PIDS);
 const NCPU = Math.max(1, os.cpus().length || 1);
 const TOTAL_MEM = os.totalmem();
@@ -611,13 +624,109 @@ function publicBase() {
     try { const j = JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'tunnel.json'), 'utf8')); if (j && /^https:\/\//.test(j.url)) return j.url.replace(/\/+$/, ''); } catch (_) {}
     return 'http://127.0.0.1:4010';
 }
+// Where a notification's tap lands. The phone companion on the public front
+// end (www.s0a.app/m/) is where a phone stays paired — its token lives in that
+// origin's storage — while a fresh browser context opened from the push has no
+// token for the daemon's own (rotating) tunnel origin and /preview/* is behind
+// the pairing gate. So the tap opens the companion, which opens its Health
+// sheet on this alert and talks to this service through the paired daemon's
+// /preview/<port>/ proxy. The link carries the alert id plus the name, pid and
+// reason already in the push text — never a pairing token or unlock.
+function healthDeepLink(base, id, c) {
+    const q = new URLSearchParams();
+    q.set('health', id);
+    if (c && c.pid) q.set('pid', String(c.pid));
+    const name = c ? (c.app || c.name || '') : '';
+    if (name) q.set('name', String(name).slice(0, 60));
+    const why = c && Array.isArray(c.reasons) ? c.reasons.map((r) => r && r.detail).filter(Boolean).join('; ') : '';
+    if (why) q.set('why', why.slice(0, 120));
+    return `${String(base || CLICK_BASE).replace(/\/+$/, '')}/m/#${q.toString()}`;
+}
 function linkFor(c) {
     for (const [id, l] of svc.links) if (l.expires < Date.now()) svc.links.delete(id);
     const id = crypto.randomBytes(9).toString('base64url');
-    svc.links.set(id, { pid: c.pid, startTime: c.startTime, comm: c.comm, name: c.app || c.name, args: c.args, reasons: c.reasons, expires: Date.now() + LINK_TTL_MS });
+    svc.links.set(id, { pid: c.pid, startTime: c.startTime, comm: c.comm, name: c.app || c.name, args: c.args, reasons: c.reasons, created: Date.now(), expires: Date.now() + LINK_TTL_MS });
     while (svc.links.size > 200) svc.links.delete(svc.links.keys().next().value);
-    return { id, url: `${publicBase()}/preview/${PORT}/confirm?c=${id}` };
+    // url: what the push opens. confirm: the old one-page stop link, still served
+    // for local use (the Mac's own browser, or a paired browser on the tunnel).
+    return { id, url: healthDeepLink(CLICK_BASE, id, c), confirm: `${publicBase()}/preview/${PORT}/confirm?c=${id}` };
 }
+
+// Delivery with retry. One push failed on a transient network/ntfy error and
+// was lost (no retry, and only "Command failed: …" in the log). Each message is
+// now a job: up to NOTIFY_DELAYS.length attempts (default immediately, +20 s,
+// +90 s), the sender's own stderr logged as the reason, never awaited by the
+// sampler, and deduplicated — a job with the same channel+title+text that is
+// still pending or was delivered within the dedupe window is dropped, and at
+// most maxPending jobs exist at once, so a burst of alerts cannot turn into a
+// storm of duplicate pushes.
+const NOTIFY_DELAYS = String(env.SOA_HEALTH_NOTIFY_RETRY_MS || '0,20000,90000').split(',').map((x) => parseInt(x, 10)).filter((n) => n >= 0);
+const NOTIFY_DEDUPE_MS = clampInt(env.SOA_HEALTH_NOTIFY_DEDUPE_MS, 10 * 60000, 0, 24 * 3600000);
+class Notifier {
+    constructor({ run, log: lg = () => {}, delays = [0, 20000, 90000], dedupeMs = 10 * 60000, maxPending = 20, now = Date.now, timer = setTimeout } = {}) {
+        this.run = run; this.log = lg; this.delays = delays.length ? delays : [0]; this.dedupeMs = dedupeMs;
+        this.maxPending = maxPending; this.now = now; this.timer = timer;
+        this.pending = new Map();     // key → job
+        this.delivered = new Map();   // key → delivered at
+    }
+    static key(channel, title, text) { return channel + ':' + crypto.createHash('sha1').update(String(title) + '\n' + String(text)).digest('hex').slice(0, 16); }
+    /** Queue one message. Returns 'queued' | 'duplicate' | 'dropped'. Never throws, never blocks. */
+    send(channel, args, { title = '', text = '' } = {}) {
+        const now = this.now();
+        for (const [k, t] of this.delivered) if (now - t > this.dedupeMs) this.delivered.delete(k);
+        const key = Notifier.key(channel, title, text);
+        if (this.pending.has(key) || this.delivered.has(key)) { this.log(`notify ${channel}: duplicate dropped`); return 'duplicate'; }
+        if (this.pending.size >= this.maxPending) { this.log(`notify ${channel}: ${this.pending.size} messages already pending, dropped`); return 'dropped'; }
+        const job = { key, channel, args, attempt: 0 };
+        this.pending.set(key, job);
+        this._schedule(job);
+        return 'queued';
+    }
+    _schedule(job) {
+        const d = this.delays[job.attempt] || 0;
+        const go = () => { this._attempt(job).catch((e) => this.log(`notify ${job.channel}: ${e && e.message}`)); };
+        if (d <= 0 && job.attempt === 0) return go();
+        const h = this.timer(go, d);
+        if (h && typeof h.unref === 'function') h.unref();
+    }
+    async _attempt(job) {
+        job.attempt++;
+        let r;
+        try { r = await this.run(job.channel, job.args); } catch (e) { r = { ok: false, reason: e && e.message || 'failed' }; }
+        const n = this.delays.length;
+        if (r && r.ok) {
+            this.pending.delete(job.key);
+            this.delivered.set(job.key, this.now());
+            if (job.attempt > 1) this.log(`notify ${job.channel}: delivered on attempt ${job.attempt}/${n}`);
+            return;
+        }
+        const why = (r && r.reason) || 'failed';
+        if (job.attempt >= n) {
+            this.pending.delete(job.key);
+            this.log(`notify ${job.channel}: FAILED after ${n} attempts: ${why}`);
+            return;
+        }
+        this.log(`notify ${job.channel}: attempt ${job.attempt}/${n} failed (${why}); retry in ${Math.round((this.delays[job.attempt] || 0) / 1000)} s`);
+        this._schedule(job);
+    }
+}
+// The sender's own words, minus anything that would leak the ntfy topic (the
+// topic is the channel's shared secret; soa-notify prints the topic URL).
+function failureReason(e, stderr) {
+    const raw = String(stderr || '').trim() || String(e && e.message || '').split('\n')[0];
+    let why = raw.replace(/(?:→|->)\s*\S+/g, '').replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').trim();
+    if (e && e.killed) why = `timed out${why ? ': ' + why : ''}`;
+    else if (e && e.code != null && typeof e.code === 'number') why = `exit ${e.code}${why ? ': ' + why : ''}`;
+    return why.slice(0, 300) || 'failed';
+}
+const notifyBin = (n) => { const p = path.join(__dirname, n); return fs.existsSync(p) ? p : n; };
+function runNotifier(channel, args) {
+    const bin = channel === 'push' ? notifyBin('soa-notify') : notifyBin('soa-msg');
+    return new Promise((resolve) => {
+        execFile(bin, args, { timeout: channel === 'push' ? 25000 : 15000 }, (e, _out, err) => resolve(e ? { ok: false, reason: failureReason(e, err) } : { ok: true }));
+    });
+}
+const notifier = new Notifier({ run: (c, a) => runNotifier(c, a), log: (m) => log(m), delays: NOTIFY_DELAYS, dedupeMs: NOTIFY_DEDUPE_MS });
 function notify(text, { title = 'SoA health', priority = 'default', click = null } = {}) {
     const s = svc.settings;
     if (NOTIFY_DRY) {
@@ -625,13 +734,12 @@ function notify(text, { title = 'SoA health', priority = 'default', click = null
         log('notify (dry):', text, click || '');
         return;
     }
-    const bin = (n) => { const p = path.join(__dirname, n); return fs.existsSync(p) ? p : n; };
-    if (s.notify.chat) execFile(bin('soa-msg'), [click ? `${text} ${click}` : text], { timeout: 15000 }, (e) => { if (e) log('soa-msg failed', e.message); });
+    if (s.notify.chat) notifier.send('chat', [click ? `${text} ${click}` : text], { title, text });
     if (s.notify.push) {
         const a = ['-t', title, '-p', priority, '-T', 'thermometer'];
         if (click) a.push('--click', click);
-        a.push(text);
-        execFile(bin('soa-notify'), a, { timeout: 20000 }, (e) => { if (e) log('soa-notify failed', e.message.split('\n')[0]); });
+        a.push('--', text);   // a body starting with '-' (e.g. a '-zsh' label) is not a flag
+        notifier.send('push', a, { title, text });
     }
 }
 const shortArgs = (s) => (String(s || '').length > 200 ? String(s).slice(0, 200) + '…' : String(s || ''));
@@ -751,7 +859,7 @@ function notifyCandidate(c, now, prefix = '') {
     const s = svc.settings;
     const k = `${c.pid}:${c.startTime}`;
     const last = svc.notified.get(k);
-    if (last && now - last < s.notify.cooldownMin * 60000) return;
+    if (last && now - last < s.notify.cooldownMin * 60000) return null;
     svc.notified.set(k, now);
     for (const [kk, t] of svc.notified) if (now - t > 24 * 3600000) svc.notified.delete(kk);
     const link = linkFor(c);
@@ -759,6 +867,7 @@ function notifyCandidate(c, now, prefix = '') {
     const msg = `${prefix ? prefix + ' ' : ''}${label(c)} (pid ${c.pid}) is using a lot: ${why}. Tap to stop it:`;
     notify(msg, { priority: 'default', click: link.url });
     audit({ action: 'notify', result: 'sent', pid: c.pid, startTime: c.startTime, name: label(c), args: c.args, reason: why, link: link.id });
+    return link;
 }
 
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
@@ -880,8 +989,28 @@ function guardReason(req, port) {
     const h = String(req.headers.host || '').toLowerCase();
     if (h !== `127.0.0.1:${port}` && h !== `localhost:${port}` && h !== `[::1]:${port}`) return 'bad host';
     const sfs = String(req.headers['sec-fetch-site'] || '').toLowerCase();
-    if (sfs === 'cross-site' || (sfs === 'same-site' && req.method !== 'GET')) return 'cross-site request';
+    if (sfs === 'cross-site' || (sfs === 'same-site' && req.method !== 'GET')) {
+        if (!viaTrustedProxy(req)) return 'cross-site request';
+    }
     return null;
+}
+// A cross-site request is accepted only when it names one of the public front
+// ends as its Origin AND arrived through a forwarding proxy (the daemon's
+// /preview proxy behind the tunnel adds x-forwarded-* / cf-*). A page in a
+// browser cannot forge Origin, and cannot add a forwarding header to a
+// request straight to this port without a CORS preflight, which this service
+// never answers — so a hostile site the Mac's own browser visits is still
+// refused. The daemon in front has already required the pairing token (and
+// the password unlock when one is set) and answers CORS only for its
+// allowlisted origins; mutations here still need an x-health-token.
+// The forwarding header must be one the daemon itself reads as "an internet
+// caller" (sessionManager.isLocalRequest): with it the daemon's /preview gate
+// demanded the pairing token (+ unlock). A looser proxy header (via, cf-ray,
+// x-forwarded-proto…) can ride a loopback call the daemon exempts as local.
+const DAEMON_REMOTE_HEADERS = ['cf-connecting-ip', 'x-forwarded-for', 'x-real-ip', 'forwarded'];
+function viaTrustedProxy(req) {
+    const origin = String(req.headers.origin || '').replace(/\/+$/, '');
+    return !!origin && CROSS_SITE_ORIGINS.has(origin) && DAEMON_REMOTE_HEADERS.some((k) => req.headers[k]);
 }
 function authOk(req, body, key) {
     const t = req.headers['x-health-token'] || (body && body.token);
@@ -961,6 +1090,18 @@ function createServer() {
                 }
                 if (p === '/settings') return json(res, 200, { settings: svc.settings, defaults: defaultSettings(), limits: { intervalSec: [MIN_INTERVAL_S, MAX_INTERVAL_S], autoConfirm: AUTO_CONFIRM, cores: NCPU, totalMemMB: Math.round(TOTAL_MEM / 1048576) } });
                 if (p === '/actions') return json(res, 200, { actions: readActions(clampInt(url.searchParams.get('limit'), 50, 1, 1000)) });
+                if (p === '/link') {
+                    const id = String(url.searchParams.get('c') || '');
+                    const l = svc.links.get(id);
+                    if (!l || l.expires < Date.now()) return json(res, 404, { error: 'expired', id });
+                    const live = svc.candidates.find((c) => c.pid === l.pid && c.startTime === l.startTime) || null;
+                    // "running" means THAT process (pid + start time), not whatever holds the pid now.
+                    // (the candidate list can be up to one sample old, so it is not proof of life)
+                    const running = alive(l.pid) && !identityMismatch(l, (await liveProc(l.pid)).p);
+                    return json(res, 200, { ok: true, id, pid: l.pid, startTime: l.startTime, comm: l.comm, name: l.name, args: shortArgs(l.args),
+                        reasons: l.reasons || [], created: l.created || null, expires: l.expires, running,
+                        stillHeavy: running && !!live, current: running && live ? { cpu: live.cpu, rssMB: live.rssMB, reasons: live.reasons } : null });
+                }
                 if (p === '/confirm') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(confirmPage(String(url.searchParams.get('c') || ''))); }
                 if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(CONTROL_PAGE); }
                 res.writeHead(404); return res.end('not found');
@@ -997,6 +1138,19 @@ function createServer() {
                     return json(res, e.result === 'refused' || e.result === 'failed' ? 409 : 200, e);
                 }
                 if (p === '/sample') { await sampleOnce('manual'); return json(res, 200, statusPayload()); }
+                // TEST ONLY (needs SOA_HEALTH_TEST_ALLOW_PIDS): raise a notification for an
+                // allowlisted pid as if it were a candidate, to exercise links + delivery.
+                if (p === '/test/alert' && TEST_ALLOW) {
+                    const pid = parseInt(body.pid, 10);
+                    if (!TEST_ALLOW.has(pid)) return json(res, 409, { error: 'not in the test allowlist' });
+                    const { p: lp } = await liveProc(pid);
+                    if (!lp) return json(res, 404, { error: 'not running' });
+                    const c = Object.assign({}, lp, { cpu: lp.pcpu || 0, rssMB: Math.round(lp.rssKB / 1024), reasons: [{ kind: 'test', detail: String(body.detail || 'test alert') }] });
+                    svc.candidates = [c].concat(svc.candidates.filter((x) => x.pid !== pid));
+                    svc.notified.delete(`${c.pid}:${c.startTime}`);
+                    const link = notifyCandidate(c, Date.now());
+                    return json(res, 200, { ok: true, link });
+                }
                 return json(res, 404, { error: 'not found' });
             }
             res.writeHead(405, { allow: 'GET, POST' }); return res.end();
@@ -1150,6 +1304,7 @@ async function cli(argv) {
 module.exports = {
     defaultSettings, normalizeSettings, applySettingsPatch, parsePs, parseLstart, parseCpuTime, protectReason, eligibility,
     Detector, reasonsFor, AGENT_ARGS_RE, scoreOf, RateLimiter, identityMismatch, trendOf, guardReason, listMatch, AUTO_CONFIRM, PROXY_HEADER,
+    Notifier, failureReason, healthDeepLink, CROSS_SITE_ORIGINS,
 };
 
 if (require.main === module) {

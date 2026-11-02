@@ -1469,6 +1469,9 @@ button:active { background: var(--accent-bg-hover); }
     border-bottom: none;
     border-radius: 20px 20px 0 0;
     padding-bottom: calc(env(safe-area-inset-bottom) + 14px);
+    max-height: calc(100% - env(safe-area-inset-top) - 24px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     transform: translateY(100%);
     transition: transform 0.3s ease-out;
 }
@@ -1479,7 +1482,7 @@ button:active { background: var(--accent-bg-hover); }
     padding: 4px 16px 8px;
 }
 .overflow-title {
-    font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+    font-size: 14px; letter-spacing: 0.16em; text-transform: uppercase;
     color: var(--fg-dim);
 }
 .overflow-grid {
@@ -1492,25 +1495,29 @@ button:active { background: var(--accent-bg-hover); }
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
-    padding: 14px 6px;
+    gap: 10px;
+    padding: 14px 4px;
     border: 1px solid var(--line);
     border-radius: 14px;
     background: rgba(255, 255, 255, 0.03);
+    cursor: pointer;
 }
+.overflow-tile:active { background: var(--accent-bg); }
 .overflow-btn {
-    width: 46px; height: 46px;
-    min-width: 46px;
+    flex: none; /* .bb-icon-sm's 44px flex-basis would cap the column-tile height */
+    width: 52px; height: 52px;
+    min-width: 52px;
     padding: 0;
     margin: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: 20px;
+    font-size: 23px;
     line-height: 1;
     border-radius: 12px;
     border: 1px solid var(--line);
     background: var(--accent-bg);
     color: var(--fg);
 }
+.overflow-btn .vc-i { width: 24px; height: 24px; }
 .overflow-btn:active { background: var(--accent-bg-hover); }
 .overflow-btn[aria-pressed="true"] {
     color: var(--accent);
@@ -1518,10 +1525,10 @@ button:active { background: var(--accent-bg-hover); }
     background: var(--accent-bg-hover);
 }
 .overflow-cap {
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    color: var(--fg-dim);
-    text-transform: uppercase;
+    font-size: 17px;
+    line-height: 1.2;
+    text-align: center;
+    color: var(--fg);
 }
 
 .settings-handle {
@@ -2850,3 +2857,24 @@ html.soa-android .chat-status[data-state="working"] .chat-status-text::after {
     animation: none;
     content: '…';
 }
+
+/* Dictation light: a dot on the top-bar mic while dictation runs (⋯ → Dictate).
+   listening = green, transcribing = amber and quicker, error = red. */
+#btn-mic { position: relative; }
+#btn-mic .dictate-light {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green, #5dbd5a);
+    box-shadow: 0 0 0 1.5px var(--bg, #000);
+    pointer-events: none;
+}
+#btn-mic .dictate-light[hidden] { display: none; }
+#btn-mic .dictate-light[data-state="listening"]    { animation: dictate-pulse 2.4s ease-in-out infinite; }
+#btn-mic .dictate-light[data-state="transcribing"] { background: var(--yellow, #d9b657); animation: dictate-pulse .7s linear infinite; }
+#btn-mic .dictate-light[data-state="error"]        { background: var(--red, #ff6b6b); }
+@keyframes dictate-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { #btn-mic .dictate-light { animation: none; } }

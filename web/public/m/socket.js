@@ -208,6 +208,36 @@ export class BridgeSocket extends EventTarget {
         }
     }
 
+    /**
+     * Move to `url` (a ws base) now and connect through it: a backup door the
+     * app has already proved answers (see doors.js). Refused while connected,
+     * so a working link is never abandoned. The door joins the pool, so the
+     * ordinary rotation can come back to it later.
+     */
+    switchEndpoint(url) {
+        if (this._stop || !url || !_isEligibleWsScheme(url)) return false;
+        if (this.state === SocketState.CONNECTED && this.ws && this.ws.readyState === 1) return false;
+        if (!this._endpoints.includes(url)) {
+            this._endpoints.push(url);
+            this.dispatchEvent(new CustomEvent('endpoints-changed', { detail: { endpoints: this._endpoints.slice() } }));
+        }
+        this._endpointIdx = this._endpoints.indexOf(url);
+        this.baseUrl = url;
+        this._failuresOnCurrent = 0;
+        this._attempt = 0;
+        if (this._probeController) { try { this._probeController.abort(); } catch (_) {} }
+        if (this.ws) {
+            const old = this.ws;
+            this.ws = null;
+            old._superseded = true;
+            try { old.close(4002, 'switching door'); } catch (_) {}
+        }
+        blog('switch → backup door', url);
+        this.dispatchEvent(new CustomEvent('endpoint-switched', { detail: { url, index: this._endpointIdx, door: true } }));
+        this._scheduleReconnect(0);
+        return true;
+    }
+
     /** Jump to the next endpoint in the pool immediately, if one exists. */
     _rotateEndpoint() {
         if (this._endpoints.length < 2) return false;
@@ -235,6 +265,8 @@ export class BridgeSocket extends EventTarget {
 
     _open() {
         this._clearTimers();
+        // A newer _open (or a door switch) makes this attempt's late results moot.
+        const gen = this._openGen = (this._openGen || 0) + 1;
         const url = this.token
             ? `${this.baseUrl}/ws?t=${encodeURIComponent(this.token)}`
             : `${this.baseUrl}/ws`;
@@ -242,7 +274,7 @@ export class BridgeSocket extends EventTarget {
         blog('open → probing', this.baseUrl, '(attempt', this._attempt + 1 + ')');
 
         this._probeConnectivity().then(diag => {
-            if (this._stop) return;
+            if (this._stop || gen !== this._openGen) return;
             blog('probe result:', diag, 'for', this.baseUrl);
             this._setDiagnosis(diag);
 
@@ -278,6 +310,7 @@ export class BridgeSocket extends EventTarget {
             this.ws = ws;
 
             ws.addEventListener('open', () => {
+                if (ws._superseded) { try { ws.close(1000); } catch (_) {} return; }
                 blog('WS OPEN ✓', this.baseUrl);
                 this._attempt = 0;
                 this._failuresOnCurrent = 0;
@@ -291,6 +324,7 @@ export class BridgeSocket extends EventTarget {
             });
 
             ws.addEventListener('message', (ev) => {
+                if (ws._superseded) return;
                 this._lastRecvAt = Date.now();
                 let msg;
                 try { msg = JSON.parse(ev.data); }
@@ -311,6 +345,7 @@ export class BridgeSocket extends EventTarget {
             ws.addEventListener('error', () => { blog('WS error event (close will follow)'); });
 
             ws.addEventListener('close', (ev) => {
+                if (ws._superseded) return;   // left behind by switchEndpoint()
                 blog('WS CLOSE code=' + ev.code, 'reason=' + (ev.reason || '(none)'), 'wasConnected=' + (this.state === SocketState.CONNECTED));
                 this._stopHeartbeat();
                 this.ws = null;

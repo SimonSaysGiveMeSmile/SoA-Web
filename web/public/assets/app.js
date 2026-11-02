@@ -18,14 +18,16 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=agent-unlock-20261014';
-import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=32';
-import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=pair-scan-20260930';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=web-20261102';
+import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=35';
+import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=web-20261102';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
 import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-20261005b';
-import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=desktop-packs-20260930';
+import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=web-20261102';
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
+import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=web-20261102';
+import { attachDesktopFailover, findWorkingDoor, doorsSupported } from '/assets/doors.js?v=web-20261102';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -210,7 +212,8 @@ function bootUnlockPrompt(backend, { wantToken = false } = {}) {
             resolve(r);
         });
         form.querySelector('.boot-unlock-back').addEventListener('click', () => { form.remove(); resolve(null); });
-        setTimeout(() => { try { pw.focus(); } catch (_) {} }, 60);
+        // Shown at boot, not from a tap: on a touch screen the user taps the field.
+        setTimeout(() => maybeFocus(pw), 60);
     });
 }
 
@@ -545,7 +548,7 @@ class TabRuntime {
             type: 'button',
             hidden: 'hidden',
             title: tr('term.live.hint'),
-            onclick: () => { this.scrollToBottom(); this.focus(); },
+            onclick: () => { this.scrollToBottom(); maybeFocus(this); },
         }, tr('term.live'));
         this._liveBtn.hidden = true;
         this.container.appendChild(this._liveBtn);
@@ -567,6 +570,7 @@ class TabRuntime {
             this._touchY = y;
         }, { passive: true });
         this._attachTouchScroll();
+        this._attachTouchFocusGuard();
         if (this._onData) this.term.onData(d => this._onData && this._onData(d));
         if (this._onResize) this.term.onResize(({ cols, rows }) => this._onResize && this._onResize(cols, rows));
         if (this._onTitle) this.term.onTitleChange(t => this._onTitle && this._onTitle(t));
@@ -639,6 +643,38 @@ class TabRuntime {
         const end = () => { lastY = null; };
         c.addEventListener('touchend', end, { passive: true, capture: true });
         c.addEventListener('touchcancel', end, { passive: true, capture: true });
+    }
+
+    // ── A drag is not a tap ─────────────────────────────────────────────
+    //
+    // xterm focuses its hidden textarea on mousedown, and a touch screen sends
+    // one after a tap. That is how tapping the terminal opens the keyboard, and
+    // it should. A scroll, a pinch or a long press is reading, not typing, so a
+    // mousedown or focus that lands within a moment of one is dropped before
+    // xterm sees it. Touch events only; a mouse never trips this.
+    _attachTouchFocusGuard() {
+        const c = this.container;
+        let sx = 0, sy = 0, t0 = 0, drag = false, until = 0;
+        c.addEventListener('touchstart', (e) => {
+            if (e.touches.length !== 1) { drag = true; return; }
+            sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+            t0 = performance.now(); drag = false;
+        }, { passive: true, capture: true });
+        c.addEventListener('touchmove', (e) => {
+            const p = e.touches[0];
+            if (e.touches.length !== 1 || (p && Math.hypot(p.clientX - sx, p.clientY - sy) > 10)) drag = true;
+        }, { passive: true, capture: true });
+        const end = () => {
+            if (drag || performance.now() - t0 > 500) until = performance.now() + 600;
+        };
+        c.addEventListener('touchend', end, { passive: true, capture: true });
+        c.addEventListener('touchcancel', () => { until = performance.now() + 600; }, { passive: true, capture: true });
+        c.addEventListener('mousedown', (e) => {
+            if (performance.now() < until) { e.preventDefault(); e.stopPropagation(); }
+        }, true);
+        c.addEventListener('focusin', (e) => {
+            if (performance.now() < until && isTextField(e.target)) e.target.blur();
+        }, true);
     }
 
     // ── Following the tail ──────────────────────────────────────────────
@@ -1659,6 +1695,25 @@ class Shell {
         }
 
 
+        // Reload app (⋯ MORE): a fresh copy of the UI without quitting. Only
+        // this page reloads — the server, tabs and every saved setting, token
+        // and unlock in storage are left alone. If a service worker controls
+        // the page (the web build), ask it for an update first so the reload
+        // is not served from a stale cache.
+        const reloadBtn = $('#reload-app');
+        if (reloadBtn) reloadBtn.addEventListener('click', async () => {
+            reloadBtn.disabled = true;
+            try {
+                const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+                if (reg) {
+                    await Promise.race([reg.update(), new Promise(r => setTimeout(r, 3000))]);
+                    const next = reg.waiting || reg.installing;
+                    if (next) next.postMessage({ type: 'SKIP_WAITING' });
+                }
+            } catch (_) {}
+            location.reload();
+        });
+
         // Restart the SoA server (⋯ MORE menu). Interrupts every tab's in-flight
         // turn for a few seconds, but tabs + tunnel + Claude sessions re-adopt on
         // boot (boot-resume respawns PTYs and auto-resumes Claude), so it's safe.
@@ -1982,6 +2037,17 @@ class Shell {
 
         this._initRecovery();
 
+        // A hardware keyboard turning up on a touch screen (or the setting
+        // flipping to Always) is the moment autofocus starts to apply: hand the
+        // active terminal the caret, unless something else already holds it.
+        onAutoFocusChange(allowed => {
+            if (!allowed || this.viewMode !== 'tabs') return;
+            const a = document.activeElement;
+            if (a && a !== document.body) return;
+            const rt = this.tabs.get(this.activeId);
+            if (rt) maybeFocus(rt);
+        });
+
         bridge.addEventListener('hello',     e => this._onHello(e.detail));
         bridge.addEventListener('replay',    e => this._onReplay(e.detail));
         bridge.addEventListener('snapshot',  e => this._onSnapshot(e.detail));
@@ -2077,7 +2143,7 @@ class Shell {
         // Re-pair from here: the daemon this page knew is unreachable, and on a
         // tablet the camera is the shortest way to a desktop that is up.
         const pairBtn = $('#recovery-pair');
-        if (pairBtn) import('/assets/pairScan.js?v=pair-scan-20260930').then((m) => {
+        if (pairBtn) import('/assets/pairScan.js?v=web-20261102').then((m) => {
             if (!m.cameraLikely()) return;
             pairBtn.hidden = false;
             pairBtn.addEventListener('click', () => m.openPairSheet());
@@ -2438,6 +2504,18 @@ class Shell {
         }
     }
 
+    // Give the visible terminal the caret when focusPolicy allows it (desktop,
+    // or a touch screen with a hardware keyboard). When it does not, a caret
+    // left in a terminal that is now hidden is let go, or the next keys would
+    // land in a tab nobody can see.
+    _focusTerm(rt) {
+        if (!rt || maybeFocus(rt)) return;
+        const a = document.activeElement;
+        if (a && a.closest && a.closest('.xterm') && !rt.container.contains(a)) {
+            try { a.blur(); } catch (_) {}
+        }
+    }
+
     _activate(id) {
         const switching = this.activeId !== id && this.activeId != null;
         const prevId = this.activeId;
@@ -2453,7 +2531,7 @@ class Shell {
             this._renderChat();
             this._renderChatStatus();
             this._updateChatBtn();
-            if (this._chatInput) this._chatInput.focus();
+            maybeFocus(this._chatInput);
             if (switching) this.audio.play('panels');
             return;
         }
@@ -2484,7 +2562,7 @@ class Shell {
                 this._paintRendererStatus();
                 rt.flushPendingReplay();
                 rt.scrollToBottom();
-                rt.focus();
+                this._focusTerm(rt);
                 // flushPendingReplay paints the grid without going through
                 // _onTermData, so seed the dirty flag to re-scan ctx%/status on
                 // the next tick instead of waiting for the ~8s full sweep.
@@ -4890,7 +4968,7 @@ class Shell {
                 rt.container.classList.add('active');
                 rt.fitNow();
                 rt.scrollToBottom();
-                rt.focus();
+                this._focusTerm(rt);
             }
         }
         this._updateManagerBtn();
@@ -5045,7 +5123,7 @@ class Shell {
             title: `Open localhost:${p.port} (${p.process}) in the preview`,
             text: `:${p.port} — ${p.process}`,
             onclick: async () => {
-                try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(this, String(p.port)); }
+                try { const wp = await import('/assets/previewPanel.js?v=web-20261102'); wp.openPreviewModal(this, String(p.port)); }
                 catch (err) { console.warn('[monitor] preview open failed', err); }
             },
         })));
@@ -5183,7 +5261,7 @@ class Shell {
         this._renderChat();
         this._renderChatStatus();
         this._updateChatBtn();
-        if (this._chatInput) setTimeout(() => { try { this._chatInput.focus(); } catch (_) {} }, 0);
+        setTimeout(() => maybeFocus(this._chatInput), 0);
     }
 
     _teardownChat() {
@@ -5419,7 +5497,7 @@ class Shell {
             if (document.hidden || this.viewMode !== 'meeting') return;
             this._refreshMeeting();
         }, 15_000);
-        if (this._meetInput) setTimeout(() => { try { this._meetInput.focus(); } catch (_) {} }, 0);
+        setTimeout(() => maybeFocus(this._meetInput), 0);
     }
 
     _teardownMeeting() {
@@ -6069,8 +6147,7 @@ class Shell {
         setTimeout(() => {
             try {
                 if (mode !== 'convene') { this._meetPickerGoBtn.focus(); return; }
-                this._meetNameInput.focus();
-                this._meetNameInput.select();
+                if (maybeFocus(this._meetNameInput)) this._meetNameInput.select();
             } catch (_) {}
         }, 0);
     }
@@ -6181,7 +6258,7 @@ class Shell {
         this.audio.play('granted');
         this._meetToast('"' + room + '" is open — say something to get the agents talking.');
         await this._refreshMeeting();
-        try { this._meetInput.focus(); } catch (_) {}
+        maybeFocus(this._meetInput);
     }
 
     // Join is one call per agent: the API takes a single member per op, and doing
@@ -6913,7 +6990,7 @@ class Shell {
                 title: `Open localhost:${p.port} (${p.process}) in the preview`,
                 text: `:${p.port} — ${p.process}`,
                 onclick: async () => {
-                    try { const wp = await import('/assets/previewPanel.js?v=3'); wp.openPreviewModal(this, String(p.port)); }
+                    try { const wp = await import('/assets/previewPanel.js?v=web-20261102'); wp.openPreviewModal(this, String(p.port)); }
                     catch (err) { console.warn('[manager] preview open failed', err); }
                 } }))
             : [el('div', { class: 'mgrv-empty', text: 'No open localhost ports.' })];
@@ -6960,7 +7037,7 @@ class Shell {
         this._mgrvCastOpen = !this._mgrvCastOpen;
         if (!this._mgrvCastOpen) this._mgrvCastPre = null;
         this._mgrvCastEl.hidden = !this._mgrvCastOpen;
-        if (this._mgrvCastOpen) { this._renderManagerCast(); this._mgrvCastInput.focus(); }
+        if (this._mgrvCastOpen) { this._renderManagerCast(); maybeFocus(this._mgrvCastInput); }
     }
 
     _openManagerCast(preIds) {
@@ -6969,7 +7046,7 @@ class Shell {
         this._mgrvCastOpen = true;
         this._mgrvCastEl.hidden = false;
         this._renderManagerCast();
-        this._mgrvCastInput.focus();
+        maybeFocus(this._mgrvCastInput);
     }
 
     _managerCohortIds(c) {
@@ -7209,7 +7286,7 @@ class Shell {
                     if (!selected.size) { flashEmpty(); return; }
                     persistSel();
                     this._broadcastRaw(p.key, [...selected]); this.audio.play('granted'); close();
-                } else { input.value = p.text; input.focus(); }
+                } else { input.value = p.text; maybeFocus(input); }
             },
         })));
 
@@ -7265,7 +7342,7 @@ class Shell {
         backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
         document.addEventListener('keydown', onKey);
         document.body.appendChild(backdrop);
-        input.focus();
+        maybeFocus(input);
     }
 
     // Type raw bytes into a set of tabs' PTYs. `ids` defaults to every tab
@@ -7305,7 +7382,7 @@ class Shell {
             if (!target) return;
         }
         try {
-            const wp = await import('/assets/previewPanel.js?v=3');
+            const wp = await import('/assets/previewPanel.js?v=web-20261102');
             wp.openPreviewModal(this, target);
         } catch (err) { console.warn('[preview] open failed', err); }
     }
@@ -7774,7 +7851,7 @@ class Shell {
             rt.fitNow();
             rt.flushPendingReplay();
             rt.scrollToBottom();
-            rt.focus();
+            this._focusTerm(rt);
             this._pollDirty.add(id);   // re-scan ctx%/status after the flush paint
         });
 
@@ -7854,6 +7931,19 @@ async function resolveBackend() {
         // funnel boot into the sandbox fallback. Keep it; it is re-probed on
         // every load and the user can overwrite it via ?backend= any time.
         console.warn('[soa-web] saved backend unreachable, keeping pairing:', saved.backend);
+        // The desktop may still be up behind another of its public links.
+        const door = saved.token ? await findWorkingDoor({ token: saved.token, unlock: saved.unlock, exclude: [saved.backend] }).catch(() => null) : null;
+        if (door) {
+            // Saved only once it is confirmed below: a door that fails the
+            // check must not replace the pairing.
+            const p2 = await probePing(door, saved.token, 3000);
+            const acc2 = p2 && p2.ok ? await ensureAccess(door, saved.token, p2) : null;
+            if (acc2) {
+                saveBackend(door, acc2.token, acc2.unlock);
+                try { sessionStorage.setItem('soa.doors.switched', door); } catch (_) {}
+                return { backend: door, token: acc2.token };
+            }
+        }
     }
     if (CFG.backend) {
         const cfgBackend = String(CFG.backend).replace(/\/+$/, '');
@@ -7899,6 +7989,11 @@ async function resolveBackend() {
 
 async function bootServerMode({ backend, token }) {
     const crossOrigin = backend !== location.origin.replace(/\/+$/, '');
+    // A paired remote desktop: this browser has made its choice, exactly like
+    // the ?backend= deep link the welcome gate already steps aside for. Without
+    // this, a later cold load while that desktop is down stopped at the
+    // first-run wizard instead of the recovery panel that keeps trying.
+    if (crossOrigin && token) { try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {} }
     CFG._resolvedBackend = backend;
     CFG._resolvedToken = token || '';
     $('#boot-status').textContent = tr('boot.negotiating');
@@ -7912,6 +8007,13 @@ async function bootServerMode({ backend, token }) {
     CFG._bridge = bridge;
     CFG._shell = shell;
     bridge.connect();
+    // Backup doors (doors.js): once this backend has been unreachable ~10s, move
+    // to another public link of the same desktop, saved and reloaded exactly
+    // like a picked pairing (same token, same unlock).
+    attachDesktopFailover({
+        bridge, backend, token, getUnlock: () => UNLOCK,
+        switchTo: (origin) => { saveBackend(origin, token, UNLOCK); location.reload(); },
+    });
     $('#status-session').textContent = crossOrigin ? new URL(backend).host : location.host;
 
     mountSidebar($('#sidebar'), { audio, backend, token });
@@ -7964,6 +8066,18 @@ async function _doBoot() {
             backend = await resolveBackend();
         }
     }
+    // Paired, but the desktop answers on none of its links right now: open the
+    // pairing anyway, offline. The recovery panel shows, the bridge keeps
+    // reconnecting, and backup links (doors.js) keep being tried, instead of
+    // dropping a paired browser into the sandbox until the next manual reload.
+    if (!backend && !isPhone()) {
+        const saved = loadSaved();
+        if (saved && saved.token && doorsSupported()) {
+            UNLOCK = saved.unlock || '';
+            CFG._resolvedUnlock = UNLOCK;
+            backend = { backend: saved.backend, token: saved.token };
+        }
+    }
     if (backend) {
         await bootServerMode(backend);
         return;
@@ -7977,7 +8091,7 @@ async function _doBoot() {
     // naming only the top-level file. Without the guard that error killed
     // boot dead with no retry and no way to pair a backend.
     try {
-        await import('/assets/app-wc.js?v=pair-scan-20260930');
+        await import('/assets/app-wc.js?v=web-20261102');
     } catch (err) {
         console.error('[soa-web] sandbox module graph failed to load', err);
         // Name the actual failing resource(s) — the error string won't.
@@ -8257,7 +8371,7 @@ function renderMobileWelcome() {
         const v = document.querySelector('.mwel'); if (v) v.remove();
         if (boot) boot.classList.remove('hidden');
         const bs = $('#boot-status'); if (bs) bs.textContent = tr('boot.opening');
-        import('/assets/app-wc.js?v=pair-scan-20260930').catch((err) => renderSandboxFailure(err));
+        import('/assets/app-wc.js?v=web-20261102').catch((err) => renderSandboxFailure(err));
     });
 
     // Language switcher — flips the page and re-renders the welcome in place.

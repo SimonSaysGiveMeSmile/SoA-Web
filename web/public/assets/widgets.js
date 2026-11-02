@@ -11,9 +11,11 @@
  */
 
 import { t as tr } from '/assets/i18n.js?v=35';
-import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=design-packs-20260927';
+import { getSettings, saveSettings, onSettings } from '/assets/settings.js?v=web-20261102';
 import { AnimatedWorldView } from '/assets/animated-world-view.js?v=world-view-animated-20260928';
 import { perfStart, perfStop, perfSnapshot, perfVerdict } from '/assets/perf.js?v=2';
+import { Dictation, isEditable } from '/m/dictation.js?v=web-20261102';
+import { HealthClient, HealthPanel, HEALTH_PREFIX, sameOrigin } from '/m/health.js?v=web-20261102';
 
 const $el = (tag, props = {}, children = []) => {
     const n = document.createElement(tag);
@@ -592,15 +594,19 @@ class ClaudeUsageWidget extends Widget {
         svg.setAttribute('class', 'usage-ring');
         svg.setAttribute('aria-hidden', 'true');
         const metrics = {};
-        for (const [key, label, radius] of [['session', '5h', 44], ['weekly', '7d', 31]]) {
+        // Weekly is the PRIMARY window (outer ring, first legend row): Claude
+        // is retiring its 5-hour limit and codex reports weekly only. The
+        // session window, while a provider still reports one, sits inside; once
+        // it is retired the card draws the weekly ring alone (_cardLayout).
+        for (const [key, label, radius] of [['weekly', '7d', 44], ['session', '5h', 31]]) {
             const g = document.createElementNS(NS, 'g');
             g.setAttribute('class', `ring none ${key === 'weekly' ? 'weekly' : ''}`);
             g.setAttribute('data-ring', key);
             const C = 2 * Math.PI * radius;
             let val, proj;
-            // proj: where the session window lands at its reset if the recent
+            // proj: where the primary window lands at its reset if the recent
             // pace holds. Drawn under the value arc so the arc stays the reading.
-            for (const cls of key === 'session' ? ['track', 'proj', 'val'] : ['track', 'val']) {
+            for (const cls of ['track', 'proj', 'val']) {
                 const circle = document.createElementNS(NS, 'circle');
                 for (const [k, v] of Object.entries({ cx: 50, cy: 50, r: radius, class: cls })) circle.setAttribute(k, v);
                 if (cls === 'val') {
@@ -624,7 +630,7 @@ class ClaudeUsageWidget extends Widget {
             metrics[key] = { el, big, period, cap, sample, detail, detailLabel, detailValue, rings: { a: { g, val, proj, C } } };
         }
         const legend = $el('div', { class: 'usage-metrics usage-legend' }, Object.values(metrics).map(m => m.el));
-        const gauge = $el('div', { class: 'usage-gauge usage-gauge-dual' }, [svg, legend]);
+        const gauge = $el('div', { class: 'usage-gauge usage-gauge-dual', 'data-layout': 'dual' }, [svg, legend]);
         const resetValue = $el('span', { text: '—' });
         const resetWindow = $el('span', { class: 'usage-reset-window' });
         const reset = $el('div', { class: 'usage-next-reset' }, [$el('span', { text: '↻', 'aria-hidden': 'true' }), resetWindow, resetValue]);
@@ -684,7 +690,27 @@ class ClaudeUsageWidget extends Widget {
             onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) this._toggle(src); } },
         }, [$el('div', { class: 'usage-card-heading' }, [name, sample, chevron]),
             gauge, reset, drive]);
-        return { el, name, sample, metrics, burn, range, cost, reset, resetValue, resetWindow };
+        return { el, name, sample, metrics, burn, range, cost, reset, resetValue, resetWindow, gauge, layout: 'dual' };
+    }
+
+    // windowStatus.session from the quota feed: 'reported' | 'not-reported' |
+    // 'retired' (the provider no longer has a 5-hour limit at all).
+    _sessionRetired(src) { return this._quota[src]?.windowStatus?.session === 'retired'; }
+    _sessionReported(src) {
+        const d = this._quota[src];
+        return d?.windowStatus?.session === 'reported' || (d?.windowStatus?.session !== 'retired' && !!d?.windows?.session);
+    }
+    // 'single' = the weekly ring alone. A provider whose 5h limit is retired
+    // draws one ring; a provider that merely does not report one (codex)
+    // follows its neighbour, so the two cards side by side stay the same
+    // object — both two-ring while Claude still has a session window, both
+    // one-ring once it is gone.
+    _cardLayout(src) {
+        if (this._sessionRetired(src)) return 'single';
+        if (this._sessionReported(src)) return 'dual';
+        const other = src === 'claude' ? 'codex' : 'claude';
+        const otherShown = other === 'claude' || this._codexSeen;
+        return otherShown && this._sessionRetired(other) ? 'single' : 'dual';
     }
 
     _setRing(metric, pct, weekly = true) {
@@ -701,13 +727,17 @@ class ClaudeUsageWidget extends Widget {
         }
     }
 
-    // The session ring's faint arc runs from the current reading to where the
-    // window lands at its reset if the recent official pace holds. Past 100%
-    // it goes .over: the limit will stop the work before the window resets,
-    // the same fact Range states in time.
+    // The primary (weekly) ring's faint arc runs from the current reading to
+    // where the window lands at its reset if the recent official pace holds.
+    // Past 100% it goes .over: the week would run out before it resets — the
+    // same fact Range states in time, and the fleet's THROTTLE trigger.
     _paintProjection(card, data) {
-        const metric = card.metrics.session, r = metric.rings.a, w = data?.windows?.session;
-        const pace = data?.pace?.session, now = Date.now();
+        const key = 'weekly';
+        const other = card.metrics.session.rings.a;
+        other.proj.style.visibility = 'hidden';
+        other.g.classList.remove('over');
+        const metric = card.metrics[key], r = metric.rings.a, w = data?.windows?.[key];
+        const pace = data?.pace?.[key], now = Date.now();
         const ok = this._quotaFresh && data?.status !== 'unavailable' && this._limitCurrent(w) && Number.isFinite(w.resetsAt) &&
             pace?.updatedAt === w.updatedAt && now - w.updatedAt <= 300000 && Number.isFinite(pace?.percentPerHour) &&
             pace.percentPerHour > 0 && ['estimated', 'reset-first'].includes(pace.state);
@@ -897,8 +927,23 @@ class ClaudeUsageWidget extends Widget {
         const labels = [];
         const connected = this._quotaFresh;
         const unavailable = !connected || data?.status === 'unavailable';
+        const layout = card.layout = this._cardLayout(src);
+        card.gauge.dataset.layout = layout;
+        card.el.dataset.layout = layout;
         let anyStale = false;
         for (const [key, metric] of Object.entries(card.metrics)) {
+            // A retired session window is not drawn, listed or announced: there
+            // is no 5-hour limit left to report on.
+            const gone = key === 'session' && layout === 'single';
+            metric.detail.hidden = gone;
+            if (gone) {
+                this._setRing(metric, null, false);
+                metric.sample.hidden = true;
+                metric.el.classList.remove('stale');
+                metric.rings.a.g.classList.remove('stale');
+                metric.el.title = '';
+                continue;
+            }
             const w = data?.windows?.[key], known = this._limitCurrent(w);
             const minutes = w?.windowMinutes;
             const label = key === 'weekly' ? (minutes && minutes !== 10080 ? `${minutes / 1440}-day` : 'Weekly') :
@@ -912,22 +957,24 @@ class ClaudeUsageWidget extends Widget {
             metric.detailLabel.textContent = label;
             metric.detailValue.textContent = metric.big.textContent;
             metric.cap.textContent = known ? this._resetText(w) : unavailable ? 'Unavailable' :
-                data?.status === 'waiting' ? 'Awaiting report' : data?.windowStatus?.[key] === 'expired' ? 'Awaiting update' : 'Not reported';
+                data?.status === 'waiting' ? 'Awaiting report' : data?.windowStatus?.[key] === 'expired' || (Number.isFinite(w?.resetsAt) && w.resetsAt > 0 && w.resetsAt <= Date.now()) ? 'Awaiting update' : 'Not reported';
             metric.sample.textContent = stale ? `Cached · ${age || 'age unknown'}` : '';
             metric.sample.hidden = !stale;
             metric.el.classList.toggle('stale', stale);
             metric.rings.a.g.classList.toggle('stale', stale);
             const via = w?.source === 'claude-oauth-usage' ? 'from Anthropic' : w?.source === 'claude-code-statusline' ? 'from Claude Code' : '';
-            metric.el.title = known ? `${label} (${key === 'session' ? 'outer' : 'inner'} ring): ${w.usedPercent.toFixed(1).replace(/\.0$/, '')}% used${via ? ', ' + via : ''}. Reported ${age || 'at an unknown time'}. ` +
+            const where = layout === 'single' ? 'the ring' : key === 'weekly' ? 'outer ring' : 'inner ring';
+            metric.el.title = known ? `${label} (${where}): ${w.usedPercent.toFixed(1).replace(/\.0$/, '')}% used${via ? ', ' + via : ''}. Reported ${age || 'at an unknown time'}. ` +
                 (w.resetsAt ? `Resets ${new Date(w.resetsAt).toLocaleString()}` : 'Reset time not reported.') :
                 `${src === 'codex' ? 'Codex' : 'Claude'} does not report a current ${key === 'session' ? 'session' : 'weekly'} quota on this plan, ` +
-                `so the ${key === 'session' ? 'outer' : 'inner'} ring is empty. That is not zero usage or unlimited capacity.`;
+                `so ${layout === 'single' ? 'the ring' : `the ${key === 'weekly' ? 'outer' : 'inner'} ring`} is empty. That is not zero usage or unlimited capacity.`;
             this._setRing(metric, known ? w.usedPercent : null, key === 'weekly');
             labels.push(`${label}: ${known ? Math.round(w.usedPercent) + ' percent used, ' + metric.cap.textContent : metric.cap.textContent}${stale ? ', ' + metric.sample.textContent : ''}`);
         }
         card.sample.textContent = !connected ? 'Offline' : data?.status === 'waiting' ? 'Waiting' : anyStale ? 'Cached' : '';
         card.sample.hidden = !card.sample.textContent;
-        const next = Object.entries(data?.windows || {}).filter(([, w]) => this._limitCurrent(w) && Number.isFinite(w.resetsAt))
+        const next = Object.entries(data?.windows || {}).filter(([k, w]) => (k !== 'session' || layout === 'dual') &&
+            card.metrics[k] && this._limitCurrent(w) && Number.isFinite(w.resetsAt))
             .sort((a, b) => a[1].resetsAt - b[1].resetsAt)[0];
         card.resetValue.textContent = next ? _fmtDur(next[1].resetsAt - Date.now()) : '—';
         card.resetWindow.textContent = next ? card.metrics[next[0]].period.textContent : '';
@@ -941,7 +988,7 @@ class ClaudeUsageWidget extends Widget {
             `${card.burn.chartTitle.textContent} ` +
             `${card.range.heading.textContent}: ${card.range.value.textContent}. ` +
             `${card.cost.heading.textContent}, estimated: ` +
-            Object.entries(card.cost.cells).map(([k, c]) =>
+            Object.entries(card.cost.cells).filter(([, c]) => !c.el.hidden).map(([k, c]) =>
                 `${k === 'block' ? 'five hours' : k === 'today' ? 'today' : 'seven days'} ${c.v.textContent.replace('≈', 'about ')}`).join(', ') + '. ' +
             'Show usage details.');
     }
@@ -997,12 +1044,17 @@ class ClaudeUsageWidget extends Widget {
             heading: 'Cost', mode: 'grid', cells, hot: live && b.cost >= HOT_COST.block,
             title: [
                 'Estimated from the token records on this device at API list prices. This is NOT a bill — a subscription does not charge these amounts, and other devices are not counted.',
+                !this._blockRowShown() ? '' :
                 live ? `This 5-hour block: ≈${_fmtUsd(b.cost)}${Number.isFinite(b.projectedCost) ? `, on track for ≈${_fmtUsd(b.projectedCost)} by its reset` : ''}.`
                      : 'No 5-hour block is active right now, so 5H is blank.',
                 Number.isFinite(today?.cost) ? `Today, since midnight: ≈${_fmtUsd(today.cost)}.` : '',
                 Number.isFinite(week?.cost) ? `Last 7 days: ≈${_fmtUsd(week.cost)}.` : '',
             ].filter(Boolean).join(' '),
         };
+    }
+
+    _blockRowShown() {
+        return this._cardLayout('claude') === 'dual' && (!this._codexSeen || this._cardLayout('codex') === 'dual');
     }
 
     _paintDrive(src) {
@@ -1040,8 +1092,16 @@ class ClaudeUsageWidget extends Widget {
             .map(([key, w]) => ({ key, w, pace: quota.pace?.[key] })) : [];
         const usable = windows.filter(({ w, pace }) => pace?.updatedAt === w.updatedAt && Number.isFinite(pace?.remainingMs) && pace.remainingMs >= 0 &&
             ['limited', 'estimated', 'reset-first'].includes(pace.state));
-        const beforeReset = usable.filter(({ pace }) => pace.state !== 'reset-first');
-        const choice = (beforeReset.length ? beforeReset : usable).sort((a, b) => a.pace.remainingMs - b.pace.remainingMs)[0];
+        // Weekly is the primary guard ("never let the week run out"): Range
+        // reads the weekly pace whenever there is one, and falls back to a
+        // still-reported session window only when the weekly pace is missing.
+        const layout = this._cardLayout(src);
+        const candidates = usable.filter(({ key }) => key !== 'session' || layout === 'dual');
+        const weeklyPace = candidates.find(({ key }) => key === 'weekly');
+        const beforeReset = candidates.filter(({ pace }) => pace.state !== 'reset-first');
+        const choice = weeklyPace || (beforeReset.length ? beforeReset : candidates).sort((a, b) => a.pace.remainingMs - b.pace.remainingMs)[0];
+        const sessionFirst = choice?.key === 'weekly' && candidates.find(({ key, pace }) => key === 'session' &&
+            ['limited', 'estimated'].includes(pace.state) && pace.remainingMs < choice.pace.remainingMs);
         const trend = !windows.length ? 'unknown' : windows.every(({ pace }) => pace?.state === 'steady') ? 'steady' : 'warming';
         card.range.heading.textContent = 'Range';
         card.range.value.textContent = '—';
@@ -1058,10 +1118,17 @@ class ClaudeUsageWidget extends Widget {
             card.range.el.title = pace.state === 'limited' ? `${windowName} quota is at 100% in the latest report.` :
                 `${windowName} quota only. Estimated time to 100% at the recent pace, based on ${Math.round(pace.sampledMs / 60000)} minutes of official account readings. ` +
                 (pace.state === 'reset-first' ? 'This quota resets before the projected limit.' : 'The estimate changes with your usage.') +
-                (Number.isFinite(pace.percentPerHour) ? ` Recent consumption: ${pace.percentPerHour.toFixed(1)} percentage points/hour.` : '');
+                (Number.isFinite(pace.percentPerHour) ? ` Recent consumption: ${pace.percentPerHour.toFixed(1)} percentage points/hour.` : '') +
+                (sessionFirst ? ` The 5-hour session quota is on pace to run out sooner, in about ${_fmtDur(sessionFirst.pace.remainingMs)}.` : '');
         }
 
         const money = this._costFor(src, activity);
+        // The 5-hour cost row exists only while every card on screen still has
+        // a session window; otherwise it goes on BOTH cards, so the two drives
+        // keep the same height side by side and TODAY carries the heading.
+        const blockRow = this._blockRowShown();
+        card.cost.cells.block.el.hidden = !blockRow;
+        card.cost.cells.today.l.textContent = blockRow ? 'Today' : 'Cost today';
         card.cost.heading.textContent = money.heading;
         card.cost.el.title = money.title;
         card.cost.el.dataset.cost = money.mode;
@@ -1073,7 +1140,10 @@ class ClaudeUsageWidget extends Widget {
             cell.el.classList.toggle('unknown', n === null || n === undefined);
             // Same threshold the push watchdog and the TOP SESSIONS highlight
             // use, so all three agree on "leaning hard on the model".
-            cell.el.dataset.state = key === 'block' && money.hot ? 'hot' : '';
+            // With no 5-hour row the day carries the warning instead, at the
+            // daily threshold ($60) the same alerter and TOP SESSIONS use.
+            cell.el.dataset.state = key === 'block' && money.hot ? 'hot' :
+                key === 'today' && !blockRow && Number.isFinite(n) && n >= HOT_COST.today ? 'hot' : '';
         }
     }
 
@@ -1091,11 +1161,19 @@ class ClaudeUsageWidget extends Widget {
         this._legA.l.textContent = 'QUOTA SOURCE';
         this._legB.l.textContent = '7-DAY TOKENS';
         this._legC.l.textContent = 'LOCAL WINDOW';
-        this._legC.row.style.display = '';
+        // No 5-hour limit any more: the local 5h block is no longer a window
+        // anything stops at, so the detail drops it and leads with the day.
+        const noBlock = this._cardLayout('claude') === 'single';
+        this._legC.row.style.display = noBlock ? 'none' : '';
         this._legB.row.style.display = '';
         this._reset.textContent = 'Claude Code · official';
         this._reset.classList.remove('warn');
-        if (b.active) {
+        if (noBlock) {
+            this._legC.v.textContent = '—';
+            const t = d.today || {};
+            this._sub.textContent = d.hasData ? `Local activity today: ${_fmtTok(t.tokens?.total)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(t.cost)}` : tr('widget.claude.no_data');
+            this._burn.v.textContent = `${_fmtTok(this._burnHistory('claude')?.at(-1) ?? 0)} ${tr('widget.claude.tokmin')}`;
+        } else if (b.active) {
             this._legC.v.textContent = `Ends in ${_fmtDur(b.remainingMs)}`;
             this._sub.textContent = `Local 5h activity: ${_fmtTok(b.tokens?.total)} ${tr('widget.claude.tok')} · ${b.requests || 0} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
             const recent = Date.now() - (b.lastTs || 0) < 10 * 60000;
@@ -1131,7 +1209,8 @@ class ClaudeUsageWidget extends Widget {
     // active, else today. Subagent usage is already folded into its parent
     // session server-side, so an agent-heavy session shows its whole bill.
     _renderSessions(d) {
-        const scope = d.sessionScope === 'block' ? 'block' : 'today';
+        // Weekly-only accounts rank by TODAY: a 5h block is not a limit there.
+        const scope = d.sessionScope === 'block' && this._cardLayout('claude') === 'dual' ? 'block' : 'today';
         const rows = (d.sessions || [])
             .map(s => ({ s, sc: (scope === 'block' ? s.block : s.today) || {} }))
             .filter(x => x.sc.tok > 0)
@@ -1157,12 +1236,12 @@ class ClaudeUsageWidget extends Widget {
             const hot = (sc.cost || 0) >= (scope === 'block' ? HOT_COST.block : HOT_COST.today);
             const tip = [
                 (s.project || '?') + ' — ' + (s.slug || s.shortId || ''),
-                `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
+                this._cardLayout('claude') === 'single' ? '' : `5h window: ${_fmtTok(b.tok)} tok · ≈${_fmtUsd(b.cost)} · ${b.req || 0} req`,
                 `today: ${_fmtTok(t.tok)} tok · ≈${_fmtUsd(t.cost)} · ${t.req || 0} req`,
             ];
             if (t.subCost > 0.01) tip.push(`of which subagents today: ≈${_fmtUsd(t.subCost)}`);
             if (hot) tip.push(`⚠ heavy this ${scope === 'block' ? '5h block' : 'day'} — the token-usage alerter has flagged this session`);
-            return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.join('\n') }, [
+            return $el('div', { class: 'claude-sess-row' + (hot ? ' hot' : ''), title: tip.filter(Boolean).join('\n') }, [
                 $el('span', { class: 'claude-sess-name', text: (hot ? '⚠ ' : '') + label }),
                 $el('span', { class: 'claude-sess-val', text: `${_fmtTok(sc.tok)} · ≈${_fmtUsd(sc.cost)}` }),
             ]);
@@ -1195,7 +1274,9 @@ class ClaudeUsageWidget extends Widget {
         this._legB.row.style.display = 'none';
         this._legC.row.style.display = 'none';
         const cq = this._quota.codex;
-        this._sub.textContent = (this._quotaFresh && cq?.available && !cq.windows?.session && cq.windows?.weekly)
+        this._sub.textContent = this._cardLayout('codex') === 'single'
+            ? 'Codex reports a weekly quota only. It refreshes every 15 seconds; token activity below comes from local logs.'
+            : (this._quotaFresh && cq?.available && !cq.windows?.session && cq.windows?.weekly)
             ? 'Codex has supplied only weekly usage. Its five-hour quota is not currently available. This does not mean zero usage or unlimited capacity.'
             : 'Account quotas refresh every 15 seconds through Codex. Token activity below comes from local logs.';
         this._weekSub.style.display = 'none';
@@ -1510,7 +1591,7 @@ class NetStatWidget extends Widget {
                 onclick: async () => {
                     if (mine) return;
                     try {
-                        const wp = await import('/assets/previewPanel.js?v=3');
+                        const wp = await import('/assets/previewPanel.js?v=web-20261102');
                         wp.openPreviewModal(null, String(p.port));
                     } catch (_) {}
                 },
@@ -2029,13 +2110,13 @@ class MobileQRWidget extends Widget {
         const scan = $el('button', {
             class: 'widget-btn',
             text: MQR_SCAN_LABEL[_mqrLang()] || MQR_SCAN_LABEL.en,
-            onclick: () => import('/assets/pairScan.js?v=pair-scan-20260930').then(m => m.openPairSheet()).catch(() => {}),
+            onclick: () => import('/assets/pairScan.js?v=web-20261102').then(m => m.openPairSheet()).catch(() => {}),
         });
         this.body.replaceChildren(
             $el('div', { class: 'widget-note', text: tr('mqr.sandbox_hint') }),
             scan,
         );
-        import('/assets/pairScan.js?v=pair-scan-20260930')
+        import('/assets/pairScan.js?v=web-20261102')
             .then((m) => { if (!m.cameraLikely()) scan.remove(); })
             .catch(() => scan.remove());
     }
@@ -2997,6 +3078,9 @@ class VoiceControlWidget extends Widget {
 
     _wire() {
         this._startBtn.addEventListener('click', () => {
+            // Commands and dictation share one microphone: a dictated "stop"
+            // must never reach the command parser as a Ctrl-C.
+            if (this.ctx.onVoiceStart) this.ctx.onVoiceStart();
             if (this.voice.start()) {
                 this._log(this.voice.settings.wakeMode === 'wake'
                     ? 'Say “' + this.voice.settings.wakeWord + ', next tab” or open “What can I say”.'
@@ -3227,6 +3311,17 @@ export function mountVoiceToolbar(ctx = {}) {
     });
     panel.appendChild(closeBtn);
     const host = $el('div', { class: 'voice-panel-body' });
+    // Dictation sits above the command widget and apart from it: it needs no
+    // SpeechRecognition when the Mac's Whisper answers, so it stays usable in
+    // browsers where the command widget cannot run.
+    let returnFocus = null;
+    const dictate = isSandbox() ? null : _mountDictation(button, () => widget, () => {
+        // Turning dictation on hands focus back to the field it was opened
+        // from, so the next words land there without another click.
+        const back = returnFocus;
+        if (back && back.isConnected && (isEditable(back) || back.closest('.xterm'))) { close(); back.focus(); }
+    });
+    if (dictate) panel.appendChild(dictate.row);
     panel.appendChild(host);
     panel.appendChild($el('p', { class: 'voice-hint voice-panel-hint',
         text: 'Closing this panel keeps the mic on. Choose Stop to end listening.' }));
@@ -3243,9 +3338,17 @@ export function mountVoiceToolbar(ctx = {}) {
         activity();
         if (restoreFocus) button.focus();
     };
+    // Clicking the mic moves focus onto it, so read the field it was opened
+    // from a moment earlier, on pointerdown.
+    let preFocus = null;
+    const notePreFocus = () => { preFocus = document.activeElement; };
     const open = () => {
+        const active = preFocus || document.activeElement;
+        preFocus = null;
+        returnFocus = active && active !== document.body && !panel.contains(active) && !button.contains(active) ? active : null;
         if (!widget && !isSandbox()) {
             widget = new VoiceControlWidget({ parent: host, ctx: { ...ctx,
+                onVoiceStart: () => dictate?.dictation.stop(),
                 onVoiceStatus: (st, status) => {
                     button.dataset.state = st.enabled ? 'on' : 'off';
                     const label = 'Voice controls — ' + (st.enabled ? status : 'microphone off');
@@ -3277,6 +3380,7 @@ export function mountVoiceToolbar(ctx = {}) {
     const focusout = e => {
         if (e.relatedTarget && !panel.contains(e.relatedTarget) && !button.contains(e.relatedTarget)) close();
     };
+    button.addEventListener('pointerdown', notePreFocus);
     button.addEventListener('click', toggle);
     closeBtn.addEventListener('click', () => close(true));
     panel.addEventListener('focusout', focusout);
@@ -3285,15 +3389,139 @@ export function mountVoiceToolbar(ctx = {}) {
     document.addEventListener('visibilitychange', activity);
     _voiceToolbar = { open, close, destroy() {
         close();
+        dictate?.destroy();
         widget?.destroy();
         panel.remove();
         button.removeEventListener('click', toggle);
+        button.removeEventListener('pointerdown', notePreFocus);
         document.removeEventListener('pointerdown', outside, true);
         document.removeEventListener('keydown', keydown, true);
         document.removeEventListener('visibilitychange', activity);
         _voiceToolbar = null;
     } };
     return _voiceToolbar;
+}
+
+// Dictation: the panel row (toggle + status) and the light on the mic button.
+// The engine (m/dictation.js) owns the mic and the typing; this only paints it
+// and says how to reach Whisper and the terminal.
+const DICTATE_STATE_TEXT = { idle: 'Off', listening: 'Listening', transcribing: 'Transcribing…', error: 'Problem' };
+function _mountDictation(button, getWidget, afterStart) {
+    const light = $el('span', { class: 'dictate-light', 'data-state': 'idle', 'aria-hidden': 'true' });
+    light.hidden = true;
+    button.appendChild(light);
+    const rowLight = $el('span', { class: 'dictate-light', 'data-state': 'idle', 'aria-hidden': 'true' });
+    const status = $el('span', { class: 'dictate-status', text: 'Off' });
+    const toggle = $el('button', { type: 'button', class: 'voice-btn dictate-toggle', 'aria-pressed': 'false', text: 'Start dictation' });
+    const DEFAULT_NOTE = 'Speech is typed into the focused text field or terminal. Enter is never pressed.';
+    const note = $el('div', { class: 'voice-hint dictate-note', text: DEFAULT_NOTE });
+    const row = $el('div', { class: 'dictate', role: 'group', 'aria-label': 'Dictation' }, [
+        $el('div', { class: 'dictate-head', role: 'status', 'aria-live': 'polite' }, [rowLight, $el('b', { text: 'Dictation' }), status]),
+        toggle, note,
+    ]);
+
+    const dictation = new Dictation({
+        // Mac Whisper lives behind the paired daemon's /preview/6082. This page
+        // may be served by another origin (the public site): the daemon answers
+        // its allowlisted origins with CORS, so the same URL works from there.
+        // With no daemon behind the page (its own origin, which has no
+        // /preview), there is nothing to ask: the browser engines start at once.
+        whisperUrl: p => {
+            const u = api('/preview/6082' + p);
+            try { if (new URL(u).origin === location.origin && !_daemonServesPage()) return null; } catch (_) { return null; }
+            return u;
+        },
+        // The terminal: xterm's own helper textarea has focus, so route through
+        // the tab's onData — the exact path a keystroke takes to the PTY.
+        terminalSink: el => {
+            const sh = (window.__SOA_WEB__ || {})._shell;
+            if (!sh || !el.closest || !el.closest('.xterm')) return null;
+            for (const [id, rt] of sh.tabs) {
+                if (rt.container && rt.container.contains(el) && rt._onData) return { key: id, write: t => rt._onData(t) };
+            }
+            return null;
+        },
+        onState: st => {
+            for (const l of [light, rowLight]) l.dataset.state = st.on ? st.state : 'idle';
+            light.hidden = !st.on;
+            const text = st.on ? st.label + ' · ' + (st.detail || DICTATE_STATE_TEXT[st.state]) : 'Off';
+            status.textContent = text;
+            light.title = 'Dictation: ' + text;
+            toggle.textContent = st.on ? 'Stop dictation' : 'Start dictation';
+            toggle.setAttribute('aria-pressed', String(st.on));
+            if (!st.on && st.state === 'idle') note.textContent = DEFAULT_NOTE;
+        },
+        onNotice: text => { note.textContent = text; },
+    });
+
+    toggle.addEventListener('click', () => {
+        if (dictation.on) { dictation.stop(); return; }
+        const w = getWidget();
+        if (w && w.voice && w.voice.isEnabled) w.voice.stop();
+        dictation.start();
+        afterStart();
+    });
+
+    return { row, dictation, destroy() { dictation.destroy(); light.remove(); } };
+}
+
+// True when the page itself was served by a SoA daemon (the install), false
+// on a static host such as the public site, where the paired daemon is on
+// another origin. A same-origin backend configured explicitly also counts.
+function _daemonServesPage() {
+    const c = window.__SOA_WEB__ || {};
+    const b = (c._resolvedBackend || c.backend || '').replace(/\/+$/, '');
+    return !!b && b === location.origin;
+}
+
+// ── SYSTEM HEALTH ─────────────────────────────────────────────────────
+// Temperature, CPU/memory and runaway processes from the Mac's soa-health
+// service, reached through the daemon's /preview/6084/ proxy. The panel itself
+// (m/health.js) is shared with the phone's ⋯ → Health sheet; this only gives
+// it a widget frame and a polling cadence. Its switch carries .minimal-switch
+// so the desktop packs paint it as their own.
+//
+// The service refuses cross-site requests and its replies carry no CORS, so a
+// page on another origin than the daemon (this public site, paired over the
+// tunnel) cannot use it: the widget then says so briefly and links to the
+// daemon's own dashboard (the ?backend=&t= deep link), and with no daemon at
+// all it stays hidden.
+class HealthWidget extends Widget {
+    constructor({ parent }) {
+        super({ title: 'SYSTEM HEALTH', parent, intervalMs: 15000 });
+        this.root.classList.add('health-widget');
+        this._panel = null;
+        if (isSandbox()) { this.root.hidden = true; return; }
+        let away = null;
+        const statusUrl = api(HEALTH_PREFIX + '/status');
+        if (!sameOrigin(statusUrl)) away = { href: _daemonDashboardUrl() };
+        else if (!_daemonServesPage()) { this.root.hidden = true; return; }
+        if (away && !away.href) { this.root.hidden = true; return; }
+        this._panel = new HealthPanel({
+            client: new HealthClient(p => api(HEALTH_PREFIX + p)),
+            root: $el('div', { class: 'health-panel' }),
+            switchClass: 'minimal-switch',
+            variant: 'desk',
+            away,
+        });
+        this.body.appendChild(this._panel.root);
+    }
+    tick() { if (this._panel) return this._panel.refresh(); }
+    destroy() { if (this._panel) this._panel.destroy(); super.destroy(); }
+}
+
+// The paired daemon's own dashboard, as the desktop deep link (?backend=&t=)
+// that boots it straight into server mode. Null without a remote backend.
+function _daemonDashboardUrl() {
+    const b = currentBackend();
+    if (!b || b === location.origin) return null;
+    try {
+        const u = new URL(b + '/');
+        u.searchParams.set('backend', b);
+        const t = currentToken();
+        if (t) u.searchParams.set('t', t);
+        return u.toString();
+    } catch (_) { return null; }
 }
 
 class VoiceLauncherWidget extends Widget {
@@ -3310,6 +3538,7 @@ function _widgetRegistry() {
     return [
         { id: 'clock',     titleKey: 'widget.clock',       make: p => new ClockWidget({ parent: p }) },
         { id: 'claude',    titleKey: 'widget.claude',      make: p => new ClaudeUsageWidget({ parent: p }) },
+        { id: 'health',    title: 'SYSTEM HEALTH',         make: p => new HealthWidget({ parent: p }) },
         { id: 'globe',     titleKey: 'widget.globe',       make: p => new LocationGlobeWidget({ parent: p }) },
         { id: 'mobile',    titleKey: 'widget.mobile_link', make: (p, c) => new MobileQRWidget({ parent: p, audio: c.audio }) },
         { id: 'account',  titleKey: 'widget.account',     make: p => new CloudAccountWidget({ parent: p }) },
@@ -3350,6 +3579,12 @@ function _loadLayout(key, ids) {
 // arrangement is respected again. Each migration runs a single time per key.
 const LAYOUT_MIGRATIONS = [
     { id: 'installer-last-20260929', apply: (l) => { const i = l.findIndex(e => e.id === 'installer'); if (i !== -1) l.push(...l.splice(i, 1)); } },
+    // SYSTEM HEALTH (2026-10-30) sits right under TOKEN USAGE, not at the end.
+    { id: 'health-after-usage-20261030', apply: (l) => {
+        const i = l.findIndex(e => e.id === 'health'); if (i === -1) return;
+        const [h] = l.splice(i, 1); const u = l.findIndex(e => e.id === 'claude');
+        l.splice(u === -1 ? 0 : u + 1, 0, h);
+    } },
 ];
 function _migrateLayout(key, layout) {
     let done = [];
@@ -3448,7 +3683,7 @@ function _openSidebarManager(reg, layout, apply) {
             const w = byId[e.id]; if (!w) return null;
             const row = $el('div', { class: 'smgr-row' + (e.on ? '' : ' off'), draggable: 'true' }, [
                 $el('span', { class: 'smgr-grip', title: tr('sidebar.drag'), text: '⠿' }),
-                $el('span', { class: 'smgr-name', text: tr(w.titleKey) }),
+                $el('span', { class: 'smgr-name', text: w.titleKey ? tr(w.titleKey) : w.title }),
                 $el('span', { class: 'smgr-btns' }, [
                     $el('button', { class: 'smgr-mv', text: '↑', title: tr('sidebar.up'), disabled: i === 0 ? '' : null, onclick: () => move(i, -1) }),
                     $el('button', { class: 'smgr-mv', text: '↓', title: tr('sidebar.down'), disabled: i === work.length - 1 ? '' : null, onclick: () => move(i, 1) }),

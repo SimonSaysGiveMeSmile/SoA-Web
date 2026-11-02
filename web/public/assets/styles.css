@@ -607,6 +607,7 @@ html[data-load="high"] .set-row { transition: none !important; }
     --soa-icon-audio: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 9.5v5h3.5L12 18V6L7.5 9.5H4z'/><path d='M15 9.2a4 4 0 0 1 0 5.6'/><path d='M17.6 7a7 7 0 0 1 0 10'/></svg>");
     --soa-icon-audio-off: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 9.5v5h3.5L12 18V6L7.5 9.5H4z'/><path d='m16 9.5 4 5'/><path d='m20 9.5-4 5'/></svg>");
     --soa-icon-tts: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5h16v10H9l-4 3.5V15H4z'/><path d='M8 9h8'/><path d='M8 12h5'/></svg>");
+    --soa-icon-reload: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 12a8 8 0 1 1-2.34-5.66'/><path d='M20 4v5h-5'/></svg>");
     --soa-icon-monitor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4.5' width='18' height='11.5' rx='1.5'/><path d='M9 20h6'/><path d='M12 16v4'/></svg>");
     /* View-switcher icons — one crisp monochrome line glyph per view, same
        CSS-mask technique so each inherits currentColor / the active-cell ink. */
@@ -685,6 +686,7 @@ html[data-load="high"] .set-row { transition: none !important; }
 #more-menu .mi-tts      { --mi-icon: var(--soa-icon-tts); }
 #more-menu .mi-monitor  { --mi-icon: var(--soa-icon-monitor); }
 #more-menu .mi-clock    { --mi-icon: var(--soa-icon-clock); }
+#more-menu .mi-reload   { --mi-icon: var(--soa-icon-reload); }
 
 /* ── User profile chip ────────────────────────────────────────────────────── */
 .user-chip {
@@ -732,16 +734,7 @@ html[data-load="high"] .set-row { transition: none !important; }
    settings); name, region flag and gear stay in the profile pane. */
 .topbar .user-chip { padding: 3px !important; gap: 0 !important; }
 .topbar .user-chip :is(.user-chip-name, .user-chip-flag, .user-chip-gear) { display: none !important; }
-/* Voice control lives in the more menu; while the mic is on, a dot on the
-   more button says so without opening the menu. */
-#more-menu .mi-voice { --mi-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><rect x='9' y='2' width='6' height='12' rx='3'/><path d='M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8'/></svg>"); }
-#more-menu .mi-voice[data-state="on"] { color: var(--soa-green, #5dbd5a); }
-#toggle-more { position: relative; }
-.topbar-actions:has(#toggle-voice[data-state="on"]) #toggle-more::after {
-    content: ""; position: absolute; top: 3px; right: 3px;
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--soa-green, #5dbd5a);
-}
+/* The voice mic sits in the bar itself (icon only); see voice-control.css. */
 
 /* Profile settings pane */
 .profile-stats {
@@ -1317,129 +1310,553 @@ body.nocursor, body.nocursor * { cursor: none !important; }
 }
 
 /* ── Welcome gate ───────────────────────────────────────────────────── */
-/* Shown on first visit (html[data-welcome]) and on every mobile visit
-   (html[data-welcome-mobile]). Kept intentionally short — a 2-column
-   compare card plus one install command — so it fits on a 667px-tall
-   iPhone viewport without scrolling. Typography hierarchy from size +
-   letter-spacing + opacity since Fira Mono has one weight only. */
+/* ── First-run welcome (desktop browsers; phones get renderMobileWelcome) ──
+   Shown while html[data-welcome="1"]. One column of plain reading copy, the
+   setup wizard (#wiz, driven by data-step) and ONE illustration: the
+   laptop + phone demo (.wel-demo). Palette is welcome-scoped (--w-*), so the
+   nine design packs keep their own look for the app itself. Dark by default;
+   light/dim follow html[data-theme]; with no saved theme the welcome alone
+   follows the system (html[data-welcome-auto], set by the gate). */
 #welcome { display: none; }
-html[data-welcome="1"] #welcome { display: flex; }
+html[data-welcome="1"] #welcome { display: block; }
 html[data-welcome="1"] #boot,
 html[data-welcome="1"] #shell { display: none !important; }
-html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
+html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; background: #070b10; }
 
 .welcome {
+    --w-bg: #070b10;
+    --w-panel: #0e161c;
+    --w-ink: #d6e6e8;
+    --w-quiet: #8fa9ac;
+    --w-accent: #aacfd1;
+    --w-on-accent: #061317;
+    --w-accent-hover: #c9e3e5;
+    --w-need: #f2b84b;
+    --w-done: #5fd49a;
+    --w-line: rgba(170, 207, 209, 0.18);
+    --w-line-strong: rgba(170, 207, 209, 0.34);
+    --w-sans: 'Familjen Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --w-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
     position: fixed; inset: 0;
-    align-items: center; justify-content: center;
-    padding: 32px 24px;
     overflow-y: auto;
-    background: var(--soa-bg);
-    color: var(--soa-accent);
-    font-family: 'Fira Mono', ui-monospace, Menlo, Consolas, monospace;
+    padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+    background: var(--w-bg);
+    color: var(--w-ink);
+    font-family: var(--w-sans);
+    font-size: 17px; line-height: 1.55; font-weight: 400;   /* neumorphism sets body to 600 */
+    letter-spacing: 0; text-transform: none;
     z-index: 10000;
+    color-scheme: dark;
 }
-.welcome-inner { width: 100%; max-width: 760px; }
+html[data-theme="light"] .welcome,
+html[data-theme="dim"] .welcome {
+    --w-bg: #f4f7f8;
+    --w-panel: #ffffff;
+    --w-ink: #15302e;
+    --w-quiet: #4e6668;
+    --w-accent: #0e6b73;
+    --w-on-accent: #ffffff;
+    --w-accent-hover: #0a5259;
+    --w-need: #a15f07;
+    --w-done: #15803d;
+    --w-line: rgba(21, 48, 46, 0.14);
+    --w-line-strong: rgba(21, 48, 46, 0.28);
+    color-scheme: light;
+}
+html[data-theme="dim"] .welcome { --w-bg: #e3e9ea; --w-panel: #f3f6f6; }
+html[data-welcome="1"][data-theme="light"] body,
+html[data-welcome="1"][data-theme="dim"] body { background: #f4f7f8; }
+@media (prefers-color-scheme: light) {
+    html[data-welcome="1"][data-welcome-auto] body { background: #f4f7f8; }
+    html[data-welcome-auto] .welcome {
+        --w-bg: #f4f7f8;
+        --w-panel: #ffffff;
+        --w-ink: #15302e;
+        --w-quiet: #4e6668;
+        --w-accent: #0e6b73;
+        --w-on-accent: #ffffff;
+        --w-accent-hover: #0a5259;
+        --w-need: #a15f07;
+        --w-done: #15803d;
+        --w-line: rgba(21, 48, 46, 0.14);
+        --w-line-strong: rgba(21, 48, 46, 0.28);
+        color-scheme: light;
+    }
+}
+html[lang="zh"] .wel-headline { line-height: 1.22; letter-spacing: 0; }
+html[lang="zh"] .welcome {
+    --w-sans: 'Familjen Grotesk', 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', system-ui, sans-serif;
+}
 
-/* ── Guided setup wizard (first-run) ──────────────────────────────────────
-   One step visible at a time, driven by #wiz[data-step]. Keeps first-run
-   calm; the marketing/FAQ lives in #wiz-more, revealed by "What is this?". */
-.wiz { max-width: 460px; margin: 0 auto; text-align: center; }
-.wiz-progress {
-    display: flex; justify-content: center; gap: 8px;
-    list-style: none; margin: 0 0 26px; padding: 0;
+.welcome *, .welcome *::before, .welcome *::after { box-sizing: border-box; }
+:where(.welcome) :where(h1, h2, h3, p, ul, ol, figure, pre) { margin: 0; }
+/* #id specificity: the packs set [data-ui] button { font-family } and their
+   own focus rings, which would otherwise win over these class rules. */
+#welcome :is(button, input, summary, a) { font-family: inherit; letter-spacing: 0; text-transform: none; text-shadow: none; }
+.welcome a { color: var(--w-accent); }
+#welcome :is(a, button, summary, input):focus-visible {
+    outline: 2px solid var(--w-accent); outline-offset: 3px; border-radius: 4px;
+    box-shadow: none;   /* windows11 adds a second, inner focus ring */
 }
-.wiz-dot {
-    width: 22px; height: 3px; border-radius: 2px;
-    background: rgba(var(--soa-accent-rgb), 0.18);
-    transition: background 160ms, box-shadow 160ms;
+/* The welcome scrolls inside its own fixed layer, so a pack's scrollbar rules
+   (windows11 tints the thumb from data-theme, which is "dark" even while an
+   auto welcome follows a light system) would paint on the welcome's ground.
+   Tint them from the welcome palette instead. */
+#welcome::-webkit-scrollbar, #welcome ::-webkit-scrollbar { width: 12px; height: 12px; }
+#welcome::-webkit-scrollbar-track, #welcome ::-webkit-scrollbar-track { background: transparent; }
+#welcome::-webkit-scrollbar-thumb, #welcome ::-webkit-scrollbar-thumb {
+    background-color: var(--w-line-strong); border: 3px solid transparent;
+    background-clip: content-box; border-radius: 99px;
 }
-.wiz-dot.is-on { background: var(--soa-accent); box-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.5); }
+#welcome::-webkit-scrollbar-thumb:hover, #welcome ::-webkit-scrollbar-thumb:hover { background-color: var(--w-quiet); }
+#welcome::-webkit-scrollbar-button, #welcome ::-webkit-scrollbar-button { display: none; }
+.welcome .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.welcome-inner {
+    width: 100%; max-width: 1200px; margin: 0 auto;
+    padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 20px 40px;
+}
+@media (min-width: 700px) { .welcome-inner { padding-inline: 32px; padding-block: 24px 56px; } }
 
-.wiz-step { display: none; animation: wiz-fade 220ms ease-out; }
-.wiz[data-step="1"] .wiz-step--1,
-.wiz[data-step="2"] .wiz-step--2,
-.wiz[data-step="3"] .wiz-step--3 { display: block; }
-@keyframes wiz-fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* ── Top bar ── */
+.wel-top {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 8px 16px; padding-bottom: 20px;
+}
+.welcome-head { margin: 0; }
+.welcome-title { font-size: 18px; font-weight: 600; line-height: 1.2; }
+.welcome-title a { color: var(--w-ink); text-decoration: none; transition: color 120ms; }
+.welcome-title a:hover { color: var(--w-accent); }
+/* GitHub star count: a quiet link beside the language switch, same weight as
+   its buttons. min-width reserves room for both states ("GitHub" with no count,
+   or the star + a count up to six digits in every language: "123,5 mil" in es,
+   "123.456" in de, which have no short thousands form), so filling it in never moves
+   the header; the content hugs the end, next to the languages. */
+.wel-star {
+    margin-left: auto;
+    display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px;
+    min-width: 104px; min-height: 44px; padding: 0 10px;
+    border-radius: 6px;
+    color: var(--w-quiet); font-size: 15px; line-height: 1;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    text-decoration: none;
+    transition: color 120ms, background 120ms;
+}
+#welcome .wel-star { color: var(--w-quiet); }
+#welcome .wel-star:hover { color: var(--w-ink); }
+.wel-star-icon { flex: none; width: 16px; height: 16px; }
+#welcome .wel-star:hover .wel-star-icon path { fill: currentColor; }
+.welcome-lang { display: flex; flex-wrap: wrap; gap: 2px; }
+.welcome-lang button {
+    min-width: 44px; min-height: 44px; padding: 0 10px;
+    background: none; border: 0; border-radius: 6px;
+    color: var(--w-quiet); font-size: 15px; cursor: pointer;
+    transition: color 120ms, background 120ms;
+}
+.welcome-lang button:hover { color: var(--w-ink); }
+.welcome-lang button[aria-pressed="true"] { color: var(--w-ink); background: var(--w-line); font-weight: 600; }
 
-.wiz-h {
-    margin: 0 0 8px; font-size: 17px; font-weight: 400;
-    letter-spacing: 0.04em; color: var(--soa-accent-bright);
+/* ── Hero: copy + wizard on the left, the demo on the right ── */
+.wel-hero {
+    display: grid; gap: 28px;
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: 56px;
 }
-.wiz-p {
-    margin: 0 0 20px; font-size: 13px; line-height: 1.6;
-    /* Theme-aware: accent-rgb adapts (light teal on dark, dark teal on light).
-       A hard-coded near-white was invisible in light mode. */
-    color: rgba(var(--soa-accent-rgb), 0.92);
+@media (min-width: 1000px) {
+    .wel-hero {
+        grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+        grid-template-areas: "copy demo" "setup demo";
+        grid-template-rows: auto 1fr;
+        column-gap: 56px; row-gap: 32px;
+        padding-top: 24px; padding-bottom: 80px;
+    }
+    .wel-copy { grid-area: copy; }
+    .wel-demo { grid-area: demo; align-self: start; position: sticky; top: 24px; }
+    .wel-setup { grid-area: setup; }
 }
-.wiz-meta {
-    margin: 12px 0 0; font-size: 11px; letter-spacing: 0.08em;
-    color: rgba(var(--soa-accent-rgb), 0.55);
+.wel-headline {
+    font-size: clamp(2rem, 4.6vw, 3.25rem); font-weight: 600;
+    line-height: 1.08; letter-spacing: -0.01em; color: var(--w-ink);
+    text-wrap: balance;
 }
+.welcome-sub {
+    margin-top: 16px; max-width: 34em;
+    font-size: 17px; line-height: 1.55; color: var(--w-quiet);
+}
+@media (max-width: 600px) {
+    .welcome { font-size: 16px; }
+    .welcome-sub { font-size: 16px; }
+}
+
+/* ── The wizard card ── */
+.wel-setup { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.wiz {
+    background: var(--w-panel); border: 1px solid var(--w-line-strong); border-radius: 12px;
+    padding: 22px 22px 18px; text-align: left; max-width: none; margin: 0;
+}
+.wiz-card-title { font-size: clamp(1.375rem, 2.6vw, 1.75rem); font-weight: 600; line-height: 1.2; margin-bottom: 14px; }
+.wiz-progress { list-style: none; padding: 0; margin: 0; }
+
+.wiz-steps { display: flex; flex-direction: column; }
+.wiz-step { display: block; position: relative; padding: 14px 0 14px 44px; border-top: 1px solid var(--w-line); }
+.wiz-step:first-child { border-top: 0; padding-top: 4px; }
+.wiz-n {
+    position: absolute; left: 0; top: 14px;
+    width: 30px; height: 30px; border-radius: 50%;
+    display: grid; place-items: center;
+    border: 1px solid var(--w-line-strong); color: var(--w-quiet);
+    font-size: 15px; font-weight: 600; line-height: 1;
+}
+.wiz-step:first-child .wiz-n { top: 4px; }
+.wiz-h:focus { outline: none; }
+.wiz-h { font-size: 18px; font-weight: 600; line-height: 1.35; color: var(--w-ink); min-height: 30px; display: flex; align-items: center; }
+.wiz-sum { display: none; margin-top: 2px; font-size: 15px; line-height: 1.5; color: var(--w-quiet); }
+.wiz-body { display: none; margin-top: 6px; }
+.wiz-ok-mark { display: none; }
+
+/* Current step: open body, filled number. Later steps: title + summary.
+   Earlier steps: title + a done mark. */
+.wiz[data-step="1"] .wiz-step--1 .wiz-body,
+.wiz[data-step="2"] .wiz-step--2 .wiz-body,
+.wiz[data-step="3"] .wiz-step--3 .wiz-body { display: block; }
+.wiz[data-step="1"] :is(.wiz-step--2, .wiz-step--3) .wiz-sum,
+.wiz[data-step="2"] .wiz-step--3 .wiz-sum { display: block; }
+.wiz[data-step="1"] .wiz-step--1 .wiz-n,
+.wiz[data-step="2"] .wiz-step--2 .wiz-n,
+.wiz[data-step="3"] .wiz-step--3 .wiz-n { background: var(--w-accent); border-color: var(--w-accent); color: var(--w-on-accent); }
+.wiz[data-step="1"] :is(.wiz-step--2, .wiz-step--3) .wiz-h { color: var(--w-quiet); }
+.wiz[data-step="2"] .wiz-step--1 .wiz-n,
+.wiz[data-step="3"] :is(.wiz-step--1, .wiz-step--2) .wiz-n { font-size: 0; border-color: var(--w-done); color: var(--w-done); }
+.wiz[data-step="2"] .wiz-step--1 .wiz-n::after,
+.wiz[data-step="3"] :is(.wiz-step--1, .wiz-step--2) .wiz-n::after { content: "\2713"; font-size: 16px; }
+.wiz[data-step="3"] .wiz-ok-mark { display: inline; color: var(--w-done); margin-right: 6px; }
+
+.wiz-p { font-size: 16px; line-height: 1.55; color: var(--w-ink); }
+.wiz-meta { margin-top: 10px; font-size: 15px; color: var(--w-quiet); }
 .wiz-file {
-    font-family: inherit; font-size: 12.5px;
-    padding: 1px 6px; border-radius: 3px;
-    background: rgba(var(--soa-accent-rgb), 0.1);
-    color: var(--soa-accent-bright); white-space: nowrap;
+    font-family: var(--w-mono); font-size: 14px;
+    padding: 1px 6px; border-radius: 4px; background: var(--w-line); color: var(--w-ink);
+    word-break: break-all;
 }
-
 .wiz-primary {
-    display: inline-block; min-width: 240px; padding: 14px 26px;
-    font-family: inherit; font-size: 14px; font-weight: 600; letter-spacing: 0.06em;
-    color: var(--soa-bg); -webkit-text-fill-color: var(--soa-bg);
-    background: var(--soa-accent); border: 1px solid var(--soa-accent);
-    border-radius: 6px; cursor: pointer;
-    box-shadow: 0 0 22px rgba(var(--soa-accent-rgb), 0.35);
-    transition: transform 80ms, box-shadow 120ms, background 120ms;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-height: 48px; margin-top: 14px; padding: 10px 22px;
+    border: 1px solid var(--w-accent); border-radius: 8px;
+    background: var(--w-accent); color: var(--w-on-accent);
+    font-size: 17px; font-weight: 600; line-height: 1.25; text-align: center;
+    white-space: normal; cursor: pointer; transition: background 120ms, border-color 120ms;
 }
-.wiz-primary:hover {
-    background: var(--soa-accent-bright); border-color: var(--soa-accent-bright);
-    box-shadow: 0 0 30px rgba(var(--soa-accent-rgb), 0.5);
+.wiz-primary:hover { background: var(--w-accent-hover); border-color: var(--w-accent-hover); }
+.wiz-secondary, .wiz-pair-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+    min-height: 44px; padding: 8px 16px;
+    border: 1px solid var(--w-line-strong); border-radius: 8px;
+    background: transparent; color: var(--w-ink);
+    font-size: 16px; font-weight: 500; line-height: 1.3; text-align: center;
+    text-decoration: none; cursor: pointer; transition: border-color 120ms, background 120ms;
 }
-.wiz-primary:active { transform: translateY(1px); }
+.wiz-secondary:hover, .wiz-pair-btn:hover { border-color: var(--w-accent); background: var(--w-line); }
+.welcome a.wiz-pair-btn { color: var(--w-ink); }
+.wiz-link {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 0;
+    background: none; border: 0; color: var(--w-accent);
+    font-size: 15px; text-decoration: underline; text-underline-offset: 3px;
+    cursor: pointer;
+}
+.wiz-link:hover { color: var(--w-ink); }
+/* Narrow screens stack copy → demo → setup; this lets a visitor who is
+   already sold reach the installer without scrolling past the demo. */
+.wel-jump { margin-top: 8px; }
+@media (min-width: 1000px) { .wel-jump { display: none; } }
+.wiz-card-title:focus { outline: none; }
+.wiz { scroll-margin-top: 16px; }
 
-.wiz-alt { margin: 18px auto 0; max-width: 380px; text-align: left; }
+/* Disclosures inside the card: a quiet row with a chevron. */
+.wiz-alt { margin-top: 12px; }
 .wiz-alt > summary {
-    cursor: pointer; list-style: none; text-align: center;
-    font-size: 11px; letter-spacing: 0.08em;
-    color: rgba(var(--soa-accent-rgb), 0.6); padding: 6px;
+    display: flex; align-items: center; gap: 8px; min-height: 44px;
+    list-style: none; cursor: pointer; font-size: 15px; color: var(--w-accent);
 }
 .wiz-alt > summary::-webkit-details-marker { display: none; }
-.wiz-alt > summary:hover { color: var(--soa-accent); }
-.wiz-alt[open] > summary { margin-bottom: 8px; }
+.wiz-alt > summary::before {
+    content: ""; flex: 0 0 auto; width: 7px; height: 7px;
+    border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg); transition: transform 120ms;
+}
+.wiz-alt[open] > summary::before { transform: rotate(45deg); }
+.wiz-alt > summary:hover { color: var(--w-ink); }
 
-/* Pair instead of install: the daemon already runs on another machine. */
-.wiz-pair {
-    margin: 22px auto 0; max-width: 380px; padding-top: 18px;
-    border-top: 1px dashed rgba(var(--soa-accent-rgb), 0.18);
-    display: flex; flex-direction: column; align-items: center; gap: 10px;
+.welcome-cmdwrap { display: flex; gap: 8px; align-items: stretch; margin-top: 6px; }
+.welcome-cmd {
+    flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: pre;
+    padding: 11px 12px; border-radius: 8px;
+    background: var(--w-bg); border: 1px solid var(--w-line);
+    font-family: var(--w-mono); font-size: 13.5px; line-height: 1.5; color: var(--w-ink);
 }
-.wiz-pair-p { margin: 0; font-size: 12px; letter-spacing: 0.04em; color: rgba(var(--soa-accent-rgb), 0.62); }
-.wiz-pair-btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 10px;
-    min-width: 240px; padding: 11px 18px;
-    font-family: inherit; font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
-    color: var(--soa-accent); background: rgba(var(--soa-accent-rgb), 0.06);
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.4); border-radius: 6px; cursor: pointer;
-    transition: background 120ms, border-color 120ms, transform 80ms;
+.welcome-copy {
+    flex: 0 0 auto; min-width: 72px; min-height: 44px; padding: 0 14px;
+    border: 1px solid var(--w-line-strong); border-radius: 8px;
+    background: transparent; color: var(--w-ink);
+    font-size: 15px; font-weight: 500; cursor: pointer;
 }
-.wiz-pair-btn:hover { background: rgba(var(--soa-accent-rgb), 0.12); border-color: var(--soa-accent); }
-.wiz-pair-btn:active { transform: translateY(1px); }
-.wiz-pair-ico { position: relative; flex: 0 0 18px; width: 18px; height: 18px; }
-.wiz-pair-ico i { position: absolute; width: 7px; height: 7px; border: 2px solid currentColor; }
+.welcome-copy:hover { border-color: var(--w-accent); background: var(--w-line); }
+.welcome-run-hint {
+    margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+    background: var(--w-line); color: var(--w-ink); font-size: 15px; line-height: 1.5;
+}
+
+/* Pair with a computer that already runs it. */
+.wiz-pair-box { margin-top: 0; }
+.wiz-pair { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 4px 0 6px; }
+.wiz-pair-p { font-size: 15px; color: var(--w-quiet); }
+.wiz-pair-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.wiz-pair-ico { position: relative; flex: 0 0 16px; width: 16px; height: 16px; }
+.wiz-pair-ico i { position: absolute; width: 6px; height: 6px; border: 2px solid currentColor; }
 .wiz-pair-ico i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
 .wiz-pair-ico i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
 .wiz-pair-ico i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
 .wiz-pair-ico i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
-.wiz-pair-manual { margin-top: 0; width: 100%; }
+.wiz-pair-manual { width: 100%; margin-top: 0; }
 .wiz-pair-url {
-    flex: 1; min-width: 0; padding: 8px 10px;
-    font-family: var(--font-mono); font-size: 12px; color: var(--soa-accent-bright);
-    background: rgba(var(--soa-accent-rgb), 0.06); border: 1px solid rgba(var(--soa-accent-rgb), 0.22); border-radius: 4px;
+    flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 12px;
+    border: 1px solid var(--w-line-strong); border-radius: 8px;
+    background: var(--w-bg); color: var(--w-ink); font-size: 15px;
 }
-.wiz-pair-url:focus { outline: none; border-color: var(--soa-accent); }
-.wiz-pair-err { margin: 0; font-size: 12px; line-height: 1.45; color: var(--soa-red, #e06c62); }
+.wiz-pair-url::placeholder { color: var(--w-quiet); }
+.wiz-pair-err { font-size: 15px; line-height: 1.5; color: #e5534b; }
+html[data-theme="light"] .wiz-pair-err, html[data-theme="dim"] .wiz-pair-err { color: #b91c1c; }
 .wiz-pair-pwrow { margin-top: 8px; }
-#wiz-devhist { margin-top: 2px; }
+.welcome [hidden] { display: none !important; }
+
+.wiz-wait { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 15px; color: var(--w-quiet); }
+.wiz-spin {
+    flex: 0 0 auto; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--w-line-strong); border-top-color: var(--w-accent);
+    animation: wiz-spin 900ms linear infinite;
+}
+.wiz-checking { display: none; }
+@keyframes wiz-spin { to { transform: rotate(360deg); } }
+.wiz-next { margin-top: 14px; font-size: 15px; color: var(--w-quiet); }
+
+.wel-sandbox { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.wel-sandbox-note { flex: 1 1 16em; font-size: 15px; line-height: 1.5; color: var(--w-quiet); }
+@media (max-width: 600px) {
+    .wiz { padding: 18px 16px 14px; }
+    .wiz-primary, .wel-sandbox .wiz-secondary { width: 100%; }
+    .welcome-cmdwrap { flex-direction: column; }
+}
+
+/* ── The demo: one laptop pane, one phone pane, same shell ── */
+.wel-demo { min-width: 0; }
+.wel-stage {
+    position: relative; width: 100%; max-width: 100%;
+    aspect-ratio: 16 / 9.6;
+}
+.wel-laptop {
+    position: absolute; left: 0; top: 0; width: 80%; height: 86%;
+    display: flex; flex-direction: column;
+    background: var(--w-panel); border: 1px solid var(--w-line-strong); border-radius: 10px;
+    overflow: hidden; transition: opacity 300ms;
+}
+.wel-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 12px; border-bottom: 1px solid var(--w-line);
+    font-family: var(--w-mono); font-size: 12px; color: var(--w-quiet); white-space: nowrap;
+}
+.wel-tabs { display: flex; gap: 12px; overflow: hidden; }
+.wel-tab { display: inline-flex; align-items: center; gap: 5px; }
+.wel-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+    border: 1.5px solid var(--w-quiet); transition: background 200ms, border-color 200ms;
+}
+.wel-dot.is-work { background: var(--w-accent); border-color: var(--w-accent); }
+.wel-dot.is-need { background: var(--w-need); border-color: var(--w-need); }
+.wel-dot.is-done { background: var(--w-done); border-color: var(--w-done); }
+.wel-term {
+    flex: 1 1 auto; min-height: 0; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 10px 14px 12px;
+    font-family: var(--w-mono); font-size: 13px; line-height: 1.6; color: var(--w-ink);
+}
+.wel-term .ln, .wel-phone .ln { display: none; flex: 0 0 auto; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.wel-term .ln.on, .wel-phone .ln.on { display: block; }
+.wel-term .q { color: var(--w-ink); font-weight: 600; }
+.wel-term .dim, .wel-phone .dim { color: var(--w-quiet); }
+.wel-term .ok, .wel-phone .ok { color: var(--w-done); }
+.wel-key { visibility: hidden; color: var(--w-need); font-weight: 700; }
+.wel-key.on { visibility: visible; }
+.wel-cur { display: inline-block; width: 0.55em; height: 1.05em; vertical-align: -0.18em; background: var(--w-ink); opacity: 0.7; }
+.wel-away {
+    position: absolute; right: 10px; top: 42px; display: none;
+    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--w-line-strong);
+    background: var(--w-panel); color: var(--w-quiet); font-size: 12px;
+}
+.wel-demo.is-away .wel-laptop { opacity: 0.55; }
+.wel-demo.is-away .wel-away { display: block; }
+
+.wel-phone {
+    position: absolute; right: 0; bottom: 0; width: 31%; height: 82%;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px 9px 10px;
+    background: var(--w-panel); border: 1px solid var(--w-line-strong); border-radius: 16px;
+    font-size: 12px; line-height: 1.35; color: var(--w-ink); overflow: hidden;
+}
+.wel-clock { text-align: center; font-size: 11px; font-weight: 600; color: var(--w-quiet); }
+.wel-mirror {
+    flex: 1 1 auto; min-height: 0; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 6px 7px; border-radius: 8px; background: var(--w-bg);
+    font-family: var(--w-mono); font-size: 11px; line-height: 1.5;
+}
+.wel-card { display: none; padding: 7px 8px; border-radius: 9px; border: 1px solid var(--w-line-strong); }
+.wel-card.on { display: block; }
+.wel-status { display: none; align-items: center; gap: 6px; color: var(--w-quiet); }
+.wel-status.on { display: flex; }
+.wel-notify { border-color: var(--w-need); border-left-width: 3px; }
+.wel-notify.on { animation: wel-drop 200ms ease-out; }
+@keyframes wel-drop { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.wel-notify b { display: block; font-weight: 600; }
+.wel-notify-q { display: block; margin-top: 2px; color: var(--w-quiet); }
+.wel-btns { display: none; gap: 6px; margin-top: 7px; }
+.wel-notify.is-open .wel-btns { display: flex; }
+.wel-btn {
+    flex: 1 1 0; padding: 6px 0; border-radius: 7px; text-align: center;
+    border: 1px solid var(--w-line-strong); font-weight: 600; transition: box-shadow 120ms;
+}
+.wel-btn.yes { background: var(--w-accent); border-color: var(--w-accent); color: var(--w-on-accent); }
+.wel-btn.yes.is-press { box-shadow: 0 0 0 3px var(--w-need); }
+.wel-fleet { display: none; flex-direction: column; gap: 5px; }
+.wel-fleet.on { display: flex; }
+.wel-row { display: flex; align-items: center; gap: 6px; padding: 5px 7px; border-radius: 7px; border: 1px solid var(--w-line); }
+.wel-row .nm { font-weight: 600; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wel-row .st { color: var(--w-quiet); white-space: nowrap; }
+.wel-row .st.need { color: var(--w-need); }
+.wel-row .st.done { color: var(--w-done); }
+
+.wel-trace { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.wel-trace line {
+    stroke: var(--w-need); stroke-width: 1.5; stroke-linecap: round;
+    stroke-dasharray: var(--len, 400); stroke-dashoffset: var(--len, 400); opacity: 0;
+}
+.wel-trace.is-run line { opacity: 1; stroke-dashoffset: 0; transition: stroke-dashoffset 300ms ease-out, opacity 300ms 500ms; }
+.wel-trace.is-run.is-fade line { opacity: 0; }
+
+.wel-cap-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; margin-top: 14px; }
+.wel-cap { flex: 1 1 18em; min-height: 3em; font-size: 18px; font-weight: 500; line-height: 1.45; color: var(--w-ink); }
+@media (max-width: 600px) { .wel-cap { font-size: 17px; } }
+.wel-ctrl { display: flex; align-items: center; gap: 2px; }
+.wel-toggle {
+    min-width: 44px; min-height: 44px; padding: 0 12px; margin-right: 4px;
+    border: 1px solid var(--w-line-strong); border-radius: 8px; background: transparent;
+    color: var(--w-ink); font-size: 15px; cursor: pointer;
+}
+.wel-toggle:hover { border-color: var(--w-accent); }
+.wel-demo-dot {
+    width: 32px; height: 44px; padding: 0; border: 0; background: none; cursor: pointer;
+    display: grid; place-items: center;
+}
+.wel-demo-dot::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%;
+    border: 1.5px solid var(--w-quiet); transition: background 150ms, border-color 150ms;
+}
+.wel-demo-dot[aria-current="step"]::before { background: var(--w-ink); border-color: var(--w-ink); }
+.wel-caps-list { display: none; margin-top: 12px; padding-left: 1.4em; font-size: 15px; color: var(--w-quiet); }
+.wel-caps-list li + li { margin-top: 4px; }
+
+@media (max-width: 600px) {
+    .wel-stage { aspect-ratio: 4 / 3.6; }
+    .wel-laptop { width: 88%; height: 74%; }
+    .wel-phone { width: 44%; height: 66%; }
+    .wel-bar { padding: 6px 9px; font-size: 11px; }
+    .wel-tab:not(:first-child) { display: none; }
+    .wel-term { padding: 8px 10px; font-size: 11.5px; }
+    .wel-phone { font-size: 11px; }
+    .wel-mirror { font-size: 10px; }
+    .wel-demo.is-away .wel-away { display: none; }
+}
+
+/* ── Features, privacy, questions ── */
+.wel-section { padding-block: 40px; border-top: 1px solid var(--w-line); }
+.wel-h2 { font-size: clamp(1.375rem, 2.6vw, 1.75rem); font-weight: 600; line-height: 1.2; margin-bottom: 20px; }
+.wel-groups { display: grid; gap: 28px 48px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1100px) { .wel-groups { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.wel-h3 { font-size: 18px; font-weight: 600; color: var(--w-quiet); margin-bottom: 6px; }
+.wel-feats { list-style: none; padding: 0; }
+.wel-feats li { padding: 12px 0; border-top: 1px solid var(--w-line); }
+.wel-feats li:first-child { border-top: 0; }
+.wel-feats b { display: block; font-weight: 600; color: var(--w-ink); }
+.wel-feats span { display: block; color: var(--w-quiet); font-size: 16px; }
+.wel-feats li.is-need b::before {
+    content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--w-need); margin-right: 8px; vertical-align: 0.08em;
+}
+.wel-prose { max-width: 40em; }
+.wel-prose p + p { margin-top: 12px; }
+.wel-prose p { color: var(--w-ink); }
+
+.welcome-faq { max-width: 46em; }
+.welcome-faq-item { border-top: 1px solid var(--w-line); }
+.welcome-faq-item:last-child { border-bottom: 1px solid var(--w-line); }
+.welcome-faq-item summary {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    min-height: 52px; padding: 10px 0; cursor: pointer; list-style: none;
+    font-size: 17px; font-weight: 500; color: var(--w-ink);
+}
+.welcome-faq-item summary::-webkit-details-marker { display: none; }
+.welcome-faq-item summary::after {
+    content: ""; flex: 0 0 auto; width: 8px; height: 8px; margin-right: 4px;
+    border-right: 1.5px solid var(--w-quiet); border-bottom: 1.5px solid var(--w-quiet);
+    transform: rotate(45deg); transition: transform 120ms;
+}
+.welcome-faq-item[open] summary::after { transform: rotate(-135deg); }
+.welcome-faq-item summary:hover { color: var(--w-accent); }
+.welcome-faq-item p { padding: 0 0 16px; color: var(--w-quiet); max-width: 40em; }
+.welcome-faq code, .wel-prose code { font-family: var(--w-mono); font-size: 0.88em; padding: 1px 5px; border-radius: 4px; background: var(--w-line); color: var(--w-ink); }
+
+.wel-tech { margin-top: 20px; }
+.wiz-more { margin-top: 12px; padding: 18px 0 4px; max-width: 46em; }
+.wiz-more .wel-prose { margin-bottom: 18px; }
+.welcome-src-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.welcome-src-desc { color: var(--w-quiet); font-size: 16px; }
+
+.wiz-foot {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 24px;
+    padding-top: 24px; border-top: 1px solid var(--w-line);
+}
+.welcome-link {
+    display: inline-flex; align-items: center; min-height: 44px;
+    color: var(--w-accent); font-size: 15px; text-decoration: underline; text-underline-offset: 3px;
+}
+.welcome-link:hover { color: var(--w-ink); }
+.welcome-credit { margin-left: auto; font-size: 15px; color: var(--w-quiet); }
+.welcome-credit a { color: var(--w-accent); }
+@media (max-width: 600px) { .welcome-credit { margin-left: 0; width: 100%; } }
+
+/* ── Reduced motion: a still frame, the five captions as a list ── */
+@media (prefers-reduced-motion: reduce) {
+    .wel-caps-list { display: block; }
+    .wel-cap, .wel-toggle { display: none; }
+    .wel-trace { display: none; }
+    .wel-notify.on { animation: none; }
+    .wel-laptop, .wel-dot, .wel-btn { transition: none; }
+    .wiz-spin { display: none; }
+    .wiz-checking { display: inline; }
+}
+@media (prefers-reduced-motion: reduce) and (min-width: 1000px) {
+    .wel-caps-list { margin-top: 16px; }
+}
+
+/* ── Forced colours: state is carried by words, marks by currentColor ── */
+@media (forced-colors: active) {
+    .wel-dot, .wel-dot.is-work, .wel-dot.is-need, .wel-dot.is-done { background: CanvasText; border-color: CanvasText; forced-color-adjust: none; }
+    .wel-trace line { stroke: CanvasText; }
+    .wel-demo-dot::before { border-color: ButtonText; }
+    .wel-demo-dot[aria-current="step"]::before { background: Highlight; border-color: Highlight; forced-color-adjust: none; }
+    .wiz-n { forced-color-adjust: auto; }
+}
 
 /* The boot-screen password prompt: one field, under the status line. */
 .boot-unlock {
@@ -1561,409 +1978,6 @@ html[data-welcome="1"] body { overflow: hidden; overflow-y: auto; }
 }
 .mwel-openas-o.on { color: var(--soa-bg); background: var(--soa-accent); border-color: var(--soa-accent); }
 
-.wiz-wait {
-    display: flex; align-items: center; justify-content: center; gap: 10px;
-    margin: 8px 0 18px; font-size: 12.5px; color: rgba(var(--soa-accent-rgb), 0.8);
-}
-.wiz-spin {
-    width: 13px; height: 13px; border-radius: 50%;
-    border: 2px solid rgba(var(--soa-accent-rgb), 0.25);
-    border-top-color: var(--soa-accent);
-    animation: wiz-spin 0.8s linear infinite;
-}
-@keyframes wiz-spin { to { transform: rotate(360deg); } }
-
-.wiz-link {
-    background: none; border: none; cursor: pointer;
-    font-family: inherit; font-size: 11.5px; letter-spacing: 0.06em;
-    color: rgba(var(--soa-accent-rgb), 0.6); padding: 6px 4px; transition: color 80ms;
-}
-.wiz-link:hover { color: var(--soa-accent); }
-
-.wiz-foot {
-    display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 26px;
-}
-.wiz-foot-sep { color: rgba(var(--soa-accent-rgb), 0.3); font-size: 11px; }
-.wiz-foot .welcome-link { font-size: 11.5px; }
-
-.wiz-more {
-    margin-top: 34px; padding-top: 26px;
-    border-top: 1px solid rgba(var(--soa-accent-rgb), 0.14); text-align: left;
-}
-
-@media (max-width: 600px) {
-    .wiz-primary { width: 100%; min-width: 0; }
-    .wiz-alt { max-width: none; }
-}
-
-.welcome-intro {
-    margin: 0 0 18px;
-    padding: 12px 14px;
-    border-left: 2px solid rgba(var(--soa-accent-rgb), 0.4);
-    background: rgba(var(--soa-accent-rgb), 0.035);
-}
-.welcome-intro-p {
-    margin: 0;
-    font-size: 12.5px;
-    line-height: 1.55;
-    color: rgba(230, 244, 246, 0.85);
-}
-
-.welcome-section-title {
-    margin: 0 0 10px;
-    font-size: 11px;
-    font-weight: 400;
-    letter-spacing: 0.22em;
-    color: rgba(var(--soa-accent-rgb), 0.7);
-    text-transform: uppercase;
-}
-
-/* Language picker sits above the title on the welcome page. Five tiny
-   buttons; the current choice wears an accent underline. Clicking
-   re-renders copy in place (no reload) and writes to the same
-   soa-web:lang key that the main app reads, so the picked language
-   carries into the terminal UI automatically. */
-.welcome-lang {
-    display: flex;
-    justify-content: center;
-    gap: 4px;
-    margin-bottom: 16px;
-}
-.welcome-lang button {
-    background: transparent;
-    color: rgba(var(--soa-accent-rgb), 0.55);
-    border: 1px solid transparent;
-    border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.14);
-    padding: 4px 10px;
-    font-family: inherit;
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    cursor: pointer;
-    transition: color 80ms, border-color 80ms;
-}
-.welcome-lang button:hover {
-    color: var(--soa-accent);
-    border-bottom-color: rgba(var(--soa-accent-rgb), 0.4);
-}
-.welcome-lang button[aria-pressed="true"] {
-    color: var(--soa-accent-bright);
-    border-bottom-color: var(--soa-accent);
-}
-
-.welcome-head { text-align: center; margin-bottom: 22px; }
-.welcome-title {
-    margin: 0;
-    font-size: 26px;
-    letter-spacing: 0.14em;
-    font-weight: 400;
-    color: var(--soa-accent-bright);
-}
-.welcome-sub {
-    margin: 6px 0 0;
-    font-size: 10px;
-    letter-spacing: 0.26em;
-    color: rgba(var(--soa-accent-rgb), 0.5);
-}
-
-.welcome-compare {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin-bottom: 18px;
-}
-.welcome-compare--three {
-    grid-template-columns: 1fr 1fr 1fr;
-}
-.welcome-col {
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.2);
-    background: rgba(var(--soa-accent-rgb), 0.03);
-    padding: 14px 14px 12px;
-}
-.welcome-col--accent {
-    border-color: rgba(var(--soa-accent-rgb), 0.35);
-    background: rgba(var(--soa-accent-rgb), 0.055);
-}
-.welcome-h3 {
-    margin: 0 0 8px;
-    font-size: 13px;
-    font-weight: 400;
-    letter-spacing: 0.12em;
-    color: var(--soa-accent-bright);
-}
-.welcome-tag {
-    font-size: 10px;
-    letter-spacing: 0.16em;
-    color: rgba(var(--soa-accent-rgb), 0.5);
-    padding-left: 6px;
-}
-.welcome-list {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    font-size: 12px;
-    line-height: 1.45;
-    color: rgba(var(--soa-accent-rgb), 0.82);
-}
-.welcome-list li {
-    padding: 4px 0;
-    border-top: 1px dashed rgba(var(--soa-accent-rgb), 0.12);
-}
-.welcome-list li:first-child { border-top: none; }
-.welcome-list li.no { color: rgba(var(--soa-accent-rgb), 0.5); }
-.welcome-list li.no::before {
-    content: '× ';
-    color: rgba(255, 110, 110, 0.7);
-    margin-right: 2px;
-}
-
-.welcome-cta { margin-bottom: 18px; }
-.welcome-cta-caption {
-    margin: 0 0 8px;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    color: rgba(var(--soa-accent-rgb), 0.7);
-}
-.welcome-cmdwrap {
-    display: flex;
-    gap: 8px;
-    align-items: stretch;
-}
-.welcome-cmd {
-    flex: 1;
-    margin: 0;
-    padding: 10px 12px;
-    background: rgba(var(--soa-accent-rgb), 0.07);
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.2);
-    color: var(--soa-accent-bright);
-    font-size: 12px;
-    line-height: 1.35;
-    white-space: nowrap;
-    overflow-x: auto;
-    user-select: all;
-}
-.welcome-copy {
-    background: transparent;
-    color: var(--soa-accent);
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.28);
-    padding: 0 14px;
-    font-family: inherit;
-    font-size: 10px;
-    letter-spacing: 0.14em;
-    cursor: pointer;
-}
-.welcome-copy:hover { background: rgba(var(--soa-accent-rgb), 0.06); }
-.welcome-copy:active { background: rgba(var(--soa-accent-rgb), 0.12); }
-.welcome-run {
-    background: rgba(var(--soa-accent-rgb), 0.12);
-    color: #e6f5f6;
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.45);
-    padding: 0 14px;
-    font-family: inherit;
-    font-size: 10px;
-    letter-spacing: 0.14em;
-    cursor: pointer;
-}
-.welcome-run:hover { background: rgba(var(--soa-accent-rgb), 0.22); }
-.welcome-run:active { background: rgba(var(--soa-accent-rgb), 0.32); }
-.welcome-run-hint {
-    margin: 8px 0 0;
-    padding: 8px 10px;
-    background: rgba(var(--soa-accent-rgb), 0.05);
-    border-left: 2px solid rgba(var(--soa-accent-rgb), 0.45);
-    color: #c9e0e2;
-    font-size: 11.5px;
-    line-height: 1.5;
-}
-
-.welcome-foot {
-    padding-top: 14px;
-    border-top: 1px dashed rgba(var(--soa-accent-rgb), 0.18);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 14px;
-}
-.welcome-link {
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    color: rgba(var(--soa-accent-rgb), 0.6);
-    text-decoration: none;
-    border-bottom: 1px dashed rgba(var(--soa-accent-rgb), 0.24);
-    padding-bottom: 2px;
-}
-.welcome-link:hover { color: var(--soa-accent); border-color: rgba(var(--soa-accent-rgb), 0.55); }
-
-/* Creator signature — subtle footer credit on the desktop welcome wizard. */
-.welcome-credit { margin: 16px 0 0; text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; color: rgba(var(--soa-accent-rgb), 0.6); }
-.welcome-credit a { color: var(--soa-accent); text-decoration: none; border-bottom: 1px solid rgba(var(--soa-accent-rgb), 0.3); transition: text-shadow 0.2s, border-color 0.2s; }
-.welcome-credit a:hover { text-shadow: 0 0 8px rgba(var(--soa-accent-rgb), 0.6); border-color: var(--soa-accent); }
-.welcome-enter {
-    background: var(--soa-accent);
-    color: var(--soa-bg);
-    border: 1px solid var(--soa-accent);
-    padding: 9px 18px;
-    font-family: inherit;
-    font-size: 11px;
-    letter-spacing: 0.18em;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-    -webkit-text-fill-color: var(--soa-bg);
-}
-.welcome-enter:hover { background: #c8dfe1; border-color: #c8dfe1; color: var(--soa-bg); -webkit-text-fill-color: var(--soa-bg); }
-.welcome-enter:active { transform: translateY(1px); }
-
-.welcome-setup { margin-bottom: 18px; }
-.welcome-setup-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 12px;
-}
-.welcome-step {
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.2);
-    background: rgba(var(--soa-accent-rgb), 0.03);
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-.welcome-step-head {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-}
-.welcome-step-num {
-    font-size: 10px;
-    letter-spacing: 0.18em;
-    color: rgba(var(--soa-accent-rgb), 0.55);
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.28);
-    padding: 1px 6px;
-}
-.welcome-step-label {
-    font-size: 12.5px;
-    letter-spacing: 0.1em;
-    color: var(--soa-accent-bright);
-}
-.welcome-step-desc {
-    margin: 0;
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: rgba(var(--soa-accent-rgb), 0.72);
-}
-.welcome-step .welcome-cmd {
-    font-size: 11px;
-    white-space: pre;
-    line-height: 1.5;
-}
-.welcome-step-after {
-    margin: 12px 0 0;
-    font-size: 11.5px;
-    line-height: 1.5;
-    color: rgba(var(--soa-accent-rgb), 0.65);
-}
-.welcome-step-after code,
-.welcome-faq code {
-    font-family: inherit;
-    font-size: 11px;
-    padding: 1px 5px;
-    background: rgba(var(--soa-accent-rgb), 0.08);
-    border: 1px solid rgba(var(--soa-accent-rgb), 0.16);
-    color: var(--soa-accent-bright);
-}
-
-.welcome-faq {
-    margin-bottom: 18px;
-    border-top: 1px dashed rgba(var(--soa-accent-rgb), 0.18);
-    padding-top: 14px;
-}
-.welcome-faq-item {
-    border-bottom: 1px dashed rgba(var(--soa-accent-rgb), 0.12);
-}
-.welcome-faq-item:last-child { border-bottom: none; }
-.welcome-faq-item summary {
-    cursor: pointer;
-    list-style: none;
-    padding: 8px 0;
-    font-size: 12px;
-    letter-spacing: 0.04em;
-    color: rgba(230, 244, 246, 0.88);
-    position: relative;
-    padding-left: 18px;
-}
-.welcome-faq-item summary::-webkit-details-marker { display: none; }
-.welcome-faq-item summary::before {
-    content: '+';
-    position: absolute;
-    left: 2px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: rgba(var(--soa-accent-rgb), 0.7);
-    font-size: 13px;
-    transition: transform 120ms;
-}
-.welcome-faq-item[open] summary::before {
-    content: '−';
-}
-.welcome-faq-item summary:hover {
-    color: var(--soa-accent-bright);
-}
-.welcome-faq-item p {
-    margin: 0 0 10px 18px;
-    font-size: 11.5px;
-    line-height: 1.55;
-    color: rgba(var(--soa-accent-rgb), 0.78);
-}
-
-/* Tablet: 3-col compare + 2-col setup get tight; collapse compare to two
-   columns and stretch the third underneath, while setup stays 2-col. */
-@media (min-width: 641px) and (max-width: 900px) {
-    .welcome-compare--three {
-        grid-template-columns: 1fr 1fr;
-    }
-    .welcome-compare--three > .welcome-col:nth-child(3) {
-        grid-column: 1 / -1;
-    }
-}
-
-/* Phone: collapse the compare to one column, but keep type readable —
-   body copy ≥ 14px so it isn't a squint exercise. Long shell commands
-   scroll horizontally rather than shrink to unreadable sizes. */
-@media (max-width: 640px) {
-    .welcome { padding: 18px 16px; align-items: flex-start; }
-    .welcome-title { font-size: 22px; letter-spacing: 0.12em; }
-    .welcome-sub { font-size: 10px; letter-spacing: 0.2em; }
-    .welcome-head { margin-bottom: 16px; }
-    .welcome-lang { gap: 2px; margin-bottom: 12px; }
-    .welcome-lang button { padding: 5px 9px; font-size: 12px; letter-spacing: 0.1em; min-height: 32px; }
-    .welcome-compare { grid-template-columns: 1fr; gap: 10px; margin-bottom: 16px; }
-    .welcome-compare--three { grid-template-columns: 1fr; }
-    .welcome-col { padding: 12px 14px; }
-    .welcome-h3 { font-size: 14px; margin-bottom: 8px; letter-spacing: 0.08em; }
-    .welcome-list { font-size: 14px; line-height: 1.5; }
-    .welcome-list li { padding: 5px 0 5px 16px; }
-    .welcome-list li::before { top: 7px; }
-    .welcome-intro { padding: 12px 14px; margin-bottom: 16px; }
-    .welcome-intro-p { font-size: 14px; line-height: 1.55; }
-    .welcome-section-title { font-size: 11px; letter-spacing: 0.18em; margin-bottom: 10px; }
-    .welcome-setup-grid { grid-template-columns: 1fr; gap: 12px; }
-    .welcome-step { padding: 12px 14px; gap: 10px; }
-    .welcome-step-num { font-size: 11px; padding: 2px 7px; }
-    .welcome-step-label { font-size: 14px; letter-spacing: 0.06em; }
-    .welcome-step-desc { font-size: 13.5px; line-height: 1.5; }
-    .welcome-step-after { font-size: 13.5px; line-height: 1.55; }
-    .welcome-step-after code, .welcome-faq code { font-size: 12.5px; }
-    .welcome-faq-item summary { font-size: 14px; padding: 12px 0 12px 22px; min-height: 44px; line-height: 1.4; display: flex; align-items: center; }
-    .welcome-faq-item summary::before { left: 4px; font-size: 16px; }
-    .welcome-faq-item p { font-size: 13.5px; line-height: 1.6; margin: 0 0 12px 22px; }
-    .welcome-cta { margin-bottom: 14px; }
-    .welcome-cta-caption { font-size: 12px; }
-    .welcome-cmd { font-size: 12.5px; padding: 10px 12px; overflow-x: auto; white-space: pre; }
-    .welcome-cmdwrap { flex-direction: column; gap: 8px; }
-    .welcome-copy { min-height: 36px; font-size: 12px; padding: 8px 0; -webkit-tap-highlight-color: transparent; }
-    .welcome-run { min-height: 36px; font-size: 12px; padding: 8px 0; -webkit-tap-highlight-color: transparent; }
-    .welcome-foot { flex-direction: column-reverse; align-items: stretch; gap: 10px; padding-top: 10px; }
-    .welcome-enter { width: 100%; padding: 14px; font-size: 13px; font-weight: 600; letter-spacing: 0.14em; color: var(--soa-bg); -webkit-text-fill-color: var(--soa-bg); }
-    .welcome-link { text-align: center; }
-}
 
 /* ── Mobile "not supported" toast ───────────────────────────────────── */
 /* OS-native-style notification banner: pill-shaped card, blurred backdrop,

@@ -32,6 +32,9 @@ function harness(mode = 'tabs') {
         el: (tag, attrs, children) => new Element(tag, attrs, children),
         requestAnimationFrame: fn => fn(), setTimeout: () => 1, clearTimeout() {},
         INPUT_KIND: { SWITCH_TAB: 'switch-tab' },
+        // app.js imports these from /m/focusPolicy.js; a desktop allows autofocus.
+        autoFocusAllowed: () => true,
+        maybeFocus: (node) => { node?.focus?.(); return true; },
     });
     vm.runInContext(metadataSource + '\n' + shellSource + '\nthis.Shell = Shell; this.modelBadge = modelBadge; this.sessionMetadata = sessionMetadata;', context);
     const shell = Object.create(context.Shell.prototype);

@@ -7,7 +7,7 @@
  */
 
 // Scope-relative shell cache supports both standalone / and hosted /m/ apps.
-const VERSION = 'soa-mobile-session-models-20261029-' + new URL(self.registration.scope).pathname;
+const VERSION = 'soa-mobile-web-20261102-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
     '/index.html',
@@ -15,16 +15,21 @@ const SHELL = [
     '/app.js',
     '/fullscreen.js',
     '/socket.js',
+    '/doors.js',
     '/ansi.js',
     '/terminal.js',
     '/voice-chat.js',
+    '/dictation.js',
     '/chat-attachments.js',
     '/voice-chat.css',
+    '/health.js',
+    '/health.css',
     '/session-history.js',
     '/vendor/xterm-headless.mjs',
     '/agentDetect.js',
     '/sessionMetadata.js',
     '/keyboard.js',
+    '/focusPolicy.js',
     '/sizeClaim.js',
     '/sounds.js',
     '/qrscan.js',
@@ -48,6 +53,11 @@ self.addEventListener('install', (e) => {
     e.waitUntil(
         caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())
     );
+});
+
+// The ⋯ sheet's Reload app asks a waiting worker to take over at once.
+self.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {

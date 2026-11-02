@@ -78,6 +78,10 @@ const MINIMAL_XTERM = {
 const LIQUID_XTERM = {
     foreground: '#e6e6ea', background: '#0a0a0e', cursor: '#ffffff',
     cursorAccent: '#0a0a0e', selectionBackground: 'rgba(255,255,255,0.22)', ...ANSI_DARK,
+    // Lift the two ANSI_DARK entries that sank into
+    // the near-black well (brightBlack 1.3:1 — Claude Code's dim hints — and
+    // blue 4.2:1) to >=4.5:1.
+    brightBlack: '#7a7f8c', blue: '#7486bd',
 };
 
 // True while the MINIMAL UI language is active (data-ui set pre-paint by
@@ -135,6 +139,9 @@ export function xtermTheme(resolved) {
     if (isLiquidUi()) return resolved === 'dark' ? { ...LIQUID_XTERM } : {
         ...ANSI_LIGHT, foreground: '#1b354b', background: '#f4f8fc', cursor: '#1265ad',
         white: '#4d6576', brightWhite: '#1b354b',
+        // ANSI_LIGHT's bright green/yellow/cyan/magenta are 2.7–3.7:1 on this
+        // paper; keep them >=4.5:1 here.
+        brightGreen: '#0f7a37', brightYellow: '#8a5a06', brightCyan: '#0b6a85', brightMagenta: '#9d1fa8',
         cursorAccent: '#f4f8fc', selectionBackground: 'rgba(18,101,173,0.22)',
     };
     if (resolved === 'light') return {

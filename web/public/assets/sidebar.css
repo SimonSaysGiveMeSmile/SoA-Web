@@ -27,7 +27,8 @@
 .bar { height: 4px; background: var(--soa-line-soft); margin-top: 6px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--soa-accent); transition: width 0.5s ease; }
 
-/* Usage summary: session outside, weekly inside; one shared gauge per provider. */
+/* Usage summary: weekly outside (the primary window), session inside while a
+   provider still reports one; one shared gauge per provider. */
 .usage-dials { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .usage-card {
   min-width: 0; position: relative; padding: 12px 10px;
@@ -78,7 +79,17 @@
 .usage-ring .ring.none .proj { visibility: hidden; }
 /* Both arcs sweep up from empty on first paint. Landing the inner one a beat
    later makes the pair resolve as a single gauge instead of two racing bars. */
-.usage-ring .ring.weekly .val { transition-delay: .14s; }
+.usage-ring .ring[data-ring="session"] .val { transition-delay: .14s; }
+/* Session window retired (no 5-hour limit): the card is the weekly ring alone —
+   no empty inner track, no 5h row — and the reading sits larger in the middle.
+   The outer ring's clear radius (44 - 3) leaves ~82% of the gauge free. */
+.usage-gauge[data-layout="single"] .ring[data-ring="session"],
+.usage-gauge[data-layout="single"] .usage-metric[data-window="session"],
+.usage-quota-row[hidden], .usage-cost-cell[hidden] { display: none; }
+.usage-gauge[data-layout="single"] .usage-legend { inset: 24%; }
+.usage-gauge[data-layout="single"] .usage-metric { flex-direction: column; align-items: center; justify-content: center; gap: 3px; text-align: center; }
+:root .usage-gauge[data-layout="single"] .usage-card-big { font-size: 17px; }
+:root[data-ui] .usage-gauge[data-layout="single"] .usage-card-big { font-size: clamp(11px, 17cqi, 17px); }
 /* At 95% the quota is about to stop the work. Colour alone carries that only
    for people who can separate this red from the yellow below it. */
 @keyframes soa-ring-crit { 0%, 100% { opacity: 1; } 50% { opacity: .58; } }
@@ -121,7 +132,7 @@
 .usage-drive-cost:not([data-cost="single"]) .usage-cost-single { display: none; }
 
 /* Compact quota overview. Keep the providers side by side in every pack;
-   color-linked readings identify the outer session and inner weekly rings. */
+   color-linked readings identify the outer weekly and inner session rings. */
 :root[data-ui] .usage-dials { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; align-items: stretch; }
 :root[data-ui] .usage-dials.solo { grid-template-columns: minmax(0, 1fr); }
 :root[data-ui] .usage-card:not([hidden]) {
@@ -184,7 +195,7 @@
 [data-ui="minimal"] .usage-card.open::after { background: var(--soa-bg-panel); }
 @media (prefers-reduced-motion: reduce) {
   .usage-ring .val, .usage-burn-chart rect, .usage-detail, .usage-card, .usage-chevron { transition: none; }
-  .usage-ring .ring.weekly .val { transition-delay: 0s; }
+  .usage-ring .ring[data-ring="session"] .val { transition-delay: 0s; }
   .usage-ring .proj { transition: none; }
   .usage-ring .ring.crit .val { animation: none; }
   .usage-live { animation: none; }

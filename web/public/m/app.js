@@ -14,14 +14,18 @@
  */
 
 import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './socket.js';
+import { DoorFailover, preferredDoor } from './doors.js';
 import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
 import { modelBadge } from './sessionMetadata.js';
 import { VirtualKeyboard } from './keyboard.js';
+import { maybeFocus, getAutoFocusPref, setAutoFocusPref } from './focusPolicy.js';
 import { PhoneSizeClaim, colsThatFit } from './sizeClaim.js';
 import { sounds, PROFILES as SOUND_PROFILES } from './sounds.js';
 import { QrScanner, parsePairingPayload } from './qrscan.js';
 import { VoiceChat } from './voice-chat.js';
+import { Dictation } from './dictation.js';
+import { openHealthSheet, sameOrigin, parseHealthLink, healthLinkHash } from './health.js';
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
@@ -30,7 +34,7 @@ import { SessionHistory, openHistory } from './session-history.js';
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
 // service worker / HTTP cache is stale → use FORCE RELOAD in Settings.
-const MOBILE_BUILD = 'session models · 2026-10-29';
+const MOBILE_BUILD = 'web · 2026-11-02';
 
 const STORAGE_KEY = 'son-of-anton.session';
 const THEME_KEY = 'son-of-anton.theme';
@@ -434,6 +438,11 @@ const INITIAL_VIEW = (() => {
         return VIEW_ALIASES[raw] || null;
     } catch (_) { return null; }
 })();
+
+// A health notification opens  …/m/#health=<alert id>&pid=&name=&why=  (see
+// scripts/soa-health healthDeepLink). Captured at load, like INITIAL_VIEW,
+// because readToken() rewrites the hash away; opened once the backend is known.
+let PENDING_HEALTH = (() => { try { return parseHealthLink(location.hash); } catch (_) { return null; } })();
 
 const NATIVE_BACKEND_KEY = 'soa.native.backend';
 function nativeBackend() {
@@ -873,11 +882,19 @@ class App {
             if (localStorage.getItem('soa.m.installHint') === 'auto')
                 setTimeout(() => this._installHint(), 1500);
         } catch (_) {}
+        // After a failover, a reload starts on the backup door that worked
+        // (doors.js) instead of waiting out the dead primary again; the
+        // primary stays in the rotation behind it.
+        this._doorPrimary = primaryOrigin;
+        const startDoor = token ? preferredDoor(primaryOrigin) : null;
         this.socket = new BridgeSocket({
-            url: wsBaseFromHttp(primaryOrigin),
-            altUrls: altOrigin ? [wsBaseFromHttp(altOrigin)] : [],
+            url: wsBaseFromHttp(startDoor || primaryOrigin),
+            altUrls: [startDoor && primaryOrigin, altOrigin].filter(Boolean).map(wsBaseFromHttp),
             token,
         });
+        // A health notification's deep link: health is plain HTTP through the
+        // proxy, so it need not wait for the terminal socket.
+        if (PENDING_HEALTH) setTimeout(() => this._openPendingHealth(), 600);
 
         // Typing or dictating here makes this phone the device that sizes the
         // terminal, so the agent wraps what you write at phone width instead
@@ -906,6 +923,7 @@ class App {
         this._pullCapabilities();
 
         this._wireSocket();
+        this._wireDoors(token);
         this._wireUi();
         this._buildDiagPanel();
         this._wireWebPreview();
@@ -1033,6 +1051,34 @@ class App {
         });
         this._wireWindowControls();
         this._wireReloadControls();
+        this._wireKbdFocus();
+    }
+
+    // "Open keyboard automatically" — the same setting the dashboard shows,
+    // stored once for this origin by focusPolicy.js.
+    _wireKbdFocus() {
+        const grid = document.getElementById('kbd-focus-grid');
+        if (!grid) return;
+        const opts = [['auto', 'Auto'], ['always', 'Always'], ['tap', 'On tap']];
+        const paint = () => {
+            const cur = getAutoFocusPref();
+            grid.querySelectorAll('.sound-option').forEach(b => {
+                const on = b.dataset.pref === cur;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            });
+        };
+        grid.innerHTML = '';
+        for (const [key, label] of opts) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'sound-option';
+            btn.dataset.pref = key;
+            btn.textContent = label;
+            btn.addEventListener('click', () => { setAutoFocusPref(key); paint(); });
+            grid.appendChild(btn);
+        }
+        paint();
     }
 
     // Desktop-window presets: ask the server to resize/move the desktop SoA
@@ -1685,6 +1731,59 @@ class App {
         });
     }
 
+    // Backup doors (doors.js). The desktop publishes its other public links,
+    // encrypted under the pairing token. While connected the list is kept
+    // fresh; once this link has been down ~10s the saved doors, then a fresh
+    // list, are probed and the socket moves to the first that answers, with
+    // the same token and unlock (the same thing a saved-connection tap does,
+    // without reloading the page that may have come from the dead door).
+    _wireDoors(token) {
+        const toHttp = (u) => String(u || '').replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '');
+        this._doors = new DoorFailover({
+            token,
+            current: () => toHttp(this.socket && this.socket.baseUrl),
+            primary: this._doorPrimary,
+            getUnlock: () => (this.socket && this.socket.unlock) || '',
+            onSwitch: (origin) => (this.socket ? this.socket.switchEndpoint(wsBaseFromHttp(origin)) : false),
+            onStatus: (s) => this._doorStatus(s),
+        });
+        if (!this._doors.enabled) return;
+        this.socket.addEventListener('state', (ev) => {
+            const st = ev.detail.state;
+            if (st === SocketState.CONNECTED) this._doors.connected();
+            else if (st === SocketState.DISCONNECTED || st === SocketState.CONNECTING) this._doors.disconnected();
+        });
+    }
+
+    _doorStatus(s) {
+        let line = document.getElementById('reconnect-doors');
+        if (!line && this.reconnectSub) {
+            line = document.createElement('p');
+            line.id = 'reconnect-doors';
+            line.className = 'reconnect-diag reconnect-doors';
+            line.setAttribute('aria-live', 'polite');
+            this.reconnectSub.insertAdjacentElement('afterend', line);
+        }
+        const set = (t) => { if (line) { line.textContent = t; line.hidden = !t; } };
+        const secs = Math.round((s.nextInMs || 0) / 1000);
+        switch (s.phase) {
+            case 'trying': set('Trying backup links…'); break;
+            case 'switching': set('Switching to a backup link…'); pushLog('doors: switching to ' + s.url); break;
+            case 'waiting':
+                set(s.listOk === false
+                    ? `No backup link answered and the link list is unreachable. Still trying saved links (next in ${secs}s).`
+                    : `No backup link answered yet. Still trying backup links (next in ${secs}s).`);
+                break;
+            case 'switched':
+                set('');
+                this._toast('Reconnected through a backup link');
+                this._setStatus('connected', 'paired · backup link');
+                pushLog('doors: reconnected through ' + s.url);
+                break;
+            case 'ok': set(''); break;
+        }
+    }
+
     _wireUi() {
         this.viewBtns.forEach(btn => {
             btn.addEventListener('click', () => {
@@ -1695,6 +1794,7 @@ class App {
 
         this.btnNewTab.addEventListener('click', () => this._showNewTabChooser());
         this._wireVoiceChat();
+        this._wireDictation();
         this.btnMic.addEventListener('click', () => this._openVoiceManager());
 
         // Chat composer: send a message to the active tab's PTY (exactly like
@@ -1845,7 +1945,9 @@ class App {
             this._updateChatBadge();
             this._renderChat();
             this._renderChatStatus();
-            setTimeout(() => { try { this.chatInput && this.chatInput.focus(); } catch (_) {} }, 60);
+            // Opening a view is not a tap on its composer: on a touch keyboard
+            // the caret waits for the tap (focusPolicy.js).
+            setTimeout(() => maybeFocus(this.chatInput), 60);
         }
         // Meet: same shape as chat, on the meeting's own counter. The transcript
         // lives server-side, so entry is a `?since=<cursor>` delta rather than a
@@ -1855,7 +1957,7 @@ class App {
             this._updateMeetBadge();
             this._pullMeetings();
             this._renderMeet();
-            setTimeout(() => { try { this.meetInput && this.meetInput.focus(); } catch (_) {} }, 60);
+            setTimeout(() => maybeFocus(this.meetInput), 60);
         }
         if (target === 'web-view') {
             this._refreshWebPorts();
@@ -2334,7 +2436,7 @@ class App {
         if (this._bcastPreIds) this._bcastCohort = 'selected';
         this._renderBroadcast();
         overlay.classList.add('visible');
-        setTimeout(() => { const i = document.getElementById('bcast-input'); if (i) i.focus(); }, 80);
+        setTimeout(() => maybeFocus(document.getElementById('bcast-input')), 80);
     }
 
     _closeBroadcast() {
@@ -2578,6 +2680,7 @@ class App {
         mic.addEventListener('click', () => {
             if (this._voiceChat.active) this._voiceChat.stop();
             else {
+                this._dictation?.stop();
                 this._stopMicMonitor();
                 this.chatInput.blur();
                 this._voiceChat.start(this.chatInput.value);
@@ -2593,6 +2696,61 @@ class App {
             if (document.hidden) { this._voiceChat.cancel(); window.speechSynthesis?.cancel(); }
         });
         if (!this._voiceChat.supported) this._voiceStatus('Use your keyboard’s dictation microphone to speak a message.');
+    }
+
+    // Dictation (⋯ sheet → Dictate): speech typed into whichever field has
+    // focus — the terminal's compose box, the chat composer, a search field.
+    // The compose box forwards what lands in it as term-keys, so the terminal
+    // receives dictated words exactly as if they were typed; nothing presses
+    // Enter. The light on the top-bar mic shows it is running. Engine choice,
+    // capture and typing live in dictation.js (shared with the desktop).
+    _wireDictation() {
+        const btn = document.getElementById('btn-dictate');
+        const cap = document.getElementById('dictate-cap');
+        if (!btn) return;
+        const light = document.createElement('span');
+        light.className = 'dictate-light';
+        light.setAttribute('aria-hidden', 'true');
+        light.hidden = true;
+        this.btnMic.appendChild(light);
+        const STATE_TEXT = { listening: 'listening', transcribing: 'transcribing', error: 'problem' };
+        let lastNotice = 0;
+        this._dictation = new Dictation({
+            // Mac Whisper behind the paired daemon's /preview/6082, with the same
+            // token + unlock as every other API call. This page may be served by
+            // another origin (the public site): the daemon answers its
+            // allowlisted origins with CORS. No paired daemon → no URL, and the
+            // browser engines start at once.
+            whisperUrl: p => {
+                const b = this.socket && this.socket.baseUrl;
+                if (!b || !/^(wss?|https?):\/\//i.test(b)) return null;
+                return this._apiUrl('/preview/6082' + p);
+            },
+            onState: st => {
+                light.hidden = !st.on;
+                light.dataset.state = st.on ? st.state : 'idle';
+                btn.setAttribute('aria-pressed', String(st.on));
+                if (cap) cap.textContent = st.on ? 'Dictating' : 'Dictate';
+                const text = st.on ? 'Dictation on · ' + st.label + ' · ' + (st.detail || STATE_TEXT[st.state] || '') : 'Dictation off';
+                btn.title = text;
+                light.title = text;
+                if (st.on && st.state === 'error' && st.detail) this._toast(st.detail);
+            },
+            onNotice: text => {
+                // "Not typed" can repeat with every phrase; one toast per few seconds.
+                if (/^Not typed/.test(text) && Date.now() - lastNotice < 4000) return;
+                lastNotice = Date.now();
+                this._toast(text);
+            },
+        });
+        btn.addEventListener('click', () => {
+            if (this._dictation.on) { this._dictation.stop(); this._toast('Dictation off'); return; }
+            // One microphone: the chat's own voice turn and the mic test yield.
+            this._voiceChat?.cancel();
+            this._stopMicMonitor();
+            this._dictation.start();
+            this._toast('Dictation on — tap a text field and speak');
+        });
     }
 
     async _openVoiceManager() {
@@ -3429,6 +3587,15 @@ class App {
         if (macTile) macTile.addEventListener('click', () => {
             window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
         });
+        // System health (⋯ → Health): temperature, heavy processes and the
+        // monitor / auto-stop switches, from soa-health via /preview/6084/.
+        const healthTile = document.getElementById('btn-health');
+        if (healthTile) healthTile.addEventListener('click', () => this._openHealth(null));
+        // A second notification tapped while this page is already open.
+        window.addEventListener('hashchange', () => {
+            const f = parseHealthLink(location.hash);
+            if (f) { this._clearHealthHash(); this._openHealth(f); }
+        });
 
         // Tap the live agent view → forward as a click at the page's coords.
         if (this._agentFrame) {
@@ -3534,6 +3701,53 @@ class App {
         this._showView('web-view');
         if (this._webUrlInp) this._webUrlInp.value = u;
         this._openWeb(this._resolveWebTarget(u));
+    }
+
+    // ⋯ → Health, or a notification's deep link (focus = parseHealthLink()).
+    // On the Mac's own origin the sheet calls soa-health same-origin. On another
+    // origin (the public companion) it calls the paired Mac's /preview/6084/
+    // cross-origin: the daemon answers CORS for that origin and soa-health takes
+    // a cross-site request from it through the proxy. If the Mac's soa-health
+    // refuses (an older one), the sheet shows the alert and a link to the Mac's
+    // own companion with the same alert preselected.
+    _openHealth(focus) {
+        const urlFor = p => this._proxyUrl('/preview/6084' + p);
+        // No socket yet means no paired Mac: never call this page's own origin
+        // when it is not the Mac (on the public site that is the landing page).
+        const paired = !!(this.socket && this.socket.baseUrl);
+        const local = sameOrigin(urlFor('/status'));
+        const home = paired && !local ? this._healthHomeUrl(focus) : null;
+        if (!paired && !local) return openHealthSheet({ urlFor, away: { href: null }, focus });
+        openHealthSheet({ urlFor, focus, fallback: home ? { href: home } : null });
+    }
+
+    _openPendingHealth() {
+        const f = PENDING_HEALTH;
+        if (!f) return;
+        PENDING_HEALTH = null;
+        this._clearHealthHash();
+        this._openHealth(f);
+    }
+
+    _clearHealthHash() {
+        try {
+            if (/(?:^#|&)health=/.test(location.hash) && history.replaceState) {
+                history.replaceState(history.state, '', location.pathname + location.search);
+            }
+        } catch (_) {}
+    }
+
+    // The paired Mac's own companion (same alert preselected), for when this
+    // origin cannot use the monitor. An in-app hand-off only; push links never
+    // carry a token.
+    _healthHomeUrl(focus) {
+        const b = this.socket && this.socket.baseUrl;
+        if (!b) return null;
+        try {
+            const u = new URL('/m/', b.replace(/^ws(s?):\/\//, 'http$1://'));
+            if (this.socket.token) u.searchParams.set('t', this.socket.token);
+            return u.toString() + healthLinkHash(focus);
+        } catch (_) { return null; }
     }
 
     // Build an absolute /preview/ URL against the BACKEND origin (not the page
@@ -4005,6 +4219,8 @@ class App {
             this._showWelcome('Scan the desktop QR code to reconnect this phone.');
             this._openScanner();
         });
+        const reloadBtn = document.getElementById('btn-reload-app');
+        if (reloadBtn) reloadBtn.addEventListener('click', () => this._reloadApp());
         if (this.overflowOverlay) {
             this.overflowOverlay.addEventListener('click', (e) => {
                 if (e.target === this.overflowOverlay) this._closeOverflow();
@@ -4016,13 +4232,51 @@ class App {
             // Settings closes this sheet and opens the settings overlay.
             const grid = this.overflowOverlay.querySelector('.overflow-grid');
             if (grid) grid.addEventListener('click', (e) => {
-                if (e.target.closest('.overflow-btn')) this._closeOverflow();
+                if (e.target.closest('.overflow-btn')) { this._closeOverflow(); return; }
+                // The whole tile is the target, caption included — not just the
+                // icon square in its middle.
+                const tile = e.target.closest('.overflow-tile');
+                const btn = tile && tile.querySelector('.overflow-btn');
+                if (btn && !btn.disabled) btn.click();
             });
         }
     }
 
     _openOverflow() {
         if (this.overflowOverlay) this.overflowOverlay.classList.add('open');
+    }
+
+    // Reload app (⋯ sheet): a fresh UI without quitting the home-screen app.
+    // Unlike Force reload in Settings this keeps the cache and every key in
+    // storage (token, unlock, saved links, preferred door); it only asks the
+    // service worker for an update, lets a new one take over, then reloads.
+    async _reloadApp() {
+        if (this._reloadingApp) return;
+        if ((this._chatSending || this._chatAttachments?.drafts.size)
+            && !confirm('A message or image is still being sent. Reload anyway?')) return;
+        this._reloadingApp = true;
+        this._voiceStatus?.('Reloading…');
+        try { this._saveHistory(); } catch (_) {}
+        try {
+            const sw = navigator.serviceWorker;
+            const reg = sw && !window.Capacitor ? await sw.getRegistration() : null;
+            if (reg) {
+                const wait = (ms) => new Promise(r => setTimeout(r, ms));
+                await Promise.race([reg.update().catch(() => {}), wait(3000)]);
+                const next = reg.waiting || reg.installing;
+                if (next) {
+                    // Let the new worker take over before reloading, or the
+                    // reload is answered from the old worker's cache.
+                    next.postMessage({ type: 'SKIP_WAITING' });
+                    await Promise.race([new Promise(r => {
+                        const done = () => { if (next.state === 'activated' || next.state === 'redundant') r(); };
+                        next.addEventListener('statechange', done);
+                        done();
+                    }), wait(4000)]);
+                }
+            }
+        } catch (_) {}
+        location.reload();
     }
 
     _closeOverflow() {
