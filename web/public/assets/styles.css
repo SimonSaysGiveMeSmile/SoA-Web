@@ -734,16 +734,7 @@ html[data-load="high"] .set-row { transition: none !important; }
    settings); name, region flag and gear stay in the profile pane. */
 .topbar .user-chip { padding: 3px !important; gap: 0 !important; }
 .topbar .user-chip :is(.user-chip-name, .user-chip-flag, .user-chip-gear) { display: none !important; }
-/* Voice control lives in the more menu; while the mic is on, a dot on the
-   more button says so without opening the menu. */
-#more-menu .mi-voice { --mi-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><rect x='9' y='2' width='6' height='12' rx='3'/><path d='M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8'/></svg>"); }
-#more-menu .mi-voice[data-state="on"] { color: var(--soa-green, #5dbd5a); }
-#toggle-more { position: relative; }
-.topbar-actions:has(#toggle-voice[data-state="on"]) #toggle-more::after {
-    content: ""; position: absolute; top: 3px; right: 3px;
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--soa-green, #5dbd5a);
-}
+/* The voice mic sits in the bar itself (icon only); see voice-control.css. */
 
 /* Profile settings pane */
 .profile-stats {
