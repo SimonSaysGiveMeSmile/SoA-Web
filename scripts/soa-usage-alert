@@ -5,8 +5,12 @@
  * The dashboard usage widget shows *which* session is burning most, but only
  * while the user is looking. This runs headless from launchd every ~120s
  * (com.soa-web.usage-alert) and pushes the user an alert when a SINGLE session
- * is "using too much token" — leaning hard on the model within the active
- * 5-hour usage-limit block (or today), or suddenly burning fast.
+ * is "using too much token" — heavy today, suddenly burning fast, or (only while
+ * the provider still reports a 5-hour window) heavy in the active 5h block — and
+ * once per cooldown when the account's WEEKLY quota is projected to run out
+ * before it resets (the 5h limit is being retired; the week is the ceiling).
+ * The weekly projection comes from the quota service (:4011, loopback) via
+ * soa-weekly-guard.cjs, the same verdict `soa-sessions usage` prints.
  *
  * It reuses the daemon's own numbers (GET /api/claude-usage — the same v2 engine
  * the widget shows, so alerts never disagree with the UI), and adds the piece
@@ -20,12 +24,18 @@
  *
  * Thresholds (env-overridable; dollars are list-price ESTIMATES, the same unit
  * the widget uses for "how hard am I leaning on the model"):
- *   SOA_USAGE_BLOCK_COST   per-session cost in the active 5h block   (default 20)
+ *   SOA_USAGE_BLOCK_COST   per-session cost in the active 5h block   (default 20;
+ *                          only while a 5h window is reported)
  *   SOA_USAGE_TODAY_COST   per-session cost since local midnight      (default 60)
  *   SOA_USAGE_BURN_COST    per-session cost velocity, $/min           (default 1.5)
  *   SOA_USAGE_MIN_COST     floor before a velocity-only alert fires   (default 3)
  *   SOA_USAGE_COOLDOWN     seconds between alerts for one session      (default 1800)
  *   SOA_USAGE_ESCALATE     re-alert inside cooldown if cost grows Nx   (default 2)
+ *   SOA_USAGE_WEEK_ALERT   0 = no weekly-projection push               (default 1)
+ *   SOA_USAGE_WEEK_COOLDOWN seconds between weekly pushes per provider (default 21600)
+ *   SOA_USAGE_WEEK_STEP    re-push inside the cooldown when used% rose this much (default 10)
+ *   SOA_WEEK_PROJECTED_PCT / SOA_WEEK_WARN_PCT  verdict lines (else usage-budgets.json, 100/90)
+ *   SOA_QUOTA_PORT         quota service port (default 4011)
  *   SOA_WEB_PORT           daemon port (else daemon.lock, else 4010)
  *
  * Flags:
@@ -45,6 +55,7 @@ const LOG_DIR = path.join(os.homedir(), '.soa-web', 'logs');
 const LOG = path.join(LOG_DIR, 'usage-alert.log');
 const STATE = path.join(LOG_DIR, '.usage-alert-state.json');
 const NOTIFY = path.join(__dirname, 'soa-notify');   // sibling script
+const weeklyGuard = require('./soa-weekly-guard.cjs');
 
 const num = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
 const CFG = {
@@ -54,7 +65,12 @@ const CFG = {
     minCost:   num(process.env.SOA_USAGE_MIN_COST, 3),
     cooldown:  num(process.env.SOA_USAGE_COOLDOWN, 1800),
     escalate:  num(process.env.SOA_USAGE_ESCALATE, 2),
+    weekAlert: process.env.SOA_USAGE_WEEK_ALERT !== '0',
+    weekCooldown: num(process.env.SOA_USAGE_WEEK_COOLDOWN, 21600),
+    weekStep:  num(process.env.SOA_USAGE_WEEK_STEP, 10),
 };
+function budgetsDefault() { try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'usage-budgets.json'), 'utf8')).default || {}; } catch (_) { return {}; } }
+const localDay = ms => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
 const args = new Set(process.argv.slice(2));
 const DRY = args.has('--dry-run');
 const STATUS = args.has('--status');
@@ -102,7 +118,7 @@ const mtok = n => (n / 1e6).toFixed(1) + 'M';
 
 async function main() {
     if (TEST) {
-        const ok = await notify('SoA token alert — test', '✅ soa-usage-alert delivery works. A real alert fires when a session leans hard on the model in the 5h block.', 'high', 'warning,robot', 'https://s0a.app');
+        const ok = await notify('SoA token alert — test', '✅ soa-usage-alert delivery works. A real alert fires when a session leans hard on the model, or the weekly quota is on track to run out.', 'high', 'warning,robot', 'https://s0a.app');
         log('test alert sent=' + ok);
         console.log('test alert sent=' + ok);
         return;
@@ -112,7 +128,10 @@ async function main() {
     if (!resp || !resp.ok || !resp.data) { log('no usage data (daemon down or endpoint changed) — skipping'); return; }
     const d = resp.data;
     if (!d.hasData) { log('no usage records yet — skipping'); return; }
-    const scope = d.sessionScope;                       // 'block' while the 5h window is live, else 'today'
+    // Weekly guard + whether the provider still reports a 5h window at all.
+    const guard = weeklyGuard.assess(await weeklyGuard.fetchQuota(), { budgetsDefault: budgetsDefault() });
+    const fiveHour = guard.available ? guard.claude.sessionReported : true;   // feed down → old behaviour
+    const scope = fiveHour ? d.sessionScope : 'today';  // 'block' only while a 5h window is live
     const blockStartTs = d.block && d.block.active ? d.block.startTs : 0;
     const remainMin = d.block && d.block.active ? Math.round(d.block.remainingMs / 60000) : 0;
 
@@ -129,10 +148,12 @@ async function main() {
     }
 
     const state = loadState();
-    // New 5h block → velocity baselines and cooldowns from the old block are stale.
-    if (blockStartTs && state.blockStartTs !== blockStartTs) { state.blockStartTs = blockStartTs; state.sessions = {}; }
     const now = d.now || Date.now();
-    const next = { blockStartTs: state.blockStartTs, sessions: {} };
+    // New 5h block (while one is reported) or a new local day → velocity
+    // baselines and per-session cooldowns from the old window are stale.
+    if (fiveHour && blockStartTs && state.blockStartTs !== blockStartTs) { state.blockStartTs = blockStartTs; state.sessions = {}; }
+    if (state.day && state.day !== localDay(now)) state.sessions = {};
+    const next = { blockStartTs: state.blockStartTs, day: localDay(now), sessions: {}, week: state.week || {} };
 
     const rows = [];
     const alerts = [];
@@ -142,9 +163,10 @@ async function main() {
         const costToday = s.today ? s.today.cost : 0;
         const prev = state.sessions[s.id];
         // Velocity from the delta since the last poll (the piece the snapshot lacks).
+        // Diffed on today's cost so it survives a retired 5h window.
         let burn = 0;
         if (prev && prev.ts && now > prev.ts) {
-            const dCost = costBlock - (prev.costBlock || 0);
+            const dCost = prev.costToday != null ? costToday - prev.costToday : costBlock - (prev.costBlock || 0);
             const dMin = (now - prev.ts) / 60000;
             if (dCost > 0 && dMin > 0) burn = dCost / dMin;
         }
@@ -156,15 +178,19 @@ async function main() {
         rows.push({ id: s.id, label, costBlock, costToday, tok: sc.tok, req: sc.req, sub: sc.subCost || 0, burn });
 
         const reasons = [];
-        if (costBlock >= CFG.blockCost) reasons.push(`${money(costBlock)} in the 5h block`);
+        const primary = fiveHour ? costBlock : costToday;   // escalation + velocity floor key
+        if (fiveHour && costBlock >= CFG.blockCost) reasons.push(`${money(costBlock)} in the 5h block`);
         if (costToday >= CFG.todayCost) reasons.push(`${money(costToday)} today`);
-        if (burn >= CFG.burnCost && costBlock >= CFG.minCost) reasons.push(`${money(burn)}/min`);
+        if (burn >= CFG.burnCost && primary >= CFG.minCost) reasons.push(`${money(burn)}/min`);
 
         let fired = false;
         if (reasons.length) {
             const last = prev && prev.lastAlert;
             const coolExpired = !last || (now - last.at) / 1000 >= CFG.cooldown;
-            const escalated = last && costBlock >= CFG.escalate * (last.cost || 0);
+            // Compare like with like: the 5h window can come and go between
+            // polls, and block$ vs today$ are different scales.
+            const lastKey = last && (fiveHour ? last.costBlock : last.costToday);
+            const escalated = last && primary >= CFG.escalate * ((lastKey != null ? lastKey : last.cost) || 0);
             if (coolExpired || escalated) {
                 fired = true;
                 alerts.push({ label, reasons, costBlock, costToday, tok: sc.tok, req: sc.req, burn, remainMin });
@@ -172,30 +198,64 @@ async function main() {
         }
         next.sessions[s.id] = {
             ts: now, costBlock, costToday, tok: sc.tok,
-            lastAlert: fired ? { at: now, cost: costBlock } : (prev && prev.lastAlert) || null,
+            lastAlert: fired ? { at: now, cost: primary, costBlock, costToday } : (prev && prev.lastAlert) || null,
         };
     }
 
+    // Account-wide WEEKLY push: one per provider per cooldown while the weekly %
+    // is projected past the limit at reset; re-pushed early if used% keeps
+    // climbing by weekStep. A new week (different resetsAt) clears it.
+    const weekAlerts = [];
+    if (guard.available) {
+        for (const prov of ['claude', 'codex']) {
+            const a = guard[prov], w = a && a.weekly, prevW = next.week[prov];
+            if (prevW && w && !weeklyGuard.sameWeek(prevW.resetsAt, w.resetsAt)) delete next.week[prov];
+            if (!w || a.verdict !== 'THROTTLE' || !CFG.weekAlert) continue;
+            const last = next.week[prov];
+            const cool = !last || (now - last.at) / 1000 >= CFG.weekCooldown;
+            const climbed = last && w.used >= (last.used || 0) + CFG.weekStep;
+            if (!(cool || climbed)) continue;
+            weekAlerts.push({ prov, a });
+            next.week[prov] = { at: now, used: w.used, projected: w.projected, resetsAt: w.resetsAt };
+        }
+    }
+
     if (STATUS) {
-        console.log(`scope=${scope} block=${money(d.block.cost)} burn/min=${d.block.burnRatePerMin} remain=${remainMin}m  today=${money(d.today.cost)}`);
-        console.log('  ' + 'session'.padEnd(26) + 'block$'.padStart(9) + 'today$'.padStart(9) + 'tok'.padStart(8) + '$/min'.padStart(8));
-        for (const r of rows.sort((a, b) => b.costBlock - a.costBlock))
-            console.log('  ' + r.label.slice(0, 25).padEnd(26) + money(r.costBlock).padStart(9) + money(r.costToday).padStart(9) + mtok(r.tok).padStart(8) + money(r.burn).padStart(8));
+        if (guard.available) console.log(`week: ${weeklyGuard.describe('claude', guard.claude)}  |  ${weeklyGuard.describe('codex', guard.codex)}`);
+        else console.log('week: (quota service unreachable)');
+        console.log(`scope=${scope} 5h=${fiveHour ? 'reported' : (guard.claude ? guard.claude.session : '?')}` + (fiveHour ? ` block=${money(d.block.cost)} burn/min=${d.block.burnRatePerMin} remain=${remainMin}m` : '') + `  today=${money(d.today.cost)}`);
+        console.log('  ' + 'session'.padEnd(26) + (fiveHour ? 'block$'.padStart(9) : '') + 'today$'.padStart(9) + 'tok'.padStart(8) + '$/min'.padStart(8));
+        for (const r of rows.sort((a, b) => fiveHour ? b.costBlock - a.costBlock : b.costToday - a.costToday))
+            console.log('  ' + r.label.slice(0, 25).padEnd(26) + (fiveHour ? money(r.costBlock).padStart(9) : '') + money(r.costToday).padStart(9) + mtok(r.tok).padStart(8) + money(r.burn).padStart(8));
         return;
+    }
+
+    for (const { prov, a } of weekAlerts) {
+        const w = a.weekly;
+        const name = prov === 'claude' ? 'Claude' : 'Codex';
+        const runOut = w.runsOutBeforeReset && w.runOutAt ? ` — runs out ≈${weeklyGuard.fmtWhen(w.runOutAt)}` : '';
+        const body = `⚠ Weekly quota: ${name} is at ${weeklyGuard.pct(w.used)} and on pace for ${weeklyGuard.pct(w.projected)} by its reset ${weeklyGuard.fmtWhen(w.resetsAt)}${runOut}. `
+            + `Throttle (never stop): soa-sessions usage → soa-sessions throttle hot.`;
+        if (DRY) { console.log('WOULD ALERT: ' + body); log('DRY would-alert: ' + body); }
+        else { await notify('SoA weekly quota', body, 'high', 'warning,hourglass', 'https://s0a.app'); log('WEEK-ALERT: ' + body); }
     }
 
     // Deliver (one push per over-threshold session).
     for (const a of alerts) {
         // reasons already names the threshold(s) crossed (incl. $/min when the
         // velocity trigger fired), so the parenthetical is just the raw stats.
+        const tail = fiveHour ? ` 5h block resets in ${a.remainMin}m.`
+            : (guard.available && guard.claude.weekly ? ` Week ${weeklyGuard.pct(guard.claude.weekly.used)} → ${weeklyGuard.pct(guard.claude.weekly.projected)} at reset.` : '');
         const body = `⚠ Token watch: “${a.label}” is heavy — ${a.reasons.join(', ')} `
-            + `(${mtok(a.tok)} tok, ${a.req} reqs). 5h block resets in ${a.remainMin}m.`;
+            + `(${mtok(a.tok)} tok, ${a.req} reqs).${tail}`;
         if (DRY) { console.log('WOULD ALERT: ' + body); log('DRY would-alert: ' + body); }
         else { await notify('SoA token alert', body, 'high', 'warning,fire', 'https://s0a.app'); log('ALERT: ' + body); }
     }
 
     if (!DRY && !STATUS) saveState(next);
-    log(`scope=${scope} sessions=${d.sessions.length} block=${money(d.block.cost)} today=${money(d.today.cost)} alerted=${alerts.length}`
+    log(`scope=${scope} sessions=${d.sessions.length} ${fiveHour ? 'block=' + money(d.block.cost) : '5h=' + (guard.claude ? guard.claude.session : '?')} today=${money(d.today.cost)}`
+        + (guard.available && guard.claude.weekly ? ` week=${weeklyGuard.pct(guard.claude.weekly.used)}→${weeklyGuard.pct(guard.claude.weekly.projected)}` : '')
+        + ` alerted=${alerts.length}${weekAlerts.length ? ' week-alerted=' + weekAlerts.map(x => x.prov).join(',') : ''}`
         + (alerts.length ? ' [' + alerts.map(a => a.label).join(', ') + ']' : ''));
 }
 

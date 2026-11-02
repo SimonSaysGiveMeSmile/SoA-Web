@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DICTATION ENGINE — runs scripts/soa-dictate: the loopback service
+  (127.0.0.1:6082) that turns streamed microphone audio into text with an
+  on-device recognizer (whisper.cpp + Metal, model kept warm), reached through
+  the daemon's /preview/6082/ proxy (same tunnel, same pairing gate; no daemon
+  restart needed).
+
+  Needs: brew install whisper-cpp opencc, and the ggml models in
+  $SOA_WEB_STATE_DIR/dictate/models (ggml-small.bin default, ggml-base.bin
+  fallback) from huggingface.co/ggerganov/whisper.cpp.
+  It never opens a microphone itself: audio only arrives from a paired page.
+
+  Paths use $HOME through /bin/sh (launchd does not expand $HOME in
+  ProgramArguments), so the plist carries no user-specific path. The install
+  lives at $HOME/.soa-web, the state dir at $HOME/.soa-web-local.
+
+  Load: cp deploy/launchd/com.soa-web.dictate.plist ~/Library/LaunchAgents/ &&
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.dictate.plist
+  Stop: launchctl bootout gui/$(id -u)/com.soa-web.dictate
+  Log:  $SOA_WEB_STATE_DIR/logs/dictate.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.dictate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>: "${SOA_WEB_STATE_DIR:=$HOME/.soa-web-local}"; export SOA_WEB_STATE_DIR; mkdir -p "$SOA_WEB_STATE_DIR/logs" &amp;&amp; cd "$HOME/.soa-web" &amp;&amp; exec node "$HOME/.soa-web/scripts/soa-dictate" &gt;&gt; "$SOA_WEB_STATE_DIR/logs/dictate.log" 2&gt;&amp;1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

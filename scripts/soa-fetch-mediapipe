@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# soa-fetch-mediapipe — put the remote-desktop viewer's Air trackpad files in place.
+#
+# The Air trackpad (scripts/soa-desktop-remote.html) runs MediaPipe's
+# HandLandmarker in the browser from files the daemon serves as static assets.
+# They are ~34 MB of WASM + model, so they are not committed: this script
+# downloads the pinned versions, checks every file's sha256, and installs them
+# into web/public/assets/vendor/mediapipe-tasks-vision-1.2.0/ (git-ignored).
+# Without them the viewer simply hides the Air trackpad button.
+#
+#   soa-fetch-mediapipe            download + verify + install (no-op when present and valid)
+#   soa-fetch-mediapipe --check    verify what is installed; exit 1 if missing or altered
+#   soa-fetch-mediapipe --force    re-download even if the installed copy verifies
+#   SOA_MEDIAPIPE_DEST=<dir>       install somewhere else (default: this checkout's vendor dir)
+#
+# Static files only: takes effect on the viewer's next load, no restart.
+set -euo pipefail
+
+PKG_VERSION="1.2.0"
+PKG_NAME="mediapipe-tasks-vision-${PKG_VERSION}"
+TARBALL_URL="https://registry.npmjs.org/@mediapipe/tasks-vision/-/tasks-vision-${PKG_VERSION}.tgz"
+TARBALL_SHA512="7+dr9GbGyTtcuLh11wE5TOn4dNFRncIT9oAWs72620WX99KW5FfzF6rFJ/ChTgXG9vJ6dCiE9FrEEY4CnwPWKQ=="
+MODEL_URL="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+MODEL_PATH="models/hand_landmarker-float16-v1.task"
+
+# sha256 of each installed file, unmodified from the npm tarball / model URL above.
+SUMS="870da5cfc43bfcf2a8b0f14e8152dae8c7e701722e1191b0e592b94b81b4127a  vision_bundle.mjs
+85c1a342be70427987f900969a5f26e17557351111364e6585e97fb03e93e108  wasm/vision_wasm_internal.js
+bcc13df22d3d69ec8cbe8e280989356d844ae00f4523eb82072d2484f44134dc  wasm/vision_wasm_internal.wasm
+e9b2b799e0f1078f5538b300a57835b823742c37e2646308a03f0f25b39fdcdc  wasm/vision_wasm_nosimd_internal.js
+ed5e5e5812490bd90d6a440290845ff9e4c516f696847a28a0c0e0573470d469  wasm/vision_wasm_nosimd_internal.wasm
+fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1  ${MODEL_PATH}"
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="${SOA_MEDIAPIPE_DEST:-$HERE/web/public/assets/vendor/$PKG_NAME}"
+MODE="install"
+case "${1:-}" in
+    "") ;;
+    --check) MODE="check" ;;
+    --force) MODE="force" ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
+esac
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+# verify <dir>: every pinned file present with its pinned sha256.
+verify() {
+    local dir="$1" ok=0 sum rel got
+    while read -r sum rel; do
+        [ -n "$rel" ] || continue
+        if [ ! -f "$dir/$rel" ]; then echo "  missing  $rel" >&2; ok=1; continue; fi
+        got="$(sha256 "$dir/$rel")"
+        if [ "$got" != "$sum" ]; then echo "  MISMATCH $rel" >&2; ok=1; fi
+    done <<< "$SUMS"
+    return $ok
+}
+
+if [ "$MODE" = "check" ]; then
+    if verify "$DEST"; then echo "ok: $PKG_NAME verified in $DEST"; exit 0; fi
+    echo "not installed or altered: run scripts/soa-fetch-mediapipe" >&2; exit 1
+fi
+if [ "$MODE" = "install" ] && verify "$DEST" 2>/dev/null; then
+    echo "already installed and verified: $DEST"; exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "openssl is required (tarball integrity check)" >&2; exit 1; }
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/soa-mediapipe.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/dl" "$WORK/x" "$WORK/stage/wasm" "$WORK/stage/models"
+
+echo "fetching @mediapipe/tasks-vision $PKG_VERSION …"
+curl -fsSL --retry 2 -o "$WORK/dl/pkg.tgz" "$TARBALL_URL"
+got512="$(openssl dgst -sha512 -binary "$WORK/dl/pkg.tgz" | openssl base64 -A)"
+if [ "$got512" != "$TARBALL_SHA512" ]; then echo "tarball integrity mismatch — refusing to install" >&2; exit 1; fi
+# Extract only the files we serve; never run anything from the package.
+tar -xzf "$WORK/dl/pkg.tgz" -C "$WORK/x" \
+    package/vision_bundle.mjs \
+    package/wasm/vision_wasm_internal.js package/wasm/vision_wasm_internal.wasm \
+    package/wasm/vision_wasm_nosimd_internal.js package/wasm/vision_wasm_nosimd_internal.wasm
+cp "$WORK/x/package/vision_bundle.mjs" "$WORK/stage/"
+cp "$WORK/x/package/wasm/"vision_wasm_* "$WORK/stage/wasm/"
+
+echo "fetching hand_landmarker.task (float16, v1) …"
+curl -fsSL --retry 2 -o "$WORK/stage/$MODEL_PATH" "$MODEL_URL"
+
+if ! verify "$WORK/stage"; then echo "checksum mismatch — refusing to install" >&2; exit 1; fi
+
+cat > "$WORK/stage/VERSIONS.txt" <<EOF
+Installed by scripts/soa-fetch-mediapipe for the remote-desktop viewer's
+experimental Air trackpad. Everything here runs in the browser; nothing is
+fetched from a CDN at run time.
+
+@mediapipe/tasks-vision $PKG_VERSION (Apache-2.0)
+  $TARBALL_URL
+  npm tarball sha512-$TARBALL_SHA512
+
+hand_landmarker.task (MediaPipe Hand Landmarker, float16, model version 1, Apache-2.0)
+  $MODEL_URL
+
+sha256 of each file (unmodified):
+$(printf '%s\n' "$SUMS" | sed 's/^/  /')
+
+Note: this build has a usage logger that POSTs to a Google endpoint every 60 s.
+The viewer switches it off after creating the task, and its CSP (connect-src
+'self') blocks other origins.
+EOF
+
+mkdir -p "$(dirname "$DEST")"
+rm -rf "$DEST.new"
+mv "$WORK/stage" "$DEST.new"
+chmod -R u+rwX,go+rX "$DEST.new"
+rm -rf "$DEST.old"
+[ -e "$DEST" ] && mv "$DEST" "$DEST.old"
+mv "$DEST.new" "$DEST"
+rm -rf "$DEST.old"
+echo "installed + verified: $DEST"

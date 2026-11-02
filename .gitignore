@@ -12,3 +12,6 @@ coverage/
 .agents/
 .claude/
 .vercel
+
+# Air trackpad runtime (~34 MB): installed by scripts/soa-fetch-mediapipe, never committed
+web/public/assets/vendor/mediapipe-tasks-vision-*/

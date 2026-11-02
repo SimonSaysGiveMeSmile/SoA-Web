@@ -23,6 +23,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const weeklyGuard = require('./soa-weekly-guard.cjs');
 
 function base() {
     if (process.env.SOA_WEB_TTS_URL) return process.env.SOA_WEB_TTS_URL.replace(/\/api\/tts$/, '');
@@ -94,7 +95,9 @@ function budgetsPath() { return path.join(stateDir(), 'usage-budgets.json'); }
 // Per-project budgets (USD estimate). Defaults mirror the soa-usage-alert
 // watchdog so the manager, the dashboard highlight, and the phone push agree.
 function loadBudgets() {
-    const b = { default: { blockCost: 20, todayCost: 60, burnCost: 1.5 }, projects: {} };
+    // weekProjectedPct / weekWarnPct: the WEEKLY guard (projected weekly % at
+    // reset). blockCost only applies while a 5h session window is reported.
+    const b = { default: { blockCost: 20, todayCost: 60, burnCost: 1.5, weekProjectedPct: 100, weekWarnPct: 90 }, projects: {} };
     try {
         const j = JSON.parse(fs.readFileSync(budgetsPath(), 'utf8'));
         if (j.default) b.default = { ...b.default, ...j.default };
@@ -102,15 +105,18 @@ function loadBudgets() {
     } catch (_) {}
     return b;
 }
+const BUDGETS_NOTE = 'Per-project token/cost budgets (USD estimate) for `soa-sessions usage`. todayCost = since local midnight; burnCost = $/min. blockCost = cost in the 5h usage-limit window, applied ONLY while the provider still reports a 5h window. weekProjectedPct / weekWarnPct = account-wide weekly guard: THROTTLE when the weekly % projected at reset reaches it.';
 function saveBudgets(b) {
     fs.mkdirSync(stateDir(), { recursive: true });
     fs.writeFileSync(budgetsPath(), JSON.stringify({
-        note: 'Per-project token/cost budgets (USD estimate) for `soa-sessions usage`. blockCost = cost in the active 5h usage-limit window; todayCost = since local midnight.',
+        note: BUDGETS_NOTE,
         default: b.default, projects: b.projects,
     }, null, 2));
 }
-function overBudget(blockCost, todayCost, bud) {
-    return (bud.blockCost > 0 && blockCost >= bud.blockCost) || (bud.todayCost > 0 && todayCost >= bud.todayCost);
+// The 5h block cap only counts while a 5h window is still reported (Claude is
+// retiring it); today$ and $/min are the per-project guards either way.
+function overBudget(blockCost, todayCost, bud, fiveHour = true) {
+    return (fiveHour && bud.blockCost > 0 && blockCost >= bud.blockCost) || (bud.todayCost > 0 && todayCost >= bud.todayCost);
 }
 // Per-session cost velocity ($/min), reused from the soa-usage-alert watchdog's
 // state (it diffs successive 120s polls). Keyed by Claude sessionId → $/min.
@@ -124,7 +130,8 @@ function loadVelocity(usage) {
     for (const s of (usage && usage.data && usage.data.sessions) || []) {
         const p = st.sessions && st.sessions[s.id];
         if (!p || !p.ts || now <= p.ts) continue;
-        const dCost = ((s.block || {}).cost || 0) - (p.costBlock || 0);
+        // today$ delta (survives a retired 5h window); block$ for old state files.
+        const dCost = p.costToday != null ? ((s.today || {}).cost || 0) - p.costToday : ((s.block || {}).cost || 0) - (p.costBlock || 0);
         const dMin = (now - p.ts) / 60000;
         if (dCost > 0 && dMin > 0) vel.set(s.id, dCost / dMin);
     }
@@ -133,7 +140,7 @@ function loadVelocity(usage) {
 
 // tabId → {block,today} cost, by matching the usage engine's per-session cwd to
 // the live tab cwd. Sessions sharing a cwd fold together (same project).
-function costByTabFrom(usage, tabs) {
+function costByTabFrom(usage, tabs, fiveHour = true) {
     const m = new Map();
     const d = usage && usage.data; if (!d) return m;
     const byCwd = new Map();
@@ -143,6 +150,7 @@ function costByTabFrom(usage, tabs) {
         c.block += (s.block || {}).cost || 0; c.today += (s.today || {}).cost || 0;
         byCwd.set(s.cwd, c);
     }
+    if (!fiveHour) for (const c of byCwd.values()) c.block = 0;
     for (const t of (tabs && tabs.tabs) || []) { if (t.cwd && byCwd.has(t.cwd)) m.set(t.id, byCwd.get(t.cwd)); }
     return m;
 }
@@ -151,10 +159,16 @@ function costByTabFrom(usage, tabs) {
 // + per-project block/today cost + $/min velocity + tab correlation + budget
 // verdicts. `over` = cost past budget; `fast` = velocity past burnCost. The
 // throttle targets are `overIds` (over budget) and `hotIds` (over OR fast).
-async function usageView(scope) {
-    const [usage, tabs] = await Promise.all([get('/api/claude-usage'), get('/api/tabs')]);
+async function usageView(scope) {   // scope 'block' falls back to 'today' when the 5h window is retired
+    const [usage, tabs, quota] = await Promise.all([get('/api/claude-usage'), get('/api/tabs'), weeklyGuard.fetchQuota()]);
     const d = usage && usage.data;
     const budgets = loadBudgets();
+    // Weekly guard (account-wide). The cost rows here are Claude sessions, so
+    // Claude's verdict drives the throttle set; Codex is reported alongside.
+    const guard = weeklyGuard.assess(quota, { budgetsDefault: budgets.default });
+    const fiveHour = guard.available ? guard.claude.sessionReported : true;   // feed down → old behaviour
+    const weekThrottle = guard.available && guard.claude.verdict === 'THROTTLE';
+    if (!fiveHour && scope === 'block') scope = 'today';
     const velById = loadVelocity(usage);
     const tabByCwd = new Map();
     for (const t of (tabs && tabs.tabs) || []) {
@@ -185,13 +199,20 @@ async function usageView(scope) {
     const projList = [...pm.values()].map(p => ({
         proj: p.proj, blockCost: p.blockCost, todayCost: p.todayCost, tok: p.tok, burn: p.burn,
         tabIds: [...p.tabIds].sort((a, b) => a - b), bud: p.bud,
-        over: overBudget(p.blockCost, p.todayCost, p.bud),
+        over: overBudget(p.blockCost, p.todayCost, p.bud, fiveHour),
         fast: p.burn >= (p.bud.burnCost || 1.5),
     })).sort((a, b) => scope === 'today' ? b.todayCost - a.todayCost : b.blockCost - a.blockCost);
+    // Weekly THROTTLE → the heaviest spenders today (and anything burning) join
+    // the throttle set even if no single project is over its own cap: the week
+    // is shared, so the biggest burners are where /compact buys the most.
+    const topN = Math.max(1, Number(budgets.default.weekTopN) || 3);
+    const weekHot = new Set(weekThrottle ? projList.filter(p => p.tabIds.length && (p.todayCost > 0 || p.burn > 0))
+        .slice().sort((a, b) => (b.burn - a.burn) || (b.todayCost - a.todayCost)).slice(0, topN).map(p => p.proj) : []);
+    projList.forEach(p => { p.week = weekHot.has(p.proj); });
     const overIds = [...new Set(projList.filter(p => p.over).flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
-    const hotIds = [...new Set(projList.filter(p => p.over || p.fast).flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
+    const hotIds = [...new Set(projList.filter(p => p.over || p.fast || p.week).flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
     const allIds = [...new Set(projList.flatMap(p => p.tabIds))].filter(id => id !== SELF).sort((a, b) => a - b);
-    return { d, budgets, sessRows, projList, overIds, hotIds, allIds };
+    return { d, budgets, sessRows, projList, overIds, hotIds, allIds, guard, fiveHour, weekThrottle, scope };
 }
 
 // ── Manager-agent helpers ────────────────────────────────────────────────────
@@ -275,8 +296,10 @@ function fmtList(snap, costByTab) {
             const r = await post({ action: 'list' });
             let costByTab;
             if (r.ok && (hasFlag('--cost') || hasFlag('-$'))) {
-                const [usage, tabs] = await Promise.all([get('/api/claude-usage'), get('/api/tabs')]);
-                costByTab = costByTabFrom(usage, tabs);
+                const [usage, tabs, quota] = await Promise.all([get('/api/claude-usage'), get('/api/tabs'), weeklyGuard.fetchQuota()]);
+                // /5h only while Claude still reports a 5h window; else today's $.
+                const g = quota ? weeklyGuard.assess(quota) : null;
+                costByTab = costByTabFrom(usage, tabs, g && g.available ? g.claude.sessionReported : true);
             }
             console.log(r.ok ? fmtList(r, costByTab) : JSON.stringify(r));
             process.exit(r.ok ? 0 : 1);
@@ -579,46 +602,65 @@ function fmtList(snap, costByTab) {
         // within the usage limit. --over / --ids <over|hot|all> print just the
         // tab ids (for fan-out); --by session for detail; --json for raw.
         if (cmd === 'usage') {
-            const scope = argval('--scope') === 'today' ? 'today' : 'block';
             const by = argval('--by') || 'project';
-            const { d, budgets, sessRows, projList, overIds, hotIds, allIds } = await usageView(scope);
+            const v = await usageView(argval('--scope') === 'today' ? 'today' : 'block');
+            const { d, budgets, sessRows, projList, overIds, hotIds, allIds, guard, fiveHour, weekThrottle, scope } = v;
             if (!d || !d.hasData) { console.log(hasFlag('--over') || argval('--ids') ? '' : '(no usage data — is the daemon up?)'); process.exit(0); }
             if (hasFlag('--over')) { console.log(overIds.join(',')); process.exit(0); }
             if (argval('--ids')) { const w = argval('--ids'); console.log((w === 'hot' ? hotIds : w === 'all' ? allIds : overIds).join(',')); process.exit(0); }
-            if (hasFlag('--json')) { console.log(JSON.stringify({ scope, block: d.block, today: d.today, projects: projList, sessions: sessRows, budgets, overIds, hotIds }, null, 2)); process.exit(0); }
+            if (hasFlag('--json')) { console.log(JSON.stringify({ scope, fiveHour, week: { claude: guard.claude, codex: guard.codex, thresholds: guard.thresholds, available: guard.available }, block: d.block, today: d.today, weekCost: d.week, projects: projList, sessions: sessRows, budgets, overIds, hotIds }, null, 2)); process.exit(0); }
             const b = d.block || {};
             const reset = b.active ? new Date(b.endTs) : null;
             const hhmm = dt => dt ? dt.getHours() + ':' + String(dt.getMinutes()).padStart(2, '0') : '—';
             const fleetFast = (b.burnRatePerMin || 0) >= 800000;   // fleet tok/min heuristic
-            const throttle = overIds.length || hotIds.length || fleetFast;
-            console.log(`USAGE · 5h ${_fmtUsd(b.cost || 0)} · burn ${_fmtTok(b.burnRatePerMin || 0)}tok/min · ${Math.round(b.pct || 0)}% elapsed · resets ${hhmm(reset)} · proj ${_fmtUsd(b.projectedCost || 0)} · today ${_fmtUsd((d.today || {}).cost || 0)}${throttle ? '   ⚠ THROTTLE' : ''}`);
-            console.log(`budgets: default ${_fmtUsd(budgets.default.blockCost)}/5h · ${_fmtUsd(budgets.default.todayCost)}/day · ${_fmtUsd(budgets.default.burnCost)}/min  (soa-sessions budget set <project> <blk> [day])`);
+            const throttle = overIds.length || hotIds.length || fleetFast || weekThrottle;
+            // WEEKLY first: it is the limit that stops work now that the 5h one is retiring.
+            if (guard.available) {
+                console.log(`WEEK · ${weeklyGuard.describe('claude', guard.claude)}   |   ${weeklyGuard.describe('codex', guard.codex)}${weekThrottle ? '   ⚠ THROTTLE' : ''}`);
+            } else console.log('WEEK · (quota service unreachable — weekly guard unknown)');
+            const five = fiveHour ? `5h ${_fmtUsd(b.cost || 0)} · ${Math.round(b.pct || 0)}% elapsed · resets ${hhmm(reset)} · proj ${_fmtUsd(b.projectedCost || 0)} · ` : '';
+            console.log(`USAGE · ${five}today ${_fmtUsd((d.today || {}).cost || 0)} · 7d ${_fmtUsd((d.week || {}).cost || 0)} · burn ${_fmtTok(b.burnRatePerMin || 0)}tok/min${throttle ? '   ⚠ THROTTLE' : ''}`);
+            const bd = budgets.default;
+            console.log(`budgets: default ${fiveHour ? _fmtUsd(bd.blockCost) + '/5h · ' : ''}${_fmtUsd(bd.todayCost)}/day · ${_fmtUsd(bd.burnCost)}/min · week proj ≥${guard.thresholds.projectedPct}% → THROTTLE  (budget set <project> <blk> [day] · budget week <pct>)`);
+            const head = first => '  ' + first + (fiveHour ? '5h$'.padStart(8) : '') + 'day$'.padStart(8) + '$/min'.padStart(8) + '  status';
+            const cells = r => (fiveHour ? _fmtUsd(r.blockCost).padStart(8) : '') + _fmtUsd(r.todayCost).padStart(8) + (r.burn ? _fmtUsd(r.burn) : '—').padStart(8);
             if (by === 'session') {
-                console.log('  ' + 'session'.padEnd(22) + 'tab'.padEnd(9) + '5h$'.padStart(8) + 'day$'.padStart(8) + '$/min'.padStart(8) + '  status');
+                console.log(head('session'.padEnd(22) + 'tab'.padEnd(9)));
                 for (const r of sessRows.slice().sort((a, c) => scope === 'today' ? c.todayCost - a.todayCost : c.blockCost - a.blockCost)) {
-                    const over = overBudget(r.blockCost, r.todayCost, r.bud), fast = r.burn >= (r.bud.burnCost || 1.5);
+                    const over = overBudget(r.blockCost, r.todayCost, r.bud, fiveHour), fast = r.burn >= (r.bud.burnCost || 1.5);
                     const nm = (r.proj + (r.slug ? ' · ' + r.slug.split('-')[0] : '')).slice(0, 21);
                     const tab = r.tabIds.length ? '#' + r.tabIds.join(',#') : '—';
-                    console.log('  ' + (over || fast ? '⚠ ' : '  ') + nm.padEnd(20) + tab.slice(0, 8).padEnd(9) + _fmtUsd(r.blockCost).padStart(8) + _fmtUsd(r.todayCost).padStart(8) + (r.burn ? _fmtUsd(r.burn) : '—').padStart(8) + '  ' + (over ? 'OVER' : fast ? 'FAST' : 'ok'));
+                    console.log('  ' + (over || fast ? '⚠ ' : '  ') + nm.padEnd(20) + tab.slice(0, 8).padEnd(9) + cells(r) + '  ' + (over ? 'OVER' : fast ? 'FAST' : 'ok'));
                 }
             } else {
-                console.log('  ' + 'project'.padEnd(18) + 'tabs'.padEnd(11) + '5h$'.padStart(8) + 'day$'.padStart(8) + '$/min'.padStart(8) + '  status');
+                console.log(head('project'.padEnd(18) + 'tabs'.padEnd(11)));
                 for (const p of projList) {
                     const tab = p.tabIds.length ? '#' + p.tabIds.join(',#') : '—';
-                    console.log('  ' + (p.over || p.fast ? '⚠ ' : '  ') + p.proj.slice(0, 16).padEnd(18) + tab.slice(0, 10).padEnd(11) + _fmtUsd(p.blockCost).padStart(8) + _fmtUsd(p.todayCost).padStart(8) + (p.burn ? _fmtUsd(p.burn) : '—').padStart(8) + '  ' + (p.over ? `OVER(${_fmtUsd(p.bud.blockCost)}/${_fmtUsd(p.bud.todayCost)})` : p.fast ? 'FAST' : 'ok'));
+                    const cap = fiveHour ? `${_fmtUsd(p.bud.blockCost)}/${_fmtUsd(p.bud.todayCost)}` : `${_fmtUsd(p.bud.todayCost)}/day`;
+                    console.log('  ' + (p.over || p.fast || p.week ? '⚠ ' : '  ') + p.proj.slice(0, 16).padEnd(18) + tab.slice(0, 10).padEnd(11) + cells(p) + '  ' + (p.over ? `OVER(${cap})` : p.fast ? 'FAST' : p.week ? 'WEEK' : 'ok'));
                 }
             }
             if (throttle) {
                 const ids = (hotIds.length ? hotIds : overIds).join(',');
-                console.log(`\n⚠ approaching/over budget → THROTTLE, never stop:  soa-sessions throttle ${ids || 'hot'}`);
+                const why = weekThrottle ? `weekly projected ${weeklyGuard.pct(guard.claude.weekly.projected)} at reset` : 'approaching/over budget';
+                console.log(`\n⚠ ${why} → THROTTLE, never stop:  soa-sessions throttle ${ids || 'hot'}`);
                 console.log(`  /compact keeps work going at a lower burn · add --pause to interrupt + auto-resume the fastest`);
-            } else console.log('\n✓ within budget · fleet not burning fast');
+            } else console.log('\n✓ within budget · week on track · fleet not burning fast');
             process.exit(0);
         }
         // budget — view/set per-project caps (USD est.): list | set <project|default> <blockCost> [todayCost]
         if (cmd === 'budget') {
             const sub = rest[0] || 'list';
             const budgets = loadBudgets();
+            if (sub === 'week') {
+                // budget week <projectedPct> [warnPct] — the weekly guard's verdict line
+                const pp = parseFloat(rest[1]), wp = rest[2] != null ? parseFloat(rest[2]) : undefined;
+                if (!Number.isFinite(pp)) { console.error('usage: soa-sessions budget week <projectedPct> [warnPct]'); process.exit(1); }
+                budgets.default = { ...budgets.default, weekProjectedPct: pp, ...(Number.isFinite(wp) ? { weekWarnPct: wp } : {}) };
+                try { saveBudgets(budgets); } catch (e) { console.error('budget save failed:', e.message); process.exit(1); }
+                console.log(`set weekly guard: ${JSON.stringify({ weekProjectedPct: budgets.default.weekProjectedPct, weekWarnPct: budgets.default.weekWarnPct })}`);
+                process.exit(0);
+            }
             if (sub === 'set') {
                 const name = rest[1], blk = parseFloat(rest[2]), day = rest[3] != null ? parseFloat(rest[3]) : undefined;
                 if (!name || !Number.isFinite(blk)) { console.error('usage: soa-sessions budget set <project|default> <blockCost> [todayCost]'); process.exit(1); }
@@ -669,7 +711,7 @@ function fmtList(snap, costByTab) {
             process.exit(0);
         }
         console.error('usage: soa-sessions list [--cost] | read <id> [lines] | send <id> <text> | say <id> <text> | compact <id>\n' +
-                      '       usage [--by project|session] [--scope block|today] [--over|--ids hot|all|over|--json] | budget [list|set <proj|default> <blk> [day]]\n' +
+                      '       usage [--by project|session] [--scope block|today] [--over|--ids hot|all|over|--json] | budget [list|set <proj|default> <blk> [day]|week <projPct> [warnPct]]\n' +
                       '       throttle <id|list|over|hot|all> [--pause [Nm]] [--dry-run]   (never stops — /compact or interrupt+auto-resume)\n' +
                       '       schedule <id|all|limited> <+15m|2:30am|epochMs> [text] | resume-all [when] [text]\n' +
                       '       schedules | unschedule <scheduleId> | config autoResume on|off | config closeInactive on|off | config text <text>\n' +

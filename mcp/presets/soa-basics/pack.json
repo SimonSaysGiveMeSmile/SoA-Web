@@ -1,0 +1,15 @@
+{
+  "name": "soa-basics",
+  "version": "1.0.0",
+  "description": "How to work well inside Son of Anton: claim before you edit, message the user sparingly, keep the context canvas current.",
+  "author": "SoA-Web contributors",
+  "license": "MIT",
+  "snippets": {
+    "soa-claim-wrap": {
+      "title": "Run a command under a soa-work claim",
+      "language": "shell",
+      "description": "Claim a scope, run a command, always release, refuse on conflict.",
+      "tags": ["soa", "soa-work", "coordination"]
+    }
+  }
+}

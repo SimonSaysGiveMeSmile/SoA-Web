@@ -130,52 +130,149 @@ function saveManagerState(st) {
     } catch (_) { /* best-effort */ }
 }
 
-// Next wall-clock occurrence of H:MM am/pm, as epoch ms (server-local time).
-function nextOccurrence(h12, min, ampm, now = Date.now()) {
-    let h = h12 % 12;
-    if (/pm/i.test(ampm)) h += 12;
-    const d = new Date(now);
-    d.setHours(h, min, 0, 0);
-    if (d.getTime() <= now) d.setTime(d.getTime() + 24 * 60 * 60 * 1000);
-    return d.getTime();
-}
-
 // ── Usage-limit banners: Claude Code AND Codex CLI ────────────────────────────
 // Claude Code (cli.js Rd()):
 //   "You've hit your session limit · resets 9pm (America/Los_Angeles)"
 //   >24h out: "… weekly limit · resets Sep 4, 6pm (…)" (year appended if it differs)
-//   fast tier: "… fast limit · resets in 2h 15m"
+//   all-models weekly cap (the 5h session limit is being retired):
+//     "You've hit your weekly limit · resets Nov 3, 5pm (America/Los_Angeles)"
+//     "You've hit your Opus weekly limit · resets Nov 3 at 5pm"
+//   older wording: "Opus weekly limit reached ∙ resets Oct 9, 10am",
+//     "5-hour limit reached ∙ resets 2am", "Claude usage limit reached. Your limit
+//     will reset at 5pm (America/Los_Angeles)."
+//   fast tier: "… fast limit · resets in 2h 15m" (weekly: "resets in 3d 4h")
 // Codex CLI (tui):
 //   "■ You've hit your usage limit. Upgrade to Plus to continue using Codex (…), or try
 //    again at Sep 30th, 2026 3:09 AM."   ← wraps mid-sentence at the terminal width,
 //   so every gap is \s+; "try again at" is the Codex tell, "resets" the Claude one.
 //   Admin-managed: "You've hit your usage limit. To get more access now, send a request
 //   to your admin" (no reset time — flagged limited, nothing to schedule).
-const TIME_PHRASE = String.raw`(?:[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+(?:\d{4},?\s+)?(?:at\s+)?)?\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]`;
-const CLAUDE_LIMIT_RE = new RegExp(String.raw`hit your (?:[a-z-]+ ){0,2}limit\b[\s\S]{0,120}?resets\s+(in\s+(?:\d+\s*h(?:ours?)?\s*)?(?:\d+\s*m(?:in(?:ute)?s?)?)?|${TIME_PHRASE})`, 'ig');
-const CODEX_LIMIT_RE  = new RegExp(String.raw`hit your usage limit\b[\s\S]{0,320}?try\s+again\s+at\s+(${TIME_PHRASE})`, 'ig');
+// A trailing "(Area/City)" names the zone the wall time is in; it is honoured even
+// when the daemon runs in a different zone, and DST is resolved in THAT zone.
+const MD_PHRASE = String.raw`[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?`;
+const WD_PHRASE = String.raw`(?:mon|tue|tues|wed|wednes|thu|thur|thurs|fri|sat|satur|sun)(?:day)?\.?`;
+const CLOCK_PHRASE = String.raw`\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?|\d{1,2}:\d{2}(?!\d)`;
+const TIME_PHRASE = String.raw`(?:(?:${MD_PHRASE}|${WD_PHRASE}),?\s+(?:at\s+)?)?(?:${CLOCK_PHRASE})|${MD_PHRASE}`;
+const REL_PHRASE = String.raw`in\s+(?:\d+\s*d(?:ays?)?,?\s*)?(?:\d+\s*h(?:(?:ou)?rs?)?,?\s*)?(?:\d+\s*m(?:in(?:ute)?s?)?)?`;
+const TZ_SUFFIX = String.raw`(?:\s*\(\s*([A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+){0,2})\s*\))?`;
+// "hit/reached your [opus weekly] limit" | "[Claude usage|Opus weekly|5-hour] limit reached".
+// The "… limit reached" form only with a quota-window qualifier: a bare "Rate
+// limit reached … resets at 17:00" in an API error or tool output is not a cap.
+const LIMIT_LEAD = String.raw`(?:(?:hit|reached)\s+your\s+(?:[a-z0-9-]+\s+){0,3}limit|\b(?:(?:claude|opus|sonnet|haiku|fable)\s+)?(?:usage|weekly|5-hour|five-hour|session|daily|fast)(?:\s+usage)?\s+limit\s+reached)\b`;
+const CLAUDE_LIMIT_RE = new RegExp(String.raw`${LIMIT_LEAD}[\s\S]{0,120}?(?:resets|(?:will\s+)?reset)(?:\s+(?:at|on))?\s+(${REL_PHRASE}|${TIME_PHRASE})${TZ_SUFFIX}`, 'ig');
+const CODEX_LIMIT_RE  = new RegExp(String.raw`hit your usage limit\b[\s\S]{0,320}?try\s+again\s+at\s+(${TIME_PHRASE})${TZ_SUFFIX}`, 'ig');
 const CODEX_LIMIT_NOTIME_RE = /hit your usage limit\.\s+To get more access/ig;
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+const WEEKDAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 const H = 3600_000;
+const D = 24 * H;
 
-// "9pm" | "9:30pm" | "Sep 4, 6pm" | "Sep 30th, 2026 3:09 AM" | "in 2h 15m" → epoch ms (null if unparsable)
-function parseResetTime(phrase, now = Date.now()) {
+// Wall-clock arithmetic in a named IANA zone (undefined = the daemon's own zone).
+const _dtfCache = new Map();
+function _dtf(tz) {
+    const key = tz || '';
+    let f = _dtfCache.get(key);
+    if (!f) {
+        f = new Intl.DateTimeFormat('en-US', { timeZone: tz || undefined, hourCycle: 'h23', weekday: 'short',
+            year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' });
+        _dtfCache.set(key, f);
+    }
+    return f;
+}
+function validTz(tz) {
+    if (!tz || typeof tz !== 'string') return undefined;
+    try { _dtf(tz); return tz; } catch (_) { return undefined; }
+}
+function wallParts(ts, tz) {
+    const o = {};
+    for (const p of _dtf(tz).formatToParts(new Date(ts))) o[p.type] = p.value;
+    return { y: +o.year, mo: +o.month - 1, d: +o.day, h: +o.hour % 24, mi: +o.minute, s: +o.second,
+        wd: WEEKDAYS[String(o.weekday).slice(0, 3).toLowerCase()] };
+}
+function tzOffsetMs(ts, tz) {
+    const p = wallParts(ts, tz);
+    return Date.UTC(p.y, p.mo, p.d, p.h, p.mi, p.s) - Math.floor(ts / 1000) * 1000;
+}
+// Wall time (y, mo, d, h, mi) in `tz` → epoch ms. Day/month overflow normalises
+// (d = 32 → next month). Fall-back ambiguity resolves to the first occurrence;
+// a spring-forward gap time lands on the hour after.
+function zonedEpoch(y, mo, d, h, mi, tz) {
+    const guess = Date.UTC(y, mo, d, h, mi, 0, 0);
+    const o1 = tzOffsetMs(guess - 12 * H, tz), o2 = tzOffsetMs(guess + 12 * H, tz);
+    const a = guess - o1, b = guess - o2;
+    // Prefer the candidate whose wall time reads back exactly (earliest if both do).
+    const ok = t => { const p = wallParts(t, tz); return p.h === new Date(guess).getUTCHours() && p.mi === new Date(guess).getUTCMinutes(); };
+    const okA = ok(a), okB = ok(b);
+    if (okA && okB) return Math.min(a, b);
+    if (okA) return a;
+    if (okB) return b;
+    return Math.max(a, b);      // nonexistent (DST gap) → the later instant
+}
+
+// Next wall-clock occurrence of H:MM am/pm, as epoch ms (in `tz`, default server-local).
+function nextOccurrence(h12, min, ampm, now = Date.now(), tz) {
+    let h = h12 % 12;
+    if (/pm/i.test(ampm)) h += 12;
+    return nextWall(h, min, now, tz);
+}
+function nextWall(h, min, now, tz) {
+    const p = wallParts(now, tz);
+    let t = zonedEpoch(p.y, p.mo, p.d, h, min, tz);
+    if (t <= now) t = zonedEpoch(p.y, p.mo, p.d + 1, h, min, tz);   // tomorrow's wall clock, not +24h (DST)
+    return t;
+}
+
+// "9pm" | "9:30pm" | "17:00" | "Sep 4, 6pm" | "Nov 3 at 5pm" | "Mon 5pm" | "Nov 3"
+// | "Sep 30th, 2026 3:09 AM" | "in 2h 15m" | "in 3d 4h" → epoch ms (null if unparsable).
+// `tz` is the banner's "(Area/City)" suffix; unknown/absent → the daemon's zone.
+function parseResetTime(phrase, now = Date.now(), tz) {
+    tz = validTz(tz);
     const t = String(phrase || '').replace(/\s+/g, ' ').trim();
     let m;
-    if ((m = t.match(/^in\s+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i)) && (m[1] || m[2])) {
-        return now + (+(m[1] || 0)) * H + (+(m[2] || 0)) * 60_000;
+    if ((m = t.match(/^in\s+(?:(\d+)\s*d(?:ays?)?,?\s*)?(?:(\d+)\s*h(?:(?:ou)?rs?)?,?\s*)?(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i)) && (m[1] || m[2] || m[3])) {
+        return now + (+(m[1] || 0)) * D + (+(m[2] || 0)) * H + (+(m[3] || 0)) * 60_000;
     }
-    m = t.match(/^(?:([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4}),?\s+)?(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]/);
-    if (!m) return null;
-    const h12 = +m[4], min = +(m[5] || 0), ampm = m[6].toLowerCase() === 'p' ? 'pm' : 'am';
-    if (!m[1]) return nextOccurrence(h12, min, ampm, now);
-    const mon = MONTHS[m[1].toLowerCase()];
-    if (mon == null) return null;
-    let h = h12 % 12; if (ampm === 'pm') h += 12;
-    const year = m[3] ? +m[3] : new Date(now).getFullYear();
-    const d = new Date(year, mon, +m[2], h, min, 0, 0);
-    if (!m[3] && d.getTime() < now - 12 * H) d.setFullYear(year + 1);   // undated month/day already past → next year
-    return d.getTime();
+    m = t.match(/^(?:(?:([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?|([A-Za-z]{3})[A-Za-z]*\.?),?\s+(?:at\s+)?)?(?:(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]|(\d{1,2}):(\d{2}))/);
+    let h = 0, min = 0, hasClock = false;
+    if (m) {
+        hasClock = true;
+        if (m[7]) { h = (+m[5]) % 12 + (m[7].toLowerCase() === 'p' ? 12 : 0); min = +(m[6] || 0); }
+        else { h = +m[8]; min = +m[9]; }
+        if (h > 23 || min > 59) return null;
+    } else {
+        m = t.match(/^([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\s*$/);   // date only → midnight
+        if (!m) return null;
+    }
+    const monKey = m[1] && m[1].toLowerCase();
+    if (monKey && MONTHS[monKey] != null) {
+        const mon = MONTHS[monKey], day = +m[2];
+        if (day < 1 || day > 31) return null;
+        if (m[3]) return zonedEpoch(+m[3], mon, day, h, min, tz);
+        // Undated month/day: the year that puts it NEAREST to now. A weekly reset
+        // is at most days away, so "Jan 2" seen on Dec 30 is next year — but a
+        // reset that has already passed stays in the past (stale banner), it
+        // never jumps a year ahead and re-arms a resume for next November.
+        const y = wallParts(now, tz).y;
+        let best = null;
+        for (const yy of [y - 1, y, y + 1]) {
+            const c = zonedEpoch(yy, mon, day, h, min, tz);
+            if (best == null || Math.abs(c - now) < Math.abs(best - now)) best = c;
+        }
+        return best;
+    }
+    if (monKey) return null;                                  // "Foo 5" — not a month
+    const wdKey = m[4] && m[4].toLowerCase().slice(0, 3);
+    if (wdKey) {
+        const wd = WEEKDAYS[wdKey];
+        if (wd == null || !hasClock) return null;
+        const p = wallParts(now, tz);
+        let c = zonedEpoch(p.y, p.mo, p.d + ((wd - p.wd + 7) % 7), h, min, tz);
+        // Same weekday, already passed: within 12h it is the reset that just
+        // happened (stale banner) — beyond that it means next week.
+        if (c < now - 12 * H) c = zonedEpoch(p.y, p.mo, p.d + ((wd - p.wd + 7) % 7) + 7, h, min, tz);
+        return c;
+    }
+    return nextWall(h, min, now, tz);
 }
 
 function lastMatch(re, text) {
@@ -185,28 +282,60 @@ function lastMatch(re, text) {
     return last;
 }
 
-// Newest limit banner in the (ANSI-stripped) tail → { agent, resetAt, label } | null.
+// Which window a banner names: 'weekly' | 'opus weekly' | 'sonnet weekly' |
+// 'session' (incl. "5-hour") | 'fast' | 'usage' | … | null when it names none.
+function limitWindow(label) {
+    const s = String(label || '').replace(/\s+/g, ' ');
+    const m = s.match(/(?:hit|reached) your ((?:[a-z0-9-]+ ){0,3})limit/i) || s.match(/((?:[a-z0-9-]+ ){0,3})limit reached/i);
+    if (!m) return null;
+    const words = m[1].trim().toLowerCase().split(' ').filter(w => w && !/^(?:claude|the|your|you've|you|have|'ve)$/.test(w));
+    if (!words.length) return null;
+    if (words.includes('weekly') || words.includes('week')) {
+        const model = words.find(w => /^(?:opus|sonnet|haiku|fable)$/.test(w));
+        return model ? `${model} weekly` : 'weekly';
+    }
+    if (words.some(w => /^(?:session|5-hour|5h|five-hour)$/.test(w))) return 'session';
+    return words[words.length - 1];
+}
+
+// Newest limit banner in the (ANSI-stripped) tail → { agent, resetAt, label, window, tz } | null.
 function detectLimit(plain, now = Date.now()) {
     const hits = [];
     const cx = lastMatch(CODEX_LIMIT_RE, plain);
-    if (cx) hits.push({ agent: 'codex', idx: cx.index, resetAt: parseResetTime(cx[1], now), label: cx[0] });
+    if (cx) hits.push({ agent: 'codex', idx: cx.index, resetAt: parseResetTime(cx[1], now, cx[2]), label: cx[0], tz: validTz(cx[2]) || null, relative: false });
     const cn = lastMatch(CODEX_LIMIT_NOTIME_RE, plain);
-    if (cn) hits.push({ agent: 'codex', idx: cn.index, resetAt: null, label: cn[0] });
+    if (cn) hits.push({ agent: 'codex', idx: cn.index, resetAt: null, label: cn[0], tz: null });
     const cl = lastMatch(CLAUDE_LIMIT_RE, plain);
-    if (cl) hits.push({ agent: 'claude', idx: cl.index, resetAt: parseResetTime(cl[1], now), label: cl[0] });
+    if (cl) hits.push({ agent: 'claude', idx: cl.index, resetAt: parseResetTime(cl[1], now, cl[2]), label: cl[0], tz: validTz(cl[2]) || null, relative: /^in\s/i.test(cl[1]) });
     if (!hits.length) return null;
     hits.sort((a, b) => b.idx - a.idx);
     const h = hits[0];
-    return { agent: h.agent, resetAt: h.resetAt, label: h.label.replace(/\s+/g, ' ').slice(0, 120) };
+    const label = h.label.replace(/\s+/g, ' ').slice(0, 120);
+    return { agent: h.agent, resetAt: h.resetAt, label, window: limitWindow(h.label) || (h.agent === 'codex' ? 'usage' : null), tz: h.tz, relative: !!h.relative };
+}
+
+// Two parses of one banner name the same reset. A relative banner ("resets in
+// 3d 4h") is re-anchored to `now` on every repaint and its countdown ticks, so
+// the instants drift by up to a minute or two between paints.
+const SAME_RESET_MS = 5 * 60_000;
+function sameReset(a, b) {
+    if (a == null || b == null) return a == null && b == null;
+    return Math.abs(a - b) <= SAME_RESET_MS;
 }
 
 // A TUI keeps the banner on screen (and re-paints it into the stream) long after
 // the reset it names has passed. Re-parsing "resets 9pm" at 9:02pm yields TOMORROW
 // 9pm — which used to re-arm the auto-resume a day out and re-fire `limited`.
+// Dated weekly banners ("resets Nov 3, 5pm") resolve to the PAST once the reset
+// has gone by, so they are stale by the first rule for as long as they linger.
 // `ref` is the current or most recently lifted limit for the tab.
 function isStaleBanner(det, ref, now = Date.now()) {
     if (det.resetAt != null && det.resetAt <= now) return true;          // absolute time already behind us
     if (!ref) return false;
+    // A relative banner ("resets in 3d 4h") re-parses to now + 3d 4h on every
+    // repaint, so its instant keeps sliding — identical TEXT is the identity. It
+    // is a fresh cap only once real work has happened since (lifted by 'working').
+    if (det.relative && ref.label === det.label && ref.liftedBy !== 'working' && !ref.workedSince) return true;
     if (det.resetAt == null) return ref.resetAt == null && ref.label === det.label;
     if (ref.resetAt != null && now >= ref.resetAt && now - ref.resetAt < 12 * H
         && Math.abs((det.resetAt - ref.resetAt) - 24 * H) < 2 * H) return true;   // same wall-clock, rolled to tomorrow
@@ -1582,6 +1711,7 @@ class SessionManager {
             // so keep the limit (and its replay queue); _fireDue's sweep lifts it if
             // the work genuinely persists (e.g. /usage-credits).
             if (next === 'working' && s.limit && s.limit.resetAt != null && Date.now() >= s.limit.resetAt) this._liftLimit(id, s, 'working');
+            else if (next === 'working' && !s.limit && s.limitPrev) s.limitPrev.workedSince = true;   // a later identical relative banner is a new cap
             // Leaving 'working' re-arms the stuck latch for the next episode.
             if (next !== 'working') this._stuckEmitted.delete(id);
             this._emit(next, id, { from: prev, to: next, ctxPct: s.ctxPct });
@@ -1613,12 +1743,12 @@ class SessionManager {
         if (det) {
             const now = Date.now();
             const cur = s.limit, prev = s.limitPrev;
-            const same = l => l && l.agent === det.agent && l.resetAt === det.resetAt && (det.resetAt != null || l.label === det.label);
+            const same = l => l && l.agent === det.agent && ((det.relative && l.label === det.label) || (sameReset(l.resetAt, det.resetAt) && (det.resetAt != null || l.label === det.label)));
             if (same(cur)) { /* same episode, banner merely re-painted */ }
-            else if (same(prev) && prev.liftedBy !== 'working' && !(prev.resetAt != null && now >= prev.resetAt)) {
+            else if (same(prev) && prev.liftedBy !== 'working' && !(det.relative && prev.workedSince) && !(prev.resetAt != null && now >= prev.resetAt)) {
                 s.limit = prev; s.limitPrev = null;    // lifted too eagerly — restore silently (no re-emit, no re-arm)
             } else if (!isStaleBanner(det, cur || prev, now)) {
-                s.limit = { agent: det.agent, resetAt: det.resetAt, label: det.label, at: now, queued: [] };
+                s.limit = { agent: det.agent, resetAt: det.resetAt, label: det.label, window: det.window || null, at: now, queued: [] };
                 s.limitPrev = null;
                 if (det.agent && det.agent !== s.agent) { s.agent = det.agent; if (tab) tab.agent = det.agent; }
                 // The prompt the user just submitted is what the banner rejected.
@@ -1843,6 +1973,7 @@ class SessionManager {
                 limited: !!s.limit,
                 limitResetAt: s.limit ? s.limit.resetAt : null,
                 limitAgent: s.limit ? s.limit.agent : null,
+                limitWindow: s.limit ? (s.limit.window || null) : null,   // 'weekly' | 'session' | 'opus weekly' | 'usage' | …
                 limitQueued: s.limit && Array.isArray(s.limit.queued) ? s.limit.queued.length : 0,
                 resumeAt: sched ? sched.at : null,
             };
@@ -2452,7 +2583,7 @@ function mount(app, requireAuthed, sessions) {
 module.exports = {
     SessionManager, ensure, mount,
     classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
-    detectLimit, parseResetTime, isStaleBanner, detectAgentKind, agentForCwd, sessionMaps, resumeLineFor,
+    detectLimit, parseResetTime, isStaleBanner, limitWindow, sameReset, detectAgentKind, agentForCwd, sessionMaps, resumeLineFor,
     resolveCohort, activeOnlyIds, makeEventFilter, isLocalRequest, autoGroupFromCwd,
     // Meeting pure helpers — exported for the same reason resolveCohort is: the
     // rules that decide who gets prompted must be testable without a daemon.
