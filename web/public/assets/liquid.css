@@ -106,8 +106,7 @@
    refract, AND an absolute overlay (manager / tiles) fully occludes the
    terminal layer beneath it. A bare `transparent` here let live terminals
    bleed through the fleet view. Shell/welcome stay clear to reveal the body. */
-[data-ui="liquid"] .shell,
-[data-ui="liquid"] .welcome { background: transparent; }
+[data-ui="liquid"] .shell { background: transparent; }
 [data-ui="liquid"] .terms,
 [data-ui="liquid"] .tiles-grid,
 [data-ui="liquid"] .meet-view,
@@ -493,21 +492,14 @@ html[data-load="high"][data-ui="liquid"] .tab.active::after { animation: none; }
 [data-ui="liquid"] .pv-notice { border-radius: var(--lq-r); border: 1px solid var(--soa-line); background: var(--lq-glass); }
 
 /* ═══ Welcome / wizard ═════════════════════════════════════════════════ */
-[data-ui="liquid"] :is(.welcome-title, .mwel-title) {
+/* The first-run welcome paints its own ground and palette (--w-* in
+   styles.css), so only the companion title is skinned here. */
+[data-ui="liquid"] .mwel-title {
   font-family: var(--font-display); font-weight: 700; letter-spacing: -0.02em;
   text-transform: none; text-shadow: 0 2px 40px rgba(255,255,255,0.2); color: var(--soa-fg);
 }
 [data-ui="liquid"] .mwel::before { display: none; }   /* the TRON grid is TRON's */
 [data-ui="liquid"] .mwel-head { border-bottom-color: var(--soa-line); box-shadow: none; }
-[data-ui="liquid"] .wiz-primary {
-  background: var(--lq-tint); border: 1px solid var(--lq-tint); color: #fff;
-  border-radius: var(--lq-pill); font-family: var(--font-display); font-weight: 640;
-  box-shadow: 0 8px 30px rgba(var(--lq-tint-rgb),0.36);
-  transition: transform var(--lq-ease), box-shadow var(--lq-ease), background var(--lq-ease);
-}
-[data-ui="liquid"] .wiz-primary:hover { transform: translateY(-1px); background: var(--lq-tint-press); box-shadow: 0 12px 44px rgba(var(--lq-tint-rgb),0.5); }
-[data-ui="liquid"] .wiz-primary:active { transform: scale(0.98); }
-[data-ui="liquid"] .welcome-cmd { background: rgba(10,10,14,0.6); color: #e8e8ea; border-radius: var(--lq-r-sm); }
 
 /* ═══ Toasts / notes / mobile-sim ══════════════════════════════════════ */
 [data-ui="liquid"] .widget-note { color: var(--lq-ink-2); font-family: var(--font-display); }

@@ -424,8 +424,8 @@
 [data-ui="minimal"] .pv-notice { border-radius: var(--m-r); border: 1px solid var(--soa-line); background: var(--soa-bg-panel); }
 
 /* ── Welcome surfaces ── */
-[data-ui="minimal"] .welcome { background: var(--soa-bg); }
-[data-ui="minimal"] .welcome-title,
+/* The first-run welcome paints its own ground and palette (--w-* in
+   styles.css); only the companion title is skinned here. */
 [data-ui="minimal"] .mwel-title {
   font-family: var(--font-display); font-weight: 700;
   letter-spacing: -0.02em; text-transform: lowercase;
@@ -433,13 +433,6 @@
 }
 [data-ui="minimal"] .mwel::before { display: none; }   /* the Tron grid is TRON's */
 [data-ui="minimal"] .mwel-head { border-bottom-color: var(--soa-line); box-shadow: none; }
-[data-ui="minimal"] .wiz-primary {
-  background: var(--m-accent); border-color: var(--m-accent); color: #fff;
-  border-radius: var(--m-r-sm); font-family: var(--font-display); font-weight: 600;
-  box-shadow: var(--m-shadow);
-}
-[data-ui="minimal"] .wiz-primary:hover { background: #0a6c62; }
-[data-ui="minimal"] .welcome-cmd { background: var(--m-slate); color: #d9dee7; border-radius: var(--m-r-sm); }
 
 /* ── Toasts / notes ── */
 [data-ui="minimal"] .widget-note { color: var(--soa-accent-dim); font-family: var(--font-display); }
