@@ -1,0 +1,1159 @@
+#!/usr/bin/env node
+/**
+ * soa-health — system health monitor for the Mac running Son of Anton.
+ *
+ * Samples CPU, memory, load, swap and temperature on an interval (default 60 s),
+ * finds processes that stay heavy (sustained CPU, a large resident set, or a
+ * leak-shaped growth curve), and either NOTIFIES the user with a one-tap
+ * "terminate" link (the default) or, only when the user deliberately turns it
+ * on, terminates them automatically. Monitoring can be switched on and off
+ * from the dashboard, the phone (through the daemon's /preview/<port>/ proxy,
+ * behind the same pairing gate as everything else) or this CLI.
+ *
+ * A loopback-only service (default 127.0.0.1:6084). No daemon restart, no sudo,
+ * no new permission: temperatures come from scripts/soa-thermal.swift (compiled
+ * on first use into the state dir), which reads ProcessInfo.thermalState and
+ * the IOHIDEventSystem temperature sensors, and falls back to thermal state /
+ * battery temperature only.
+ *
+ * HTTP API (JSON; see docs/soa-health.md for every field):
+ *     GET  /health             liveness, direct loopback only (no proxy headers)
+ *     GET  /token              a 10-minute action token (the daemon gates /preview)
+ *     GET  /status             current sample, trend, candidates, top processes
+ *     GET  /history?minutes=N  1-minute samples, up to 24 h
+ *     GET  /settings           current settings + limits
+ *     POST /settings           partial update                         (token)
+ *     POST /terminate          {pid, startTime}                       (token)
+ *     POST /sample             take a sample now                      (token)
+ *     GET  /actions?limit=N    the audit log, newest first
+ *     GET  /                   a small control page
+ *     GET  /confirm?c=<id>     the page a notification's link opens
+ *
+ * POST bodies are JSON sent as application/json OR text/plain — through the
+ * /preview proxy only text/plain works (the daemon's express.json() swallows
+ * application/json bodies before proxying them).
+ *
+ * Auth: every request needs a loopback peer and a loopback Host for this port
+ * (DNS-rebinding guard, like soa-dictate). A request whose Sec-Fetch-Site is
+ * cross-site is refused. Mutating calls need `x-health-token: <token>` (from
+ * GET /token) or, from a direct local caller only (no proxy/forwarding
+ * headers), `Authorization: Bearer <key>` with the per-install key in
+ * <state>/health/key (0600; the CLI uses it). The preview proxy strips
+ * Authorization, so the key can never be used through the tunnel.
+ *
+ * CLI: soa-health [serve] | status | on | off | mode notify|auto [--yes]
+ *      | dry-run on|off | history [minutes] | top | kill <pid> | actions | doctor
+ *
+ * Env: SOA_HEALTH_PORT (6084), SOA_WEB_STATE_DIR, SOA_HEALTH_DIR,
+ *      SOA_HEALTH_LOG, SOA_HEALTH_PUBLIC_URL (base for notification links),
+ *      SOA_HEALTH_MIN_INTERVAL_S (30), SOA_HEALTH_TERM_GRACE_MS (10000),
+ *      SOA_HEALTH_NO_HELPER=1 (never build/run the Swift helper),
+ *      SOA_HEALTH_NOTIFY_DRY=1 (write notifications to the log instead of sending),
+ *      SOA_HEALTH_TEST_ALLOW_PIDS=a,b (TEST ONLY: refuse to signal any other pid),
+ *      SOA_HEALTH_TEST_THERMAL=serious (TEST ONLY, needs the allowlist: fake thermal state).
+ */
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { execFile, execFileSync } = require('node:child_process');
+
+const VERSION = '1.0.0';
+const env = process.env;
+const PORT = clampInt(env.SOA_HEALTH_PORT, 6084, 1, 65535);
+const HOST = '127.0.0.1';
+const STATE_DIR = env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
+const HEALTH_DIR = env.SOA_HEALTH_DIR || path.join(STATE_DIR, 'health');
+const SETTINGS_FILE = path.join(HEALTH_DIR, 'settings.json');
+const HISTORY_FILE = path.join(HEALTH_DIR, 'history.jsonl');
+const ACTIONS_FILE = path.join(HEALTH_DIR, 'actions.jsonl');
+const KEY_FILE = path.join(HEALTH_DIR, 'key');
+const NOTIFY_DRY_FILE = path.join(HEALTH_DIR, 'notify-dry.jsonl');
+const LOG_FILE = env.SOA_HEALTH_LOG || path.join(STATE_DIR, 'logs', 'health.log');
+const HELPER_SRC = path.join(__dirname, 'soa-thermal.swift');
+const HELPER_BIN = path.join(HEALTH_DIR, 'soa-thermal');
+const MIN_INTERVAL_S = clampInt(env.SOA_HEALTH_MIN_INTERVAL_S, 30, 1, 600);
+const MAX_INTERVAL_S = 600;
+const TERM_GRACE_MS = clampInt(env.SOA_HEALTH_TERM_GRACE_MS, 10000, 500, 60000);
+const TOKEN_TTL_MS = 10 * 60 * 1000;
+const HISTORY_MS = 24 * 3600 * 1000;
+const HISTORY_MAX = Math.ceil(HISTORY_MS / (MIN_INTERVAL_S * 1000)) + 10;
+const LINK_TTL_MS = 60 * 60 * 1000;
+const MANUAL_MAX_PER_10M = 10;
+const NO_HELPER = env.SOA_HEALTH_NO_HELPER === '1';
+const NOTIFY_DRY = env.SOA_HEALTH_NOTIFY_DRY === '1';
+const TEST_ALLOW = parseTestAllow(env.SOA_HEALTH_TEST_ALLOW_PIDS);
+const NCPU = Math.max(1, os.cpus().length || 1);
+const TOTAL_MEM = os.totalmem();
+const SYSCTL = fs.existsSync('/usr/sbin/sysctl') ? '/usr/sbin/sysctl' : 'sysctl';
+const IOREG = fs.existsSync('/usr/sbin/ioreg') ? '/usr/sbin/ioreg' : 'ioreg';
+
+function clampInt(v, d, lo, hi) { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; }
+function clampNum(v, d, lo, hi) { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; }
+function parseTestAllow(v) {
+    if (v == null || v === '') return null;
+    return new Set(String(v).split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => n > 1));
+}
+const r1 = (n) => (n == null || !Number.isFinite(n) ? null : Math.round(n * 10) / 10);
+
+function log(...a) {
+    const line = new Date().toISOString() + ' ' + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n';
+    try { fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); fs.appendFileSync(LOG_FILE, line); } catch (_) { process.stderr.write(line); }
+}
+
+// ── settings ─────────────────────────────────────────────────────────────
+function defaultSettings() {
+    return {
+        enabled: true,
+        intervalSec: 60,
+        mode: 'notify',              // 'notify' (default) | 'auto' (terminate automatically)
+        dryRun: false,               // auto mode decides but never signals
+        thresholds: {
+            cpuPct: 85,              // % of ONE core (100 = a full core)
+            sustainSamples: 3,       // consecutive samples over cpuPct / rssPctOfRam
+            rssPctOfRam: 25,         // resident set as % of physical RAM
+            leakMB: 1024,            // RSS growth …
+            leakWindowMin: 10,       // … over this many minutes
+            tempAlertC: 95,          // CPU-die °C treated like thermal state "serious"
+        },
+        notify: { chat: true, push: true, cooldownMin: 30, thermal: true },
+        allowlist: [],               // never flagged or terminated (extends the built-in protected list)
+        denylist: [],                // flagged on the FIRST sample over a threshold; terminated first in auto mode
+        rate: { max: 3, windowMin: 10, commandCooldownMin: 30 },
+        autoEnabledAt: null,
+    };
+}
+function cleanList(v) {
+    if (!Array.isArray(v)) return [];
+    return [...new Set(v.map((s) => String(s).trim()).filter((s) => s && s.length <= 200))].slice(0, 100);
+}
+function normalizeSettings(s, base = defaultSettings()) {
+    const d = base;
+    s = s && typeof s === 'object' ? s : {};
+    const th = Object.assign({}, d.thresholds, s.thresholds || {});
+    const nt = Object.assign({}, d.notify, s.notify || {});
+    const rt = Object.assign({}, d.rate, s.rate || {});
+    return {
+        enabled: s.enabled == null ? d.enabled : !!s.enabled,
+        intervalSec: clampInt(s.intervalSec, d.intervalSec, MIN_INTERVAL_S, MAX_INTERVAL_S),
+        mode: s.mode === 'auto' ? 'auto' : s.mode === 'notify' ? 'notify' : d.mode,
+        dryRun: s.dryRun == null ? d.dryRun : !!s.dryRun,
+        thresholds: {
+            cpuPct: clampNum(th.cpuPct, 85, 10, 100 * NCPU),
+            sustainSamples: clampInt(th.sustainSamples, 3, 1, 30),
+            rssPctOfRam: clampNum(th.rssPctOfRam, 25, 1, 95),
+            leakMB: clampInt(th.leakMB, 1024, 64, 65536),
+            leakWindowMin: clampInt(th.leakWindowMin, 10, 2, 120),
+            tempAlertC: clampNum(th.tempAlertC, 95, 50, 120),
+        },
+        notify: { chat: !!nt.chat, push: !!nt.push, cooldownMin: clampInt(nt.cooldownMin, 30, 1, 1440), thermal: !!nt.thermal },
+        allowlist: cleanList(s.allowlist == null ? d.allowlist : s.allowlist),
+        denylist: cleanList(s.denylist == null ? d.denylist : s.denylist),
+        rate: { max: clampInt(rt.max, 3, 1, 20), windowMin: clampInt(rt.windowMin, 10, 1, 240), commandCooldownMin: clampInt(rt.commandCooldownMin, 30, 0, 1440) },
+        autoEnabledAt: s.autoEnabledAt || null,
+    };
+}
+// A partial update. Turning automatic termination ON is never implicit: the
+// body must carry confirm:"auto-terminate" (the UI's deliberate choice).
+const AUTO_CONFIRM = 'auto-terminate';
+function applySettingsPatch(cur, patch, now = Date.now()) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { error: 'body must be a JSON object' };
+    if (patch.mode != null && patch.mode !== 'notify' && patch.mode !== 'auto') return { error: "mode must be 'notify' or 'auto'" };
+    const turningAuto = patch.mode === 'auto' && cur.mode !== 'auto';
+    if (turningAuto && patch.confirm !== AUTO_CONFIRM) {
+        return { error: `automatic termination stays off unless the request carries confirm:"${AUTO_CONFIRM}"`, needConfirm: AUTO_CONFIRM };
+    }
+    const merged = Object.assign({}, cur);
+    for (const k of ['enabled', 'intervalSec', 'mode', 'dryRun', 'allowlist', 'denylist']) if (k in patch) merged[k] = patch[k];
+    for (const k of ['thresholds', 'notify', 'rate']) if (patch[k] && typeof patch[k] === 'object') merged[k] = Object.assign({}, cur[k], patch[k]);
+    if (turningAuto) merged.autoEnabledAt = new Date(now).toISOString();
+    if (merged.mode !== 'auto') merged.autoEnabledAt = null;
+    return { settings: normalizeSettings(merged, cur), changed: Object.keys(patch).filter((k) => k !== 'confirm' && k !== 'token') };
+}
+function atomicWrite(file, data, mode = 0o600) {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = file + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, data, { mode });
+    fs.renameSync(tmp, file);
+    try { fs.chmodSync(file, mode); } catch (_) {}
+}
+function loadSettings() {
+    try { return normalizeSettings(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))); } catch (_) { return defaultSettings(); }
+}
+function saveSettings(s) { atomicWrite(SETTINGS_FILE, JSON.stringify(s, null, 2) + '\n'); }
+function loadOrCreateKey() {
+    try { const k = fs.readFileSync(KEY_FILE, 'utf8').trim(); if (k.length >= 32) { try { fs.chmodSync(KEY_FILE, 0o600); } catch (_) {} return k; } } catch (_) {}
+    const k = crypto.randomBytes(24).toString('hex');
+    atomicWrite(KEY_FILE, k + '\n');
+    return k;
+}
+
+// ── process table ────────────────────────────────────────────────────────
+const MONTHS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+function parseLstart(s) {
+    const m = /^\w{3}\s+(\w{3})\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\d{4})$/.exec(String(s).trim());
+    if (!m || !(m[1] in MONTHS)) return null;
+    return new Date(+m[6], MONTHS[m[1]], +m[2], +m[3], +m[4], +m[5]).getTime();
+}
+// ps cputime: [[dd-]hh:]mm:ss[.ss] (macOS prints mmm:ss.ss, procps hh:mm:ss).
+function parseCpuTime(s) {
+    s = String(s || '').trim();
+    if (!s) return null;
+    let days = 0;
+    const d = s.indexOf('-');
+    if (d > 0) { days = parseInt(s.slice(0, d), 10) || 0; s = s.slice(d + 1); }
+    const parts = s.split(':').map(Number);
+    if (parts.some((x) => !Number.isFinite(x))) return null;
+    let sec = 0;
+    for (const p of parts) sec = sec * 60 + p;
+    return days * 86400 + sec;
+}
+const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d+:\d+:\d+\s+\d{4})\s+(.*)$/;
+function parsePs(out, argsOut) {
+    const args = new Map();
+    for (const line of String(argsOut || '').split('\n')) {
+        const m = /^\s*(\d+)\s(.*)$/.exec(line);
+        if (m) args.set(+m[1], m[2].trim());
+    }
+    const procs = [];
+    for (const line of String(out || '').split('\n')) {
+        const m = PS_LINE.exec(line);
+        if (!m) continue;
+        const pid = +m[1];
+        const startTime = parseLstart(m[7]);
+        if (startTime == null) continue;
+        const comm = m[8].trim();
+        procs.push({
+            pid, ppid: +m[2], uid: +m[3], pcpu: +m[4], rssKB: +m[5], cpuSec: parseCpuTime(m[6]),
+            startTime, comm, args: args.get(pid) || comm, ...names(comm),
+        });
+    }
+    return procs;
+}
+function names(comm) {
+    const name = path.basename(comm) || comm;
+    const i = comm.indexOf('.app/');
+    const app = i > 0 ? path.basename(comm.slice(0, i)) : null;
+    return { name, app };
+}
+function run(cmd, args, opts = {}) {
+    return new Promise((resolve) => {
+        execFile(cmd, args, { timeout: opts.timeout || 15000, maxBuffer: 32 * 1024 * 1024, env: Object.assign({}, process.env, { LC_ALL: 'C' }) },
+            (err, out) => resolve(err ? (opts.okOnError ? String(out || '') : null) : String(out)));
+    });
+}
+async function readProcs() {
+    const [a, b] = await Promise.all([
+        run('/bin/ps', ['-axww', '-o', 'pid=,ppid=,uid=,pcpu=,rss=,time=,lstart=,comm=']),
+        run('/bin/ps', ['-axww', '-o', 'pid=,args=']),
+    ]);
+    return a ? parsePs(a, b) : [];
+}
+const keyOf = (p) => `${p.pid}:${p.startTime}`;
+
+// ── protection ───────────────────────────────────────────────────────────
+// Processes that are never terminated, whatever the thresholds say.
+const PROTECTED_NAMES = new Set([
+    'launchd', 'kernel_task', 'windowserver', 'loginwindow', 'dock', 'finder', 'systemuiserver', 'controlcenter',
+    'coreaudiod', 'sarea', 'soa pointer',
+    // the user's remote link
+    'cloudflared', 'ngrok', 'ssh', 'sshd', 'autossh', 'mosh-server', 'mosh-client', 'tailscale', 'tailscaled',
+    'wireguard-go', 'frpc', 'zrok',
+    // terminals and multiplexers hold the user's sessions
+    'terminal', 'iterm', 'iterm2', 'ghostty', 'wezterm', 'wezterm-gui', 'alacritty', 'kitty', 'warp', 'tmux', 'screen',
+    // coding agents
+    'claude', 'codex', 'ssh-agent', 'gpg-agent',
+]);
+const PROTECTED_APPS = new Set(['sarea', 'soa pointer', 'terminal', 'iterm', 'iterm2', 'ghostty', 'wezterm', 'alacritty', 'kitty', 'warp', 'tailscale', 'cloudflare warp',
+    'claude', 'codex', 'chatgpt']);
+const SYSTEM_PATHS = ['/System/', '/usr/libexec/', '/usr/sbin/', '/sbin/', '/Library/Apple/'];
+// The SoA daemon, every soa-* service / launchd job and the quota service.
+const SOA_SERVICE_RE = /\.soa-web(?:-local)?\/|\/soa-web\/|(?:^|[\s/])soa-[a-z0-9][\w.-]*(?:\s|$)|usageQuota\.js|(?:^|[\s/])(?:com\.soa-web|app\.s0a)\./i;
+const SOA_DAEMON_RE = /\/server\/src\/index\.js(?:\s|$)/;
+// Coding agents and everything they run: the CLIs (any case — Claude rewrites its
+// process title to a bare "claude"/"Claude"), versioned native binaries, codex
+// helpers ("codex-…"), the agents' Bash-tool shells (~/.claude/shell-snapshots)
+// and background tasks writing to the per-user claude tmp dir — those are often
+// re-parented to launchd, so the ancestor walk alone cannot see them.
+const AGENT_ARGS_RE = /@anthropic-ai\/claude-code|@openai\/codex|(?:^|[\s/])(?:claude|codex)(?:[\s-]|$)|\/\.claude\/|\/\.codex\/|\/claude\/versions\/|\/claude-\d+\//i;
+
+function listMatch(list, p) {
+    if (!list || !list.length) return null;
+    const n = p.name.toLowerCase(), a = (p.app || '').toLowerCase();
+    for (const e of list) {
+        const l = e.toLowerCase();
+        if (e.startsWith('/')) { if (p.comm.startsWith(e)) return e; continue; }
+        if (l === n || (a && l === a)) return e;
+    }
+    return null;
+}
+// ctx: {uid, selfPid, selfChain:Set, daemonPids:Set, byPid:Map, frontmost:{pid,bundlePath}|null, allowlist:[]}
+// Returns a human reason when the process must never be terminated, else null.
+function protectReason(p, ctx) {
+    if (!p || p.pid <= 1) return 'pid ≤ 1 (kernel / launchd)';
+    // ps "comm" is argv[0]: a system daemon may show a bare name ("cloudphotod")
+    // and any binary can rename itself. p.exe (proc_pidpath, the real executable)
+    // is checked as well whenever the caller resolved it.
+    const ids = [{ comm: p.comm, name: p.name, app: p.app }];
+    if (p.exe && p.exe !== p.comm) ids.push(Object.assign({ comm: p.exe }, names(p.exe)));
+    for (const id of ids) {
+        const n = String(id.name || '').toLowerCase();
+        if (PROTECTED_NAMES.has(n)) return `protected process (${id.name})`;
+        if (n.startsWith('com.apple.')) return `system process (${id.name})`;
+        if (id.app && PROTECTED_APPS.has(id.app.toLowerCase())) return `protected app (${id.app})`;
+        for (const sp of SYSTEM_PATHS) if (id.comm.startsWith(sp)) return `system path (${sp})`;
+    }
+    if (p.pid === ctx.selfPid || (ctx.selfChain && ctx.selfChain.has(p.pid))) return 'the health service or its parent';
+    if (AGENT_ARGS_RE.test(p.args) || AGENT_ARGS_RE.test(p.comm) || (p.exe && AGENT_ARGS_RE.test(p.exe))) return 'coding agent';
+    const f = ctx.frontmost;
+    if (f && (f.pid === p.pid || (f.bundlePath && [p.comm, p.exe].some((c) => c && c.startsWith(f.bundlePath.replace(/\/+$/, '') + '/'))))) return 'frontmost app';
+    // Walk the ancestor chain: SoA daemon descendants (tabs, shells, agents and
+    // their tools) and children of any soa-* service are off limits.
+    const seen = new Set();
+    let cur = p;
+    while (cur && !seen.has(cur.pid)) {
+        seen.add(cur.pid);
+        if (ctx.daemonPids && ctx.daemonPids.has(cur.pid)) return cur === p ? 'SoA daemon' : 'runs inside a SoA session (daemon descendant)';
+        if (SOA_DAEMON_RE.test(cur.args) && /soa/i.test(cur.args)) return cur === p ? 'SoA daemon' : 'runs inside a SoA session (daemon descendant)';
+        if (SOA_SERVICE_RE.test(cur.args) || SOA_SERVICE_RE.test(cur.comm)) return cur === p ? 'SoA service' : 'child of a SoA service';
+        if (cur !== p && (AGENT_ARGS_RE.test(cur.args) || AGENT_ARGS_RE.test(cur.comm))) return 'started by a coding agent';
+        if (cur !== p && f && f.pid === cur.pid) return 'child of the frontmost app';
+        if (cur !== p && (PROTECTED_NAMES.has(cur.name.toLowerCase()) && ['tmux', 'screen', 'sshd', 'mosh-server'].includes(cur.name.toLowerCase()))) return `runs inside ${cur.name}`;
+        if (cur.ppid <= 1 || !ctx.byPid) break;
+        cur = ctx.byPid.get(cur.ppid);
+    }
+    const al = listMatch(ctx.allowlist, p);
+    if (al) return `on your allowlist (${al})`;
+    return null;
+}
+function eligibility(p, ctx) {
+    if (p.uid !== ctx.uid) return 'owned by another user';
+    return protectReason(p, ctx);
+}
+function readDaemonPids() {
+    const s = new Set();
+    for (const f of [path.join(STATE_DIR, 'daemon.lock')]) {
+        try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j && j.pid > 1) s.add(+j.pid); } catch (_) {}
+    }
+    for (const x of String(env.SOA_HEALTH_DAEMON_PIDS || '').split(',')) { const n = parseInt(x, 10); if (n > 1) s.add(n); }
+    return s;
+}
+function selfChain(byPid) {
+    const s = new Set([process.pid, process.ppid]);
+    let cur = byPid.get(process.ppid);
+    const seen = new Set();
+    while (cur && cur.ppid > 1 && !seen.has(cur.pid)) { seen.add(cur.pid); s.add(cur.ppid); cur = byPid.get(cur.ppid); }
+    return s;
+}
+
+// ── detection ────────────────────────────────────────────────────────────
+// Tracks every process across samples (keyed by pid + start time, so a reused
+// pid starts from zero) and reports the ones over a threshold.
+class Detector {
+    constructor() { this.track = new Map(); this.prevT = 0; }
+    // procs: [{pid,startTime,cpuSec,pcpu,rssKB,…}]; returns procs with .cpu (% of one core over the interval).
+    update(procs, now, settings) {
+        const th = settings.thresholds;
+        const dt = this.prevT ? (now - this.prevT) / 1000 : 0;
+        // A run of N "consecutive samples" must mean ~N intervals of wall time:
+        // an extra sample (POST /sample, monitor re-enabled) taken well inside
+        // an interval does not advance it, and a long gap (monitor was off,
+        // Mac asleep) starts it over.
+        const iv = settings.intervalSec || 60;
+        const shortGap = dt > 0 && dt < iv * 0.5;
+        const longGap = dt > iv * 2.5;
+        const seen = new Set();
+        const rssTh = TOTAL_MEM * th.rssPctOfRam / 100 / 1024;   // KB
+        const leakWin = th.leakWindowMin * 60000;
+        for (const p of procs) {
+            const k = keyOf(p);
+            seen.add(k);
+            let t = this.track.get(k);
+            if (!t) { t = { cpuRun: 0, rssRun: 0, rss: [], lastCpuSec: null, firstSeen: now }; this.track.set(k, t); }
+            if (dt > 0 && t.lastCpuSec != null && p.cpuSec != null) p.cpu = Math.max(0, (p.cpuSec - t.lastCpuSec) / dt * 100);
+            else p.cpu = p.pcpu;
+            t.lastCpuSec = p.cpuSec;
+            p.cpu = r1(p.cpu);
+            if (longGap) { t.cpuRun = 0; t.rssRun = 0; }
+            const step = shortGap ? 0 : 1;
+            t.cpuRun = p.cpu >= th.cpuPct ? t.cpuRun + step : 0;
+            t.rssRun = p.rssKB >= rssTh ? t.rssRun + step : 0;
+            t.rss.push([now, p.rssKB]);
+            while (t.rss.length && now - t.rss[0][0] > leakWin * 1.5) t.rss.shift();
+            p.track = t;
+        }
+        for (const k of this.track.keys()) if (!seen.has(k)) this.track.delete(k);
+        this.prevT = now;
+        return procs;
+    }
+}
+// Pure: why is this (already tracked) process over a threshold? [] when it is not.
+function reasonsFor(p, settings, intervalSec, now) {
+    const th = settings.thresholds;
+    const t = p.track || { cpuRun: 0, rssRun: 0, rss: [] };
+    const deny = !!listMatch(settings.denylist, p);
+    const need = deny ? 1 : th.sustainSamples;
+    const out = [];
+    if (t.cpuRun >= need) {
+        const mins = Math.max(1, Math.round(t.cpuRun * intervalSec / 60));
+        out.push({ kind: 'cpu', value: p.cpu, threshold: th.cpuPct, samples: t.cpuRun,
+            detail: `CPU ${Math.round(p.cpu)}% of one core for ${t.cpuRun} samples (~${mins} min)` });
+    }
+    if (t.rssRun >= need) {
+        const pct = p.rssKB * 1024 / TOTAL_MEM * 100;
+        out.push({ kind: 'memory', value: r1(pct), threshold: th.rssPctOfRam, samples: t.rssRun,
+            detail: `memory ${Math.round(p.rssKB / 1024)} MB (${Math.round(pct)}% of RAM) for ${t.rssRun} samples` });
+    }
+    const win = th.leakWindowMin * 60000;
+    if (t.rss.length >= 2) {
+        // the oldest sample at least ~a window ago, inside 1.5 windows
+        let base = null;
+        for (const [ts, kb] of t.rss) if (now - ts >= win * 0.9) base = [ts, kb]; else break;
+        if (base) {
+            const growMB = (p.rssKB - base[1]) / 1024;
+            if (growMB >= th.leakMB) {
+                out.push({ kind: 'leak', value: Math.round(growMB), threshold: th.leakMB, windowMin: Math.round((now - base[0]) / 60000),
+                    detail: `memory grew +${Math.round(growMB)} MB in ${Math.round((now - base[0]) / 60000)} min` });
+            }
+        }
+    }
+    return out;
+}
+function scoreOf(p, reasons, settings) {
+    let s = 0;
+    for (const r of reasons) s = Math.max(s, r.kind === 'cpu' ? r.value / r.threshold : r.kind === 'memory' ? r.value / r.threshold : r.value / r.threshold);
+    if (listMatch(settings.denylist, p)) s += 10;
+    return r1(s);
+}
+
+// ── rate limiting ────────────────────────────────────────────────────────
+class RateLimiter {
+    constructor() { this.events = []; this.lastByName = new Map(); }
+    check(name, rate, now = Date.now()) {
+        const win = rate.windowMin * 60000;
+        this.events = this.events.filter((t) => now - t < win);
+        if (this.events.length >= rate.max) return `rate limit: ${rate.max} terminations per ${rate.windowMin} min`;
+        const last = this.lastByName.get(name);
+        if (last && rate.commandCooldownMin > 0 && now - last < rate.commandCooldownMin * 60000) return `cooldown: ${name} was stopped ${Math.round((now - last) / 60000)} min ago`;
+        return null;
+    }
+    record(name, now = Date.now()) { this.events.push(now); this.lastByName.set(name, now); }
+    used(rate, now = Date.now()) { return this.events.filter((t) => now - t < rate.windowMin * 60000).length; }
+}
+// PID-reuse guard: the live process must be the very one the caller saw.
+function identityMismatch(want, live) {
+    if (!live) return 'process is gone';
+    if (want.startTime != null && Number(want.startTime) !== live.startTime) return 'pid was reused (start time differs)';
+    if (want.comm && want.comm !== live.comm) return 'pid was reused (command differs)';
+    return null;
+}
+
+// ── system metrics ───────────────────────────────────────────────────────
+let prevCpuTimes = null;
+function cpuTotal() {
+    const cpus = os.cpus();
+    let idle = 0, total = 0;
+    for (const c of cpus) { const t = c.times; idle += t.idle; total += t.user + t.nice + t.sys + t.idle + t.irq; }
+    const prev = prevCpuTimes; prevCpuTimes = { idle, total };
+    if (!prev || total <= prev.total) return null;
+    return r1((1 - (idle - prev.idle) / (total - prev.total)) * 100);
+}
+async function readMem() {
+    const out = await run(SYSCTL, ['-n', 'kern.memorystatus_vm_pressure_level', 'kern.memorystatus_level', 'vm.swapusage'], { okOnError: true });
+    const vm = await run('/usr/bin/vm_stat', [], { okOnError: true });
+    const lines = String(out || '').trim().split('\n');
+    const lvl = parseInt(lines[0], 10);
+    const freePct = parseInt(lines[1], 10);
+    const sw = /used\s*=\s*([\d.]+)M/.exec(lines[2] || '');
+    const swt = /total\s*=\s*([\d.]+)M/.exec(lines[2] || '');
+    const page = parseInt((/page size of (\d+)/.exec(vm || '') || [])[1], 10) || 16384;
+    const pg = (label) => { const m = new RegExp(label + ':\\s+(\\d+)').exec(vm || ''); return m ? +m[1] * page : null; };
+    const pressure = lvl === 4 ? 'critical' : lvl === 2 ? 'warn' : lvl === 1 ? 'normal' : null;
+    return {
+        totalMB: Math.round(TOTAL_MEM / 1048576),
+        usedPct: Number.isFinite(freePct) ? 100 - freePct : r1((1 - os.freemem() / TOTAL_MEM) * 100),
+        pressure,
+        compressedMB: pg('Pages occupied by compressor') != null ? Math.round(pg('Pages occupied by compressor') / 1048576) : null,
+        wiredMB: pg('Pages wired down') != null ? Math.round(pg('Pages wired down') / 1048576) : null,
+        swapUsedMB: sw ? Math.round(+sw[1]) : null,
+        swapTotalMB: swt ? Math.round(+swt[1]) : null,
+    };
+}
+async function readBatteryC() {
+    const out = await run(IOREG, ['-rn', 'AppleSmartBattery'], { timeout: 5000 });
+    const m = /"Temperature"\s*=\s*(\d+)/.exec(out || '');
+    if (!m) return null;
+    const c = +m[1] / 100;
+    return c > 0 && c < 90 ? r1(c) : null;
+}
+let helperState = { built: false, error: NO_HELPER ? 'disabled (SOA_HEALTH_NO_HELPER=1)' : null, building: null };
+function ensureHelper() {
+    if (NO_HELPER) return Promise.resolve(false);
+    try {
+        if (fs.existsSync(HELPER_BIN) && fs.statSync(HELPER_BIN).mtimeMs >= fs.statSync(HELPER_SRC).mtimeMs) { helperState.built = true; return Promise.resolve(true); }
+    } catch (_) {}
+    if (helperState.building) return helperState.building;
+    if (!fs.existsSync(HELPER_SRC)) { helperState.error = 'soa-thermal.swift not found'; return Promise.resolve(false); }
+    fs.mkdirSync(HEALTH_DIR, { recursive: true, mode: 0o700 });
+    log('helper: compiling soa-thermal');
+    helperState.building = new Promise((resolve) => {
+        execFile('swiftc', ['-O', '-o', HELPER_BIN, HELPER_SRC], { timeout: 240000 }, (err, _o, se) => {
+            helperState.building = null;
+            if (err) { helperState.error = 'swiftc failed: ' + String(se || err.message).split('\n').filter(Boolean).slice(-1)[0]; log('helper:', helperState.error); return resolve(false); }
+            helperState.built = true; helperState.error = null; log('helper: built'); resolve(true);
+        });
+    });
+    return helperState.building;
+}
+// pid → real executable path (proc_pidpath via the helper). {} when unavailable.
+async function exePaths(pids) {
+    pids = [...new Set(pids)].filter((n) => n > 1).slice(0, 400);
+    if (!pids.length || !(await ensureHelper())) return {};
+    const out = await run(HELPER_BIN, ['--paths', ...pids.map(String)], { timeout: 5000 });
+    try { const j = JSON.parse(out); return j && typeof j === 'object' ? j : {}; } catch (_) { return {}; }
+}
+async function frontmostFallback() {
+    const asn = (await run('/usr/bin/lsappinfo', ['front'], { timeout: 3000 }) || '').trim();
+    if (!asn) return null;
+    const info = await run('/usr/bin/lsappinfo', ['info', '-only', 'pid', asn], { timeout: 3000 });
+    const m = /pid"?\s*=\s*(\d+)/.exec(info || '');
+    return m ? { pid: +m[1], name: '', bundlePath: '' } : null;
+}
+async function readThermal() {
+    let h = null;
+    if (await ensureHelper()) {
+        const out = await run(HELPER_BIN, [], { timeout: 8000 });
+        try { h = JSON.parse(out); } catch (_) { h = null; }
+    }
+    const batteryC = await readBatteryC();
+    const res = { state: 'unknown', code: null, cpuC: null, maxC: null, batteryC, source: 'none', sensors: [], frontmost: null };
+    if (h) {
+        res.state = h.thermalState; res.code = h.thermalCode; res.cpuC = r1(h.cpuC); res.maxC = r1(h.maxC);
+        res.source = h.source === 'hid' ? 'hid' : 'thermal-state';
+        // one entry per sensor name (the HID list repeats names per die/cluster)
+        const by = new Map();
+        for (const s of h.sensors || []) { const e = by.get(s.name) || { name: s.name, c: -Infinity, n: 0 }; e.c = Math.max(e.c, s.c); e.n++; by.set(s.name, e); }
+        res.sensors = [...by.values()].map((e) => ({ name: e.name, c: r1(e.c), n: e.n })).sort((a, b) => b.c - a.c).slice(0, 40);
+        res.frontmost = h.frontmost || null;
+    }
+    if (!res.frontmost) res.frontmost = await frontmostFallback();
+    // TEST ONLY (honoured only together with a test allowlist): pretend the Mac is hot.
+    if (TEST_ALLOW && env.SOA_HEALTH_TEST_THERMAL) { const i = ['nominal', 'fair', 'serious', 'critical'].indexOf(env.SOA_HEALTH_TEST_THERMAL); if (i >= 0) { res.state = env.SOA_HEALTH_TEST_THERMAL; res.code = i; } }
+    if (res.cpuC == null && batteryC != null && res.source === 'none') res.source = 'battery';
+    return res;
+}
+
+// ── the service ──────────────────────────────────────────────────────────
+const svc = {
+    settings: null, key: '', detector: new Detector(), limiter: new RateLimiter(), manualTimes: [],
+    history: [], last: null, candidates: [], watch: [], top: [], terminating: new Set(), links: new Map(),
+    notified: new Map(), autoSkip: new Map(), thermalNotifiedAt: 0, lastThermalCode: 0, startedAt: Date.now(), timer: null, sampling: false,
+    lastError: null, samples: 0,
+};
+
+function loadHistory() {
+    try {
+        const cut = Date.now() - HISTORY_MS;
+        svc.history = fs.readFileSync(HISTORY_FILE, 'utf8').split('\n').filter(Boolean)
+            .map((l) => { try { return JSON.parse(l); } catch (_) { return null; } })
+            .filter((x) => x && x.t >= cut).slice(-HISTORY_MAX);
+    } catch (_) { svc.history = []; }
+}
+function pushHistory(h) {
+    svc.history.push(h);
+    const cut = Date.now() - HISTORY_MS;
+    while (svc.history.length && (svc.history[0].t < cut || svc.history.length > HISTORY_MAX)) svc.history.shift();
+    try {
+        fs.appendFileSync(HISTORY_FILE, JSON.stringify(h) + '\n', { mode: 0o600 });
+        svc.histLines = (svc.histLines || 0) + 1;
+        if (svc.histLines > 120) { svc.histLines = 0; atomicWrite(HISTORY_FILE, svc.history.map((x) => JSON.stringify(x)).join('\n') + '\n'); }
+    } catch (e) { log('history write failed', e.message); }
+}
+function audit(entry) {
+    const e = Object.assign({ t: Date.now(), id: crypto.randomBytes(6).toString('hex') }, entry);
+    try { fs.mkdirSync(HEALTH_DIR, { recursive: true, mode: 0o700 }); fs.appendFileSync(ACTIONS_FILE, JSON.stringify(e) + '\n', { mode: 0o600 }); } catch (err) { log('audit write failed', err.message); }
+    log('action', e.action, e.result || '', e.pid ? `pid ${e.pid}` : '', e.name || '', e.reason || e.detail || '');
+    return e;
+}
+function readActions(limit) {
+    try {
+        const lines = fs.readFileSync(ACTIONS_FILE, 'utf8').split('\n').filter(Boolean);
+        return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+    } catch (_) { return []; }
+}
+
+// Temperature trend: delta since the previous sample, and a 10-minute slope.
+function trendOf(history, now) {
+    const pts = history.filter((h) => h.tempC != null && now - h.t <= 10 * 60000);
+    const last = pts[pts.length - 1], prev = pts[pts.length - 2];
+    let deltaPerMin = null;
+    if (last && prev && last.t > prev.t) deltaPerMin = r1((last.tempC - prev.tempC) / ((last.t - prev.t) / 60000));
+    let slope = null;
+    if (pts.length >= 3) {
+        const xs = pts.map((p) => (p.t - pts[0].t) / 60000), ys = pts.map((p) => p.tempC);
+        const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
+        let num = 0, den = 0;
+        for (let i = 0; i < xs.length; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; }
+        slope = den > 0 ? Math.round(num / den * 100) / 100 : null;
+    }
+    const ref = slope != null ? slope : deltaPerMin;
+    const direction = ref == null ? 'unknown' : ref > 0.3 ? 'rising' : ref < -0.3 ? 'falling' : 'steady';
+    const temps = pts.map((p) => p.tempC);
+    return { tempC: last ? last.tempC : null, deltaPerMin, slope10m: slope, direction,
+        min10m: temps.length ? Math.min(...temps) : null, max10m: temps.length ? Math.max(...temps) : null };
+}
+
+function publicBase() {
+    if (env.SOA_HEALTH_PUBLIC_URL) return env.SOA_HEALTH_PUBLIC_URL.replace(/\/+$/, '');
+    try { const j = JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'tunnel.json'), 'utf8')); if (j && /^https:\/\//.test(j.url)) return j.url.replace(/\/+$/, ''); } catch (_) {}
+    return 'http://127.0.0.1:4010';
+}
+function linkFor(c) {
+    for (const [id, l] of svc.links) if (l.expires < Date.now()) svc.links.delete(id);
+    const id = crypto.randomBytes(9).toString('base64url');
+    svc.links.set(id, { pid: c.pid, startTime: c.startTime, comm: c.comm, name: c.app || c.name, args: c.args, reasons: c.reasons, expires: Date.now() + LINK_TTL_MS });
+    while (svc.links.size > 200) svc.links.delete(svc.links.keys().next().value);
+    return { id, url: `${publicBase()}/preview/${PORT}/confirm?c=${id}` };
+}
+function notify(text, { title = 'SoA health', priority = 'default', click = null } = {}) {
+    const s = svc.settings;
+    if (NOTIFY_DRY) {
+        try { fs.appendFileSync(NOTIFY_DRY_FILE, JSON.stringify({ t: Date.now(), title, priority, click, text }) + '\n', { mode: 0o600 }); } catch (_) {}
+        log('notify (dry):', text, click || '');
+        return;
+    }
+    const bin = (n) => { const p = path.join(__dirname, n); return fs.existsSync(p) ? p : n; };
+    if (s.notify.chat) execFile(bin('soa-msg'), [click ? `${text} ${click}` : text], { timeout: 15000 }, (e) => { if (e) log('soa-msg failed', e.message); });
+    if (s.notify.push) {
+        const a = ['-t', title, '-p', priority, '-T', 'thermometer'];
+        if (click) a.push('--click', click);
+        a.push(text);
+        execFile(bin('soa-notify'), a, { timeout: 20000 }, (e) => { if (e) log('soa-notify failed', e.message.split('\n')[0]); });
+    }
+}
+const shortArgs = (s) => (String(s || '').length > 200 ? String(s).slice(0, 200) + '…' : String(s || ''));
+const label = (p) => p.app && p.app !== p.name ? `${p.app} (${p.name})` : p.name;
+
+function protectionCtx(procs, thermal, settings) {
+    const byPid = new Map(procs.map((p) => [p.pid, p]));
+    return { uid: process.getuid ? process.getuid() : -1, selfPid: process.pid, selfChain: selfChain(byPid), daemonPids: readDaemonPids(),
+        byPid, frontmost: thermal && thermal.frontmost, allowlist: settings.allowlist };
+}
+
+async function sampleOnce(reason = 'timer') {
+    if (svc.sampling) return svc.last;
+    svc.sampling = true;
+    try {
+        const s = svc.settings;
+        const now = Date.now();
+        const [procs, thermal, mem] = await Promise.all([readProcs(), readThermal(), readMem()]);
+        const cpu = cpuTotal();
+        svc.detector.update(procs, now, s);
+        const ctx = protectionCtx(procs, thermal, s);
+        const load = os.loadavg().map((x) => Math.round(x * 100) / 100);
+        const tempC = thermal.cpuC != null ? thermal.cpuC : thermal.batteryC;
+        const hist = { t: now, cpu, load1: load[0], memUsedPct: mem.usedPct, pressure: mem.pressure, swapMB: mem.swapUsedMB,
+            thermal: thermal.state, tempC, maxC: thermal.maxC, batteryC: thermal.batteryC, top: [] };
+        // candidates, watch list and top
+        const cands = [], watch = [];
+        const sorted = procs.slice().sort((a, b) => (b.cpu || 0) - (a.cpu || 0));
+        const byMemAll = procs.slice().sort((a, b) => b.rssKB - a.rssKB);
+        const flagged = [];
+        for (const p of procs) {
+            const reasons = reasonsFor(p, s, s.intervalSec, now);
+            const overNow = (p.cpu || 0) >= s.thresholds.cpuPct || p.rssKB * 1024 >= TOTAL_MEM * s.thresholds.rssPctOfRam / 100;
+            if (reasons.length || overNow) flagged.push([p, reasons]);
+        }
+        const exe = await exePaths([...flagged.map(([p]) => p.pid), ...sorted.slice(0, 12).map((p) => p.pid), ...byMemAll.slice(0, 5).map((p) => p.pid)]);
+        for (const p of procs) if (exe[p.pid]) p.exe = exe[p.pid];
+        for (const [p, reasons] of flagged) {
+            const why = eligibility(p, ctx);
+            const row = procView(p, why, reasons);
+            if (why) continue;   // protected / not ours: never a candidate (see `top` for them)
+            if (reasons.length) { row.score = scoreOf(p, reasons, s); cands.push(row); } else watch.push(row);
+        }
+        cands.sort((a, b) => b.score - a.score);
+        const top = sorted.slice(0, 12).map((p) => procView(p, eligibility(p, ctx), null));
+        const byMem = byMemAll.slice(0, 5).map((p) => procView(p, eligibility(p, ctx), null));
+        hist.top = sorted.slice(0, 3).map((p) => ({ pid: p.pid, name: label(p), cpu: p.cpu }));
+        pushHistory(hist);
+        svc.candidates = cands; svc.watch = watch; svc.top = top; svc.topMem = byMem;
+        svc.procByKey = new Map(procs.map((p) => [keyOf(p), p]));
+        svc.last = { t: now, reason, intervalSec: s.intervalSec, cpu: { totalPct: cpu, cores: NCPU, load },
+            memory: mem, thermal: { state: thermal.state, code: thermal.code, cpuC: thermal.cpuC, maxC: thermal.maxC, batteryC: thermal.batteryC,
+                source: thermal.source, sensors: thermal.sensors }, frontmost: thermal.frontmost, processes: procs.length };
+        svc.samples++;
+        svc.lastError = null;
+        if (s.enabled) await act(cands, procs, thermal, ctx, now);
+        return svc.last;
+    } catch (e) {
+        svc.lastError = e.message; log('sample failed', e.stack || e.message);
+        return svc.last;
+    } finally { svc.sampling = false; }
+}
+function procView(p, protectedWhy, reasons) {
+    return { pid: p.pid, ppid: p.ppid, startTime: p.startTime, name: p.name, app: p.app, comm: p.comm, args: shortArgs(p.args),
+        uid: p.uid, cpu: p.cpu, rssMB: Math.round(p.rssKB / 1024), memPct: r1(p.rssKB * 1024 / TOTAL_MEM * 100),
+        protected: !!protectedWhy, protectedReason: protectedWhy || null,
+        ...(reasons ? { reasons, sustained: { cpu: p.track ? p.track.cpuRun : 0, memory: p.track ? p.track.rssRun : 0 } } : {}) };
+}
+
+async function act(cands, procs, thermal, ctx, now) {
+    const s = svc.settings;
+    const hot = (thermal.code != null && thermal.code >= 2) || (thermal.cpuC != null && thermal.cpuC >= s.thresholds.tempAlertC);
+    const code = thermal.code != null ? thermal.code : (hot ? 2 : 0);
+    // Thermal escalation: notify immediately on entering serious/critical (re-notify every 15 min while it lasts).
+    if (hot && s.notify.thermal && (svc.lastThermalCode < 2 || now - svc.thermalNotifiedAt > 15 * 60000)) {
+        svc.thermalNotifiedAt = now;
+        const t = trendOf(svc.history, now);
+        const topc = svc.top.find((x) => !x.protected) || svc.top[0];
+        const msg = `Mac is running hot: thermal state ${thermal.state}` + (thermal.cpuC != null ? `, CPU ${Math.round(thermal.cpuC)}°C` : '') +
+            (t.deltaPerMin != null ? ` (${t.deltaPerMin >= 0 ? '+' : ''}${t.deltaPerMin}°C/min)` : '') +
+            (topc ? `. Top: ${label(topc)} CPU ${Math.round(topc.cpu)}%` : '') + '.';
+        const c0 = cands[0];
+        const link = c0 ? linkFor(c0) : null;
+        notify(msg + (c0 && s.mode === 'notify' ? ` Tap to stop ${label(c0)}:` : ''), { priority: 'high', click: link && s.mode === 'notify' ? link.url : null });
+        audit({ action: 'thermal', result: 'notified', state: thermal.state, cpuC: thermal.cpuC, detail: msg });
+    }
+    svc.lastThermalCode = hot ? Math.max(code, 2) : code;
+
+    let terminatedThisRound = false;
+    if (s.mode === 'auto') {
+        // In auto mode, at most ONE termination per sample. Under thermal
+        // escalation the top process over the CPU threshold is eligible even
+        // before its sustain window completes.
+        let pool = cands.slice();
+        if (hot && !pool.length) {
+            pool = svc.top.filter((x) => !x.protected && x.cpu >= s.thresholds.cpuPct)
+                .map((x) => Object.assign({}, x, { reasons: [{ kind: 'thermal', value: thermal.cpuC, detail: `thermal ${thermal.state}, CPU ${Math.round(x.cpu)}%` }] }));
+        }
+        if (TEST_ALLOW) pool = pool.filter((c) => TEST_ALLOW.has(c.pid));
+        for (const [k, until] of svc.autoSkip) if (until < now) svc.autoSkip.delete(k);
+        for (const c of pool) {
+            if (terminatedThisRound) break;
+            const k = `${c.pid}:${c.startTime}`;
+            if (svc.terminating.has(k) || svc.autoSkip.has(k)) continue;
+            const limit = svc.limiter.check(c.app || c.name, s.rate, now);
+            if (limit) { notifyCandidate(c, now, `Auto-terminate held back (${limit}).`); continue; }
+            terminatedThisRound = true;
+            terminate({ pid: c.pid, startTime: c.startTime, comm: c.comm }, { by: 'auto', reasons: c.reasons })
+                .then((e) => { if (e.result === 'dry-run') svc.autoSkip.set(k, Date.now() + s.notify.cooldownMin * 60000); else if (e.result === 'refused' || e.result === 'failed') { svc.autoSkip.set(k, Date.now() + 10 * 60000); notifyCandidate(c, Date.now(), `Could not stop it automatically (${e.reason}).`); } })
+                .catch((e) => log('auto terminate failed', e.message));
+        }
+        return;
+    }
+    for (const c of cands) notifyCandidate(c, now);
+}
+function notifyCandidate(c, now, prefix = '') {
+    const s = svc.settings;
+    const k = `${c.pid}:${c.startTime}`;
+    const last = svc.notified.get(k);
+    if (last && now - last < s.notify.cooldownMin * 60000) return;
+    svc.notified.set(k, now);
+    for (const [kk, t] of svc.notified) if (now - t > 24 * 3600000) svc.notified.delete(kk);
+    const link = linkFor(c);
+    const why = c.reasons.map((r) => r.detail).join('; ');
+    const msg = `${prefix ? prefix + ' ' : ''}${label(c)} (pid ${c.pid}) is using a lot: ${why}. Tap to stop it:`;
+    notify(msg, { priority: 'default', click: link.url });
+    audit({ action: 'notify', result: 'sent', pid: c.pid, startTime: c.startTime, name: label(c), args: c.args, reason: why, link: link.id });
+}
+
+function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+async function liveProc(pid) {
+    const procs = await readProcs();
+    return { procs, p: procs.find((x) => x.pid === pid) || null };
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Terminate ONE process: re-verify identity + protection on a fresh process
+// table right before signalling, SIGTERM, wait, SIGKILL only if the same
+// process is still alive. Returns the audit entry.
+async function terminate(want, { by = 'manual', reasons = null } = {}) {
+    const s = svc.settings;
+    const pid = parseInt(want.pid, 10);
+    const base = { action: 'terminate', by, pid, startTime: want.startTime != null ? Number(want.startTime) : null, dryRun: !!s.dryRun };
+    if (!(pid > 1)) return audit(Object.assign(base, { result: 'refused', reason: 'invalid pid' }));
+    if (TEST_ALLOW && !TEST_ALLOW.has(pid)) return audit(Object.assign(base, { result: 'refused', reason: 'not in the test allowlist (SOA_HEALTH_TEST_ALLOW_PIDS)' }));
+    const k = `${pid}:${want.startTime}`;
+    if (svc.terminating.has(k)) return audit(Object.assign(base, { result: 'refused', reason: 'already terminating' }));
+    if (by !== 'auto') {
+        const now = Date.now();
+        svc.manualTimes = svc.manualTimes.filter((t) => now - t < 10 * 60000);
+        if (svc.manualTimes.length >= MANUAL_MAX_PER_10M) return audit(Object.assign(base, { result: 'refused', reason: `manual limit: ${MANUAL_MAX_PER_10M} per 10 min` }));
+    }
+    svc.terminating.add(k);
+    try {
+        const [{ procs, p }, thermal] = await Promise.all([liveProc(pid), readThermal()]);
+        if (want.startTime == null && by !== 'auto' && p) want.startTime = p.startTime;   // CLI kill <pid>: bind to what is live now
+        const mismatch = identityMismatch(want, p);
+        if (mismatch) return audit(Object.assign(base, { result: 'refused', reason: mismatch }));
+        const ex = await exePaths([pid]);
+        if (ex[pid]) p.exe = ex[pid];
+        Object.assign(base, { startTime: p.startTime, name: label(p), comm: p.comm, exe: p.exe || null, args: shortArgs(p.args) });
+        if (by === 'auto' && !p.exe) return audit(Object.assign(base, { result: 'refused', reason: 'executable path unknown; auto mode will not guess' }));
+        if (by === 'auto' && !(thermal.frontmost && thermal.frontmost.pid)) return audit(Object.assign(base, { result: 'refused', reason: 'frontmost app unknown; auto mode will not guess' }));
+        const why = eligibility(p, protectionCtx(procs, thermal, s));
+        if (why) return audit(Object.assign(base, { result: 'refused', reason: why }));
+        const track = svc.detector.track.get(keyOf(p));
+        const usage = `CPU ${Math.round((svc.procByKey && svc.procByKey.get(keyOf(p)) || p).cpu ?? p.pcpu)}%` + (track && track.cpuRun ? ` for ${Math.max(1, Math.round(track.cpuRun * s.intervalSec / 60))} min` : '');
+        const reasonText = reasons ? reasons.map((r) => r.detail).join('; ') : (by === 'auto' ? '' : 'requested by you');
+        const why2 = reasons && reasons.length ? reasons.map((r) => r.detail).join('; ') : usage;
+        if (s.dryRun) {
+            const e = audit(Object.assign(base, { result: 'dry-run', reason: reasonText, detail: `would stop ${label(p)} (${why2})` }));
+            if (by === 'auto') notify(`[dry run] Would stop ${label(p)} (pid ${pid}, ${why2}).`);
+            return e;
+        }
+        if (by === 'auto') {
+            const lim = svc.limiter.check(p.app || p.name, s.rate);
+            if (lim) return audit(Object.assign(base, { result: 'refused', reason: lim }));
+            svc.limiter.record(p.app || p.name);
+        }
+        else svc.manualTimes.push(Date.now());
+        try { process.kill(pid, 'SIGTERM'); } catch (e) { return audit(Object.assign(base, { result: 'failed', reason: `SIGTERM: ${e.code || e.message}` })); }
+        let signal = 'SIGTERM';
+        const deadline = Date.now() + TERM_GRACE_MS;
+        while (Date.now() < deadline && alive(pid)) await sleep(250);
+        if (alive(pid)) {
+            const again = (await liveProc(pid)).p;
+            if (!identityMismatch({ startTime: p.startTime, comm: p.comm }, again)) {
+                try { process.kill(pid, 'SIGKILL'); signal = 'SIGKILL'; } catch (e) { return audit(Object.assign(base, { result: 'failed', reason: `SIGKILL: ${e.code || e.message}` })); }
+                const d2 = Date.now() + 3000;
+                while (Date.now() < d2 && alive(pid)) await sleep(100);
+            }
+        }
+        const gone = !alive(pid) || !!identityMismatch({ startTime: p.startTime, comm: p.comm }, (await liveProc(pid)).p);
+        const e = audit(Object.assign(base, { result: gone ? (signal === 'SIGKILL' ? 'killed' : 'terminated') : 'failed', signal, reason: reasonText || null, detail: usage }));
+        if (gone) notify(`Stopped ${label(p)} (pid ${pid}, ${why2}${by === 'auto' ? ', automatically' : ''}). Undo: reopen it.`, { priority: by === 'auto' ? 'high' : 'default' });
+        return e;
+    } finally { svc.terminating.delete(k); }
+}
+
+// Anchored to the previous due time, so the time a sample takes (ps, the
+// helper, ioreg — seconds on a loaded Mac) does not push every later sample.
+function schedule(anchored = false) {
+    clearTimeout(svc.timer);
+    if (!svc.settings.enabled) { svc.timer = null; return; }
+    const iv = svc.settings.intervalSec * 1000, now = Date.now();
+    let next = anchored && svc.nextAt ? svc.nextAt + iv : now + iv;
+    if (next < now + 1000) next = now + iv;   // fell behind (sleep, slow sample): resync
+    svc.nextAt = next;
+    svc.timer = setTimeout(async () => { await sampleOnce('timer'); schedule(true); }, next - now);
+}
+
+function statusPayload() {
+    const s = svc.settings;
+    const now = Date.now();
+    return {
+        ok: true, service: 'soa-health', version: VERSION, pid: process.pid, port: PORT, now,
+        enabled: s.enabled, monitoring: !!svc.timer, mode: s.mode, dryRun: s.dryRun, intervalSec: s.intervalSec,
+        autoTerminate: s.mode === 'auto' && !s.dryRun, testMode: !!TEST_ALLOW,
+        nextSampleAt: svc.timer ? svc.nextAt : null, samples: svc.samples, uptimeSec: Math.round((now - svc.startedAt) / 1000),
+        sample: svc.last, trend: trendOf(svc.history, svc.last ? svc.last.t : now),
+        candidates: svc.candidates, watch: svc.watch, top: svc.top, topMemory: svc.topMem || [],
+        rate: { used: svc.limiter.used(s.rate, now), max: s.rate.max, windowMin: s.rate.windowMin },
+        thresholds: s.thresholds,
+        helper: { built: helperState.built, error: helperState.error },
+        lastAction: readActions(1)[0] || null, lastError: svc.lastError,
+    };
+}
+
+// ── HTTP ─────────────────────────────────────────────────────────────────
+const PROXY_HEADER = /^(?:x-forwarded-.*|x-real-ip|forwarded|via|cf-.*|x-soa-.*|true-client-ip|x-client-ip|x-original-.*)$/i;
+const tokens = new Map();
+function mintToken() {
+    const t = crypto.randomBytes(18).toString('base64url');
+    const now = Date.now();
+    tokens.set(t, now + TOKEN_TTL_MS);
+    for (const [k, exp] of tokens) if (exp < now) tokens.delete(k);
+    while (tokens.size > 500) tokens.delete(tokens.keys().next().value);
+    return t;
+}
+function safeEq(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); }
+function isProxied(req) { return Object.keys(req.headers).some((h) => PROXY_HEADER.test(h)); }
+// Pure guard (exported for tests). Returns a refusal reason or null.
+function guardReason(req, port) {
+    const ra = String(req.socket && req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    if (ra !== '127.0.0.1' && ra !== '::1') return 'non-loopback peer';
+    const h = String(req.headers.host || '').toLowerCase();
+    if (h !== `127.0.0.1:${port}` && h !== `localhost:${port}` && h !== `[::1]:${port}`) return 'bad host';
+    const sfs = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+    if (sfs === 'cross-site' || (sfs === 'same-site' && req.method !== 'GET')) return 'cross-site request';
+    return null;
+}
+function authOk(req, body, key) {
+    const t = req.headers['x-health-token'] || (body && body.token);
+    if (t && tokens.has(String(t)) && tokens.get(String(t)) > Date.now()) return true;
+    const m = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || ''));
+    if (m && key && !isProxied(req) && safeEq(m[1], key)) return true;
+    return false;
+}
+function json(res, code, obj) { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(obj)); }
+function forbid(res, why) { log('403', why); res.writeHead(403, { 'content-type': 'text/plain', 'cache-control': 'no-store' }); res.end('forbidden\n'); }
+function readBody(req) {
+    return new Promise((resolve) => {
+        let b = '', n = 0, dead = false;
+        req.setEncoding('utf8');
+        req.on('data', (d) => { n += d.length; if (n > 16384) { dead = true; req.destroy(); } else b += d; });
+        req.on('end', () => { if (dead) return resolve({ error: 'too large' }); if (!b.trim()) return resolve({ body: {} }); try { resolve({ body: JSON.parse(b) }); } catch (_) { resolve({ error: 'invalid JSON' }); } });
+        req.on('error', () => resolve({ error: 'read error' }));
+    });
+}
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const HTML_HEAD = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>SoA health</title><style>
+body{font:14px/1.45 -apple-system,system-ui,sans-serif;background:#0b0f14;color:#d6e2ea;margin:0;padding:16px;max-width:720px}
+h1{font-size:18px;margin:0 0 8px}.m{opacity:.7}.card{background:#121922;border-radius:10px;padding:12px;margin:10px 0}
+button{font:inherit;border:0;border-radius:8px;padding:8px 12px;margin:4px 4px 0 0;background:#24313f;color:#d6e2ea;cursor:pointer}
+button.d{background:#8a2430;color:#fff}button.on{background:#1e5d3a}code{font-size:12px;word-break:break-all;opacity:.8}
+table{width:100%;border-collapse:collapse}td{padding:3px 4px;border-top:1px solid #1d2733;vertical-align:top}</style></head><body>`;
+function confirmPage(id) {
+    const l = svc.links.get(id);
+    if (!l || l.expires < Date.now()) return HTML_HEAD + '<h1>Link expired</h1><p class="m">This stop link is no longer valid. Open the health panel for the current list.</p></body></html>';
+    return HTML_HEAD + `<h1>Stop ${esc(l.name)}?</h1><div class="card"><div>pid ${esc(l.pid)} · started ${esc(new Date(l.startTime).toLocaleString())}</div>
+<div class="m">${esc((l.reasons || []).map((r) => r.detail).join('; '))}</div><code>${esc(l.args)}</code></div>
+<p class="m">It gets SIGTERM (a normal quit), and SIGKILL only if it is still running after 10 s. Unsaved work in that app may be lost.</p>
+<button class="d" id="go">Stop it</button> <span id="out" class="m"></span>
+<script>document.getElementById('go').onclick=async()=>{const o=document.getElementById('out');o.textContent='…';
+try{const t=(await (await fetch('token',{cache:'no-store'})).json()).token;
+const r=await (await fetch('terminate',{method:'POST',headers:{'content-type':'text/plain','x-health-token':t},body:JSON.stringify(${JSON.stringify({ pid: l.pid, startTime: l.startTime, comm: l.comm, candidate: id })})})).json();
+o.textContent=r.result==='terminated'||r.result==='killed'?'Stopped.':(r.result+': '+(r.reason||''));}catch(e){o.textContent='failed: '+e.message}}</script></body></html>`;
+}
+const CONTROL_PAGE = HTML_HEAD + `<h1>SoA health</h1><div id="s" class="card m">loading…</div>
+<div class="card"><b>Monitor</b><br><button id="on">On</button><button id="off">Off</button>
+<br><br><b>When a process stays heavy</b><br><button id="mn">Notify me (default)</button><button id="ma" class="d">Terminate automatically…</button></div>
+<div class="card"><b>Candidates</b><table id="c"></table></div><div class="card"><b>Top CPU</b><table id="t"></table></div>
+<script>
+const $=(i)=>document.getElementById(i);const e=(s)=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+async function tok(){return (await (await fetch('token',{cache:'no-store'})).json()).token}
+async function post(p,b){const r=await fetch(p,{method:'POST',headers:{'content-type':'text/plain','x-health-token':await tok()},body:JSON.stringify(b)});const j=await r.json();if(!r.ok)alert(j.error||r.status);load();return j}
+async function load(){const s=await (await fetch('status',{cache:'no-store'})).json();const x=s.sample||{},th=x.thermal||{},tr=s.trend||{};
+$('s').innerHTML='Monitor <b>'+(s.enabled?'ON':'OFF')+'</b> · mode <b>'+e(s.mode)+(s.dryRun?' (dry run)':'')+'</b> · every '+s.intervalSec+'s<br>CPU '+e(x.cpu&&x.cpu.totalPct)+'% · load '+e(x.cpu&&x.cpu.load&&x.cpu.load[0])+' · memory '+e(x.memory&&x.memory.usedPct)+'% ('+e(x.memory&&x.memory.pressure)+')<br>Thermal <b>'+e(th.state)+'</b>'+(th.cpuC!=null?' · CPU '+th.cpuC+'°C':'')+(th.batteryC!=null?' · battery '+th.batteryC+'°C':'')+' · trend '+e(tr.direction)+(tr.deltaPerMin!=null?' ('+tr.deltaPerMin+'°C/min)':'');
+const row=(p,k)=>'<tr><td>'+e(p.app||p.name)+'<br><code>pid '+p.pid+'</code></td><td>'+e(p.cpu)+'%<br>'+e(p.rssMB)+' MB</td><td>'+(p.reasons?e(p.reasons.map(r=>r.detail).join('; ')):e(p.protectedReason||''))+'</td><td>'+(k?'<button class="d" data-p="'+p.pid+'" data-s="'+p.startTime+'">Stop</button>':'')+'</td></tr>';
+$('c').innerHTML=(s.candidates||[]).map(p=>row(p,1)).join('')||'<tr><td class="m">none</td></tr>';$('t').innerHTML=(s.top||[]).slice(0,8).map(p=>row(p,0)).join('');
+document.querySelectorAll('button[data-p]').forEach(b=>b.onclick=()=>confirm('Stop pid '+b.dataset.p+'? Unsaved work in it may be lost.')&&post('terminate',{pid:+b.dataset.p,startTime:+b.dataset.s}));}
+$('on').onclick=()=>post('settings',{enabled:true});$('off').onclick=()=>post('settings',{enabled:false});$('mn').onclick=()=>post('settings',{mode:'notify'});
+$('ma').onclick=()=>{if(confirm('Terminate processes AUTOMATICALLY?\\n\\nSoA will stop your own apps that stay over the limits without asking (protected system, SoA and terminal processes excluded). Unsaved work in them can be lost.'))post('settings',{mode:'auto',confirm:'${AUTO_CONFIRM}'})};
+load();setInterval(load,15000);</script></body></html>`;
+
+function createServer() {
+    return http.createServer(async (req, res) => {
+        const why = guardReason(req, PORT);
+        if (why) { req.resume(); return forbid(res, why); }
+        let url; try { url = new URL(req.url, 'http://x'); } catch (_) { res.writeHead(400); return res.end(); }
+        const p = url.pathname.replace(/\/+$/, '') || '/';
+        const proxied = isProxied(req);
+        try {
+            if (req.method === 'GET') {
+                if (p === '/health') {
+                    if (proxied) return forbid(res, 'proxied /health');
+                    return json(res, 200, { ok: true, service: 'soa-health', version: VERSION, enabled: svc.settings.enabled, mode: svc.settings.mode,
+                        lastSampleAt: svc.last ? svc.last.t : null, uptimeSec: Math.round((Date.now() - svc.startedAt) / 1000) });
+                }
+                if (p === '/token') return json(res, 200, { token: mintToken(), ttl: TOKEN_TTL_MS, header: 'x-health-token' });
+                if (p === '/status') return json(res, 200, statusPayload());
+                if (p === '/history') {
+                    const min = clampInt(url.searchParams.get('minutes'), 60, 1, 1440);
+                    const cut = Date.now() - min * 60000;
+                    return json(res, 200, { minutes: min, intervalSec: svc.settings.intervalSec, samples: svc.history.filter((h) => h.t >= cut) });
+                }
+                if (p === '/settings') return json(res, 200, { settings: svc.settings, defaults: defaultSettings(), limits: { intervalSec: [MIN_INTERVAL_S, MAX_INTERVAL_S], autoConfirm: AUTO_CONFIRM, cores: NCPU, totalMemMB: Math.round(TOTAL_MEM / 1048576) } });
+                if (p === '/actions') return json(res, 200, { actions: readActions(clampInt(url.searchParams.get('limit'), 50, 1, 1000)) });
+                if (p === '/confirm') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(confirmPage(String(url.searchParams.get('c') || ''))); }
+                if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(CONTROL_PAGE); }
+                res.writeHead(404); return res.end('not found');
+            }
+            if (req.method === 'POST') {
+                const ct = String(req.headers['content-type'] || '');
+                // JSON bodies arrive as application/json (direct) or text/plain: the daemon's
+                // global express.json() consumes application/json bodies before /preview
+                // proxies them, so a browser going through the proxy must send text/plain.
+                if (!/^(?:application\/json|text\/plain)\b/i.test(ct)) { req.resume(); return forbid(res, 'POST must carry a JSON body (application/json or text/plain)'); }
+                const { body, error } = await readBody(req);
+                if (!authOk(req, body, svc.key)) return forbid(res, 'missing or bad token');
+                if (error) return json(res, 400, { error });
+                if (p === '/settings') {
+                    const r = applySettingsPatch(svc.settings, body);
+                    if (r.error) return json(res, 400, r);
+                    const before = svc.settings;
+                    svc.settings = r.settings; saveSettings(r.settings);
+                    if (before.mode !== r.settings.mode || before.dryRun !== r.settings.dryRun) svc.autoSkip.clear();
+                    audit({ action: 'settings', by: proxied ? 'remote' : 'local', result: 'saved', detail: r.changed.join(','),
+                        mode: r.settings.mode, enabled: r.settings.enabled, dryRun: r.settings.dryRun });
+                    if (before.enabled !== r.settings.enabled || before.intervalSec !== r.settings.intervalSec) {
+                        schedule();
+                        if (r.settings.enabled && !before.enabled) sampleOnce('enabled');
+                    }
+                    if (before.mode !== r.settings.mode && r.settings.mode === 'auto') notify(`Automatic termination is ON${r.settings.dryRun ? ' (dry run)' : ''}. SoA health will stop heavy processes without asking.`, { priority: 'high' });
+                    return json(res, 200, { ok: true, settings: r.settings });
+                }
+                if (p === '/terminate') {
+                    const pid = parseInt(body.pid, 10);
+                    if (!(pid > 1)) return json(res, 400, { error: 'pid required' });
+                    if (body.startTime == null) return json(res, 400, { error: 'startTime required (from /status); it guards against pid reuse' });
+                    const e = await terminate({ pid, startTime: Number(body.startTime), comm: body.comm || null }, { by: proxied ? 'remote' : 'manual' });
+                    return json(res, e.result === 'refused' || e.result === 'failed' ? 409 : 200, e);
+                }
+                if (p === '/sample') { await sampleOnce('manual'); return json(res, 200, statusPayload()); }
+                return json(res, 404, { error: 'not found' });
+            }
+            res.writeHead(405, { allow: 'GET, POST' }); return res.end();
+        } catch (e) { log('request failed', e.stack || e.message); if (!res.headersSent) json(res, 500, { error: 'internal' }); }
+    });
+}
+
+function serve() {
+    fs.mkdirSync(HEALTH_DIR, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(HEALTH_DIR, 0o700); } catch (_) {}
+    svc.settings = loadSettings();
+    if (!fs.existsSync(SETTINGS_FILE)) saveSettings(svc.settings);
+    try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch (_) {}
+    svc.key = loadOrCreateKey();
+    loadHistory();
+    const server = createServer();
+    server.on('error', (e) => { log('listen failed:', e.code || e.message); process.exit(1); });
+    server.listen(PORT, HOST, async () => {
+        log(`soa-health ${VERSION} listening on ${HOST}:${PORT} (pid ${process.pid}, mode ${svc.settings.mode}, enabled ${svc.settings.enabled}${TEST_ALLOW ? ', TEST allowlist ' + [...TEST_ALLOW].join(',') : ''}${NOTIFY_DRY ? ', notify dry' : ''})`);
+        cpuTotal();
+        await sampleOnce('boot');
+        schedule();
+    });
+    const stop = () => { log('soa-health stopping'); clearTimeout(svc.timer); server.close(); setTimeout(() => process.exit(0), 200); };
+    process.on('SIGTERM', stop); process.on('SIGINT', stop);
+    process.on('uncaughtException', (e) => log('uncaught', e && e.stack || e));
+    process.on('unhandledRejection', (e) => log('unhandled', e && e.stack || e));
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────
+function api(method, p, body) {
+    let key = '';
+    try { key = fs.readFileSync(KEY_FILE, 'utf8').trim(); } catch (_) {}
+    return new Promise((resolve, reject) => {
+        const data = body ? JSON.stringify(body) : null;
+        const req = http.request({ host: HOST, port: PORT, method, path: p, timeout: 30000,
+            headers: Object.assign({ host: `127.0.0.1:${PORT}` }, key ? { authorization: `Bearer ${key}` } : {}, data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {}) }, (res) => {
+            let b = ''; res.on('data', (d) => (b += d)); res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch (_) {} resolve({ status: res.statusCode, body: j, text: b }); });
+        });
+        req.on('error', reject); req.on('timeout', () => req.destroy(new Error('timeout')));
+        if (data) req.write(data);
+        req.end();
+    });
+}
+const HELP = `soa-health — system health monitor (loopback service on 127.0.0.1:${PORT})
+
+  soa-health [serve]            run the service
+  soa-health status [--json]    current sample, temperature trend, candidates
+  soa-health on | off           start / stop monitoring
+  soa-health mode notify        notify with a one-tap stop link (default)
+  soa-health mode auto --yes    terminate heavy processes AUTOMATICALLY
+  soa-health dry-run on|off     auto mode decides but never signals
+  soa-health history [minutes]  temperature / CPU history (default 60)
+  soa-health top                heaviest processes and why each is (not) eligible
+  soa-health kill <pid>         stop one process now (same protection rules)
+  soa-health actions [n]        the audit log
+  soa-health doctor             check the service, helper, settings and notifier
+`;
+function fmtStatus(s) {
+    const x = s.sample || {}, th = x.thermal || {}, t = s.trend || {}, m = x.memory || {};
+    const out = [];
+    out.push(`soa-health ${s.version} pid ${s.pid} · monitor ${s.enabled ? 'ON' : 'OFF'} · mode ${s.mode}${s.dryRun ? ' (dry run)' : ''} · every ${s.intervalSec}s${s.testMode ? ' · TEST MODE' : ''}`);
+    out.push(`CPU ${x.cpu ? x.cpu.totalPct : '?'}% (${x.cpu ? x.cpu.cores : '?'} cores, load ${x.cpu ? x.cpu.load.join(' ') : '?'}) · memory ${m.usedPct}% used, pressure ${m.pressure || '?'}, swap ${m.swapUsedMB ?? '?'} MB`);
+    out.push(`thermal ${th.state || '?'} · CPU ${th.cpuC ?? '–'}°C · max ${th.maxC ?? '–'}°C · battery ${th.batteryC ?? '–'}°C · trend ${t.direction}${t.deltaPerMin != null ? ` (${t.deltaPerMin >= 0 ? '+' : ''}${t.deltaPerMin}°C/min, 10m slope ${t.slope10m ?? '–'})` : ''} [${th.source}]`);
+    out.push(`terminations ${s.rate.used}/${s.rate.max} per ${s.rate.windowMin} min`);
+    if (s.candidates.length) {
+        out.push('candidates:');
+        for (const c of s.candidates) out.push(`  ${String(c.pid).padStart(6)}  ${(c.app || c.name).slice(0, 28).padEnd(28)} ${String(c.cpu).padStart(6)}%  ${String(c.rssMB).padStart(6)} MB  ${c.reasons.map((r) => r.detail).join('; ')}`);
+    } else out.push('candidates: none');
+    if (s.lastAction) out.push(`last action: ${new Date(s.lastAction.t).toLocaleString()} ${s.lastAction.action} ${s.lastAction.result || ''} ${s.lastAction.name || ''} ${s.lastAction.reason || ''}`);
+    return out.join('\n');
+}
+async function cli(argv) {
+    const [cmd, ...rest] = argv;
+    const asJson = rest.includes('--json');
+    const need = async (r) => { if (r.status >= 300) { console.error(`soa-health: ${r.status} ${r.body ? (r.body.error || r.body.reason || JSON.stringify(r.body)) : r.text.trim()}`); process.exit(r.status === 403 ? 3 : 1); } return r.body; };
+    try {
+        switch (cmd) {
+            case 'status': { const s = await need(await api('GET', '/status')); console.log(asJson ? JSON.stringify(s, null, 2) : fmtStatus(s)); return; }
+            case 'on': case 'off': { await need(await api('POST', '/settings', { enabled: cmd === 'on' })); console.log(`monitoring ${cmd.toUpperCase()}`); return; }
+            case 'mode': {
+                const m = rest[0];
+                if (m !== 'notify' && m !== 'auto') { console.error('usage: soa-health mode notify|auto [--yes]'); process.exit(2); }
+                if (m === 'auto' && !rest.includes('--yes')) {
+                    console.error('Automatic termination stops your own apps that stay over the limits WITHOUT asking\n(protected system, SoA, agent, tunnel and terminal processes are never touched).\nUnsaved work in a stopped app can be lost. Re-run with --yes to turn it on.');
+                    process.exit(2);
+                }
+                const b = await need(await api('POST', '/settings', m === 'auto' ? { mode: 'auto', confirm: AUTO_CONFIRM } : { mode: 'notify' }));
+                console.log(`mode ${b.settings.mode}${b.settings.dryRun ? ' (dry run)' : ''}`); return;
+            }
+            case 'dry-run': { const v = rest[0] === 'on'; if (!['on', 'off'].includes(rest[0])) { console.error('usage: soa-health dry-run on|off'); process.exit(2); } await need(await api('POST', '/settings', { dryRun: v })); console.log(`dry run ${v ? 'ON' : 'OFF'}`); return; }
+            case 'history': {
+                const min = parseInt(rest.find((x) => /^\d+$/.test(x)) || '60', 10);
+                const h = await need(await api('GET', `/history?minutes=${min}`));
+                if (asJson) { console.log(JSON.stringify(h, null, 2)); return; }
+                let prev = null;
+                for (const x of h.samples) {
+                    const d = prev && x.tempC != null && prev.tempC != null ? (x.tempC - prev.tempC) / ((x.t - prev.t) / 60000) : null;
+                    console.log(`${new Date(x.t).toLocaleTimeString()}  cpu ${String(x.cpu ?? '?').padStart(5)}%  mem ${String(x.memUsedPct ?? '?').padStart(3)}%  ${String(x.thermal).padEnd(8)} ${x.tempC != null ? x.tempC.toFixed(1) + '°C' : '  –  '}${d != null ? `  ${d >= 0 ? '+' : ''}${d.toFixed(1)}°C/min` : ''}  ${x.top && x.top[0] ? x.top[0].name + ' ' + x.top[0].cpu + '%' : ''}`);
+                    prev = x;
+                }
+                return;
+            }
+            case 'top': {
+                const s = await need(await api('GET', '/status'));
+                if (asJson) { console.log(JSON.stringify({ top: s.top, topMemory: s.topMemory, candidates: s.candidates, watch: s.watch }, null, 2)); return; }
+                const cand = new Set(s.candidates.map((c) => c.pid));
+                for (const p of s.top) console.log(`${String(p.pid).padStart(6)}  ${(p.app || p.name).slice(0, 30).padEnd(30)} ${String(p.cpu).padStart(6)}%  ${String(p.rssMB).padStart(6)} MB  ${cand.has(p.pid) ? 'CANDIDATE' : p.protected ? 'protected: ' + p.protectedReason : 'eligible'}`);
+                return;
+            }
+            case 'kill': {
+                const pid = parseInt(rest[0], 10);
+                if (!(pid > 1)) { console.error('usage: soa-health kill <pid>'); process.exit(2); }
+                const procs = await readProcs();
+                const p = procs.find((x) => x.pid === pid);
+                if (!p) { console.error(`no process ${pid}`); process.exit(1); }
+                const r = await api('POST', '/terminate', { pid, startTime: p.startTime, comm: p.comm });
+                if (r.status === 403) await need(r);
+                console.log(`${r.body.result}${r.body.reason ? ': ' + r.body.reason : ''}${r.body.signal ? ' (' + r.body.signal + ')' : ''}`);
+                process.exit(r.status === 200 ? 0 : 1);
+            }
+            case 'actions': { const b = await need(await api('GET', `/actions?limit=${parseInt(rest[0], 10) || 20}`)); for (const a of b.actions.slice().reverse()) console.log(`${new Date(a.t).toLocaleString()}  ${a.action.padEnd(9)} ${(a.result || '').padEnd(10)} ${a.pid ? 'pid ' + a.pid + ' ' : ''}${a.name || ''} ${a.reason || a.detail || ''}`); return; }
+            case 'doctor': {
+                const lines = [];
+                const ok = (b, m) => lines.push(`${b ? 'ok  ' : 'FAIL'}  ${m}`);
+                let h = null; try { h = await api('GET', '/health'); } catch (_) {}
+                ok(h && h.status === 200, `service on 127.0.0.1:${PORT}${h && h.body ? ` (v${h.body.version}, ${h.body.enabled ? 'on' : 'off'}, ${h.body.mode})` : ' — not answering'}`);
+                let st = null; try { st = h && (await api('GET', '/status')).body; } catch (_) {}
+                if (st) {
+                    const th = st.sample && st.sample.thermal || {};
+                    ok(!!th.state && th.state !== 'unknown', `thermal state: ${th.state} (source ${th.source})`);
+                    ok(th.cpuC != null || th.batteryC != null, `temperature: CPU ${th.cpuC ?? '–'}°C, battery ${th.batteryC ?? '–'}°C`);
+                    ok(st.helper.built, `thermal helper ${st.helper.built ? 'built' : 'missing'}${st.helper.error ? ' — ' + st.helper.error : ''}`);
+                    ok(st.mode === 'notify' || st.mode === 'auto', `mode ${st.mode}${st.mode === 'auto' ? ' — AUTO-TERMINATE IS ON' : ''}`);
+                }
+                try { const m = fs.statSync(SETTINGS_FILE).mode & 0o777; ok(m === 0o600, `settings.json mode ${m.toString(8)}`); } catch (_) { ok(false, 'settings.json missing'); }
+                try { const m = fs.statSync(KEY_FILE).mode & 0o777; ok(m === 0o600, `key mode ${m.toString(8)}`); } catch (_) { ok(false, 'key missing'); }
+                ok(fs.existsSync(path.join(STATE_DIR, 'notify.json')) || !!env.SOA_NOTIFY_TOPIC, 'push notifier configured (notify.json)');
+                ok(fs.existsSync(path.join(__dirname, 'soa-msg')), 'soa-msg present');
+                console.log(lines.join('\n'));
+                process.exit(lines.some((l) => l.startsWith('FAIL')) ? 1 : 0);
+            }
+            default: process.stdout.write(HELP); process.exit(cmd === 'help' || cmd === '--help' || cmd === '-h' ? 0 : 2);
+        }
+    } catch (e) {
+        console.error(`soa-health: ${e.code === 'ECONNREFUSED' ? `service not running on 127.0.0.1:${PORT}` : e.message}`);
+        process.exit(1);
+    }
+}
+
+module.exports = {
+    defaultSettings, normalizeSettings, applySettingsPatch, parsePs, parseLstart, parseCpuTime, protectReason, eligibility,
+    Detector, reasonsFor, AGENT_ARGS_RE, scoreOf, RateLimiter, identityMismatch, trendOf, guardReason, listMatch, AUTO_CONFIRM, PROXY_HEADER,
+};
+
+if (require.main === module) {
+    const a = process.argv.slice(2);
+    if (!a.length || a[0] === 'serve') serve();
+    else cli(a);
+}
