@@ -1,4 +1,4 @@
-import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=accounts-20261103';
+import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=rings-20261103';
 /**
  * Sidebar widgets — small, self-contained, all driven from JSON endpoints.
  *
@@ -497,13 +497,9 @@ class ClaudeUsageWidget extends Widget {
         super({ titleKey: 'widget.claude', title: 'TOKEN USAGE', parent, intervalMs: 2500 });
         // Two matching, independently labeled windows per provider.
         // Missing windows remain unknown; reset time is text, never a ring.
-        // Which one is open is remembered: a fleet that is mostly one agent
-        // should not have to re-pick on every load.
+        // Start compact on every load; details open only from a usage circle.
         this._open = null;
-        try {
-            const saved = localStorage.getItem('soa_usage_open');
-            if (saved === 'codex' || saved === 'claude') this._open = saved;
-        } catch (_) {}
+        try { localStorage.removeItem('soa_usage_open'); } catch (_) {}
         this._codexSeen = true;
         this._quota = {};
         this._quotaFresh = false;
@@ -587,6 +583,7 @@ class ClaudeUsageWidget extends Widget {
         this._paintCodexPresence();
         this._paintOpen();
         this._accountPanel = new QuotaAccountsView({ parent: this.body, api,
+            externalDetailsId: this._detail.id,
             onDetails: src => this._toggle(src),
             onData: data => this._acceptAccounts(data) });
         this._accountPanel.root.hidden = true;
@@ -771,10 +768,6 @@ class ClaudeUsageWidget extends Widget {
 
     _toggle(src) {
         this._open = this._open === src ? null : src;
-        try {
-            if (this._open) localStorage.setItem('soa_usage_open', this._open);
-            else localStorage.removeItem('soa_usage_open');
-        } catch (_) {}
         this._paintOpen();
         // A freshly opened codex panel requests current numbers immediately.
         if (this._open === 'codex') this._codexAt = null;
@@ -786,7 +779,8 @@ class ClaudeUsageWidget extends Widget {
     _paintOpen() {
         const open = !!this._open && (this._open !== 'codex' || this._codexSeen);
         if (!open && this._detail.contains(document.activeElement)) {
-            this._cards[this._detail.dataset.src || 'claude'].el.focus();
+            if (this._accountPanel && !this._accountPanel.root.hidden) this._accountPanel.focusAccount('local-' + (this._detail.dataset.src || 'claude'));
+            else this._cards[this._detail.dataset.src || 'claude'].el.focus();
         }
         for (const [k, c] of Object.entries(this._cards)) {
             const on = open && this._open === k;
@@ -795,11 +789,14 @@ class ClaudeUsageWidget extends Widget {
             c.el.title = on ? 'Hide details' : 'Show details';
         }
         this._detail.classList.toggle('open', open);
+        this._detail.hidden = !open;
+        this._detail.style.display = open ? '' : 'none';
         this._detail.inert = !open;
         this._detail.setAttribute('aria-hidden', String(!open));
         this._more.tabIndex = open ? 0 : -1;
         this._more.hidden = !window.__SOA_WEB__?._shell?._managerEnabled?.();
         this._detail.dataset.src = this._open || '';
+        this._accountPanel?.setExternalOpen(open ? 'local-' + this._open : null);
         if (open) this._quotaDetails.replaceChildren(...Object.values(this._cards[this._open].metrics).map(m => m.detail));
     }
 

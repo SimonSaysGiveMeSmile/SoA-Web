@@ -3594,7 +3594,7 @@ class App {
         const usageAccountsTile = document.getElementById('btn-usage-accounts');
         if (usageAccountsTile) usageAccountsTile.addEventListener('click', async () => {
             try {
-                const { openQuotaAccountsSheet } = await import('./quotaAccounts.js?v=accounts-20261103');
+                const { openQuotaAccountsSheet } = await import('./quotaAccounts.js?v=rings-20261103');
                 openQuotaAccountsSheet({ api: p => this._proxyUrl(p), available: !!this.socket?.baseUrl });
             } catch (_) { this._toast?.('Account monitor could not load. Reload and retry.'); }
         });

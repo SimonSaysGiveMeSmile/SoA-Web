@@ -34,6 +34,9 @@ const factory = (a, directory) => {
     readers.set(a.id, reader); return reader;
 };
 const store = new QuotaAccounts({ directory: path.join(tmp, 'state'), factory });
+const windowPace = store.pace.window.bind(store.pace);
+store.pace.window = (id, key, ...args) => id.startsWith('local-codex:') && key === 'weekly'
+    ? { state: 'estimated', remainingMs: 23700000 } : windowPace(id, key, ...args);
 function listen(server) { return new Promise(r => server.once('listening', r)); }
 function checkJSON(url, body, token) { return fetch(url, { method: 'POST', headers: { 'content-type': 'text/plain', 'x-soa-quota-action': token }, body: JSON.stringify(body) }).then(async r => { const data = await r.json(); assert.equal(r.status, 200, JSON.stringify(data)); return data; }); }
 (async () => {
@@ -54,7 +57,7 @@ const api=p=>p+(p.includes('?')?'&':'?')+'t=fixture-pair';
 window.view=new QuotaAccountsView({parent:document.querySelector('#fixture'),api});
 await view.refresh(); window.timer=setInterval(()=>view.refresh(),350); window.ready=true;
 window.openPhone=async()=>{const {openQuotaAccountsSheet}=await import('/m/quotaAccounts.js');return window.phone=openQuotaAccountsSheet({api})};
-window.openWidget=async()=>{clearInterval(window.timer);view.destroy();const {ClaudeUsageWidget}=await import('/assets/widgets.js');window.widget=new ClaudeUsageWidget({parent:document.querySelector('#fixture')});await widget.tick();await widget.tick();};
+window.openWidget=async()=>{clearInterval(window.timer);view.destroy();window.widget?.destroy();const {ClaudeUsageWidget}=await import('/assets/widgets.js');window.widget=new ClaudeUsageWidget({parent:document.querySelector('#fixture')});await widget.tick();await widget.tick();};
 </script></body></html>`));
     front = app.listen(0, '127.0.0.1'); await listen(front); const origin = `http://127.0.0.1:${front.address().port}`;
     browser = await browserType.launch({ headless: true }); const page = await browser.newPage({ viewport: { width: 800, height: 950 } });
@@ -75,6 +78,18 @@ window.openWidget=async()=>{clearInterval(window.timer);view.destroy();const {Cl
     assert.equal(store.account('local-claude').enabled, false);
     await page.getByRole('button', { name: 'Resume monitoring Claude' }).click();
     await page.getByRole('button', { name: 'Choose monitored accounts' }).click();
+    const mutationRoute = '**/api/usage-quota/accounts?*';
+    await page.route(mutationRoute, async route => {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await route.continue();
+    });
+    const showClaude = page.getByLabel('Show Claude', { exact: true });
+    await showClaude.uncheck();
+    await page.evaluate(() => window.view.refresh());
+    assert.equal(await showClaude.isChecked(), false, 'polling must preserve an in-flight checkbox change');
+    await page.waitForFunction(() => window.view.data.accounts[0].visible === false);
+    await page.unroute(mutationRoute);
+    await showClaude.check();
     const input = page.getByLabel('Name for Claude', { exact: true }); await input.fill('Work Claude');
     await page.waitForTimeout(800); assert.equal(await input.inputValue(), 'Work Claude'); assert.equal(await input.evaluate(n => n === document.activeElement), true);
     await input.press('Tab'); await page.waitForFunction(() => window.view.data.accounts[0].label === 'Work Claude');
@@ -99,12 +114,39 @@ window.openWidget=async()=>{clearInterval(window.timer);view.destroy();const {Cl
     await page.setViewportSize({ width: 390, height: 844 }); await page.evaluate(() => window.openPhone());
     await page.waitForSelector('dialog[open] .qa-card');
     assert.equal(await page.locator('dialog[open]').evaluate(n => n.scrollWidth > n.clientWidth + 1), false);
+    const phoneRing = page.locator('dialog [data-account="local-claude"] .qa-gauge');
+    assert.equal(await phoneRing.getAttribute('aria-expanded'), 'false');
+    await phoneRing.click(); assert.equal(await page.locator('dialog .qa-details').isVisible(), true);
+    await phoneRing.click(); assert.equal(await page.locator('dialog .qa-details').isVisible(), false);
     await page.screenshot({ path: path.join(tmp, 'phone.png'), fullPage: true });
     await page.getByRole('button', { name: 'Done', exact: true }).click(); await page.locator('dialog').waitFor({state:'detached'});
-    await page.setViewportSize({ width: 900, height: 950 }); await page.evaluate(() => window.openWidget());
+    await page.setViewportSize({ width: 900, height: 950 });
+    await page.evaluate(() => localStorage.setItem('soa_usage_open', 'claude'));
+    await page.evaluate(() => window.openWidget());
     await page.waitForSelector('.quota-accounts:not([hidden]) .qa-card');
     assert.equal(await page.locator('.usage-dials').isVisible(), false);
     assert.ok(await page.locator('.qa-card').count() >= 2);
+    assert.equal(await page.locator('.usage-detail').isVisible(), false, 'old preference must not reopen details');
+    assert.equal(await page.getByRole('button', { name: /local activity/ }).count(), 0);
+    const claudeRing = page.locator('.qa-card[data-account="local-claude"] .qa-gauge');
+    const codexRing = page.locator('.qa-card[data-account="local-codex"] .qa-gauge');
+    await claudeRing.click();
+    assert.equal(await page.locator('.usage-detail').isVisible(), true);
+    assert.equal(await page.locator('.usage-detail').getAttribute('data-src'), 'claude');
+    await page.evaluate(() => window.widget.tick());
+    assert.equal(await claudeRing.getAttribute('aria-expanded'), 'true');
+    await codexRing.click();
+    assert.equal(await page.locator('.usage-detail').getAttribute('data-src'), 'codex');
+    assert.equal(await claudeRing.getAttribute('aria-expanded'), 'false');
+    await codexRing.press('Enter'); assert.equal(await page.locator('.usage-detail').isVisible(), false);
+    await codexRing.press('Space'); assert.equal(await page.locator('.usage-detail').isVisible(), true);
+    const customRing = page.locator(`.qa-card[data-account="${added.id}"] .qa-gauge`);
+    await customRing.click();
+    assert.equal(await page.locator('.usage-detail').isVisible(), false);
+    assert.equal(await page.locator('.qa-details').getAttribute('data-account'), added.id);
+    assert.equal(await page.locator('.qa-details').isVisible(), true);
+    await customRing.click(); assert.equal(await page.locator('.qa-details').isVisible(), false);
+    await page.screenshot({ path: path.join(tmp, 'rings-collapsed.png'), fullPage: true });
     await page.getByRole('button', { name: 'Choose monitored accounts' }).click();
     const widgetInput = page.getByLabel('Name for Work Claude'); await widgetInput.fill('Typed while polling');
     await page.evaluate(() => window.widget.tick()); assert.equal(await widgetInput.inputValue(), 'Typed while polling');
@@ -113,9 +155,21 @@ window.openWidget=async()=>{clearInterval(window.timer);view.destroy();const {Cl
     for (const theme of ['light', 'dark']) for (const pack of ['tron', 'minimal', 'liquid', 'brutalist', 'classic', 'dos', 'macos27', 'windows11', 'neumorphism']) {
         await page.evaluate(({theme, pack}) => { document.documentElement.dataset.theme=theme; document.documentElement.dataset.ui=pack; }, {theme,pack});
         assert.equal(await page.locator('.quota-accounts').evaluate(n => n.scrollWidth > n.clientWidth + 1), false, `${pack} ${theme} overflow`);
+        const aligned = await page.evaluate(() => {
+            const cards = ['local-claude', 'local-codex'].map(id => document.querySelector(`.qa-card[data-account="${id}"]`));
+            return { rows: ['.qa-gauge', '.qa-reset', '.qa-local-burn', '.qa-bars', '[data-period=today]', '[data-period=week]'].map(selector => {
+                const rects = cards.map(c => c.querySelector(selector).getBoundingClientRect());
+                return { selector, delta: Math.abs(rects[0].y-rects[1].y) };
+            }), colors: cards.map(c=>getComputedStyle(c.querySelector('.qa-ring-weekly .value')).stroke),
+                gauges: cards.map(c=>({w:c.querySelector('.qa-gauge').getBoundingClientRect().width,h:c.querySelector('.qa-gauge').getBoundingClientRect().height})) };
+        });
+        assert.ok(aligned.rows.every(r => r.delta < 1), `${pack} ${theme}: ${JSON.stringify(aligned.rows)}`);
+        assert.deepEqual(aligned.colors, ['rgb(215, 155, 132)', 'rgb(139, 201, 238)']);
+        assert.ok(aligned.gauges.every(g=>g.w<=106.1 && Math.abs(g.w-g.h)<1));
+        assert.equal(await page.locator('.usage-detail').isVisible(), false);
     }
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ passed: true, engine, themes: 18, accounts: store.config.accounts.length, proxyPost: true, focusRetained: true, screenshots: tmp, browserErrors: errors }));
+    console.log(JSON.stringify({ passed: true, engine, themes: 18, accounts: store.config.accounts.length, disclosure: true, alignedRows: 6, providerColors: true, proxyPost: true, focusRetained: true, screenshots: tmp, browserErrors: errors }));
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => {
     await browser?.close(); front?.closeAllConnections(); await new Promise(r => front ? front.close(r) : r());
     quota?.closeAllConnections(); await new Promise(r => quota ? quota.close(r) : r()); store.close();
