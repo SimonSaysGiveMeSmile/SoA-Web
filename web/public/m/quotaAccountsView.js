@@ -22,12 +22,13 @@ const money = n => Number.isFinite(n) ? '≈$' + (n >= 1000 ? (n / 1000).toFixed
 const providerName = p => p === 'codex' ? 'Codex' : 'Claude';
 let sequence = 0;
 export class QuotaAccountsView {
-    constructor({ parent, api = x => x, onData = () => {}, onDetails = null, request = (...args) => fetch(...args) }) {
+    constructor({ parent, api = x => x, onData = () => {}, onDetails = null, externalDetailsId = null, request = (...args) => fetch(...args) }) {
         this.api = api; this.request = request; this.onData = onData; this.onDetails = onDetails;
+        this.externalDetailsId = externalDetailsId; this.openAccountId = null;
         this.rows = new Map(); this.cards = new Map(); this.activity = {}; this.controllers = new Set(); this.dead = false; this.busy = false;
         this.data = null; this.online = true;
         if (!document.querySelector('link[data-quota-accounts]')) document.head.append(el('link', {
-            rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=accounts-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
+            rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=rings-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
         this.root = el('section', { class: 'quota-accounts', 'aria-label': 'Account usage' });
         this.manage = button('Accounts', 'Choose monitored accounts', () => this.setManage(this.manager.hidden));
         this.manage.setAttribute('aria-expanded', 'false');
@@ -43,12 +44,49 @@ export class QuotaAccountsView {
         this.manager = el('div', { class: 'qa-manager', id: 'qa-manager-' + ++sequence }, [this.list, this.form]);
         this.manager.hidden = true; this.manage.setAttribute('aria-controls', this.manager.id);
         this.grid = el('div', { class: 'qa-grid' });
+        this.details = el('div', { class: 'qa-details', id: 'qa-details-' + sequence });
+        this.details.hidden = true;
         this.empty = button('Choose accounts to show', 'Choose accounts to show in this panel', () => this.setManage(true));
         this.empty.className = 'qa-empty';
-        this.root.append(this.bar, this.error, this.manager, this.grid, this.empty);
+        this.root.append(this.bar, this.error, this.manager, this.grid, this.details, this.empty);
         parent.append(this.root);
     }
     setManage(open) { this.manager.hidden = !open; this.manage.setAttribute('aria-expanded', String(open)); }
+    toggleDetails(account) {
+        if (account.system && this.onDetails) { this.onDetails(account.provider); return; }
+        const next = this.openAccountId === account.id ? null : account.id;
+        this.onDetails?.(null);
+        this.openAccountId = next;
+        this.renderDetails();
+    }
+    setExternalOpen(id) {
+        if (id || this.data?.accounts.find(a => a.id === this.openAccountId)?.system) this.openAccountId = id;
+        this.renderDetails();
+    }
+    focusAccount(id) { (this.cards.get(id)?.gauge.disabled === false ? this.cards.get(id).gauge : this.manage).focus({ preventScroll: true }); }
+    renderDetails() {
+        const account = this.data?.accounts.find(a => a.id === this.openAccountId && a.visible);
+        for (const [id, c] of this.cards) {
+            const open = account?.id === id;
+            c.gauge.setAttribute('aria-expanded', String(open));
+            c.gauge.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${c.title.textContent} usage details`);
+            c.gauge.title = open ? 'Hide details' : 'Show details';
+        }
+        this.details.hidden = !account || !!(account.system && this.onDetails);
+        if (this.details.hidden) return;
+        const q = account.quota || {}, rows = [el('strong', { text: account.label })];
+        for (const [key, label] of [['weekly', 'Weekly'], ['session', q.windows?.session?.windowMinutes === 300 ? 'Session · 5h' : 'Session']]) {
+            const w = q.windows?.[key];
+            if (!w || !Number.isFinite(w.usedPercent) || w.resetsAt !== null && w.resetsAt <= Date.now()) continue;
+            rows.push(el('div', { class: 'qa-detail-row' }, [el('span', { text: label }), el('strong', { text: `${Math.round(w.usedPercent)}%` }),
+                el('span', { class: 'qa-detail-reset', text: Number.isFinite(w.resetsAt) ? `Resets in ${duration(w.resetsAt - Date.now())}` : 'Reset not reported' })]));
+        }
+        if (rows.length === 1) rows.push(el('span', { text: 'Usage not reported' }));
+        const source = q.source === 'codex-app-server' ? 'Codex' : q.source === 'claude-code-statusline' ? 'Claude Code' : 'Claude';
+        rows.push(el('span', { class: 'qa-detail-source', text: `${source}${q.available && (!this.online || q.status !== 'ready') ? ' · Cached' : ''}` }));
+        this.details.dataset.account = account.id;
+        this.details.replaceChildren(...rows);
+    }
     async refresh() {
         if (this.loading || this.dead) return;
         this.loading = true;
@@ -94,7 +132,11 @@ export class QuotaAccountsView {
     setData(data) {
         if (this.dead || data?.service !== 'soa-usage-quota' || !Array.isArray(data.accounts)) return false;
         if (this.data && data.revision < this.data.revision) return false;
-        this.data = data; this.online = true; this.render(); return true;
+        this.data = data; this.online = true;
+        if (this.openAccountId && (!data.monitoring || !data.accounts.some(a => a.id === this.openAccountId && a.visible && a.enabled))) {
+            this.openAccountId = null; this.onDetails?.(null);
+        }
+        this.render(); return true;
     }
     setOffline() { if (!this.dead) { this.online = false; this.render(); } }
     setActivity(provider, data, costs) { this.activity[provider] = { data, costs }; this.renderCards(); }
@@ -144,17 +186,18 @@ export class QuotaAccountsView {
             svg.append(group);
         }
         const percent = el('strong', { class: 'qa-percent' }), period = el('span', { class: 'qa-period' });
-        const gauge = el('div', { class: 'qa-gauge' }, [svg, el('div', { class: 'qa-center' }, [percent, period])]);
+        const gauge = el('button', { type: 'button', class: 'qa-gauge', 'aria-expanded': 'false',
+            'aria-controls': account.system && this.onDetails ? this.externalDetailsId : this.details.id,
+            onclick: () => this.toggleDetails(account) }, [svg, el('div', { class: 'qa-center' }, [percent, period])]);
         const session = el('div', { class: 'qa-session' });
         const reset = el('div', { class: 'qa-reset' });
         const state = el('div', { class: 'qa-card-state' });
         const resume = button('Resume', `Resume monitoring ${account.label}`, () => this.data.monitoring ? this.act({ action: 'update', id: account.id, enabled: true }) : this.act({ action: 'monitoring', enabled: true }));
         const range = el('div', { class: 'qa-range' });
         const activity = el('div', { class: 'qa-activity' });
-        const details = button('Activity ↗', `View ${account.label} local activity`, () => this.onDetails?.(account.provider));
-        const card = el('article', { class: 'qa-card', 'data-account': account.id }, [el('div', { class: 'qa-card-header' }, [title, hide]), subtitle, gauge, session, reset, state, resume, range, activity, details]);
+        const card = el('article', { class: 'qa-card', 'data-account': account.id, 'data-provider': account.provider }, [el('div', { class: 'qa-card-header' }, [title, hide]), subtitle, gauge, session, reset, state, resume, range, activity]);
         this.grid.append(card);
-        const result = { card, title, hide, subtitle, gauge, rings, percent, period, session, reset, state, resume, range, activity, details };
+        const result = { card, title, hide, subtitle, gauge, rings, percent, period, session, reset, state, resume, range, activity };
         this.cards.set(account.id, result); return result;
     }
     render() {
@@ -190,6 +233,7 @@ export class QuotaAccountsView {
     renderCards() {
         if (!this.data || this.dead) return;
         const accounts = this.data.accounts.filter(a => a.visible), ids = new Set(accounts.map(a => a.id));
+        this.grid.classList.toggle('qa-has-session-cost', accounts.some(a => a.system && a.quota?.windows?.session));
         for (const [id, c] of this.cards) if (!ids.has(id)) { c.card.remove(); this.cards.delete(id); }
         this.empty.hidden = accounts.length > 0;
         const now = Date.now();
@@ -204,6 +248,7 @@ export class QuotaAccountsView {
             c.subtitle.textContent = [a.label.toLowerCase() === a.provider ? '' : providerName(a.provider), q.connection?.plan].filter(Boolean).join(' · ');
             c.subtitle.hidden = !c.subtitle.textContent;
             c.card.dataset.state = paused ? 'paused' : fresh ? 'ready' : 'stale';
+            c.gauge.disabled = paused;
             c.percent.textContent = week ? `${Math.round(week.usedPercent)}%` : '—';
             c.period.textContent = 'Weekly';
             for (const [key, w] of [['weekly', week], ['session', session]]) {
@@ -227,9 +272,9 @@ export class QuotaAccountsView {
             const pace = q.pace?.weekly;
             c.range.textContent = fresh && pace?.state === 'limited' ? 'At limit' : fresh && pace?.state === 'estimated' ? `Range ≈ ${duration(pace.remainingMs)}` : fresh && pace?.state === 'reset-first' ? 'Reset before limit' : '';
             c.range.hidden = !c.range.textContent;
-            c.details.hidden = !a.system || !this.onDetails;
             this.paintActivity(a, c, fresh);
         }
+        this.renderDetails();
     }
     paintActivity(a, c, fresh) {
         const entry = a.system && this.activity[a.provider], d = entry?.data;
@@ -251,7 +296,7 @@ export class QuotaAccountsView {
         for (const value of series) { const bar = el('i'); bar.style.height = (Number.isFinite(value) ? Math.max(1, value / max * 100) : 0) + '%'; chart.append(bar); }
         const windows = [...(a.quota?.windows?.session ? [['block', '5h']] : []), ['today', 'Today'], ['week', '7d']];
         const costs = el('div', { class: 'qa-local-costs', title: 'Local API-price estimates, not subscription charges or all-account spend. An asterisk means some records could not be priced.' },
-            windows.map(([key, label]) => el('span', { text: label + ' ' + money(cost?.[key]?.cost) + (cost?.[key]?.partial ? '*' : '') })));
+            windows.map(([key, label]) => el('span', { 'data-period': key, text: label + ' ' + money(cost?.[key]?.cost) + (cost?.[key]?.partial ? '*' : '') })));
         c.activity.replaceChildren(top, chart, costs);
     }
     destroy() { this.dead = true; for (const c of this.controllers) c.abort(); this.controllers.clear(); this.root.remove(); }
