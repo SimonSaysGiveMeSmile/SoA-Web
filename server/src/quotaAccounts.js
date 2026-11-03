@@ -194,7 +194,19 @@ class QuotaAccounts {
         if (!this.readers.has(a.id)) this.readers.set(a.id, this.factory(a, path.join(this.directory, a.id)));
         return this.readers.get(a.id);
     }
-    stop(id) { const r = this.readers.get(id); if (r) { this.cache.set(id, r.snapshot()); r.close(); this.readers.delete(id); } }
+    report(id) {
+        const report = this.readers.get(id)?.snapshot() || this.cache.get(id) || empty();
+        const previous = this.cache.get(id);
+        // Resuming/restarting during a provider outage retains a labelled cache
+        // only after the native CLI confirms it is still the same account.
+        if (!report.available && !report.official?.ok && report.connection?.state === 'connected' &&
+            report.identity && previous?.identity === report.identity && previous.available) {
+            return { ...report, windows: previous.windows, windowStatus: previous.windowStatus,
+                updatedAt: previous.updatedAt, available: true, status: 'stale' };
+        }
+        return report;
+    }
+    stop(id) { const r = this.readers.get(id); if (r) { this.cache.set(id, this.report(id)); r.close(); this.readers.delete(id); } }
     create({ provider, label }) {
         if (!['claude', 'codex'].includes(provider)) throw new Error('Choose Claude or Codex');
         if (this.config.accounts.length >= MAX_ACCOUNTS) throw new Error(`Up to ${MAX_ACCOUNTS} accounts can be saved.`);
@@ -237,7 +249,7 @@ class QuotaAccounts {
                     try {
                         await reader.refresh();
                         if (this.closed || !a.enabled || this.readers.get(a.id) !== reader) continue;
-                        const value = reader.snapshot(); this.cache.set(a.id, value);
+                        const value = this.report(a.id); this.cache.set(a.id, value);
                         // Public metadata and usage only; login URLs/codes are ephemeral.
                         const { login, ...persist } = value;
                         save(path.join(this.directory, a.id, 'reading.json'), persist);
@@ -252,7 +264,7 @@ class QuotaAccounts {
         return { monitoring: this.config.monitoring, maxAccounts: MAX_ACCOUNTS, revision: this.config.revision || 0,
             accounts: this.config.accounts.map(a => {
                 const reader = this.readers.get(a.id);
-                const report = reader?.snapshot() || this.cache.get(a.id) || empty();
+                const report = this.report(a.id);
                 const paused = !this.config.monitoring || !a.enabled;
                 const status = paused ? 'paused' : report.updatedAt && this.now() - report.updatedAt > 300000 ? 'stale' : report.status;
                 const data = { ...report, status };

@@ -65,6 +65,25 @@ test('pause during refresh discards in-flight readings and closes the child', as
     const f = fixture(t); const pending = f.store.refresh(); f.store.monitoring(false); await pending;
     assert.equal(f.store.readers.size, 0); assert.ok(f.store.snapshot().accounts.every(a => a.quota.status === 'paused'));
 });
+test('provider outages preserve a stale saved reading only for the verified account', async t => {
+    const f = fixture(t); await f.store.refresh();
+    const original = f.store.snapshot().accounts[0].quota;
+    const reader = f.made[0]; let identity = 'local-claude';
+    reader.snapshot = () => ({ available: false, status: 'waiting', windows: {}, identity,
+        connection: { state: 'connected' }, official: { ok: false, error: 'rate limited' } });
+    f.advance(60000); await f.store.refresh();
+    const cached = f.store.snapshot().accounts[0].quota;
+    assert.equal(cached.status, 'stale'); assert.equal(cached.updatedAt, original.updatedAt);
+    assert.deepEqual(cached.windows, original.windows);
+    assert.equal(cached.official.error, 'rate limited');
+    f.store.close();
+    const next = new QuotaAccounts({ directory: f.directory, factory: () => reader }); t.after(() => next.close());
+    await next.refresh();
+    assert.equal(next.snapshot().accounts[0].quota.windows.weekly.usedPercent, 20);
+    identity = 'different-account';
+    assert.equal(next.snapshot().accounts[0].quota.available, false);
+    assert.deepEqual(next.snapshot().accounts[0].quota.windows, {});
+});
 test('sign-in state is ephemeral; hiding and pausing never deletes CLI credential files', async t => {
     const f = fixture(t), a = f.store.create({ provider: 'claude', label: 'Saved' });
     const home = path.join(f.directory, a.id, 'cli'); fs.mkdirSync(home, { recursive: true }); fs.writeFileSync(path.join(home, '.credentials.json'), 'native-owned-fixture');
