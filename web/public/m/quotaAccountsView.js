@@ -219,7 +219,7 @@ export class QuotaAccountsView {
             c.reset.textContent = next ? `↻ ${duration(next.resetsAt - now)}` : '—';
             c.reset.title = next ? `${next === week ? 'Weekly' : 'Session'} resets ${new Date(next.resetsAt).toLocaleString()}` : 'Reset time not reported';
             const connection = q.connection?.state;
-            c.state.textContent = !this.online ? 'Offline' : paused ? 'Paused' : connection === 'sign-in-required' ? 'Connect in Accounts' : connection === 'reconnect' ? 'Reconnect' :
+            c.state.textContent = !this.online ? 'Offline' : paused ? 'Paused' : connection === 'sign-in-required' ? 'Connect in Accounts' : connection === 'reconnect' ? 'Reconnect' : q.official?.error === 'rate limited' && !fresh ? 'Rate limited · retrying' :
                 !q.available ? 'Waiting for usage' : !fresh ? 'Cached' : '';
             c.state.title = q.updatedAt ? `Last reading ${new Date(q.updatedAt).toLocaleString()}` : 'No reading yet';
             c.state.hidden = !c.state.textContent;

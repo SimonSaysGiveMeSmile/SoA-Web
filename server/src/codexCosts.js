@@ -166,7 +166,10 @@ class CodexCosts {
         if (!this.worker) {
             const worker = new Worker(__filename, { workerData: { codexCosts: true, home: this.home } });
             this.worker = worker;
-            worker.on('message', data => { this.pending = false; this.current = data; });
+            worker.on('message', data => {
+                if (this.worker !== worker || this.closed) return;
+                this.pending = false; this.current = data; worker.unref();
+            });
             const fail = () => {
                 if (this.worker !== worker) return;
                 this.worker = null; this.pending = false;
@@ -175,6 +178,9 @@ class CodexCosts {
             worker.on('error', fail); worker.on('exit', fail); worker.unref();
         }
         this.pending = true;
+        // An outstanding scan must finish even in a short-lived CLI caller.
+        // Idle workers stay unreferenced so they never prevent shutdown.
+        this.worker.ref();
         this.worker.postMessage({ now: this.now(), session });
     }
     snapshot() {
