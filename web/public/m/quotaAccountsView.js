@@ -26,6 +26,7 @@ export class QuotaAccountsView {
         this.api = api; this.request = request; this.onData = onData; this.onDetails = onDetails;
         this.externalDetailsId = externalDetailsId; this.openAccountId = null;
         this.rows = new Map(); this.cards = new Map(); this.activity = {}; this.controllers = new Set(); this.dead = false; this.busy = false;
+        this.pendingFields = new Map();
         this.data = null; this.online = true;
         if (!document.querySelector('link[data-quota-accounts]')) document.head.append(el('link', {
             rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=rings-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
@@ -99,9 +100,17 @@ export class QuotaAccountsView {
         finally { clearTimeout(timer); this.controllers.delete(ctl); this.loading = false; }
     }
     act(body) {
+        const token = {}, fields = body.action === 'update' ? ['visible', 'enabled', 'label'].filter(k => k in body) : [];
+        for (const field of fields) this.pendingFields.set(`${body.id}/${field}`, { token, value: body[field] });
         const pending = (this.mutations || Promise.resolve()).then(() => this.post(body));
         this.mutations = pending.catch(() => {});
-        return pending;
+        return pending.finally(() => {
+            for (const field of fields) {
+                const key = `${body.id}/${field}`;
+                if (this.pendingFields.get(key)?.token === token) this.pendingFields.delete(key);
+            }
+            this.render();
+        });
     }
     async post(body) {
         if (this.dead || !this.data?.actionToken) return null;
@@ -211,9 +220,10 @@ export class QuotaAccountsView {
         for (const [id, row] of this.rows) if (!ids.has(id)) { row.row.remove(); this.rows.delete(id); }
         for (const a of accounts) {
             const r = this.rows.get(a.id) || this.createRow(a), conn = a.quota?.connection;
-            if (document.activeElement !== r.name) r.name.value = a.label;
+            if (document.activeElement !== r.name) r.name.value = this.pendingFields.get(`${a.id}/label`)?.value ?? a.label;
             r.info.textContent = [providerName(a.provider), conn?.email || conn?.plan || (conn?.state === 'connected' ? 'Connected' : 'Not connected')].filter(Boolean).join(' · ');
-            r.visible.input.checked = a.visible; r.enabled.input.checked = a.enabled;
+            r.visible.input.checked = this.pendingFields.get(`${a.id}/visible`)?.value ?? a.visible;
+            r.enabled.input.checked = this.pendingFields.get(`${a.id}/enabled`)?.value ?? a.enabled;
             for (const input of [r.name, r.visible.input, r.enabled.input]) input.disabled = !this.online;
             r.connect.hidden = a.system; r.local.hidden = !a.system;
             r.connect.textContent = conn?.state === 'connected' ? 'Reconnect' : 'Connect';

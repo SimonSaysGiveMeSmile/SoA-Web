@@ -78,6 +78,18 @@ window.openWidget=async()=>{clearInterval(window.timer);view.destroy();window.wi
     assert.equal(store.account('local-claude').enabled, false);
     await page.getByRole('button', { name: 'Resume monitoring Claude' }).click();
     await page.getByRole('button', { name: 'Choose monitored accounts' }).click();
+    const mutationRoute = '**/api/usage-quota/accounts?*';
+    await page.route(mutationRoute, async route => {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await route.continue();
+    });
+    const showClaude = page.getByLabel('Show Claude', { exact: true });
+    await showClaude.uncheck();
+    await page.evaluate(() => window.view.refresh());
+    assert.equal(await showClaude.isChecked(), false, 'polling must preserve an in-flight checkbox change');
+    await page.waitForFunction(() => window.view.data.accounts[0].visible === false);
+    await page.unroute(mutationRoute);
+    await showClaude.check();
     const input = page.getByLabel('Name for Claude', { exact: true }); await input.fill('Work Claude');
     await page.waitForTimeout(800); assert.equal(await input.inputValue(), 'Work Claude'); assert.equal(await input.evaluate(n => n === document.activeElement), true);
     await input.press('Tab'); await page.waitForFunction(() => window.view.data.accounts[0].label === 'Work Claude');
