@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+// Used only as the BROWSER executable of an isolated native CLI sign-in.
+// The parent reads this marker in memory; no URL/token is logged or saved.
+const value = process.argv[2];
+try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || !['claude.ai', 'claude.com', 'console.anthropic.com', 'platform.claude.com', 'auth.anthropic.com'].includes(url.hostname)) process.exit(1);
+    process.stdout.write('SOA_LOGIN_URL=' + url.href + '\n');
+} catch (_) { process.exit(1); }

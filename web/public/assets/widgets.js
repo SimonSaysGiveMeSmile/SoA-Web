@@ -1,3 +1,4 @@
+import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=accounts-20261103';
 /**
  * Sidebar widgets — small, self-contained, all driven from JSON endpoints.
  *
@@ -585,6 +586,26 @@ class ClaudeUsageWidget extends Widget {
         this._mountStructure();
         this._paintCodexPresence();
         this._paintOpen();
+        this._accountPanel = new QuotaAccountsView({ parent: this.body, api,
+            onDetails: src => this._toggle(src),
+            onData: data => this._acceptAccounts(data) });
+        this._accountPanel.root.hidden = true;
+    }
+
+    _acceptAccounts(data) {
+        if (!Array.isArray(data.accounts)) return;
+        if (this._accountsData && data.revision < this._accountsData.revision) return;
+        this._accountsData = data;
+        this._quota = data.data; this._quotaFresh = true;
+        this._codexCosts = data.costs?.codex || null;
+        this._accountPanel.setData(data);
+        this._accountPanel.root.hidden = false;
+        this._dials.style.display = 'none';
+        if (this.body.firstChild !== this._accountPanel.root) this.body.prepend(this._accountPanel.root);
+        if (this._open && !data.accounts.some(a => a.id === 'local-' + this._open && a.visible && a.enabled) || !data.monitoring) {
+            this._open = null; this._paintOpen();
+        }
+        for (const provider of ['claude', 'codex']) this._accountPanel.setActivity(provider, this[`_${provider}`], provider === 'codex' ? this._codexCosts : null);
     }
 
     _makeCard(src) {
@@ -705,13 +726,7 @@ class ClaudeUsageWidget extends Widget {
     // follows its neighbour, so the two cards side by side stay the same
     // object — both two-ring while Claude still has a session window, both
     // one-ring once it is gone.
-    _cardLayout(src) {
-        if (this._sessionRetired(src)) return 'single';
-        if (this._sessionReported(src)) return 'dual';
-        const other = src === 'claude' ? 'codex' : 'claude';
-        const otherShown = other === 'claude' || this._codexSeen;
-        return otherShown && this._sessionRetired(other) ? 'single' : 'dual';
-    }
+    _cardLayout(src) { return this._sessionReported(src) ? 'dual' : 'single'; }
 
     _setRing(metric, pct, weekly = true) {
         const r = metric.rings.a;
@@ -751,7 +766,7 @@ class ClaudeUsageWidget extends Widget {
     }
 
     _mountStructure() {
-        this.body.replaceChildren(this._dials, this._detail);
+        this.body.replaceChildren(...(this._accountPanel ? [this._accountPanel.root] : []), this._dials, this._detail);
     }
 
     _toggle(src) {
@@ -811,6 +826,12 @@ class ClaudeUsageWidget extends Widget {
     }
 
     async _refreshUsage() {
+        if (this._accountsData) {
+            await this._refreshQuota();
+            if (this._accountsData.monitoring) await Promise.all(this._accountsData.accounts
+                .filter(a => a.system && a.visible && a.enabled).map(a => this._readUsage(a.provider)));
+            return;
+        }
         const now = Date.now();
         // Coalesce per provider: a slow request must not stop the other provider
         // from refreshing. Failures back off; successful sources poll at 2.5s.
@@ -872,6 +893,7 @@ class ClaudeUsageWidget extends Widget {
                 if (!this._destroyed) {
                     this._quota = body.data; this._quotaFresh = true;
                     this._codexCosts = body.costs?.codex || null;
+                    this._acceptAccounts(body);
                 }
             } catch (_) { if (!this._destroyed) this._quotaFresh = false; }
             finally {
@@ -886,6 +908,10 @@ class ClaudeUsageWidget extends Widget {
     _paintUsage() {
         if (!this.body.contains(this._dials)) this._mountStructure();
         this._paintCodexPresence();
+        if (this._accountsData) {
+            if (!this._quotaFresh) this._accountPanel.setOffline();
+            for (const provider of ['claude', 'codex']) this._accountPanel.setActivity(provider, this[`_${provider}`], provider === 'codex' ? this._codexCosts : null);
+        }
         this._paintClaudeCard(); this._paintCodexCard(); this._paintDetail();
         this._health.hidden = this._quotaFresh;
         this._health.textContent = this._quotaAt == null ? 'Connecting' : 'Retrying';
@@ -896,6 +922,7 @@ class ClaudeUsageWidget extends Widget {
     destroy() {
         super.destroy();
         for (const controller of this._controllers) controller.abort();
+        this._accountPanel?.destroy();
         window.removeEventListener('online', this._online);
     }
 

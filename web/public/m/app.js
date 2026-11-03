@@ -3591,6 +3591,13 @@ class App {
         // monitor / auto-stop switches, from soa-health via /preview/6084/.
         const healthTile = document.getElementById('btn-health');
         if (healthTile) healthTile.addEventListener('click', () => this._openHealth(null));
+        const usageAccountsTile = document.getElementById('btn-usage-accounts');
+        if (usageAccountsTile) usageAccountsTile.addEventListener('click', async () => {
+            try {
+                const { openQuotaAccountsSheet } = await import('./quotaAccounts.js?v=accounts-20261103');
+                openQuotaAccountsSheet({ api: p => this._proxyUrl(p), available: !!this.socket?.baseUrl });
+            } catch (_) { this._toast?.('Account monitor could not load. Reload and retry.'); }
+        });
         // A second notification tapped while this page is already open.
         window.addEventListener('hashchange', () => {
             const f = parseHealthLink(location.hash);
