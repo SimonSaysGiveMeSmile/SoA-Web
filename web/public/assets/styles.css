@@ -3678,3 +3678,13 @@ html[data-theme="light"] .wiz-pair-err, html[data-theme="dim"] .wiz-pair-err { c
       rgba(0, 0, 0, 0.10) 0%, rgba(0, 0, 0, 0.06) 55%, rgba(0, 0, 0, 0.02) 100%);
   mix-blend-mode: multiply;
 }
+
+/* Welcome on a phone or tablet (data-welcome-touch): the same page, but the
+   setup card pairs this device with the computer instead of installing here.
+   The install steps and the in-browser sandbox need a desktop browser. */
+.wiz-touch { display: none; }
+:root[data-welcome-touch="1"] .wiz-touch { display: block; }
+:root[data-welcome-touch="1"] .wiz-touch .wiz-primary { width: 100%; margin-top: 12px; }
+:root[data-welcome-touch="1"] .wiz-touch .wiz-alt { margin-top: 14px; }
+:root[data-welcome-touch="1"] #wiz .wiz-steps,
+:root[data-welcome-touch="1"] .wel-sandbox { display: none; }
