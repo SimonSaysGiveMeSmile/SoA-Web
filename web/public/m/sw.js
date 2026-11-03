@@ -7,12 +7,15 @@
  */
 
 // Scope-relative shell cache supports both standalone / and hosted /m/ apps.
-const VERSION = 'soa-mobile-web-20261102-' + new URL(self.registration.scope).pathname;
+const VERSION = 'soa-mobile-accounts-20261103-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
     '/index.html',
     '/styles.css',
     '/app.js',
+    '/quotaAccounts.js',
+    '/quotaAccountsView.js',
+    '/quotaAccounts.css',
     '/fullscreen.js',
     '/socket.js',
     '/doors.js',

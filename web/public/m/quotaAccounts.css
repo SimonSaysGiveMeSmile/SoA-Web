@@ -1,0 +1,72 @@
+.quota-accounts{--qa-fg:var(--soa-fg,#dce4ec);--qa-muted:var(--soa-accent-dim,#8996a5);--qa-line:var(--soa-line-soft,#34404b);--qa-bg:var(--soa-bg-panel,#20252d);color:var(--qa-fg);font:inherit;min-width:0;container-type:inline-size}
+.quota-accounts [hidden]{display:none!important}
+.quota-accounts :is(button,input,select,a){font:inherit;box-sizing:border-box}
+.quota-accounts button{color:inherit;background:transparent;border:1px solid var(--qa-line);border-radius:7px;min-height:30px;padding:4px 8px;cursor:pointer;letter-spacing:normal;text-transform:none}
+.quota-accounts button:hover:not(:disabled){background:color-mix(in srgb,var(--qa-fg) 7%,transparent)}
+.quota-accounts :is(button,input,select,a):focus-visible{outline:2px solid var(--soa-accent,#81b9ec);outline-offset:2px}
+.quota-accounts :disabled{opacity:.45;cursor:default}
+.qa-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:11px}
+.qa-toolbar>button:last-child{margin-left:auto}
+.qa-state{color:var(--qa-muted);font-size:10px}
+.qa-error{color:#eb807d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
+.qa-manager{border-block:1px solid var(--qa-line);margin:0 0 14px;padding:0 0 12px}
+.qa-account-list{max-height:390px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.qa-account-row{padding:12px 0;border-bottom:1px solid var(--qa-line);min-width:0}
+.quota-accounts input[type=text],.quota-accounts input[type=password],.quota-accounts select{width:100%;min-width:0;color:inherit;background:var(--qa-bg);border:1px solid var(--qa-line);border-radius:6px;font-size:12px;padding:7px;min-height:32px}
+.qa-account-name input{font-weight:600}
+.qa-account-info{display:block;color:var(--qa-muted);font-size:10px;margin:5px 0 8px;overflow-wrap:anywhere}
+.qa-account-options{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px}
+.qa-account-options>button,.qa-local{margin-left:auto}
+.qa-check{display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
+.qa-check input{accent-color:var(--soa-accent,#81b9ec);width:15px;height:15px;margin:0}
+.qa-local{font-size:10px;color:var(--qa-muted)}
+.qa-add{display:grid;grid-template-columns:85px minmax(0,1fr);gap:7px;padding-top:12px}
+.qa-add>button{grid-column:1/-1;font-size:12px}
+.qa-login{display:grid;gap:8px;font-size:11px;padding-top:10px;min-width:0}
+.qa-login a{color:var(--soa-accent,#81b9ec);text-decoration:underline;text-underline-offset:3px;min-height:28px;display:flex;align-items:center}
+.qa-login-status{color:var(--qa-muted);line-height:1.4}
+.qa-user-code{font-size:17px;font-weight:600;letter-spacing:.08em;user-select:all}
+.qa-code-form{display:flex;gap:6px;min-width:0}
+.qa-code-form input{flex:1}
+.qa-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 0}
+.qa-card{position:relative;min-width:0;padding:0 10px 8px;border-bottom:1px solid var(--qa-line)}
+.qa-card:nth-child(2n){border-left:1px solid var(--qa-line)}
+.qa-card:nth-child(2n+1){padding-left:0}
+.qa-card:nth-child(2n){padding-right:0}
+.qa-card-header{display:flex;align-items:center;min-width:0;gap:4px;min-height:28px}
+.qa-card-name{min-width:0;font-size:12px;font-weight:650;line-height:1.25;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;letter-spacing:0}
+.quota-accounts .qa-hide{border:0;margin-left:auto;padding:0;min-height:26px;width:22px;flex:0 0 22px;font-size:18px;color:var(--qa-muted)}
+.qa-card-provider{display:block;color:var(--qa-muted);font-size:9px;line-height:1.3;min-height:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qa-gauge{position:relative;width:100%;max-width:106px;aspect-ratio:1;margin:8px auto 4px}
+.qa-gauge svg{width:100%;height:100%;overflow:visible;transform:rotate(-90deg)}
+.qa-gauge .track{stroke:currentColor;opacity:.13}
+.qa-gauge .value{stroke:currentColor;transition:stroke-dashoffset .35s ease}
+.qa-ring-weekly{color:#83c9ab}.qa-ring-session{color:#a5aaff}
+.qa-gauge [data-level=high]{color:#e6c86b}.qa-gauge [data-level=critical]{color:#f0788d}
+.qa-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;pointer-events:none}
+.qa-percent{font-size:22px;letter-spacing:-.05em;font-weight:650;line-height:1.1;font-variant-numeric:tabular-nums}
+.qa-period{font-size:8px;color:var(--qa-muted)}
+.qa-session{text-align:center;font-size:10px;color:#a5aaff;font-variant-numeric:tabular-nums;margin:3px 0}
+.qa-reset{text-align:center;color:var(--qa-muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;margin:7px 0}
+.qa-card-state{font-size:10px;color:var(--qa-muted);text-align:center;margin:7px 0;line-height:1.4}
+.qa-card[data-state=paused] .qa-gauge,.qa-card[data-state=stale] .qa-gauge{opacity:.55}
+.qa-card>button:not(.qa-hide){display:block;width:100%;font-size:10px;margin-top:8px}
+.qa-range{font-size:10px;line-height:1.4;text-align:center;margin:8px 0}
+.qa-empty{display:block;width:100%;font-size:12px!important;padding:16px!important;color:var(--qa-muted)!important}
+.qa-activity{border-top:1px solid var(--qa-line);margin-top:10px;padding-top:9px}
+.qa-local-burn{display:flex;gap:3px;flex-wrap:wrap;align-items:baseline;justify-content:space-between;font-size:9px;color:var(--qa-muted)}
+.qa-local-burn strong{font-size:11px;color:var(--qa-fg);white-space:nowrap}
+.qa-bars{display:flex;align-items:end;gap:3px;height:26px;margin:7px 0;border-bottom:1px solid var(--qa-line)}
+.qa-bars i{flex:1;background:var(--soa-accent,#81b9ec);opacity:.55;border-radius:2px 2px 0 0}.qa-bars i:last-child{opacity:1}
+.qa-local-costs{display:flex;gap:5px;flex-wrap:wrap;justify-content:space-between;font-size:9px;color:var(--qa-muted)}
+@container (max-width:210px){.qa-card{padding-inline:6px}.qa-card-name{font-size:10px}.qa-percent{font-size:18px}.qa-reset{font-size:10px}.qa-toolbar{gap:3px;font-size:10px}.qa-toolbar button{padding-inline:5px}}
+@container (min-width:650px){.qa-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.qa-card:nth-child(n){border-left:1px solid var(--qa-line);padding-inline:12px}.qa-card:nth-child(4n+1){border-left:0;padding-left:0}}
+@media(prefers-reduced-motion:reduce){.qa-gauge .value{transition:none}}
+.qa-phone-sheet{box-sizing:border-box;position:fixed;inset:auto 0 0;max-width:680px;width:100%;max-height:92dvh;margin:0 auto;padding:0;border:1px solid var(--line,#34404b);border-radius:20px 20px 0 0;color:var(--text,#dce4ec);background:var(--bg,#20252d);font:13px system-ui;overflow:hidden}
+.qa-phone-sheet::backdrop{background:rgba(0,0,0,.5)}
+.qa-phone-sheet>header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line,#34404b)}
+.qa-phone-sheet>header button{font:inherit;color:inherit;background:transparent;border:0;min-height:36px;padding:4px 8px}
+.qa-phone-body{padding:16px 18px max(20px,env(safe-area-inset-bottom));max-height:calc(92dvh - 70px);overflow:auto;overscroll-behavior:contain}
+.qa-phone-sheet .quota-accounts{--qa-fg:var(--text,#dce4ec);--qa-muted:var(--muted,#8996a5);--qa-bg:var(--bg,#20252d);--qa-line:var(--line,#34404b)}
+.qa-phone-sheet .qa-toolbar button,.qa-phone-sheet .qa-account-options button,.qa-phone-sheet .qa-add button{min-height:38px}
+.qa-phone-sheet .qa-hide{width:36px;min-height:36px;flex-basis:36px}
