@@ -163,7 +163,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=web-20261102">
+  <link rel="stylesheet" href="/assets/styles.css?v=welcome-touch-20261102">
   <link rel="stylesheet" href="/assets/sidebar.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/health.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/minimal.css?v=web-20261102">
@@ -209,18 +209,24 @@
                 document.documentElement.dataset.welcome = '1';
                 return;
             }
-            // Phones AND tablets get the companion welcome from the boot path
-            // (the install wizard can't run there) — skip the wizard gate. The
-            // tell is a touch-only pointer, not the viewport: an iPad is wider
-            // than a phone and asks for the desktop site by default, with a Mac
-            // user agent — so a "Mac" that reports touch points is an iPad.
-            if (window.matchMedia && matchMedia('(pointer: coarse)').matches
-                && matchMedia('(hover: none)').matches) return;
-            if (/Mac/.test(navigator.platform || '') && navigator.maxTouchPoints > 1) return;
+            // Phones AND tablets see the same welcome as a desktop. Only the
+            // setup card differs (data-welcome-touch): there is nothing to
+            // install there, so it pairs with the computer instead. The tell is
+            // a touch-only pointer, not the viewport: an iPad is wider than a
+            // phone and asks for the desktop site by default, with a Mac user
+            // agent — so a "Mac" that reports touch points is an iPad.
             if (localStorage.getItem('soa_web_welcomed') === '1') return;
         } catch (_) { /* private mode — treat as not yet welcomed */ }
         markAutoTheme();
         document.documentElement.dataset.welcome = '1';
+    })();
+    (function markTouch() {
+        try {
+            if ((window.matchMedia && matchMedia('(pointer: coarse)').matches && matchMedia('(hover: none)').matches)
+                || (/Mac/.test(navigator.platform || '') && navigator.maxTouchPoints > 1)) {
+                document.documentElement.dataset.welcomeTouch = '1';
+            }
+        } catch (_) {}
     })();
   </script>
 </head>
@@ -340,6 +346,21 @@
                others show as one-line summaries (CSS only). -->
           <section class="wiz" id="wiz" data-step="1" aria-labelledby="wiz-card-title">
             <h2 class="wiz-card-title" id="wiz-card-title" data-w="wiz_card_title">Get it on this computer</h2>
+            <!-- Touch devices (data-welcome-touch): nothing installs on a phone or
+                 tablet, so the card pairs it with the computer that runs SoA. -->
+            <div class="wiz-touch">
+              <p class="wiz-p" data-w="touch_sub">Son of Anton runs on your computer. Pair this device with it using your camera.</p>
+              <button type="button" class="wiz-primary" id="wiz-touch-pair" data-w="touch_pair">Pair with my computer</button>
+              <p class="wiz-meta" data-w="touch_how">On your computer, open Son of Anton, then Mobile link in the sidebar, and scan its QR code.</p>
+              <details class="wiz-alt">
+                <summary data-w="touch_notyet">Not installed on your computer yet?</summary>
+                <p class="wiz-p" data-w="touch_install">Open www.s0a.app on your computer, or paste this into its Terminal:</p>
+                <div class="welcome-cmdwrap">
+                  <pre class="welcome-cmd" id="welcome-cmd-touch">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
+                  <button type="button" class="welcome-copy" id="welcome-copy-touch" data-w="copy">Copy</button>
+                </div>
+              </details>
+            </div>
             <ol class="wiz-progress sr-only">
               <li class="wiz-dot" data-w="wiz_dot1">Download</li>
               <li class="wiz-dot" data-w="wiz_dot2">Start</li>
@@ -561,6 +582,12 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: "Next, connect your phone: in the sidebar, open Mobile link and scan the QR code with your phone's camera.",
                 wiz_sandbox: 'Try it in this browser first',
                 wiz_sandbox_note: "A practice shell that runs in this tab. It can't see your files or your computer.",
+                touch_title: 'Pair this device',
+                touch_sub: 'Son of Anton runs on your computer. Pair this device with it using your camera.',
+                touch_pair: 'Pair with my computer',
+                touch_how: 'On your computer, open Son of Anton, then Mobile link in the sidebar, and scan its QR code.',
+                touch_notyet: 'Not installed on your computer yet?',
+                touch_install: 'Open www.s0a.app on your computer, or paste this into its Terminal:',
                 feat_title: 'What it does for you',
                 feat_g1: 'At your desk', feat_g2: 'Away from your desk', feat_g3: 'If something goes wrong',
                 f_tabs_t: 'Nothing lost on reload or restart.', f_tabs_d: 'Your tabs and their history come back after a page reload or a reboot.',
@@ -632,6 +659,12 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: '下一步，连接手机：在侧栏中打开 Mobile Link，用手机相机扫描二维码。',
                 wiz_sandbox: '先在浏览器里试试',
                 wiz_sandbox_note: '一个在本标签页中运行的练习用 shell，它看不到你的文件，也接触不到你的电脑。',
+                touch_title: '配对这台设备',
+                touch_sub: 'Son of Anton 运行在你的电脑上。用摄像头把这台设备和它配对。',
+                touch_pair: '与我的电脑配对',
+                touch_how: '在电脑上打开 Son of Anton，点侧边栏的「手机连接」，然后扫描它的二维码。',
+                touch_notyet: '电脑上还没安装？',
+                touch_install: '在电脑上打开 www.s0a.app，或把这条命令粘贴到它的终端：',
                 feat_title: '它能为你做什么',
                 feat_g1: '在电脑前', feat_g2: '离开电脑时', feat_g3: '出问题时',
                 f_tabs_t: '刷新或重启都不会丢失。', f_tabs_d: '页面刷新或电脑重启后，你的标签页和历史记录都会恢复。',
@@ -703,6 +736,12 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: 'Ensuite, connectez votre téléphone : dans la barre latérale, ouvrez Mobile Link et scannez le QR code avec l’appareil photo du téléphone.',
                 wiz_sandbox: 'L’essayer d’abord dans ce navigateur',
                 wiz_sandbox_note: 'Un shell d’entraînement qui tourne dans cet onglet. Il ne voit ni vos fichiers ni votre ordinateur.',
+                touch_title: 'Associer cet appareil',
+                touch_sub: 'Son of Anton tourne sur votre ordinateur. Associez cet appareil avec l’appareil photo.',
+                touch_pair: 'Associer à mon ordinateur',
+                touch_how: 'Sur votre ordinateur, ouvrez Son of Anton, puis Lien mobile dans la barre latérale, et scannez son code QR.',
+                touch_notyet: 'Pas encore installé sur votre ordinateur ?',
+                touch_install: 'Ouvrez www.s0a.app sur votre ordinateur, ou collez ceci dans son Terminal :',
                 feat_title: 'Ce qu’il fait pour vous',
                 feat_g1: 'À votre bureau', feat_g2: 'Loin de votre bureau', feat_g3: 'Si quelque chose tourne mal',
                 f_tabs_t: 'Rien de perdu au rechargement ou au redémarrage.', f_tabs_d: 'Vos onglets et leur historique reviennent après un rechargement de la page ou un redémarrage.',
@@ -774,6 +813,12 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: 'Verbinde als Nächstes dein Handy: Öffne in der Seitenleiste Mobile Link und scanne den QR-Code mit der Handykamera.',
                 wiz_sandbox: 'Erst in diesem Browser ausprobieren',
                 wiz_sandbox_note: 'Eine Übungs-Shell, die in diesem Tab läuft. Sie sieht weder deine Dateien noch deinen Computer.',
+                touch_title: 'Dieses Gerät koppeln',
+                touch_sub: 'Son of Anton läuft auf deinem Computer. Kopple dieses Gerät mit der Kamera.',
+                touch_pair: 'Mit meinem Computer koppeln',
+                touch_how: 'Öffne auf deinem Computer Son of Anton, dann Mobile-Link in der Seitenleiste, und scanne den QR-Code.',
+                touch_notyet: 'Noch nicht auf deinem Computer installiert?',
+                touch_install: 'Öffne www.s0a.app auf deinem Computer oder füge das in sein Terminal ein:',
                 feat_title: 'Was es für dich tut',
                 feat_g1: 'Am Schreibtisch', feat_g2: 'Unterwegs', feat_g3: 'Wenn etwas schiefgeht',
                 f_tabs_t: 'Nichts geht beim Neuladen oder Neustart verloren.', f_tabs_d: 'Deine Tabs und ihr Verlauf kommen nach dem Neuladen der Seite oder einem Neustart zurück.',
@@ -845,6 +890,12 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: 'Después, conecta tu móvil: en la barra lateral, abre Mobile Link y escanea el código QR con la cámara del móvil.',
                 wiz_sandbox: 'Pruébalo primero en este navegador',
                 wiz_sandbox_note: 'Una shell de práctica que se ejecuta en esta pestaña. No puede ver tus archivos ni tu ordenador.',
+                touch_title: 'Vincula este dispositivo',
+                touch_sub: 'Son of Anton se ejecuta en tu ordenador. Vincula este dispositivo con la cámara.',
+                touch_pair: 'Vincular con mi ordenador',
+                touch_how: 'En tu ordenador, abre Son of Anton, luego Enlace móvil en la barra lateral, y escanea su código QR.',
+                touch_notyet: '¿Aún no está instalado en tu ordenador?',
+                touch_install: 'Abre www.s0a.app en tu ordenador o pega esto en su Terminal:',
                 feat_title: 'Lo que hace por ti',
                 feat_g1: 'En tu mesa', feat_g2: 'Lejos de tu mesa', feat_g3: 'Si algo sale mal',
                 f_tabs_t: 'Nada se pierde al recargar o reiniciar.', f_tabs_d: 'Tus pestañas y su historial vuelven tras recargar la página o reiniciar el ordenador.',
@@ -888,6 +939,10 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         var lang = pickLang();
         var strings = DICT[lang] || DICT.en;
         var enter = document.getElementById('welcome-enter');
+        if (html.dataset.welcomeTouch === '1') {
+            var touchTitle = document.getElementById('wiz-card-title');
+            if (touchTitle) touchTitle.setAttribute('data-w', 'touch_title');
+        }
 
         function apply() {
             strings = DICT[lang] || DICT.en;
@@ -1021,6 +1076,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         var copyPairs = [
             ['welcome-copy', 'welcome-cmd'],
             ['welcome-copy-2', 'welcome-cmd-2'],
+            ['welcome-copy-touch', 'welcome-cmd-touch'],
         ];
         copyPairs.forEach(function (pair) {
             var copyBtn = document.getElementById(pair[0]);
@@ -1160,6 +1216,9 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         }
 
         if (enter) enter.addEventListener('click', doEnter);            // step 3 · enter
+        // Phone / tablet: the boot path's pairing screen (camera scan, paste,
+        // and on a tablet the full-dashboard choice) is where this lands.
+        var touchPair = document.getElementById('wiz-touch-pair');
         var sandboxBtn = document.getElementById('wiz-sandbox');
         if (sandboxBtn) sandboxBtn.addEventListener('click', doEnter);  // skip into sandbox
         var backBtn = document.getElementById('wiz-back');
@@ -1199,7 +1258,27 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         }
         var pairPwRow = document.getElementById('wiz-pair-pwrow');
         var pairPw = document.getElementById('wiz-pair-pw');
+        // A phone lands in the companion at /m/ (its own storage, service
+        // worker and touch UI), as the boot path's pairing screen does; a
+        // tablet keeps the full dashboard. `alt` (the second transport) and
+        // `backend` ride in the hash, where /m/ reads them.
+        function pairToCompanion() {
+            return html.dataset.welcomeTouch === '1'
+                && !(window.matchMedia && matchMedia('(min-width: 700px)').matches);
+        }
+        function pairPhone(url, token, alt, backend) {
+            var target = new URL(url);
+            if (!target.searchParams.get('t')) target.searchParams.set('t', token);
+            var hash = new URLSearchParams();
+            if (alt) hash.set('alt', alt);
+            if (backend) hash.set('backend', backend);
+            if (hash.toString()) target.hash = hash.toString();
+            if (!PREVIEW) { try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {} }
+            location.href = target.toString();
+            return true;
+        }
         function pairEnter(backend, token) {
+            if (pairToCompanion()) return pairPhone(backend + '/m/', token, '', '');
             var dest = new URL(location.origin + location.pathname);
             dest.searchParams.set('backend', backend);
             dest.searchParams.set('t', token);
@@ -1241,6 +1320,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 if (!p) { pairFail(strings.wiz_pair_err_code); return false; }
                 var backend = (p.backend || p.origin).replace(/\/+$/, '');
                 if (!p.token) return pairWithPassword(backend);
+                if (pairToCompanion() && p.url) return pairPhone(p.url, p.token, p.altOrigin, p.backend);
                 return pairEnter(backend, p.token);
             }).catch(function () { pairFail(strings.wiz_pair_err_code); return false; });
         }
@@ -1268,6 +1348,16 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 scanner.start();
             }).catch(function () { pairFail(strings.wiz_pair_err_cam); });
         });
+        // Phone / tablet: the card's own button opens the same camera scanner,
+        // and the paste field and error line move into that card, since the
+        // install steps that hold them are hidden there.
+        if (html.dataset.welcomeTouch === '1') {
+            var touchCard = document.querySelector('.wiz-touch');
+            var touchHow = touchCard && touchCard.querySelector('[data-w="touch_how"]');
+            if (touchHow && pairManual) touchHow.after(pairManual);
+            if (touchHow && pairErr) touchHow.after(pairErr);
+            if (touchPair && scanBtn) touchPair.addEventListener('click', function () { scanBtn.click(); });
+        }
         var pairUrl = document.getElementById('wiz-pair-url');
         var pairGoBtn = document.getElementById('wiz-pair-go');
         if (pairGoBtn && pairUrl) {
