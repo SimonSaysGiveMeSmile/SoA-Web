@@ -1349,3 +1349,29 @@ body.ctx-resizing * { cursor: inherit !important; }
 .acct-toggle { margin-top: 6px; }
 .acct-note { color: var(--soa-accent-dim); white-space: normal; line-height: 1.4; margin-top: 6px; }
 .acct-err { flex-basis: auto; }
+
+/* ── Usage accounts (2026-11-03): the classic dials, one per visible account.
+   The shared account view only contributes the toolbar and the account list
+   here; it keeps its own cards for the phone sheet. */
+[data-usage-status] .quota-accounts { margin: 0 0 8px; }
+[data-usage-status] .quota-accounts .qa-toolbar { margin: 0; gap: 6px; font-size: 10px; letter-spacing: .06em; }
+[data-usage-status] .quota-accounts .qa-toolbar > button {
+  min-height: 22px; padding: 2px 8px; border-radius: 4px; font-size: 10px;
+  color: var(--soa-accent-dim); border-color: var(--soa-line-soft);
+}
+[data-usage-status] .quota-accounts .qa-toolbar > button:hover:not(:disabled) { color: var(--soa-fg); }
+[data-usage-status] .quota-accounts .qa-manager { margin: 8px 0 0; }
+[data-usage-status] .quota-accounts .qa-empty { margin-top: 8px; width: 100%; }
+.usage-dials > .usage-card[hidden] { display: none; }
+/* Two per row, like the local pair; a lone card on the last row stays half width. */
+:root[data-ui] .usage-dials > .usage-card:nth-child(n+3) { border-top: 1px solid var(--soa-line-soft); }
+.usage-card .usage-card-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.usage-card[data-account-state="paused"] .usage-gauge,
+.usage-card[data-account-state="paused"] .usage-drive { opacity: .45; }
+/* A saved account's details are its own quota rows only — the local token
+   and cost collectors describe this Mac's CLI accounts, not that login. */
+.usage-detail[data-scope="account"] .usage-detail-in > :not(.usage-status):not(.usage-quota-details) { display: none !important; }
+/* Burn and cost come from this Mac's CLI records, so a saved account shows
+   only what its own login reports: the rings, the reset and Range. */
+.usage-card[data-account="saved"] .usage-drive-burn,
+.usage-card[data-account="saved"] .usage-drive-cost { display: none !important; }

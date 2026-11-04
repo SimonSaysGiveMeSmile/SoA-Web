@@ -1,4 +1,4 @@
-import { QuotaAccountsView } from './quotaAccountsView.js?v=rings-20261103';
+import { QuotaAccountsView } from './quotaAccountsView.js?v=usage-classic-20261103';
 let closeCurrent;
 export function openQuotaAccountsSheet({ api, available = true }) {
     closeCurrent?.();
@@ -22,7 +22,7 @@ export function openQuotaAccountsSheet({ api, available = true }) {
         timer = setInterval(() => { if (!document.hidden) void view.refresh(); }, 2500);
     } else {
         body.textContent = 'Pair this device to manage your accounts.';
-        const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = new URL('./quotaAccounts.css?v=rings-20261103', import.meta.url); document.head.append(css);
+        const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = new URL('./quotaAccounts.css?v=usage-classic-20261103', import.meta.url); document.head.append(css);
     }
     dialog.showModal(); close.focus({ preventScroll: true });
     return { close: closeThis, view };
