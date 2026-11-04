@@ -22,14 +22,16 @@ const money = n => Number.isFinite(n) ? '≈$' + (n >= 1000 ? (n / 1000).toFixed
 const providerName = p => p === 'codex' ? 'Codex' : 'Claude';
 let sequence = 0;
 export class QuotaAccountsView {
-    constructor({ parent, api = x => x, onData = () => {}, onDetails = null, externalDetailsId = null, request = (...args) => fetch(...args) }) {
+    constructor({ parent, api = x => x, onData = () => {}, onDetails = null, externalDetailsId = null, cards = true, request = (...args) => fetch(...args) }) {
+        // cards:false = toolbar and account list only; the host draws the cards.
+        this.showCards = cards;
         this.api = api; this.request = request; this.onData = onData; this.onDetails = onDetails;
         this.externalDetailsId = externalDetailsId; this.openAccountId = null;
         this.rows = new Map(); this.cards = new Map(); this.activity = {}; this.controllers = new Set(); this.dead = false; this.busy = false;
         this.pendingFields = new Map();
         this.data = null; this.online = true;
         if (!document.querySelector('link[data-quota-accounts]')) document.head.append(el('link', {
-            rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=rings-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
+            rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=usage-classic-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
         this.root = el('section', { class: 'quota-accounts', 'aria-label': 'Account usage' });
         this.manage = button('Accounts', 'Choose monitored accounts', () => this.setManage(this.manager.hidden));
         this.manage.setAttribute('aria-expanded', 'false');
@@ -66,6 +68,7 @@ export class QuotaAccountsView {
     }
     focusAccount(id) { (this.cards.get(id)?.gauge.disabled === false ? this.cards.get(id).gauge : this.manage).focus({ preventScroll: true }); }
     renderDetails() {
+        if (!this.showCards) { this.details.hidden = true; return; }
         const account = this.data?.accounts.find(a => a.id === this.openAccountId && a.visible);
         for (const [id, c] of this.cards) {
             const open = account?.id === id;
@@ -194,10 +197,15 @@ export class QuotaAccountsView {
             }
             svg.append(group);
         }
-        const percent = el('strong', { class: 'qa-percent' }), period = el('span', { class: 'qa-period' });
+        // The classic dial: one row per window inside the rings, label left,
+        // reading right, each in its ring's colour.
+        const percent = el('strong', { class: 'qa-percent' }), period = el('span', { class: 'qa-period', text: '7d' });
+        const sessionPct = el('strong', { class: 'qa-percent' });
+        const sessionRow = el('div', { class: 'qa-leg', 'data-window': 'session' }, [el('span', { class: 'qa-period', text: '5h' }), sessionPct]);
         const gauge = el('button', { type: 'button', class: 'qa-gauge', 'aria-expanded': 'false',
             'aria-controls': account.system && this.onDetails ? this.externalDetailsId : this.details.id,
-            onclick: () => this.toggleDetails(account) }, [svg, el('div', { class: 'qa-center' }, [percent, period])]);
+            onclick: () => this.toggleDetails(account) }, [svg, el('div', { class: 'qa-center' }, [
+                el('div', { class: 'qa-leg', 'data-window': 'weekly' }, [period, percent]), sessionRow])]);
         const session = el('div', { class: 'qa-session' });
         const reset = el('div', { class: 'qa-reset' });
         const state = el('div', { class: 'qa-card-state' });
@@ -206,7 +214,7 @@ export class QuotaAccountsView {
         const activity = el('div', { class: 'qa-activity' });
         const card = el('article', { class: 'qa-card', 'data-account': account.id, 'data-provider': account.provider }, [el('div', { class: 'qa-card-header' }, [title, hide]), subtitle, gauge, session, reset, state, resume, range, activity]);
         this.grid.append(card);
-        const result = { card, title, hide, subtitle, gauge, rings, percent, period, session, reset, state, resume, range, activity };
+        const result = { card, title, hide, subtitle, gauge, rings, percent, period, sessionPct, sessionRow, session, reset, state, resume, range, activity };
         this.cards.set(account.id, result); return result;
     }
     render() {
@@ -242,6 +250,11 @@ export class QuotaAccountsView {
     }
     renderCards() {
         if (!this.data || this.dead) return;
+        if (!this.showCards) {
+            this.grid.hidden = this.details.hidden = true;
+            this.empty.hidden = this.data.accounts.some(a => a.visible);
+            return;
+        }
         const accounts = this.data.accounts.filter(a => a.visible), ids = new Set(accounts.map(a => a.id));
         this.grid.classList.toggle('qa-has-session-cost', accounts.some(a => a.system && a.quota?.windows?.session));
         for (const [id, c] of this.cards) if (!ids.has(id)) { c.card.remove(); this.cards.delete(id); }
@@ -260,18 +273,20 @@ export class QuotaAccountsView {
             c.card.dataset.state = paused ? 'paused' : fresh ? 'ready' : 'stale';
             c.gauge.disabled = paused;
             c.percent.textContent = week ? `${Math.round(week.usedPercent)}%` : '—';
-            c.period.textContent = 'Weekly';
+            c.sessionPct.textContent = session ? `${Math.round(session.usedPercent)}%` : '—';
+            c.gauge.dataset.layout = session || a.provider === 'codex' && this.data.accounts.some(x => x.provider === 'claude' && x.visible && x.quota?.windows?.session) ? 'dual' : 'single';
+            for (const [row, w] of [[c.percent.parentNode, week], [c.sessionRow, session]]) row.dataset.level = w?.usedPercent >= 95 ? 'critical' : w?.usedPercent >= 80 ? 'high' : '';
             for (const [key, w] of [['weekly', week], ['session', session]]) {
                 const r = c.rings[key];
                 r.circle.setAttribute('stroke-dashoffset', String(r.length * (1 - (w?.usedPercent || 0) / 100)));
                 r.circle.style.visibility = w && w.usedPercent > 0 ? '' : 'hidden';
-                r.group.style.display = key === 'session' && !session ? 'none' : '';
+                r.group.style.display = key === 'session' && c.gauge.dataset.layout === 'single' ? 'none' : '';
                 r.group.dataset.level = w?.usedPercent >= 95 ? 'critical' : w?.usedPercent >= 80 ? 'high' : '';
             }
             c.session.textContent = session ? `${session.windowMinutes === 300 ? '5h' : 'Session'} · ${Math.round(session.usedPercent)}%` : '';
-            c.session.hidden = !session;
+            c.session.hidden = true;
             const next = [week, session].filter(w => w && Number.isFinite(w.resetsAt)).sort((a, b) => a.resetsAt - b.resetsAt)[0];
-            c.reset.textContent = next ? `↻ ${duration(next.resetsAt - now)}` : '—';
+            c.reset.textContent = next ? `↻ ${next === week ? '7d' : '5h'} ${duration(next.resetsAt - now)}` : '—';
             c.reset.title = next ? `${next === week ? 'Weekly' : 'Session'} resets ${new Date(next.resetsAt).toLocaleString()}` : 'Reset time not reported';
             const connection = q.connection?.state;
             c.state.textContent = !this.online ? 'Offline' : paused ? 'Paused' : connection === 'sign-in-required' ? 'Connect in Accounts' : connection === 'reconnect' ? 'Reconnect' : q.official?.error === 'rate limited' && !fresh ? 'Rate limited · retrying' :

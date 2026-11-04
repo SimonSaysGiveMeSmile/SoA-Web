@@ -81,3 +81,21 @@
 .qa-phone-sheet .quota-accounts{--qa-fg:var(--text,#dce4ec);--qa-muted:var(--muted,#8996a5);--qa-bg:var(--bg,#20252d);--qa-line:var(--line,#34404b)}
 .qa-phone-sheet .qa-toolbar button,.qa-phone-sheet .qa-account-options button,.qa-phone-sheet .qa-add button{min-height:38px}
 .qa-phone-sheet .qa-hide{width:36px;min-height:36px;flex-basis:36px}
+/* Classic dial (2026-11-03): weekly outside in green, 5h inside in the accent
+   blue, yellow from 80 % and red from 95 %, readings inside the rings. */
+.qa-card[data-provider]{--qa-ring-outer:var(--soa-green,#5dbd5a);--qa-ring-inner:var(--soa-accent,#5ec8f2)}
+.qa-gauge [data-level=high]{color:var(--soa-yellow,#e6c84a)}.qa-gauge [data-level=critical]{color:var(--soa-red,#e5534b)}
+.qa-gauge .track{stroke:var(--qa-ring-outer);opacity:.16}
+.qa-card-name{text-transform:uppercase;letter-spacing:.04em}
+.qa-center{inset:27%;gap:2px;align-items:stretch}
+.qa-leg{display:flex;justify-content:space-between;align-items:baseline;gap:3px;color:var(--qa-ring-outer)}
+.qa-leg[data-window=session]{color:var(--qa-ring-inner)}
+.qa-leg .qa-period{font-size:9px;color:var(--qa-muted)}
+.qa-leg .qa-percent{font-size:13px;letter-spacing:0;color:inherit}
+.qa-gauge[data-layout=single] .qa-leg[data-window=session]{display:none}
+.qa-gauge[data-layout=single] .qa-center{inset:22%;align-items:center}
+.qa-gauge[data-layout=single] .qa-leg{flex-direction:column;align-items:center}
+.qa-gauge[data-layout=single] .qa-percent{font-size:20px}
+.qa-reset{color:var(--qa-fg);font-size:10px}
+.qa-range{color:var(--soa-yellow,#e6c84a)}
+@container (max-width:210px){.qa-leg .qa-percent{font-size:11px}}

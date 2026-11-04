@@ -1,4 +1,4 @@
-import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=rings-20261103';
+import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=usage-classic-20261103';
 /**
  * Sidebar widgets — small, self-contained, all driven from JSON endpoints.
  *
@@ -582,7 +582,10 @@ class ClaudeUsageWidget extends Widget {
         this._mountStructure();
         this._paintCodexPresence();
         this._paintOpen();
-        this._accountPanel = new QuotaAccountsView({ parent: this.body, api,
+        // The shared account view supplies the toolbar and the account list;
+        // every visible account is drawn as one of the usage dials below.
+        this._extraCards = new Map();
+        this._accountPanel = new QuotaAccountsView({ parent: this.body, api, cards: false,
             externalDetailsId: this._detail.id,
             onDetails: src => this._toggle(src),
             onData: data => this._acceptAccounts(data) });
@@ -597,15 +600,63 @@ class ClaudeUsageWidget extends Widget {
         this._codexCosts = data.costs?.codex || null;
         this._accountPanel.setData(data);
         this._accountPanel.root.hidden = false;
-        this._dials.style.display = 'none';
         if (this.body.firstChild !== this._accountPanel.root) this.body.prepend(this._accountPanel.root);
-        if (this._open && !data.accounts.some(a => a.id === 'local-' + this._open && a.visible && a.enabled) || !data.monitoring) {
-            this._open = null; this._paintOpen();
-        }
+        this._syncAccountCards();
+        if (this._open && !this._accountShown(this._open)) { this._open = null; this._paintOpen(); }
         for (const provider of ['claude', 'codex']) this._accountPanel.setActivity(provider, this[`_${provider}`], provider === 'codex' ? this._codexCosts : null);
     }
 
-    _makeCard(src) {
+    // Card key → account: the two local CLI accounts keep their provider keys
+    // ('claude' / 'codex'); saved accounts are keyed by their account id.
+    _accountFor(key) {
+        return this._accountsData?.accounts.find(a => a.system ? a.provider === key : a.id === key) || null;
+    }
+    _accountShown(key) {
+        const a = this._accountFor(key);
+        return !this._accountsData || (!!a && a.visible && a.enabled && this._accountsData.monitoring);
+    }
+
+    // Saved accounts get the same dial as the local ones. Their quota is their
+    // own; the local token/cost collectors are never attached to them.
+    _syncAccountCards() {
+        const data = this._accountsData;
+        const extras = data.accounts.filter(a => !a.system && a.visible);
+        const ids = new Set(extras.map(a => a.id));
+        for (const [id, card] of this._extraCards) {
+            if (ids.has(id)) continue;
+            card.el.remove(); this._extraCards.delete(id); delete this._cards[id];
+        }
+        for (const a of extras) {
+            let card = this._extraCards.get(a.id);
+            if (!card) {
+                card = this._makeCard(a.id, a.provider);
+                card.el.dataset.account = 'saved';
+                card.el.setAttribute('aria-controls', this._detail.id);
+                this._extraCards.set(a.id, card); this._cards[a.id] = card;
+            }
+            card.name.textContent = a.label;
+            card.name.title = [a.label, a.provider === 'codex' ? 'Codex' : 'Claude', a.quota?.connection?.plan].filter(Boolean).join(' · ');
+            this._quota[a.id] = a.quota || null;
+        }
+        for (const a of data.accounts.filter(a => a.system)) {
+            const card = this._cards[a.provider];
+            if (card) card.el.dataset.accountHidden = a.visible ? '' : 'true';
+        }
+        this._dials.replaceChildren(this._cards.claude.el, this._cards.codex.el, ...[...this._extraCards.values()].map(c => c.el));
+        this._paintCodexPresence();
+    }
+
+    _paintAccountState(key) {
+        const a = this._accountFor(key), card = this._cards[key];
+        if (!a || !card) return;
+        const paused = !this._accountsData.monitoring || !a.enabled;
+        const conn = a.quota?.connection?.state;
+        const note = paused ? 'Paused' : conn === 'sign-in-required' ? 'Connect' : conn === 'reconnect' ? 'Reconnect' : '';
+        card.el.dataset.accountState = paused ? 'paused' : '';
+        if (note) { card.sample.textContent = note; card.sample.hidden = false; }
+    }
+
+    _makeCard(src, provider = src) {
         const NS = 'http://www.w3.org/2000/svg';
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('viewBox', '0 0 100 100');
@@ -652,7 +703,7 @@ class ClaudeUsageWidget extends Widget {
         const resetValue = $el('span', { text: '—' });
         const resetWindow = $el('span', { class: 'usage-reset-window' });
         const reset = $el('div', { class: 'usage-next-reset' }, [$el('span', { text: '↻', 'aria-hidden': 'true' }), resetWindow, resetValue]);
-        const name = $el('div', { class: 'usage-card-name', text: tr('widget.usage.src_' + src) });
+        const name = $el('div', { class: 'usage-card-name', text: tr('widget.usage.src_' + provider) });
         const sample = $el('span', { class: 'usage-provider-status' });
         const chevron = $el('span', { class: 'usage-chevron', text: '›', 'aria-hidden': 'true' });
         const readout = (key, label) => {
@@ -703,7 +754,7 @@ class ClaudeUsageWidget extends Widget {
         cost.el = $el('div', { class: 'usage-drive-cost' }, [cost.heading, cost.grid, cost.single]);
         const drive = $el('div', { class: 'usage-drive' }, [burn.el, range.el, cost.el]);
         const el = $el('div', {
-            class: 'usage-card', 'data-src': src, role: 'button', tabindex: '0', 'aria-expanded': 'false',
+            class: 'usage-card', 'data-src': src, 'data-provider': provider, role: 'button', tabindex: '0', 'aria-expanded': 'false',
             title: 'Show details', onclick: () => this._toggle(src),
             onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) this._toggle(src); } },
         }, [$el('div', { class: 'usage-card-heading' }, [name, sample, chevron]),
@@ -723,7 +774,13 @@ class ClaudeUsageWidget extends Widget {
     // follows its neighbour, so the two cards side by side stay the same
     // object — both two-ring while Claude still has a session window, both
     // one-ring once it is gone.
-    _cardLayout(src) { return this._sessionReported(src) ? 'dual' : 'single'; }
+    _cardLayout(src) {
+        if (this._sessionRetired(src)) return 'single';
+        if (this._sessionReported(src)) return 'dual';
+        const other = src === 'claude' ? 'codex' : 'claude';
+        const otherShown = other === 'claude' || this._codexSeen;
+        return otherShown && this._sessionRetired(other) ? 'single' : 'dual';
+    }
 
     _setRing(metric, pct, weekly = true) {
         const r = metric.rings.a;
@@ -796,7 +853,7 @@ class ClaudeUsageWidget extends Widget {
         this._more.tabIndex = open ? 0 : -1;
         this._more.hidden = !window.__SOA_WEB__?._shell?._managerEnabled?.();
         this._detail.dataset.src = this._open || '';
-        this._accountPanel?.setExternalOpen(open ? 'local-' + this._open : null);
+        this._accountPanel?.setExternalOpen(open ? (this._extraCards?.has(this._open) ? this._open : 'local-' + this._open) : null);
         if (open) this._quotaDetails.replaceChildren(...Object.values(this._cards[this._open].metrics).map(m => m.detail));
     }
 
@@ -807,8 +864,11 @@ class ClaudeUsageWidget extends Widget {
             (this._detail.dataset.src === 'codex' && this._detail.contains(document.activeElement)))) {
             this._cards.claude.el.focus();
         }
-        this._cards.codex.el.hidden = !this._codexSeen;
-        this._dials.classList.toggle('solo', !this._codexSeen);
+        for (const card of Object.values(this._cards)) {
+            const local = card === this._cards.claude || card === this._cards.codex;
+            card.el.hidden = card.el.dataset.accountHidden === 'true' || (card === this._cards.codex && !this._codexSeen) || (!local && !this._accountsData);
+        }
+        this._dials.classList.toggle('solo', Object.values(this._cards).filter(c => !c.el.hidden).length < 2);
         if (this._codexChecked && !this._codexSeen && this._open === 'codex') this._open = null;
         this._paintOpen();
     }
@@ -909,7 +969,10 @@ class ClaudeUsageWidget extends Widget {
             if (!this._quotaFresh) this._accountPanel.setOffline();
             for (const provider of ['claude', 'codex']) this._accountPanel.setActivity(provider, this[`_${provider}`], provider === 'codex' ? this._codexCosts : null);
         }
-        this._paintClaudeCard(); this._paintCodexCard(); this._paintDetail();
+        this._paintClaudeCard(); this._paintCodexCard();
+        for (const key of this._extraCards.keys()) this._paintQuotaCard(key);
+        if (this._accountsData) for (const key of Object.keys(this._cards)) this._paintAccountState(key);
+        this._paintDetail();
         this._health.hidden = this._quotaFresh;
         this._health.textContent = this._quotaAt == null ? 'Connecting' : 'Retrying';
         this._pulseEl.title = 'Claude: latest API response. Codex: checked every 15 seconds. Screen refreshes every 2.5 seconds.';
@@ -1174,6 +1237,13 @@ class ClaudeUsageWidget extends Widget {
     // ── the detail panel (one source at a time) ────────────────────────
     _paintDetail() {
         if (!this._open || this._detail.inert) return;
+        if (this._extraCards.has(this._open)) {
+            const q = this._quota[this._open];
+            this._detail.dataset.scope = 'account';
+            this._status.textContent = !this._quotaFresh ? 'Offline · cached data' : q?.status === 'ready' ? '' : 'Waiting for usage';
+            return;
+        }
+        this._detail.dataset.scope = '';
         const fresh = this._open === 'codex' ? this._codexFresh : this._claudeFresh;
         this._status.textContent = fresh ? '' : 'Offline · cached data';
         if (this._open === 'codex') { this._renderCodex(this._codex); return; }
