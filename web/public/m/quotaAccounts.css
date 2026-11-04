@@ -99,3 +99,9 @@
 .qa-reset{color:var(--qa-fg);font-size:10px}
 .qa-range{color:var(--soa-yellow,#e6c84a)}
 @container (max-width:210px){.qa-leg .qa-percent{font-size:11px}}
+/* Same hint on the phone sheet: hover where there is a pointer, a brief
+   press where there is only touch. */
+.quota-accounts .qa-card>.qa-gauge{transition:transform .24s cubic-bezier(.2,.8,.2,1),filter .24s ease}
+@media(hover:hover) and (pointer:fine){.quota-accounts .qa-card>.qa-gauge:is(:hover,:focus-visible):not(:disabled){transform:scale(1.035);filter:brightness(1.15)}}
+.quota-accounts .qa-card>.qa-gauge:active:not(:disabled){transform:scale(.97);transition-duration:.08s}
+@media(prefers-reduced-motion:reduce){.quota-accounts .qa-card>.qa-gauge{transition:none;transform:none!important}}

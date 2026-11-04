@@ -31,7 +31,7 @@ export class QuotaAccountsView {
         this.pendingFields = new Map();
         this.data = null; this.online = true;
         if (!document.querySelector('link[data-quota-accounts]')) document.head.append(el('link', {
-            rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=usage-classic-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
+            rel: 'stylesheet', href: new URL('./quotaAccounts.css?v=usage-hover-20261103', import.meta.url).href, 'data-quota-accounts': '' }));
         this.root = el('section', { class: 'quota-accounts', 'aria-label': 'Account usage' });
         this.manage = button('Accounts', 'Choose monitored accounts', () => this.setManage(this.manager.hidden));
         this.manage.setAttribute('aria-expanded', 'false');
