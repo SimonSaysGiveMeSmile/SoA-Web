@@ -1375,3 +1375,23 @@ body.ctx-resizing * { cursor: inherit !important; }
    only what its own login reports: the rings, the reset and Range. */
 .usage-card[data-account="saved"] .usage-drive-burn,
 .usage-card[data-account="saved"] .usage-drive-cost { display: none !important; }
+
+/* Hover hint (2026-11-03): a usage card expands on click, so on a real
+   pointer it answers the hover — the gauge lifts a touch, the rings brighten
+   and the chevron nudges toward the details twice. Touch screens never see
+   it (no hover), and reduced motion keeps only the colour change. */
+@media (hover: hover) and (pointer: fine) {
+  .usage-card .usage-gauge { transition: transform .24s cubic-bezier(.2, .8, .2, 1); }
+  .usage-card .usage-ring { transition: filter .24s ease; }
+  .usage-card:is(:hover, :focus-visible) .usage-gauge { transform: scale(1.035); }
+  .usage-card:is(:hover, :focus-visible) .usage-ring { filter: brightness(1.15) drop-shadow(0 0 4px rgba(var(--soa-accent-rgb), .35)); }
+  .usage-card:is(:hover, :focus-visible) .usage-chevron { color: var(--soa-accent); }
+  .usage-card:not(.open):is(:hover, :focus-visible) .usage-chevron { animation: usage-chevron-hint .9s ease-in-out 2; }
+  .usage-card:active .usage-gauge { transform: scale(.985); transition-duration: .08s; }
+}
+@keyframes usage-chevron-hint { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(3px); } }
+@media (prefers-reduced-motion: reduce) {
+  .usage-card .usage-gauge { transition: none; transform: none !important; }
+  .usage-card .usage-chevron { animation: none !important; }
+}
+@media (forced-colors: active) { .usage-card .usage-ring { filter: none !important; } }

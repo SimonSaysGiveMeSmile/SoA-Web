@@ -1,4 +1,4 @@
-import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=usage-classic-20261103';
+import { QuotaAccountsView } from '/m/quotaAccountsView.js?v=usage-hover-20261103';
 /**
  * Sidebar widgets — small, self-contained, all driven from JSON endpoints.
  *
