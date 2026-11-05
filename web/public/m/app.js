@@ -29,6 +29,7 @@ import { openHealthSheet, sameOrigin, parseHealthLink, healthLinkHash } from './
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
+import { loadRecord, saveRecord, reconcile, isArchived, archivedIds, setArchived, archivedAt, markUsed, lastUsed, sortIds, matches, ago as agoText, SORT_MODES, SORT_LABELS, SORT_HINTS } from './tabOrganizer.js';
 
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
@@ -46,6 +47,9 @@ const FONT_SCALE_KEY = 'son-of-anton.font-scale';
 // live immediately but only raise the big overlay if we're STILL down after
 // this delay (and cancel it the instant we reconnect).
 const RECONNECT_OVERLAY_DELAY_MS = 1400;
+// Activity / Last used: re-sort the strip at most this often for background
+// changes, so tabs do not shuffle while you aim at one.
+const TAB_RESORT_MS = 10000;
 
 /* ── MEET (group meetings) ──────────────────────────────
    Client-side mirrors of server rules. The API stays the authority — every one
@@ -596,6 +600,16 @@ class App {
         this._snapshot = null;
         this._activeTab = 0;
         this._activeTabId = 0;
+        // Tab organizer (search · sort · archive): per-device view state in
+        // localStorage, shared with the full dashboard. Archive only hides a
+        // tab from this device's strip — nothing is sent to the daemon.
+        try { this._tabOrgStore = window.localStorage; } catch (_) { this._tabOrgStore = null; }
+        this._tabOrg = loadRecord(this._tabOrgStore);
+        this._tabOutputAt = new Map();   // tab id → ms of its last terminal output
+        this._tabOrder = null;           // last sorted display order (Activity / Last used)
+        this._tabOrderAt = 0;
+        this._tabOrderStale = true;
+        this._tabsTouching = false;      // pointer over the strip: defer re-sorts
         // Per-device active tab. The server keeps ONE session-global active tab
         // and stamps it into every snapshot's activeId (3s cwd poll, device
         // connect/disconnect, and any device's switch). We must NOT blindly
@@ -910,6 +924,7 @@ class App {
                 sounds.play('key');
                 if (kind === 'term-keys' || kind === 'hotkey') {
                     payload.id = this._activeTabId;
+                    this._markTabUsed(this._activeTabId);
                     this._claimSize();
                 }
                 this.socket.sendInput(kind, payload);
@@ -2207,12 +2222,17 @@ class App {
         const tabs = (this._snapshot && this._snapshot.tabs) || [];
         const byId = new Map(tabs.map(t => [t.id, t]));
         // Prefer the supervisor list (full fleet); else the local tabs.
-        const rows = sup.length
+        let rows = sup.length
             ? sup.map(s => ({ sup: s, tab: byId.get(s.id) }))
             : tabs.map(t => ({ sup: null, tab: t }));
+        // Same view as the strip: archived tabs hidden, the rest in sort order.
+        const rowOf = new Map(rows.map(r => [r.sup ? r.sup.id : r.tab.id, r]));
+        rows = this._tabOrgOrder([...rowOf.keys()]).map(id => rowOf.get(id));
         if (!rows.length) {
             this._tilesHtml = null;   // so the next real rows always repaint over this
-            this.tilesEl.innerHTML = '<div class="m-tile-empty">No sessions yet — tap + to open one.</div>';
+            this.tilesEl.innerHTML = rowOf.size
+                ? '<div class="m-tile-empty">Every tab is archived — open the tab list to restore one.</div>'
+                : '<div class="m-tile-empty">No sessions yet — tap + to open one.</div>';
             return;
         }
         const hhmm = (ms) => { const d = new Date(ms); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
@@ -2625,6 +2645,7 @@ class App {
         // stays clean and the bubble still shows what you typed.
         let text = this._chatCommand(raw) || raw;
         // Type it into the PTY (newline submits, like pressing Enter in terminal).
+        this._markTabUsed(id);
         this._claimSize();
         this._voiceChat?.cancel();
         this._chatSending = true;
@@ -4044,6 +4065,7 @@ class App {
             this.chatInput.value = this._chatDrafts.get(id) || '';
         }
         if (id == null) return;
+        if (this._activeTabId !== id) this._markTabUsed(id, true);
         if (this._activeTabId !== id && this._snapshot) {
             this._activeTabId = id;
             this._applySnapshot(this._snapshot);
@@ -4058,6 +4080,7 @@ class App {
         // Server sends: { tabs: [{id, title, cols, rows, exited}], activeId: N }
         // Normalize to the shape our renderer expects.
         const rawTabs = snap.tabs || [];
+        if (reconcile(this._tabOrg, this._tabOrgKey(), rawTabs)) saveRecord(this._tabOrgStore, this._tabOrg);
         for (const [id, images] of this._chatAttachments?.drafts || []) {
             if (!rawTabs.some(t => t.id === id)) this._chatAttachments.remove(id, images);
         }
@@ -4116,6 +4139,12 @@ class App {
             // the one we were viewing is gone (e.g. it was just closed).
             activeId = idList.includes(this._activeTabId) ? this._activeTabId : (idList[0] || 0);
         }
+        // A fresh load does not land on a tab this device archived (it would
+        // be missing from the strip) while any other tab is still on it.
+        if (!this._hasReceivedSnapshot && isArchived(this._tabOrg, this._tabOrgKey(), activeId)) {
+            const vis = idList.find(id => !isArchived(this._tabOrg, this._tabOrgKey(), id));
+            if (vis != null) activeId = vis;
+        }
         const tabs = rawTabs.map((t, i) => ({
             index: i,
             id: t.id,
@@ -4140,6 +4169,7 @@ class App {
             this._chatDrafts.set(this._activeTabId, this.chatInput.value);
             this.chatInput.value = this._chatDrafts.get(activeId) || '';
         }
+        if (this._activeTabId !== activeId) this._markTabUsed(activeId, true);
         this._activeTab = newActiveTab;
         this._activeTabId = activeId;
         pushLog(`snapshot: raw=${JSON.stringify(snap.activeId)} → resolved activeId=${activeId} tabs=[${idList.join(',')}]`);
@@ -4154,6 +4184,7 @@ class App {
         }
 
         this._connectedDevices = snap.connectedDevices || 0;
+        this._stripTabs = tabs;
         this._renderTabs(tabs);
         this._updateTabChip();
         if (this.tabsheetOverlay && this.tabsheetOverlay.classList.contains('open')) this._renderTabSheet();
@@ -4174,6 +4205,12 @@ class App {
             }
             this._tabStatuses.set(t.id, t.status);
         }
+        // Archived tabs stay off the strip; the rest follow the sort mode.
+        const all = tabs;
+        const order = this._tabOrgOrder(all.map(t => t.id));
+        const byId = new Map(all.map(t => [t.id, t]));
+        tabs = order.map(id => byId.get(id));
+        this.tabsEl.classList.toggle('tabs-sorted', this._tabOrg.sort !== 'manual');
         const frag = document.createDocumentFragment();
         for (const t of tabs) {
             const el = document.createElement('button');
@@ -4202,7 +4239,7 @@ class App {
         // used to rebuild it, restarting each tab's status pulse. The live DOM
         // must still match (a cancelled drag can leave tabs reordered), so
         // its order and active tab are checked too.
-        const sig = tabs.map(t => [t.id, t.index, t.name, t.active ? 1 : 0,
+        const sig = this._tabOrg.sort + '\u0003' + tabs.map(t => [t.id, t.index, t.name, t.active ? 1 : 0,
             (this._mobileStatus && this._mobileStatus.get(t.id)) || t.status || ''].join('\u0001')).join('\u0002');
         const live = Array.from(this.tabsEl.children, el => el.dataset.tabId || '+').join(',');
         const want = tabs.map(t => String(t.id)).concat('+').join(',');
@@ -4302,8 +4339,119 @@ class App {
             if (closeBtn) closeBtn.addEventListener('click', () => this._closeTabSheet());
         }
         if (this.tabsheetSearch) {
-            this.tabsheetSearch.addEventListener('input', () => this._renderTabSheet());
+            this.tabsheetSearch.addEventListener('input', () => { this._tabsheetHi = 0; this._renderTabSheet(); });
+            this.tabsheetSearch.addEventListener('keydown', (e) => this._onTabSheetKey(e));
         }
+        const sort = document.getElementById('tabsheet-sort');
+        if (sort) sort.addEventListener('click', (e) => {
+            const b = e.target.closest('[data-sort]');
+            if (b) this._setTabSort(b.dataset.sort);
+        });
+        // Hold re-sorts while a finger (or mouse) is on the strip, so a tab
+        // never moves out from under it; catch up once it lets go.
+        if (this.tabsEl) {
+            const on = () => { this._tabsTouching = true; };
+            const off = () => { if (!this._tabsTouching) return; this._tabsTouching = false; this._queueTabResort(); };
+            this.tabsEl.addEventListener('pointerenter', on);
+            this.tabsEl.addEventListener('pointerdown', on);
+            this.tabsEl.addEventListener('pointerleave', off);
+            this.tabsEl.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') off(); });
+            this.tabsEl.addEventListener('pointercancel', off);
+        }
+    }
+
+    /* ── Tab organizer: archive · sort (per-device view state) ── */
+
+    // The daemon this page talks to — the same key the session history uses.
+    _tabOrgKey() { return this._historySource || location.origin; }
+
+    // Display order for `ids` (manual order in): archived tabs dropped, the
+    // rest sorted. A computed order is kept for TAB_RESORT_MS, and while the
+    // pointer is on the strip, unless a user action marked it stale.
+    _tabOrgOrder(ids) {
+        const key = this._tabOrgKey();
+        const arch = archivedIds(this._tabOrg, key);
+        const visible = ids.filter(id => !arch.has(String(id)));
+        const mode = this._tabOrg.sort;
+        if (mode === 'manual') { this._tabOrder = null; return visible; }
+        const now = Date.now();
+        const cached = this._tabOrder;
+        if (cached && !this._tabOrderStale && (this._tabsTouching || now - this._tabOrderAt < TAB_RESORT_MS)) {
+            const keep = cached.filter(id => visible.includes(id));
+            return keep.concat(visible.filter(id => !keep.includes(id)));
+        }
+        this._tabOrder = sortIds(visible, mode, {
+            activityOf: id => this._tabOutputAt.get(id) || 0,
+            usedOf: id => lastUsed(this._tabOrg, key, id),
+        });
+        this._tabOrderAt = now;
+        this._tabOrderStale = false;
+        return this._tabOrder.slice();
+    }
+
+    // Background change (output, a tab used): repaint once the throttle
+    // window is over and the pointer is off the strip.
+    _queueTabResort() {
+        if (this._tabOrg.sort === 'manual' || this._tabResortT) return;
+        const wait = Math.max(250, TAB_RESORT_MS - (Date.now() - this._tabOrderAt));
+        this._tabResortT = setTimeout(() => {
+            this._tabResortT = null;
+            if (this._tabsTouching) { this._queueTabResort(); return; }
+            this._refreshTabView();
+        }, wait);
+    }
+
+    // User action (sort mode, archive): re-sort now.
+    _refreshTabView(fresh) {
+        if (fresh) this._tabOrderStale = true;
+        if (this._stripTabs) this._renderTabs(this._stripTabs);
+        this._updateTabChip();
+        if (this._tilesTimer) this._renderTiles();
+        if (this.tabsheetOverlay && this.tabsheetOverlay.classList.contains('open')) this._renderTabSheet();
+    }
+
+    _setTabSort(mode) {
+        if (!SORT_MODES.includes(mode) || mode === this._tabOrg.sort) return;
+        this._tabOrg.sort = mode;
+        saveRecord(this._tabOrgStore, this._tabOrg);
+        this._refreshTabView(true);
+    }
+
+    // Last used: stamped on every switch and keystroke, saved at most every 5 s.
+    // A switch is the user's own action, so it re-sorts at the next render
+    // (both callers render right after) — unless a finger is on the strip,
+    // then as soon as it lifts. Keystrokes stay on the background throttle.
+    _markTabUsed(id, switched) {
+        if (id == null) return;
+        markUsed(this._tabOrg, this._tabOrgKey(), id);
+        if (!this._tabOrgSaveT) {
+            this._tabOrgSaveT = setTimeout(() => {
+                this._tabOrgSaveT = null;
+                saveRecord(this._tabOrgStore, this._tabOrg);
+            }, 5000);
+        }
+        if (this._tabOrg.sort !== 'recent') return;
+        if (switched && !this._tabsTouching) { this._tabOrderStale = true; return; }
+        if (switched) this._tabOrderAt = 0;
+        this._queueTabResort();
+    }
+
+    _archiveTab(id, on) {
+        const tabs = (this._snapshot && this._snapshot.tabs) || [];
+        const t = tabs.find(x => x.id === id);
+        if (!t) return;
+        const key = this._tabOrgKey();
+        if (on && id === this._activeTabId) {
+            // Step off the tab first: the next visible one, else the one before.
+            const order = this._tabOrgOrder(tabs.map(x => x.id));
+            const at = order.indexOf(id);
+            const next = order[at + 1] ?? order[at - 1];
+            if (next != null) this._switchTabLocal(next);
+        }
+        setArchived(this._tabOrg, key, { id, cwd: t.cwd, title: t.title }, on);
+        saveRecord(this._tabOrgStore, this._tabOrg);
+        this._refreshTabView(true);
+        if (on) this._toast(`Archived ${t.title || 'tab'} — it keeps running`);
     }
 
     // Keep the top-bar chip showing the tab this phone is viewing (the active
@@ -4312,12 +4460,14 @@ class App {
         if (!this.btnTabchip) return;
         const tabs = (this._snapshot && this._snapshot.tabs) || [];
         if (this.tabchipName)  this.tabchipName.textContent = this._tabName(this._activeTabId) || '—';
-        if (this.tabchipCount) this.tabchipCount.textContent = tabs.length ? String(tabs.length) : '';
+        const shown = tabs.filter(t => !isArchived(this._tabOrg, this._tabOrgKey(), t.id)).length;
+        if (this.tabchipCount) this.tabchipCount.textContent = shown ? String(shown) : '';
     }
 
     _openTabSheet() {
         if (!this.tabsheetOverlay) return;
         if (this.tabsheetSearch) this.tabsheetSearch.value = '';
+        this._tabsheetHi = 0;
         this._renderTabSheet();
         this.tabsheetOverlay.classList.add('open');
     }
@@ -4330,40 +4480,137 @@ class App {
     _renderTabSheet() {
         if (!this.tabsheetList) return;
         const tabs = (this._snapshot && this._snapshot.tabs) || [];
-        const q = (this.tabsheetSearch && this.tabsheetSearch.value || '').trim().toLowerCase();
+        const q = (this.tabsheetSearch && this.tabsheetSearch.value || '').trim();
+        const key = this._tabOrgKey();
+        const mode = this._tabOrg.sort;
+        const sort = document.getElementById('tabsheet-sort');
+        if (sort) for (const b of sort.querySelectorAll('[data-sort]')) {
+            b.textContent = SORT_LABELS[b.dataset.sort] || b.textContent;
+            b.setAttribute('aria-checked', b.dataset.sort === mode ? 'true' : 'false');
+        }
+        const hint = document.getElementById('tabsheet-hint');
+        if (hint) hint.textContent = SORT_HINTS[mode] + (mode === 'manual' ? '' : '. Switch to Manual to drag.');
+        const nameOf = (t) => t.title || `TAB ${tabs.indexOf(t) + 1}`;
+        // Mark each searched word inside the name (the sheet's one accent).
+        const words = q.toLowerCase().split(/\s+/).filter(w => w && !w.startsWith('#'));
+        const mark = (name) => {
+            if (!words.length) return escapeHtml(name);
+            const low = name.toLowerCase(), on = new Array(name.length).fill(false);
+            for (const w of words) for (let i = low.indexOf(w); i >= 0; i = low.indexOf(w, i + 1)) on.fill(true, i, i + w.length);
+            let out = '', i = 0;
+            while (i < name.length) {
+                let j = i; while (j < name.length && on[j] === on[i]) j++;
+                const part = escapeHtml(name.slice(i, j));
+                out += on[i] ? `<mark>${part}</mark>` : part; i = j;
+            }
+            return out;
+        };
+        const hit = (t) => matches(q, { id: t.id, title: nameOf(t), cwd: t.cwd });
+        const byId = new Map(tabs.map(t => [t.id, t]));
+        const shown = this._tabOrgOrder(tabs.map(t => t.id)).map(id => byId.get(id)).filter(hit);
+        const archived = tabs.filter(t => isArchived(this._tabOrg, key, t.id));
+        const archShown = archived.filter(hit).sort((a, b) => archivedAt(this._tabOrg, key, b.id) - archivedAt(this._tabOrg, key, a.id));
+        // Rows the keyboard can land on, in list order (Enter opens one).
+        const targets = [];
+        const open = (t) => () => {
+            if (isArchived(this._tabOrg, key, t.id)) this._archiveTab(t.id, false);
+            this._switchTabLocal(t.id);
+            this._showView('terminal-view');
+            this._closeTabSheet();
+        };
         const frag = document.createDocumentFragment();
-        let shown = 0;
-        tabs.forEach((t, i) => {
-            const name = t.title || `TAB ${i + 1}`;
-            if (q && !name.toLowerCase().includes(q)) return;
-            shown++;
+        for (const t of shown) {
+            const name = nameOf(t);
             const mob = this._mobileStatus && this._mobileStatus.get(t.id);
             const status = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
             const pct = this._ctxPct && this._ctxPct.get(t.id);
+            const item = document.createElement('div');
+            item.className = 'tabsheet-item';
             const row = document.createElement('button');
             row.type = 'button';
             row.className = 'tabsheet-row' + (t.id === this._activeTabId ? ' active' : '');
             if (status) row.setAttribute('data-status', status);
             row.innerHTML =
                 `<span class="tabsheet-dot"></span>` +
-                `<span class="tabsheet-name">${escapeHtml(name)}</span>` +
+                `<span class="tabsheet-name">${mark(name)}</span>` +
                 (pct != null ? `<span class="tabsheet-ctx">${pct}%</span>` : '') +
                 (t.id === this._activeTabId ? `<span class="tabsheet-here">VIEWING</span>` : '');
-            row.addEventListener('click', () => {
-                this._switchTabLocal(t.id);
-                this._showView('terminal-view');
-                this._closeTabSheet();
-            });
-            frag.appendChild(row);
-        });
-        if (!shown) {
+            row.addEventListener('click', open(t));
+            const arch = document.createElement('button');
+            arch.type = 'button';
+            arch.className = 'tabsheet-act';
+            arch.textContent = 'Archive';
+            arch.title = 'Hide this tab from the strip. It keeps running — restore it any time.';
+            arch.setAttribute('aria-label', `Archive ${name}`);
+            arch.addEventListener('click', (e) => { e.stopPropagation(); this._archiveTab(t.id, true); });
+            item.append(row, arch);
+            frag.appendChild(item);
+            targets.push({ el: row, open: open(t) });
+        }
+        if (!shown.length && !archShown.length) {
             const empty = document.createElement('div');
             empty.className = 'tabsheet-empty';
-            empty.textContent = q ? 'No tabs match.' : 'No open tabs.';
+            empty.textContent = q ? `No tabs match \u201c${q}\u201d` : (archived.length ? 'Every tab is archived.' : 'No open tabs.');
             frag.appendChild(empty);
         }
+        if (archShown.length) {
+            const head = document.createElement('div');
+            head.className = 'tabsheet-section';
+            head.textContent = `Archived (${archived.length})`;
+            frag.appendChild(head);
+            for (const t of archShown) {
+                const name = nameOf(t);
+                const item = document.createElement('div');
+                item.className = 'tabsheet-item archived';
+                const when = agoText(archivedAt(this._tabOrg, key, t.id));
+                // A button like the live rows (same type styling, dot, focus);
+                // tapping it opens the tab, as Open does.
+                const mob = this._mobileStatus && this._mobileStatus.get(t.id);
+                const status = mob ? cssStatus(mob) : (t.exited ? 'exited' : null);
+                const label = document.createElement('button');
+                label.type = 'button';
+                label.className = 'tabsheet-row';
+                if (status) label.setAttribute('data-status', status);
+                label.addEventListener('click', open(t));
+                label.innerHTML =
+                    `<span class="tabsheet-dot"></span>` +
+                    `<span class="tabsheet-name">${mark(name)}</span>` +
+                    (when ? `<span class="tabsheet-ctx">${escapeHtml(when)}</span>` : '');
+                const restore = document.createElement('button');
+                restore.type = 'button';
+                restore.className = 'tabsheet-act';
+                restore.textContent = 'Restore';
+                restore.title = 'Put this tab back on the strip.';
+                restore.setAttribute('aria-label', `Restore ${name}`);
+                restore.addEventListener('click', () => this._archiveTab(t.id, false));
+                item.append(label, restore);
+                frag.appendChild(item);
+                targets.push({ el: label, open: open(t) });
+            }
+        }
+        this._tabsheetTargets = targets;
+        this._tabsheetHi = Math.min(this._tabsheetHi || 0, Math.max(0, targets.length - 1));
+        if (q && targets[this._tabsheetHi]) targets[this._tabsheetHi].el.classList.add('kb-hi');
         this.tabsheetList.innerHTML = '';
         this.tabsheetList.appendChild(frag);
+    }
+
+    // Search box keys: Enter opens the highlighted match (the first by
+    // default), ArrowUp/ArrowDown move the highlight, Escape closes.
+    _onTabSheetKey(e) {
+        const targets = this._tabsheetTargets || [];
+        if (e.key === 'Escape') { e.preventDefault(); this._closeTabSheet(); return; }
+        if (e.key === 'Enter') {
+            const t = targets[this._tabsheetHi || 0];
+            if (t) { e.preventDefault(); t.open(); }
+            return;
+        }
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' || !targets.length) return;
+        e.preventDefault();
+        const n = targets.length;
+        this._tabsheetHi = ((this._tabsheetHi || 0) + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        targets.forEach((t, i) => t.el.classList.toggle('kb-hi', i === this._tabsheetHi));
+        try { targets[this._tabsheetHi].el.scrollIntoView({ block: 'nearest' }); } catch (_) {}
     }
 
     _renderActiveTerminal() {
@@ -4429,7 +4676,11 @@ class App {
             if (state.cancelled || state.dragging) return;
             const moved = Math.hypot(e.clientX - state.startX, e.clientY - state.startY) > MOVE_THRESHOLD;
             if (!moved) return;
-            if (!state.armed) {
+            // Activity / Last used order is computed, so there is nothing to
+            // drag into: the gesture pans the strip (the sheet says so).
+            if (!state.armed || this._tabOrg.sort !== 'manual') {
+                el.classList.remove('tab-armed');
+                state.armed = false;
                 // Moved before the drag-arm fired — treat as a scroll gesture
                 // and let the strip pan horizontally.
                 clearTimers();
@@ -4647,6 +4898,8 @@ class App {
         const tabId = payload.id ?? this._activeTabId;
         const ts = this._getTabState(tabId);
         ts.term.write(payload.data);
+        this._tabOutputAt.set(tabId, Date.now());
+        if (this._tabOrg.sort === 'activity') this._queueTabResort();
     }
 
     // Classify a tab's current screen at most every 250 ms (500 ms for tabs

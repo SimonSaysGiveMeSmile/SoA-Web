@@ -28,6 +28,7 @@ import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
 import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=web-20261102';
 import { attachDesktopFailover, findWorkingDoor, doorsSupported } from '/assets/doors.js?v=web-20261102';
+import { loadRecord as loadTabOrg, saveRecord as saveTabOrg, reconcile as reconcileTabOrg, isArchived, archivedIds, setArchived, archivedAt, markUsed, lastUsed, sortIds, matches as tabMatches, ago as agoText, SORT_MODES, SORT_LABELS, SORT_HINTS } from '/m/tabOrganizer.js?v=tab-organizer-20261105';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
 const LS_KEY = 'soa_web_backend';
@@ -1498,6 +1499,14 @@ class Shell {
         this._tabCwd = new Map();
         this.order = [];
         this.activeId = null;
+        // Tab organizer (search · sort · archive) — per-device VIEW state kept in
+        // this browser (/m/tabOrganizer.js, shared with the phone companion).
+        // this.order stays the server's manual order; the strip, tiles and tab
+        // shortcuts read _displayOrder() instead. Nothing here reaches the daemon:
+        // an archived tab keeps running, it is just off the strip.
+        this._org = loadTabOrg(this._orgStorage());
+        this._orgLastOut = new Map();  // tabId → ms of its last terminal output (Activity sort)
+        this._orgView = null;          // the sorted order last shown (re-sorted on a throttle)
         // CHAT view state — IM-style messaging with the active agent (the top tab
         // strip selects who). Threads keyed by tab id + an away-unread counter.
         this._chatThreads = new Map();   // tabId → [{ from:'you'|'agent', full, t }]
@@ -1791,6 +1800,10 @@ class Shell {
 
         const sideBtn = $('#toggle-sidebar');
         const stageEl = $('.stage');
+        // Tab manager: find, sort and archive tabs (also Ctrl/Cmd+Shift+F).
+        const tabMgrBtn = $('#tab-manager');
+        if (tabMgrBtn) tabMgrBtn.addEventListener('click', () => this._toggleTabManager());
+        this._paintTabManagerBtn();
         // On phone-sized viewports the sidebar is an overlay, not a
         // permanent column — start it closed so the terminal owns the
         // full width on first load. Desktop keeps its existing behavior.
@@ -2233,9 +2246,12 @@ class Shell {
             // jumping to the session-global activeId (which another device may
             // have moved). Only a fresh load (activeId still null) adopts the
             // server's last-viewed tab.
+            this._orgReconcile(tabs);
             const keepLocal = this.activeId != null && tabs.some(t => t.id === this.activeId);
+            // A fresh load skips a tab this device archived (it can still be opened from the tab manager).
             const target = keepLocal ? this.activeId
-                : (activeId && tabs.some(t => t.id === activeId)) ? activeId : tabs[0].id;
+                : (activeId && tabs.some(t => t.id === activeId) && !this._isTabArchived(activeId)) ? activeId
+                : (this._displayOrder()[0] ?? tabs[0].id);
             this._activate(target);
             // Tell the PTY what width we actually ended up at. _activate's
             // fitNow goes through the debounced _onResize (60ms) — good for
@@ -2301,6 +2317,7 @@ class Shell {
         // from another device sharing the session, must reorder the local tab
         // bar. _ensureTab only appends new ids, so adopt the snapshot order.
         this.order = tabs.map(t => t.id);
+        this._orgReconcile(tabs);
         this._syncTabsUI(tabs);
         // Per-device active tab: do NOT follow the session-global activeId on
         // routine snapshots. Adopt it only when (a) this is effectively initial
@@ -2314,7 +2331,7 @@ class Shell {
         if (this.activeId == null) {
             // Fresh page / reload: restore the last-viewed tab.
             this._adoptNewTabIds = null;
-            const initial = serverActiveValid ? activeId : (tabs[0] ? tabs[0].id : null);
+            const initial = serverActiveValid && !this._isTabArchived(activeId) ? activeId : (this._displayOrder()[0] ?? (tabs[0] ? tabs[0].id : null));
             if (initial && initial !== this.activeId) this._activate(initial);
         } else if (this._adoptNewTabIds && serverActiveValid && !this._adoptNewTabIds.has(activeId)) {
             // This device created/restored a tab and this is its new id — focus it.
@@ -2323,7 +2340,7 @@ class Shell {
         } else if (!this.tabs.has(this.activeId)) {
             // The tab we were viewing disappeared from the snapshot (closed,
             // possibly by another device): fall back locally to the first tab.
-            const fallback = tabs[0] ? tabs[0].id : null;
+            const fallback = this._displayOrder()[0] ?? (tabs[0] ? tabs[0].id : null);
             if (fallback) this._activate(fallback); else this.activeId = null;
         }
         // Otherwise keep the user's current local active tab untouched.
@@ -2373,6 +2390,9 @@ class Shell {
         if (PERF.on) pstream(data ? data.length : 0);
         const t = this.tabs.get(id);
         if (t) {
+            // Activity sort: when this tab last printed anything (re-sort is throttled).
+            this._orgLastOut.set(id, Date.now());
+            if (this._org.sort === 'activity') this._orgResortSoon();
             // Virtualization: only the on-screen terminal parses live into xterm;
             // hidden tabs buffer the raw bytes and catch up via flushPendingReplay
             // on switch — so many sessions run ~1 live ANSI parser, not N. Status
@@ -2469,7 +2489,7 @@ class Shell {
         const rt = new TabRuntime(id, title);
         this.termsEl.appendChild(rt.container);
         rt.attach(
-            data => this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: data }),
+            data => { this.bridge.input(INPUT_KIND.TERM_KEYS, { id, text: data }); this._orgTouch(id); },
             (cols, rows) => this.bridge.input(INPUT_KIND.TERM_RESIZE, { id, cols, rows, hidden: this._notLooking() }),
             t => this.bridge.input(INPUT_KIND.SET_TITLE, { id, title: t }),
         );
@@ -2498,8 +2518,9 @@ class Shell {
         this._ctxPct.delete(id);
         this._previewUrls.delete(id);
         this._previewVisible.delete(id);
+        this._orgLastOut.delete(id);
         if (this.activeId === id) {
-            const next = this.order[0];
+            const next = this._displayOrder()[0] ?? this.order[0];
             if (next) this._activate(next); else this.activeId = null;
         }
     }
@@ -2521,6 +2542,7 @@ class Shell {
         const prevId = this.activeId;
         const sameTab = this.activeId === id;
         this.activeId = id;
+        if (!sameTab) this._orgTouch(id, true);
         if (this.viewMode === 'chat') {
             // In CHAT mode the top tab strip selects which agent you're messaging;
             // skip painting/focusing the terminal hidden under the chat overlay.
@@ -2578,13 +2600,18 @@ class Shell {
     }
 
     _syncTabsUI(list) {
-        const tabs = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
+        const all = list || this.order.map(id => ({ id, title: (this.tabs.get(id) || {}).title }));
+        // The strip shows the organizer's view: archived tabs left out, the
+        // rest in the chosen sort (manual = the server's order, untouched).
+        const byId = new Map(all.map(t => [t.id, t]));
+        const tabs = this._displayOrder().filter(id => byId.has(id)).map(id => byId.get(id));
+        this._paintTabManagerBtn();
         // agentStatus is intentionally NOT folded into this signature: status
         // changes are applied as a targeted data-agent attribute swap in
         // _setStatus, so including it here would rebuild all N tab buttons on
         // every working↔done flip. Only structural changes (set/title/active)
         // bust the row cache.
-        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentKind.get(t.id) || ''}:${this._agentModel.get(t.id) || ''}:${this._agentEffort.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0);
+        const signature = tabs.map(t => `${t.id}:${t.title || ''}:${this._agentKind.get(t.id) || ''}:${this._agentModel.get(t.id) || ''}:${this._agentEffort.get(t.id) || ''}`).join('|') + '#' + (this.activeId || 0) + '#' + this._org.sort;
         if (signature === this._tabsUISig) return;
         // Rebuilding the row is the biggest single task this page runs: every
         // tab button torn down and rebuilt, twenty-two of them. That is fine
@@ -2599,6 +2626,7 @@ class Shell {
         }
         this._tabsUIDeferred = false;
         this._tabsUISig = signature;
+        if (this._tabMgr) this._renderTabManager();
         // replaceChildren destroys the old tab buttons, which resets the
         // tab row's scrollLeft to 0. Snapshot + restore so that a status
         // color change or a title update doesn't slam the row back to the
@@ -2643,7 +2671,8 @@ class Shell {
                 'data-agent': this._displayAgent(t.id),
                 'data-tab-id': String(t.id),
                 'data-has-preview': previewUrl ? '1' : null,
-                draggable: 'true',
+                // Drag reorders the MANUAL order, so it is off while a sort is on.
+                draggable: this._org.sort === 'manual' ? 'true' : 'false',
                 onclick: () => this._activate(t.id),
                 ondblclick: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
                 oncontextmenu: (e) => { e.preventDefault(); this._promptRename(t.id, t.title); },
@@ -2667,6 +2696,312 @@ class Shell {
         }
         this._installTabsDrop();
         if (this.viewMode === 'tiles') this._renderTiles();
+    }
+
+    // ── Tab organizer: search · sort · archive ───────────────────────────
+    // Per-device view state (see /m/tabOrganizer.js). Sort and archive only
+    // change what this browser shows — never a CLOSE_TAB or MOVE_TAB.
+    _orgStorage() { try { return window.localStorage; } catch (_) { return null; } }
+
+    // The same backend identity deviceHistory keys by, so each daemon paired
+    // into this browser keeps its own archive.
+    _orgKey() { return (window.__SOA_WEB__ || {})._resolvedBackend || (typeof location !== "undefined" ? location.origin : "local"); }
+
+    _orgSaveSoon() {
+        if (this._orgSaveTimer) return;
+        this._orgSaveTimer = setTimeout(() => {
+            this._orgSaveTimer = null;
+            saveTabOrg(this._orgStorage(), this._org);
+        }, 1000);
+    }
+
+    _isTabArchived(id) { return isArchived(this._org, this._orgKey(), id); }
+
+    // Live tabs this device has archived (an entry whose tab is gone waits for reconcile).
+    _archivedTabIds() { return this.order.filter(id => this._isTabArchived(id)); }
+
+    // Tab ids can change across a daemon restart; move archive entries onto the live tabs.
+    _orgReconcile(tabs) {
+        const live = tabs.map(t => ({ id: t.id, title: t.title || '', cwd: t.cwd || this._tabCwd.get(t.id) || '' }));
+        if (reconcileTabOrg(this._org, this._orgKey(), live)) saveTabOrg(this._orgStorage(), this._org);
+    }
+
+    // The order the strip shows: manual order minus archived tabs, then sorted.
+    // A sorted view is cached and only re-sorted when a user action marks it
+    // stale or the throttled _orgResortSoon runs, so tabs don't jump on every
+    // byte of output.
+    _displayOrder() {
+        const key = this._orgKey();
+        const arch = archivedIds(this._org, key);
+        const ids = this.order.filter(id => !arch.has(String(id)));
+        if (this._org.sort === 'manual') { this._orgView = null; return ids; }
+        const prev = this._orgView;
+        if (!this._orgStale && prev && prev.length === ids.length) {
+            const have = new Set(prev);
+            if (ids.every(id => have.has(id))) return prev.slice();
+        }
+        this._orgStale = false;
+        this._orgView = sortIds(ids, this._org.sort, {
+            activityOf: id => this._orgLastOut.get(id) || 0,
+            usedOf: id => lastUsed(this._org, key, id),
+        });
+        return this._orgView.slice();
+    }
+
+    // Background re-sort: at most every 10 s, and never while the pointer is
+    // over the tab strip or a drag is in flight — it waits for the pointer to leave.
+    _orgResortSoon() {
+        if (this._orgResortTimer || this._org.sort === 'manual') return;
+        const wait = Math.max(0, 10000 - (Date.now() - (this._orgResortAt || 0)));
+        this._orgResortTimer = setTimeout(() => {
+            this._orgResortTimer = null;
+            if (this._org.sort === 'manual') return;
+            if (this._dragId != null || this._tileDragId != null || this.tabsEl.matches(':hover')) {
+                this._orgResortAt = Date.now() - 8000;   // look again in ~2 s
+                this._orgResortSoon();
+                return;
+            }
+            this._orgResortAt = Date.now();
+            const before = (this._orgView || []).join(',');
+            this._orgStale = true;
+            if (this._displayOrder().join(',') !== before) this._syncTabsUI();
+        }, wait);
+    }
+
+    // Last used: switching to a tab always counts; typing counts at most every 15 s.
+    _orgTouch(id, force) {
+        if (!this._org) return;
+        const key = this._orgKey(), now = Date.now();
+        if (!force && now - lastUsed(this._org, key, id) < 15000) return;
+        markUsed(this._org, key, id, now);
+        this._orgSaveSoon();
+        if (this._org.sort === 'recent') this._orgResortSoon();
+    }
+
+    _setTabSort(mode) {
+        if (!SORT_MODES.includes(mode) || mode === this._org.sort) return;
+        this._org.sort = mode;
+        saveTabOrg(this._orgStorage(), this._org);
+        this._orgStale = true;
+        this._syncTabsUI();
+        this.audio.play('panels');
+    }
+
+    // Archive hides a tab from this device's strip; its PTY and agent keep running.
+    _setTabArchived(id, on) {
+        const rt = this.tabs.get(id);
+        if (!rt || on === this._isTabArchived(id)) return;
+        if (on && id === this.activeId) {
+            // Step off it first: the next tab along the strip, else the one before.
+            const shown = this._displayOrder();
+            const i = shown.indexOf(id);
+            const next = shown[i + 1] ?? shown[i - 1];
+            if (next != null) this._activate(next);
+        }
+        setArchived(this._org, this._orgKey(), { id, cwd: this._tabCwd.get(id) || '', title: rt.title || '' }, on);
+        saveTabOrg(this._orgStorage(), this._org);
+        this._orgStale = true;
+        this._syncTabsUI();
+        this.audio.play('panels');
+    }
+
+    _paintTabManagerBtn() {
+        const btn = $('#tab-manager');
+        if (!btn) return;
+        const n = this._archivedTabIds().length;
+        const badge = btn.querySelector('.tab-manager-badge');
+        if (badge) { badge.hidden = n === 0; badge.textContent = n > 99 ? '99+' : String(n); }
+        btn.setAttribute('aria-label', n ? `Find, sort and archive tabs — ${n} archived` : 'Find, sort and archive tabs');
+    }
+
+    _toggleTabManager() {
+        if (this._tabMgr) this._closeTabManager(); else this._openTabManager();
+    }
+
+    // Popover anchored under the topbar button: search, sort, the tabs on the
+    // strip, then the archived ones. Rebuilt in place whenever the strip changes.
+    _openTabManager() {
+        const btn = $('#tab-manager');
+        if (!btn || this._tabMgr) return;
+        const input = el('input', {
+            class: 'tabmgr-search', type: 'search', placeholder: 'Search tabs',
+            'aria-label': 'Search tabs by name, folder or #number',
+            autocomplete: 'off', spellcheck: 'false',
+        });
+        const sortRow = el('div', { class: 'tabmgr-sort', role: 'radiogroup', 'aria-label': 'Sort tabs' },
+            SORT_MODES.map(mode => el('button', {
+                type: 'button', role: 'radio', 'data-sort': mode, title: SORT_HINTS[mode],
+                text: SORT_LABELS[mode], onclick: () => this._setTabSort(mode),
+            })));
+        const list = el('div', { class: 'tabmgr-list' });
+        const panel = el('div', { class: 'tabmgr', id: 'tab-manager-panel', role: 'dialog', 'aria-label': 'Tabs' },
+            [el('div', { class: 'tabmgr-head' }, [input, sortRow]), list]);
+        const m = this._tabMgr = { btn, panel, input, sortRow, list, hl: 0, rows: [], archOpen: null };
+        input.addEventListener('input', () => { m.hl = 0; this._renderTabManager(); });
+        panel.addEventListener('keydown', (e) => this._tabMgrKey(e));
+        m.onDown = (e) => { if (!panel.contains(e.target) && !btn.contains(e.target)) this._closeTabManager(); };
+        m.onResize = () => this._placeTabManager();
+        document.addEventListener('pointerdown', m.onDown, true);
+        window.addEventListener('resize', m.onResize);
+        document.body.appendChild(panel);
+        btn.setAttribute('aria-expanded', 'true');
+        this._placeTabManager();
+        this._renderTabManager();
+        input.focus();
+        this.audio.play('panels');
+    }
+
+    _closeTabManager(refocus) {
+        const m = this._tabMgr;
+        if (!m) return;
+        this._tabMgr = null;
+        document.removeEventListener('pointerdown', m.onDown, true);
+        window.removeEventListener('resize', m.onResize);
+        m.panel.remove();
+        m.btn.setAttribute('aria-expanded', 'false');
+        if (refocus) this._focusTerm(this.tabs.get(this.activeId));
+    }
+
+    _placeTabManager() {
+        const m = this._tabMgr;
+        if (!m) return;
+        const r = m.btn.getBoundingClientRect();
+        const w = Math.min(380, window.innerWidth - 16);
+        m.panel.style.top = Math.round(r.bottom + 6) + 'px';
+        m.panel.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - w - 8))) + 'px';
+    }
+
+    _renderTabManager() {
+        const m = this._tabMgr;
+        if (!m) return;
+        const key = this._orgKey();
+        const q = m.input.value;
+        const info = (id) => {
+            const rt = this.tabs.get(id);
+            return { id, title: (rt && rt.title) || tr('tab.default', { id }), cwd: this._tabCwd.get(id) || '' };
+        };
+        const shown = this._displayOrder().map(info).filter(t => tabMatches(q, t));
+        const arch = this._archivedTabIds()
+            .sort((a, b) => archivedAt(this._org, key, b) - archivedAt(this._org, key, a))
+            .map(info);
+        const archHits = arch.filter(t => tabMatches(q, t));
+        for (const b of m.sortRow.children) b.setAttribute('aria-checked', b.dataset.sort === this._org.sort ? 'true' : 'false');
+        // A search always shows its archived matches; otherwise a long archive starts folded.
+        const archOpen = q.trim() ? true : (m.archOpen ?? (arch.length <= 5 || shown.length === 0));
+        m.rows = [];
+        const row = (t, archived) => {
+            const used = lastUsed(this._org, key, t.id);
+            const open = el('button', {
+                type: 'button', class: 'tabmgr-open',
+                title: (archived ? 'Restore and switch to this tab' : 'Switch to this tab') + (t.cwd ? '\n' + t.cwd : ''),
+                onclick: () => this._tabMgrPick(t.id, archived),
+            }, [
+                el('span', { class: 'tabmgr-title' }, this._tabMgrMark(t.title, q)),
+                el('span', { class: 'tabmgr-time', title: used ? 'Last used' : null, text: agoText(used) }),
+                t.cwd ? el('span', { class: 'tabmgr-cwd' }, this._tabMgrMark(this._shortCwd(t.cwd), q)) : null,
+            ]);
+            const act = (label, title, fn) => el('button', { type: 'button', class: 'tabmgr-act', title, text: label, onclick: fn });
+            const node = el('div', {
+                class: 'tabmgr-row' + (archived ? ' archived' : '') + (t.id === this.activeId ? ' current' : ''),
+                'data-agent': this._displayAgent(t.id),
+            }, archived ? [
+                open,
+                act('Open', 'Restore this tab and switch to it', () => this._tabMgrPick(t.id, true)),
+                act('Restore', 'Put this tab back on the strip', () => { this._setTabArchived(t.id, false); m.input.focus(); }),
+            ] : [
+                open,
+                act('Archive', 'Hide this tab from the strip. It keeps running — restore it any time.', () => this._tabMgrArchive(node, t.id)),
+            ]);
+            m.rows.push({ id: t.id, archived, node });
+            return node;
+        };
+        const kids = shown.map(t => row(t, false));
+        if (!shown.length && (q.trim() ? !archHits.length : true)) {
+            kids.push(el('p', { class: 'tabmgr-empty', text: q.trim() ? `No tabs match “${q.trim()}”` : arch.length ? 'Every tab is archived' : 'No tabs open' }));
+            if (q.trim()) kids.push(el('p', { class: 'tabmgr-hint', text: 'Search looks at names, folders and #numbers.' }));
+        }
+        const archList = q.trim() ? archHits : arch;
+        if (archList.length) {
+            const head = el('button', {
+                type: 'button', class: 'tabmgr-arch-head', 'aria-expanded': archOpen ? 'true' : 'false',
+                onclick: () => { m.archOpen = !archOpen; this._renderTabManager(); },
+            }, [el('span', { text: `Archived (${archList.length})` }), el('span', { class: 'tabmgr-chev', 'aria-hidden': 'true' })]);
+            kids.push(el('div', { class: 'tabmgr-arch' }, [head, ...(archOpen ? archList.map(t => row(t, true)) : [])]));
+        }
+        m.list.replaceChildren(...kids);
+        m.hl = Math.max(0, Math.min(m.hl, m.rows.length - 1));
+        this._tabMgrPaintHl();
+    }
+
+    _tabMgrPaintHl(scroll) {
+        const m = this._tabMgr;
+        if (!m) return;
+        m.rows.forEach((r, i) => r.node.classList.toggle('hl', i === m.hl));
+        const cur = m.rows[m.hl];
+        if (scroll && cur) cur.node.scrollIntoView({ block: 'nearest' });
+    }
+
+    _tabMgrKey(e) {
+        const m = this._tabMgr;
+        if (!m) return;
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this._closeTabManager(true); return; }
+        if (e.target === m.input && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+            e.preventDefault();
+            if (m.rows.length) m.hl = (m.hl + (e.key === 'ArrowDown' ? 1 : -1) + m.rows.length) % m.rows.length;
+            this._tabMgrPaintHl(true);
+        } else if (e.target === m.input && e.key === 'Enter') {
+            e.preventDefault();
+            const cur = m.rows[m.hl];
+            if (cur) this._tabMgrPick(cur.id, cur.archived);
+        } else if (e.target !== m.input && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && e.key !== ' ') {
+            m.input.focus();   // type-to-search from any row; the key lands in the field
+        }
+        // Keep the strip's arrow/digit shortcuts from firing behind the popover.
+        if (!e.ctrlKey && !e.metaKey && !e.altKey) e.stopPropagation();
+    }
+
+    _tabMgrPick(id, archived) {
+        if (archived) this._setTabArchived(id, false);
+        this._closeTabManager();
+        this._activate(id);
+    }
+
+    _tabMgrArchive(node, id) {
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        node.classList.add('leaving');
+        setTimeout(() => {
+            this._setTabArchived(id, true);
+            if (this._tabMgr) this._tabMgr.input.focus();
+        }, reduce ? 0 : 160);
+    }
+
+    // Matched words marked in the accent colour as you type.
+    _tabMgrMark(text, q) {
+        const words = String(q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+        if (!words.length || !text) return [text || ''];
+        const low = text.toLowerCase();
+        const hit = new Array(text.length).fill(false);
+        for (const w of words) {
+            for (let i = low.indexOf(w); i !== -1; i = low.indexOf(w, i + 1)) hit.fill(true, i, i + w.length);
+        }
+        const out = [];
+        for (let i = 0; i < text.length;) {
+            let j = i;
+            while (j < text.length && hit[j] === hit[i]) j++;
+            out.push(hit[i] ? el('mark', { text: text.slice(i, j) }) : text.slice(i, j));
+            i = j;
+        }
+        return out;
+    }
+
+    _shortCwd(cwd) {
+        let p = String(cwd || '').replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
+        if (p.length > 46) {
+            const parts = p.split('/');
+            while (parts.length > 2 && parts.join('/').length > 44) parts.shift();
+            p = '…/' + parts.join('/');
+        }
+        return p;
     }
 
     // Context consumption at a glance: green (healthy) → yellow → red (near full).
@@ -2701,7 +3036,7 @@ class Shell {
 
     _updateCtxBar(id, pct) {
         const node = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"] .ctx-bar`);
-        if (!node) { this._tabsUISig = null; this._syncTabsUI(); return; }
+        if (!node) { if (this._isTabArchived(id)) return; this._tabsUISig = null; this._syncTabsUI(); return; }
         node.replaceWith(this._makeCtxBar(pct, id));
     }
 
@@ -3677,8 +4012,10 @@ class Shell {
         if (idx === -1) return;
         const tab = this.tabs.get(id);
         if (!tab) return;
-        const canMoveLeft  = idx > 0;
-        const canMoveRight = idx < this.order.length - 1;
+        // Moves edit the manual order, so they only make sense in Manual sort.
+        const manual = this._org.sort === 'manual';
+        const canMoveLeft  = manual && idx > 0;
+        const canMoveRight = manual && idx < this.order.length - 1;
 
         const close = () => { sheet.remove(); };
         const act = (fn) => () => { close(); fn(); };
@@ -3696,6 +4033,7 @@ class Shell {
             row(tr('tab.rename_prompt') || 'Rename', act(() => this._promptRename(id, tab.title))),
             row('← ' + (tr('tab.move_left')  || 'Move left'),  act(() => this._moveRelative(id, -1)), { disabled: !canMoveLeft }),
             row('→ ' + (tr('tab.move_right') || 'Move right'), act(() => this._moveRelative(id, +1)), { disabled: !canMoveRight }),
+            row('Archive', act(() => this._setTabArchived(id, true))),
             row('× ' + (tr('tab.close') || 'Close'),
                 act(() => this._requestCloseTab(id)),
                 { danger: true }),
@@ -3917,6 +4255,9 @@ class Shell {
     }
 
     _applyMove(dragId, { beforeId }) {
+        // A sorted view is display-only — reordering it would silently rewrite
+        // the manual order underneath. Drag is off there; this catches the rest.
+        if (this._org.sort !== 'manual') return;
         // No-op when dropping onto self or onto the slot immediately after self.
         const curIdx = this.order.indexOf(dragId);
         if (curIdx === -1) return;
@@ -3957,7 +4298,7 @@ class Shell {
         // tabs. Fall back to a full sync only if the node isn't rendered yet.
         const tabNode = this.tabsEl.querySelector(`[data-tab-id="${CSS.escape(String(id))}"]`);
         if (tabNode) tabNode.setAttribute('data-agent', this._displayAgent(id));
-        else { this._tabsUISig = null; this._syncTabsUI(); }
+        else if (!this._isTabArchived(id)) { this._tabsUISig = null; this._syncTabsUI(); }
         // A status flip usually means new activity/status-line text — repaint the
         // subtitle now rather than waiting for the next poll tick.
         this._updateTabPreview(id);
@@ -4658,23 +4999,31 @@ class Shell {
         const focused = document.activeElement;
         const inInput = focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA' || focused.tagName === 'SELECT' || focused.isContentEditable);
         const inTerm  = focused && focused.closest('.xterm');
-        if (!inInput && !inTerm && this.order.length > 1) {
+        // Arrows and digits walk the strip as shown: archived tabs skipped, sort applied.
+        const shown = (!inInput && !inTerm) ? this._displayOrder() : [];
+        if (shown.length > 1) {
             if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
                 e.preventDefault();
-                const idx = this.order.indexOf(this.activeId);
+                const idx = shown.indexOf(this.activeId);
                 const next = e.key === 'ArrowLeft'
-                    ? this.order[(idx - 1 + this.order.length) % this.order.length]
-                    : this.order[(idx + 1) % this.order.length];
+                    ? shown[(idx - 1 + shown.length) % shown.length]
+                    : shown[(idx + 1) % shown.length];
                 this._activate(next);
                 return;
             }
             const digit = e.key >= '1' && e.key <= '9' ? +e.key - 1
                         : e.key === '0' ? 9 : -1;
-            if (digit !== -1 && digit < this.order.length && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            if (digit !== -1 && digit < shown.length && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
-                this._activate(this.order[digit]);
+                this._activate(shown[digit]);
                 return;
             }
+        }
+        // Ctrl/Cmd+Shift+F — find, sort and archive tabs (Ctrl+Shift+K is the context canvas).
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+            e.preventDefault();
+            this._toggleTabManager();
+            return;
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
             e.preventDefault();
@@ -7122,6 +7471,7 @@ class Shell {
             if (node) { existing.delete(id); this._updateTileNode(node, id); }
             else node = this._createTileNode(id);
             node.style.display = '';
+            node.draggable = this._org.sort === 'manual';
             return node;
         };
         const fragment = document.createDocumentFragment();
@@ -7129,7 +7479,7 @@ class Shell {
             // Grouped view: ONE horizontal-scrolling row per category. Tiles keep
             // their dashboard size; the user scrolls each category sideways.
             const buckets = new Map();
-            for (const id of this.order) {
+            for (const id of this._displayOrder()) {
                 const g = this._agentGroup.get(id) || 'ungrouped';
                 if (!buckets.has(g)) buckets.set(g, []);
                 buckets.get(g).push(id);
@@ -7151,7 +7501,7 @@ class Shell {
             }
         } else {
             // Flat dashboard: every tile in one wrapping grid, no categories.
-            for (const id of this.order) {
+            for (const id of this._displayOrder()) {
                 const n = takeTile(id); n.classList.remove('cat-tile');
                 fragment.appendChild(n);
             }
