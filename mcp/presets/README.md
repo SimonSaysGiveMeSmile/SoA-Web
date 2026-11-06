@@ -26,3 +26,11 @@ Rules (enforced by the loader; `soa-mcp presets` prints any problem):
   duplicates are reported and skipped. Prefix slugs with your pack's theme.
 - No credentials, personal paths, hostnames or private context. Use `~`,
   `$HOME` and env vars.
+
+## Acknowledgements
+
+The structure of the `soa-engineering` pack (one short skill per engineering
+station, each with a trigger description, a procedure and a stop condition)
+was inspired by [ECC](https://github.com/affaan-m/ECC) by Affaan Mustafa
+(MIT License, © Affaan Mustafa). The skill text itself is original to SoA;
+nothing from ECC is copied or shipped here.
