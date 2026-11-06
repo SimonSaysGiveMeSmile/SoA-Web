@@ -48,18 +48,48 @@ function sanitizeResponseHeaders(headers, port) {
     return out;
 }
 
+// The proxy authenticates at the daemon boundary. The app on the target port
+// must never receive Son of Anton's pairing/unlock credentials.
+// Only the credential pairs are dropped; the path and every other query pair
+// are forwarded byte-for-byte (no URL re-serialisation, which would rewrite
+// %20 as +, `?flag` as `?flag=`, and fold a `//` path into a host).
+const CRED_PARAMS = new Set(['t', 'u']);
+function upstreamPath(raw) {
+    let rest = String(raw).replace(/^\/preview\/\d+/, '') || '/';
+    if (rest[0] === '?') rest = '/' + rest;
+    const q = rest.indexOf('?');
+    if (q < 0) return rest;
+    const kept = rest.slice(q + 1).split('&').filter((pair) => {
+        let name = pair.split('=')[0];
+        try { name = decodeURIComponent(name.replace(/\+/g, ' ')); } catch (_) {}
+        return !CRED_PARAMS.has(name);
+    });
+    return rest.slice(0, q) + (kept.length ? '?' + kept.join('&') : '');
+}
+function upstreamHeaders(headers, port) {
+    const out = Object.assign({}, headers, { host: `${HOST}:${port}` });
+    delete out.authorization;
+    delete out['proxy-authorization'];
+    delete out['x-soa-unlock'];
+    delete out['x-soa-local-key'];
+    if (out.cookie) {
+        out.cookie = String(out.cookie).split(';').map(x => x.trim())
+            .filter(x => x && !/^soa_web_(?:auth|unlock)=/i.test(x)).join('; ');
+        if (!out.cookie) delete out.cookie;
+    }
+    return out;
+}
+
 function mount(app, requireAuthed) {
     const handler = (req, res) => {
         const info = parsePreview(req.path);
         if (!info) { res.status(404).end('preview: bad port'); return; }
         const { port } = info;
-        const upstreamPath = req.originalUrl.replace(/^\/preview\/\d+/, '') || '/';
-
-        const headers = Object.assign({}, req.headers);
-        headers.host = `${HOST}:${port}`;
+        const path = upstreamPath(req.originalUrl);
+        const headers = upstreamHeaders(req.headers, port);
         delete headers['accept-encoding']; // get plain text so we can inject <base>
 
-        const preq = http.request({ host: HOST, port, method: req.method, path: upstreamPath, headers }, (pres) => {
+        const preq = http.request({ host: HOST, port, method: req.method, path, headers }, (pres) => {
             const ct = String(pres.headers['content-type'] || '');
             const outHeaders = sanitizeResponseHeaders(pres.headers, port);
             if (/text\/html/i.test(ct)) {
@@ -103,12 +133,11 @@ function proxyUpgrade(req, socket, head) {
     const info = parsePreview(pathname);
     if (!info) return false;
     const { port } = info;
-    const upstreamPath = req.url.replace(/^\/preview\/\d+/, '') || '/';
+    const path = upstreamPath(req.url);
 
     const upstream = net.connect(port, HOST, () => {
-        const lines = [`${req.method} ${upstreamPath} HTTP/1.1`];
-        const h = Object.assign({}, req.headers);
-        h.host = `${HOST}:${port}`;
+        const lines = [`${req.method} ${path} HTTP/1.1`];
+        const h = upstreamHeaders(req.headers, port);
         for (const [k, v] of Object.entries(h)) {
             if (Array.isArray(v)) v.forEach((vv) => lines.push(`${k}: ${vv}`));
             else lines.push(`${k}: ${v}`);

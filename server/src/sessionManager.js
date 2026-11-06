@@ -24,6 +24,7 @@ const claudeSessions = require('./claudeSessions');
 const codexSessions  = require('./codexSessions');
 const sessionModel = require('./sessionModel');
 const localKey = require('./localKey');
+const localHost = require('./localHost');
 const automations = require('./automations');
 const entitlements = require('./entitlements');
 const meetStore = require('./meetStore');
@@ -629,6 +630,12 @@ function isLocalRequest(req) {
     // tunnel/proxy forwarding header (which a tunneled internet caller always
     // carries — cloudflared dials localhost so the socket IP alone is not enough).
     if (h['cf-connecting-ip'] || h['x-forwarded-for'] || h['x-real-ip'] || h['forwarded']) return false;
+    // DNS rebinding: a page whose name resolves to 127.0.0.1 makes the user's own
+    // browser call us from loopback with no proxy header. Its Host is still the
+    // page's name, and a plain cross-site call carries the page's Origin, so both
+    // must name this machine (or a trusted front end). See localHost.js.
+    if (!localHost.isLoopbackHost(h.host)) return false;
+    if (!localHost.isTrustedOrigin(h.origin)) return false;
     const ip = (req.ip || (req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
     return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
 }
