@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  CODE — runs scripts/soa-code: the loopback file service (127.0.0.1:6083)
+  behind the dashboard's code panel (view, edit and save files), reached
+  through the daemon's /preview/6083/ proxy (same tunnel, same pairing gate;
+  no daemon restart needed).
+
+  It reads and writes only inside SOA_CODE_ROOTS (colon-separated; default
+  the home directory), never reads credentials or the SoA state dir, and
+  never writes under ~/Library or any .git directory.
+
+  Load: cp deploy/launchd/com.soa-web.code.plist ~/Library/LaunchAgents/ &&
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.code.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.code</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/test/.soa-web/scripts/soa-code</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web-local/logs/code.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web-local/logs/code.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SOA_WEB_STATE_DIR</key>
+        <string>/Users/test/.soa-web-local</string>
+    </dict>
+</dict>
+</plist>

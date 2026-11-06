@@ -32,6 +32,13 @@
         var _ui = s && s.uiLang;
         document.documentElement.dataset.ui = ['tron', 'minimal', 'liquid', 'brutalist', 'classic', 'dos', 'macos27', 'windows11', 'neumorphism'].includes(_ui) ? _ui : 'windows11';
       } catch (e) { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.ui = 'windows11'; }
+      // Side panels (sidebar | context + code), per device. Applied pre-paint so
+      // a mirrored layout never flashes the default arrangement first.
+      try {
+        // 'standard' (or the older 'default') leaves the attribute off.
+        var _sides = localStorage.getItem('soa-web:sides');
+        if (_sides === 'swapped' || _sides === 'left') document.documentElement.dataset.sides = _sides;
+      } catch (e) {}
     })();
   </script>
   <title>Son of Anton · Browser Terminal, Claude Code, and Desktop Pairing</title>
@@ -163,8 +170,8 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=welcome-touch-20261105">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=pw-local-20261105">
+  <link rel="stylesheet" href="/assets/styles.css?v=layouts-20261106">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=layouts-20261106">
   <link rel="stylesheet" href="/assets/health.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/minimal.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/liquid.css?v=web-20261102">
@@ -1814,6 +1821,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <button id="toggle-tts" class="more-item mi-tts" role="menuitem" data-state="off" data-label="Stop speaking replies" data-label-off="Speak replies aloud" title="Speak Claude's replies aloud (text-to-speech)">🔊 SPEAK</button>
           <button id="timemachine" class="more-item mi-clock" role="menuitem" data-label="Time machine" title="Time machine — restore a prior IDE snapshot" aria-label="Time machine">TIME</button>
           <button id="desktop-remote" class="more-item mi-monitor" role="menuitem" data-label="Use the Mac desktop" title="Open the Mac's screen to view and control it" aria-label="Use the Mac desktop">MAC</button>
+          <div id="panel-layout" class="more-item mi-layout" role="group" aria-label="Panel layout" data-label="Panel layout" title="Panel layout (Ctrl+Shift+\ cycles standard, swapped and both left)"><span class="mi-layout-opts"><button type="button" class="mi-layout-opt" role="menuitemradio" data-layout="standard" aria-checked="true" tabindex="0" aria-label="Standard: sidebar left, panel right" title="Standard: sidebar left, panel right"><span class="mi-swap-glyph" aria-hidden="true"><i class="g-side"></i><i class="g-term"></i><i class="g-ctx"></i></span></button><button type="button" class="mi-layout-opt" role="menuitemradio" data-layout="swapped" aria-checked="false" tabindex="-1" aria-label="Swapped: panel left, sidebar right" title="Swapped: panel left, sidebar right"><span class="mi-swap-glyph" aria-hidden="true"><i class="g-side"></i><i class="g-term"></i><i class="g-ctx"></i></span></button><button type="button" class="mi-layout-opt" role="menuitemradio" data-layout="left" aria-checked="false" tabindex="-1" aria-label="Both left: panel beside the sidebar" title="Both left: panel beside the sidebar"><span class="mi-swap-glyph" aria-hidden="true"><i class="g-side"></i><i class="g-term"></i><i class="g-ctx"></i></span></button></span></div>
           <button id="reload-app" class="more-item mi-reload" role="menuitem" type="button" data-label="Reload app" title="Reload this page to pick up a fresh UI — tabs, pairing and settings stay as they are" aria-label="Reload app">RELOAD</button>
           <button id="restart-daemon" class="more-item mi-restart" role="menuitem" data-label="Restart server" title="Restart the SoA server — flushes tabs + scrollback, re-adopts the tunnel, and auto-resumes every Claude session on boot" aria-label="Restart server">↻ RESTART</button>
         </div>
@@ -1961,7 +1969,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="/assets/voice-commands.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-audio.js?v=2"></script>
   <script src="/assets/voice-vision.js?v=2"></script>
-  <script type="module" src="/assets/app.js?v=tab-organizer-20261105"></script>
+  <script type="module" src="/assets/app.js?v=layouts-20261106"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

@@ -2262,6 +2262,23 @@ button:active { background: var(--accent-bg-hover); }
 /* ── Web preview view ────────────────────────────────────────────────── */
 #web-view { display: none; flex-direction: column; }
 #web-view.active { display: flex; }
+/* Code view: the panel fills the stage, and the stage already tracks the
+   visual viewport (#app is pinned to it), so the editor shrinks above the
+   soft keyboard instead of sliding under it. */
+/* codePanel mounts ON this section (it adds .cp, whose position: relative
+   would beat .view's absolute fill), so the id restores the fill; the panel's
+   own rules size its bar, body and status rows. */
+#code-view { display: none; flex-direction: column; position: absolute; }
+#code-view.active { display: flex; }
+/* Only the load-failure message: the panel mounts on this section itself, so
+   its toolbar/body/status are direct children and size themselves
+   (codePanel.css) — growing all of them split the stage into equal slices. */
+#code-view > .code-view-msg { flex: 1 1 auto; min-height: 0; }
+/* Tree rows and palette results are buttons: undo the global uppercase so
+   file names show their real case. :where keeps this at element specificity,
+   so codePanel.css's own class rules still win. */
+:where(#code-view) button { text-transform: none; letter-spacing: normal; }
+.code-view-msg { margin: auto; padding: 24px 16px; max-width: 32em; text-align: center; opacity: .8; }
 .web-bar {
     flex: 0 0 auto;
     display: flex;

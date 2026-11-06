@@ -56,6 +56,7 @@
                      was already tightened to fit five switchers, and this is the sixth. -->
                 <button class="bb-btn" data-view="meet-view" hidden title="Meet — put several agents in one groupchat and talk to all of them at once">MEET<span class="bb-badge" id="meet-badge" hidden></span></button>
                 <button class="bb-btn" data-view="web-view" title="Web — the agent's browser & localhost preview">WEB</button>
+                <button class="bb-btn" data-view="code-view" title="Code — browse, edit and save files in this tab's folder">CODE</button>
                 <button class="bb-btn" data-view="widgets-view" title="System — device stats, ports & widgets">SYS</button>
             </nav>
             <button class="bb-btn bb-icon" id="btn-mic" type="button" title="Open voice chat" aria-label="Open voice chat">🎤</button>
@@ -166,6 +167,10 @@
                     <div id="web-empty" class="web-empty">Pick a local port or type a URL to preview a web page here — viewable from this device through the tunnel.</div>
                 </div>
             </section>
+            <!-- CODE — explorer + editor for the active tab's folder, served by the
+                 Mac's code service through /preview/6083/. Empty until first shown:
+                 /assets/codePanel.js (and CodeMirror) load only then. -->
+            <section id="code-view" class="view" aria-label="Code editor"></section>
         </main>
 
         <button id="focus-exit" class="focus-exit" title="Show app controls" aria-label="Show app controls">⤢</button>
