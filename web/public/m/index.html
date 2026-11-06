@@ -317,7 +317,14 @@
             <div class="tabsheet-search-wrap">
                 <input id="tabsheet-search" class="tabsheet-search" type="text"
                        placeholder="Search tabs…" autocomplete="off" autocapitalize="off"
-                       autocorrect="off" spellcheck="false" inputmode="search" />
+                       autocorrect="off" spellcheck="false" inputmode="search"
+                       enterkeyhint="go" aria-controls="tabsheet-list" />
+                <div class="tabsheet-sort" id="tabsheet-sort" role="radiogroup" aria-label="Sort tabs">
+                    <button type="button" role="radio" data-sort="manual">Manual</button>
+                    <button type="button" role="radio" data-sort="activity">Activity</button>
+                    <button type="button" role="radio" data-sort="recent">Last used</button>
+                </div>
+                <div id="tabsheet-hint" class="tabsheet-hint" aria-live="polite"></div>
             </div>
             <div id="tabsheet-list" class="tabsheet-list"></div>
         </div>

@@ -163,7 +163,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=welcome-touch-20261102">
+  <link rel="stylesheet" href="/assets/styles.css?v=tab-organizer-20261105">
   <link rel="stylesheet" href="/assets/sidebar.css?v=usage-hover-20261103">
   <link rel="stylesheet" href="/assets/health.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/minimal.css?v=web-20261102">
@@ -1557,6 +1557,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
           <a class="soa-name-link" href="https://www.youtube.com/watch?v=9-1P0v4IIwE" target="_blank" rel="noopener" title="Origin of the name">SON OF ANTON</a>
         </span>
         <button id="tile-back" class="tile-back-btn" style="display:none" title="Back to tiles">← BACK</button>
+        <!-- Tab manager: search, sort and archive (outside #tabs, which is rebuilt). -->
+        <button id="tab-manager" class="tab-manager-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="tab-manager-panel" aria-label="Find, sort and archive tabs" title="Find, sort and archive tabs (Ctrl+Shift+F)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/></svg><span class="tab-manager-badge" hidden></span></button>
       </div>
       <div class="tabs" id="tabs"></div>
       <div class="topbar-actions actions-collapsed" id="topbar-actions">
@@ -1733,7 +1735,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="/assets/voice-commands.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-audio.js?v=2"></script>
   <script src="/assets/voice-vision.js?v=2"></script>
-  <script type="module" src="/assets/app.js?v=usage-hover-20261103"></script>
+  <script type="module" src="/assets/app.js?v=tab-organizer-20261105"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

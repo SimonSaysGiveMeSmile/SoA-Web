@@ -3688,3 +3688,147 @@ html[data-theme="light"] .wiz-pair-err, html[data-theme="dim"] .wiz-pair-err { c
 :root[data-welcome-touch="1"] .wiz-touch .wiz-alt { margin-top: 14px; }
 :root[data-welcome-touch="1"] #wiz .wiz-steps,
 :root[data-welcome-touch="1"] .wel-sandbox { display: none; }
+
+/* ── Tab manager (search · sort · archive) — tab-organizer-20261105 ──────
+   Topbar button before the strip + a popover under it. Per-device view
+   state only (/m/tabOrganizer.js). Tokens only, so every theme and design
+   pack repaints it; status colours match the strip's data-agent rules. */
+.brand .tab-manager-btn {
+  position: relative;
+  background: var(--desk-control, transparent); color: var(--soa-accent);
+  border: 1px solid var(--desk-control-line, var(--soa-accent-dim));
+  border-radius: var(--desk-control-radius, 0);
+  width: 30px; height: 30px; padding: 0; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; box-sizing: border-box;
+}
+.brand .tab-manager-btn:hover,
+.brand .tab-manager-btn[aria-expanded="true"] { border-color: var(--soa-accent); }
+.tab-manager-btn:focus-visible,
+.tabmgr :is(button, input):focus-visible { outline: 2px solid var(--soa-accent); outline-offset: 1px; }
+.tab-manager-badge {
+  position: absolute; top: -5px; right: -6px;
+  min-width: 15px; height: 15px; padding: 0 3px; box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--soa-accent); color: var(--soa-bg);
+  font: 600 9px/15px var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0; text-align: center; text-shadow: none;
+  font-variant-numeric: tabular-nums;
+}
+.tab-manager-badge[hidden] { display: none; }
+@media (max-width: 768px) {
+  .brand .tab-manager-btn { width: 32px; height: 32px; }
+}
+
+.tabmgr {
+  position: fixed; z-index: 9990;
+  width: 380px; max-width: calc(100vw - 16px);
+  max-height: min(70vh, 560px);
+  display: flex; flex-direction: column;
+  background: var(--soa-bg-panel); color: var(--soa-fg);
+  border: 1px solid var(--soa-line);
+  border-radius: var(--desk-control-radius, 0);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+  letter-spacing: 0; text-shadow: none;
+  animation: tabmgr-in 120ms ease-out;
+}
+@keyframes tabmgr-in { from { opacity: 0; transform: translateY(-4px); } }
+.tabmgr-head {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; border-bottom: 1px solid var(--soa-line-soft);
+}
+.tabmgr-search {
+  width: 100%; box-sizing: border-box; padding: 7px 9px;
+  background: var(--soa-bg-deep); color: var(--soa-fg);
+  border: 1px solid var(--soa-line); border-radius: var(--desk-control-radius, 0);
+  font: inherit; font-size: 13px;
+}
+.tabmgr-search::placeholder { color: var(--soa-accent-dim); }
+.tabmgr-sort { display: flex; border: 1px solid var(--soa-line); border-radius: var(--desk-control-radius, 0); overflow: hidden; }
+.tabmgr-sort button {
+  flex: 1 1 0; min-width: 0; padding: 5px 4px;
+  background: transparent; color: var(--soa-fg);
+  border: 0; border-left: 1px solid var(--soa-line-soft);
+  font: inherit; cursor: pointer; white-space: nowrap;
+}
+.tabmgr-sort button:first-child { border-left: 0; }
+.tabmgr-sort button:hover { background: rgba(var(--soa-accent-rgb), 0.08); }
+.tabmgr-sort button[aria-checked="true"] { background: var(--soa-accent); color: var(--soa-bg); }
+.tabmgr-list { overflow-y: auto; overscroll-behavior: contain; padding: 4px 0; }
+
+.tabmgr-row {
+  position: relative;
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 8px 0 11px;
+  border-bottom: 1px solid var(--soa-line-soft);
+  max-height: 80px;
+  transition: max-height 160ms ease, opacity 160ms ease;
+}
+.tabmgr-row.leaving { max-height: 0; opacity: 0; overflow: hidden; }
+/* 3px status bar on the left edge — same colours as the tab strip. */
+.tabmgr-row::before {
+  content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px;
+  background: var(--soa-accent-dim);
+}
+.tabmgr-row[data-agent="working"]::before,
+.tabmgr-row[data-agent="delegating"]::before { background: var(--soa-green); }
+.tabmgr-row[data-agent="done"]::before { background: var(--soa-orange); }
+.tabmgr-row[data-agent="attention"]::before,
+.tabmgr-row[data-agent="error"]::before { background: var(--soa-red); }
+.tabmgr-row[data-agent="idle"]::before { background: var(--soa-blue); }
+.tabmgr-row.archived { opacity: 0.6; }
+.tabmgr-row.archived::before { background: var(--soa-accent-dim); }
+.tabmgr-row.archived:hover, .tabmgr-row.archived.hl, .tabmgr-row.archived:focus-within { opacity: 1; }
+.tabmgr-row.hl { background: rgba(var(--soa-accent-rgb), 0.1); box-shadow: inset 0 0 0 1px rgba(var(--soa-accent-rgb), 0.45); }
+.tabmgr-row:hover { background: rgba(var(--soa-accent-rgb), 0.06); }
+
+.tabmgr-open {
+  flex: 1 1 auto; min-width: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; row-gap: 1px;
+  padding: 7px 2px; text-align: left;
+  background: transparent; color: inherit; border: 0; font: inherit; cursor: pointer;
+}
+.tabmgr-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.tabmgr-row.current .tabmgr-title { font-weight: 700; }
+.tabmgr-time { color: var(--soa-accent-dim); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; align-self: center; }
+.tabmgr-cwd { grid-column: 1 / -1; color: var(--soa-accent-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tabmgr mark { background: transparent; color: var(--soa-accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+.tabmgr-act {
+  flex: none; padding: 4px 8px;
+  background: transparent; color: var(--soa-fg);
+  border: 1px solid var(--soa-line); border-radius: var(--desk-control-radius, 0);
+  font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap;
+}
+.tabmgr-act:hover { border-color: var(--soa-accent); color: var(--soa-accent); }
+/* Desktop: a visible row's Archive shows on hover/focus; always on touch. */
+@media (hover: hover) and (pointer: fine) {
+  .tabmgr-row:not(.archived) .tabmgr-act { opacity: 0; }
+  .tabmgr-row:not(.archived):is(:hover, :focus-within, .hl) .tabmgr-act { opacity: 1; }
+}
+@media (pointer: coarse) {
+  .tabmgr-act { min-height: 40px; padding: 0 12px; }
+  .tabmgr-open { min-height: 44px; }
+}
+
+.tabmgr-arch-head {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  padding: 9px 11px 7px; margin-top: 4px;
+  background: transparent; color: var(--soa-accent-dim); border: 0;
+  font: inherit; font-size: 11px; cursor: pointer; text-align: left;
+}
+.tabmgr-arch-head:hover { color: var(--soa-accent); }
+.tabmgr-chev::before { content: "▸"; display: inline-block; transition: transform 120ms ease; }
+.tabmgr-arch-head[aria-expanded="true"] .tabmgr-chev::before { transform: rotate(90deg); }
+.tabmgr-empty { margin: 0; padding: 14px 12px 4px; color: var(--soa-fg); }
+.tabmgr-hint { margin: 0; padding: 0 12px 12px; color: var(--soa-accent-dim); font-size: 11px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tabmgr, .tabmgr-row, .tabmgr-chev::before { animation: none; transition: none; }
+}
+@media (forced-colors: active) {
+  .tabmgr-row::before { background: CanvasText; }
+  .tabmgr-row.hl { outline: 2px solid Highlight; }
+  .tabmgr-sort button[aria-checked="true"] { background: Highlight; color: HighlightText; }
+}
