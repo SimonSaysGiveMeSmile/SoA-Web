@@ -73,6 +73,12 @@ function lsGet(k, fallback) {
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
 function lsDel(k) { try { localStorage.removeItem(k); } catch (_) {} }
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+// <html data-sides="swapped"> (panel left, sidebar right) and "left" (panel
+// beside the sidebar) both put this panel on the LEFT of the terminal.
+const panelOnLeft = () => {
+    const s = document.documentElement.dataset.sides;
+    return s === 'swapped' || s === 'left';
+};
 
 const STATUS_CYCLE = { pending: 'in_progress', in_progress: 'completed', completed: 'pending' };
 const STATUS_MARK = { pending: '○', in_progress: '◐', completed: '●' };
@@ -215,7 +221,7 @@ class ContextCanvas {
             this._viewBtns[key] = b;
             return b;
         };
-        const views = el('div', { class: 'ctx-views', role: 'tablist', 'aria-label': 'Right panel view' }, [
+        const views = el('div', { class: 'ctx-views', role: 'tablist', 'aria-label': 'Side panel view' }, [
             viewBtn('context', 'Context', 'Session context'),
             viewBtn('code', 'Code', `View and edit files (${IS_MAC ? '⌘⇧E' : 'Ctrl+Shift+E'})`),
         ]);
@@ -314,10 +320,18 @@ class ContextCanvas {
         }, true);
         // A widened panel tracks the window, so 60% stays 60%.
         let raf = 0;
-        window.addEventListener('resize', () => {
+        const rewiden = () => {
             if (this._view !== 'code' || !this._codeWide || raf) return;
             raf = requestAnimationFrame(() => { raf = 0; this._applyWidth({ fit: false }); });
-        });
+        };
+        window.addEventListener('resize', rewiden);
+        // Beside the sidebar the room Widen measures changes with the layout
+        // and with the sidebar, so it follows both.
+        if (typeof MutationObserver === 'function') {
+            new MutationObserver(rewiden).observe(document.documentElement, { attributes: true, attributeFilter: ['data-sides'] });
+            const stage = this.root.closest('.stage');
+            if (stage) new MutationObserver(rewiden).observe(stage, { attributes: true, attributeFilter: ['class'] });
+        }
     }
 
     setCodeWide(on) {
@@ -380,12 +394,17 @@ class ContextCanvas {
         };
         this._drag(grip,
             (e) => ({ x: e.clientX, w: width() }),
-            // The panel is on the RIGHT, so dragging left (negative dx) grows it.
-            (ev, s) => { setW(s.w + (s.x - ev.clientX)); this.onResize(); },
+            // On the RIGHT (standard) dragging left grows the panel; in the
+            // swapped and both-left layouts it sits on the LEFT, so dragging
+            // right, toward the terminal, grows it.
+            (ev, s) => { setW(s.w + (panelOnLeft() ? ev.clientX - s.x : s.x - ev.clientX)); this.onResize(); },
             () => { this._dropWide(); document.documentElement.style.removeProperty('--soa-ctx-w'); lsDel(LS_WIDTH); },
         );
         grip.addEventListener('keydown', (e) => {
-            const d = e.key === 'ArrowLeft' ? KEY_STEP : e.key === 'ArrowRight' ? -KEY_STEP : 0;
+            // The arrow pointing the way the drag widens it widens the panel.
+            const grow = panelOnLeft() ? 'ArrowRight' : 'ArrowLeft';
+            const shrink = panelOnLeft() ? 'ArrowLeft' : 'ArrowRight';
+            const d = e.key === grow ? KEY_STEP : e.key === shrink ? -KEY_STEP : 0;
             if (!d) return;
             e.preventDefault();
             setW(width() + d);
@@ -434,7 +453,17 @@ class ContextCanvas {
     // The canvas tops out at WIDTH_MAX; the code view may take up to WIDE_FRAC
     // of the window, by drag or by Widen.
     _maxW() {
-        const frac = Math.round(window.innerWidth * WIDE_FRAC);
+        // Measured from the panel's own position: beside the sidebar (both
+        // left) it shares the window with the sidebar column, so the fraction
+        // is of what is left past it. A slide-over sidebar (phone widths) or a
+        // hidden one takes no room.
+        let room = window.innerWidth;
+        if (document.documentElement.dataset.sides === 'left' && window.innerWidth > 768) {
+            const stage = this.root.closest('.stage');
+            const side = stage && !stage.classList.contains('no-sidebar') ? stage.querySelector('.sidebar') : null;
+            if (side) room -= side.getBoundingClientRect().width;
+        }
+        const frac = Math.round(room * WIDE_FRAC);
         return this._view === 'code' ? Math.max(WIDTH_MIN, frac) : Math.max(WIDTH_MIN, Math.min(WIDTH_MAX, frac));
     }
 

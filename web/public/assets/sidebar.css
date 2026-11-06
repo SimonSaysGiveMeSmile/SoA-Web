@@ -6,7 +6,7 @@
 .stage.no-context { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
 .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 .terms { grid-area: terms; }
-.sidebar { grid-area: sidebar; border-right: 1px solid var(--soa-line); border-left: none; background: var(--soa-bg-panel); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.sidebar { grid-area: sidebar; border: 0 solid var(--soa-line); border-right-width: 1px; background: var(--soa-bg-panel); padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .stage.no-sidebar .sidebar { display: none; }
 .status-bar { grid-area: status; }
 
@@ -660,7 +660,9 @@
     grid-area: context;
     /* Anchor for the width grip that rides the panel's left border. */
     position: relative;
-    border-left: 1px solid var(--soa-line);
+    /* Widths, not shorthands, carry the side: swapping panels moves the 1px to
+       the other edge without overriding a pack's border colour or its border: 0. */
+    border: 0 solid var(--soa-line); border-left-width: 1px;
     background: var(--soa-bg-panel);
     display: flex; flex-direction: column;
     /* With every band holding a floor, the column can exceed the panel — so the
@@ -950,6 +952,16 @@ body.ctx-resizing * { cursor: inherit !important; }
         box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28); }
     .ctx-pull { right: min(var(--soa-ctx-w, 256px), 86vw); }
     .stage.no-context .ctx-pull { right: 0; }
+    /* Windows 11 leaves its panes transparent over the Mica painted on .stage.
+       As an overlay the canvas sits on the TERMINAL instead, whose text showed
+       through every row, so here it takes the pack's layer fill. */
+    :root[data-ui="windows11"] .context-panel { background: var(--soa-bg-panel); }
+    /* Liquid's panel fill is a 4% glass meant for a quiet backdrop; over the
+       terminal it is the same see-through problem, so the overlay frosts. */
+    :root[data-ui="liquid"] .context-panel {
+        background: color-mix(in srgb, var(--soa-bg) 88%, transparent);
+        -webkit-backdrop-filter: blur(18px) saturate(1.3); backdrop-filter: blur(18px) saturate(1.3);
+    }
     .stage { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
     .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 }
@@ -1399,3 +1411,124 @@ body.ctx-resizing * { cursor: inherit !important; }
   .usage-card .usage-chevron { animation: none !important; }
 }
 @media (forced-colors: active) { .usage-card .usage-ring { filter: none !important; } }
+
+/* ── Swapped side panels ────────────────────────────────────────────────
+   <html data-sides="swapped"> (⋯ MORE → Swap side panels, Ctrl+Shift+\) mirrors
+   the stage: the context and code panel on the left, the sidebar on the right.
+   Set pre-paint from localStorage, so a reload never flashes the default.
+   Every state is spelled out because the prefix raises specificity above the
+   unprefixed state rules, including the media-query ones further up. */
+:root[data-sides="swapped"] .stage { grid-template-columns: var(--soa-ctx-w, 256px) 1fr var(--soa-sidebar-w, 256px); grid-template-areas: 'context terms sidebar' 'status status status'; }
+:root[data-sides="swapped"] .stage.no-sidebar { grid-template-columns: var(--soa-ctx-w, 256px) 1fr; grid-template-areas: 'context terms' 'status status'; }
+:root[data-sides="swapped"] .stage.no-context { grid-template-columns: 1fr var(--soa-sidebar-w, 256px); grid-template-areas: 'terms sidebar' 'status status'; }
+:root[data-sides="swapped"] .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+/* Widths only: packs keep their border colours (classic, dos) and their
+   border: 0 (neumorphism); liquid's and minimal's border-right is outranked. */
+:root[data-sides="swapped"] .sidebar { border-right-width: 0; border-left-width: 1px; }
+:root[data-sides="swapped"] .context-panel { border-left-width: 0; border-right-width: 1px; }
+/* The width grip rides the panel's inner edge, now its right one. */
+:root[data-sides="swapped"] .ctx-grip-w { left: auto; right: -4px; }
+/* The pull tab rides the panel's outer edge and parks at the LEFT viewport
+   edge when the panel is closed; its rail, corners and glow flip with it. */
+:root[data-sides="swapped"] .ctx-pull {
+    right: auto; left: var(--soa-ctx-w, 256px);
+    border-right: 1px solid var(--soa-line); border-left: none;
+    border-radius: 0 4px 4px 0;
+    transition: left 160ms ease, color 160ms ease, background-color 160ms ease,
+                border-color 160ms ease, box-shadow 160ms ease;
+}
+:root[data-sides="swapped"] .stage.no-context .ctx-pull { left: 0; }
+:root[data-sides="swapped"] .ctx-pull::before { right: auto; left: 0; border-radius: 0 2px 2px 0; }
+:root[data-sides="swapped"] .ctx-pull:hover,
+:root[data-sides="swapped"] .ctx-pull:focus-visible,
+:root[data-sides="swapped"] .ctx-pull:active { border-color: var(--soa-accent-dim); }
+/* :where keeps this at the base rule's weight, so packs that restyle the hover
+   glow (liquid's rim, minimal's none) still win. */
+:where(:root[data-sides="swapped"]) .ctx-pull:hover,
+:where(:root[data-sides="swapped"]) .ctx-pull:focus-visible { box-shadow: 5px 0 16px rgba(var(--soa-accent-rgb), 0.14); }
+/* The chevron still points the way the panel will travel: left to close. */
+:root[data-sides="swapped"] .ctx-pull-chev::before { content: '\2039'; }
+:root[data-sides="swapped"] .stage.no-context .ctx-pull-chev::before { content: '\203A'; }
+
+@media (max-width: 1100px) {
+    :root[data-sides="swapped"] .stage,
+    :root[data-sides="swapped"] .stage.no-context { grid-template-columns: 1fr var(--soa-sidebar-w, 256px); grid-template-areas: 'terms sidebar' 'status status'; }
+    :root[data-sides="swapped"] .stage.no-sidebar,
+    :root[data-sides="swapped"] .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+    :root[data-sides="swapped"] .context-panel { right: auto; left: 0; box-shadow: 8px 0 24px rgba(0, 0, 0, 0.28); }
+    :root[data-sides="swapped"] .ctx-pull { left: min(var(--soa-ctx-w, 256px), 86vw); }
+    :root[data-sides="swapped"] .stage.no-context .ctx-pull { left: 0; }
+}
+
+@media (max-width: 768px) {
+    :root[data-sides="swapped"] .stage,
+    :root[data-sides="swapped"] .stage.no-sidebar,
+    :root[data-sides="swapped"] .stage.no-context,
+    :root[data-sides="swapped"] .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+    /* The slide-over comes in from the right edge instead. */
+    :root[data-sides="swapped"] .stage .sidebar { left: auto; right: 0; transform: translateX(100%); }
+    :root[data-sides="swapped"] .stage:not(.no-sidebar) .sidebar { transform: translateX(0); }
+}
+
+/* ── Both panels on the left ────────────────────────────────────────────
+   <html data-sides="left"> (⋯ MORE → Panel layout) keeps the sidebar as the
+   outermost panel and seats the context and code panel beside it, between the
+   sidebar and the terminal. The panel opens, closes, resizes and overlays
+   exactly as it does on the right, mirrored: its inner edge (grip, pull tab,
+   shadow) faces the terminal. --soa-ctx-left is where the panel starts — the
+   sidebar's width, or 0 with the sidebar hidden — so the pull tab can follow it.
+   Every state is spelled out for the same specificity reason as above. */
+:root[data-sides="left"] .stage { --soa-ctx-left: var(--soa-sidebar-w, 256px); grid-template-columns: var(--soa-sidebar-w, 256px) var(--soa-ctx-w, 256px) 1fr; grid-template-areas: 'sidebar context terms' 'status status status'; }
+:root[data-sides="left"] .stage.no-sidebar { --soa-ctx-left: 0px; grid-template-columns: var(--soa-ctx-w, 256px) 1fr; grid-template-areas: 'context terms' 'status status'; }
+:root[data-sides="left"] .stage.no-context { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
+:root[data-sides="left"] .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+/* The sidebar keeps its own border-right; the panel moves its 1px to the
+   terminal side, so the sidebar/panel seam stays a single line. */
+:root[data-sides="left"] .context-panel { border-left-width: 0; border-right-width: 1px; }
+:root[data-sides="left"] .ctx-grip-w { left: auto; right: -4px; }
+/* The pull tab rides the panel's terminal-side edge and, closed, parks on the
+   sidebar's edge (or the viewport's, with the sidebar hidden). */
+:root[data-sides="left"] .ctx-pull {
+    right: auto; left: calc(var(--soa-ctx-left, 0px) + var(--soa-ctx-w, 256px));
+    border-right: 1px solid var(--soa-line); border-left: none;
+    border-radius: 0 4px 4px 0;
+    transition: left 160ms ease, color 160ms ease, background-color 160ms ease,
+                border-color 160ms ease, box-shadow 160ms ease;
+}
+:root[data-sides="left"] .stage.no-context .ctx-pull { left: var(--soa-ctx-left, 0px); }
+:root[data-sides="left"] .ctx-pull::before { right: auto; left: 0; border-radius: 0 2px 2px 0; }
+:root[data-sides="left"] .ctx-pull:hover,
+:root[data-sides="left"] .ctx-pull:focus-visible,
+:root[data-sides="left"] .ctx-pull:active { border-color: var(--soa-accent-dim); }
+:where(:root[data-sides="left"]) .ctx-pull:hover,
+:where(:root[data-sides="left"]) .ctx-pull:focus-visible { box-shadow: 5px 0 16px rgba(var(--soa-accent-rgb), 0.14); }
+:root[data-sides="left"] .ctx-pull-chev::before { content: '\2039'; }
+:root[data-sides="left"] .stage.no-context .ctx-pull-chev::before { content: '\203A'; }
+
+@media (max-width: 1100px) {
+    /* The panel overlays the terminal from the sidebar's edge; --soa-ctx-span
+       is its overlay width, capped so the terminal always shows past it. */
+    :root[data-sides="left"] .stage { --soa-ctx-span: min(var(--soa-ctx-w, 256px), calc(86vw - var(--soa-sidebar-w, 256px))); }
+    :root[data-sides="left"] .stage.no-sidebar { --soa-ctx-span: min(var(--soa-ctx-w, 256px), 86vw); }
+    :root[data-sides="left"] .stage,
+    :root[data-sides="left"] .stage.no-context { grid-template-columns: var(--soa-sidebar-w, 256px) 1fr; grid-template-areas: 'sidebar terms' 'status status'; }
+    :root[data-sides="left"] .stage.no-sidebar,
+    :root[data-sides="left"] .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+    :root[data-sides="left"] .context-panel { right: auto; left: var(--soa-ctx-left, 0px); width: var(--soa-ctx-span); box-shadow: 8px 0 24px rgba(0, 0, 0, 0.28); }
+    :root[data-sides="left"] .ctx-pull { left: calc(var(--soa-ctx-left, 0px) + var(--soa-ctx-span)); }
+    :root[data-sides="left"] .stage.no-context .ctx-pull { left: var(--soa-ctx-left, 0px); }
+}
+
+@media (max-width: 768px) {
+    /* The sidebar is the standard slide-over from the left; the panel overlays
+       from the viewport edge, above it, and the closed tab waits on the
+       slide-over's edge while that is open. */
+    :root[data-sides="left"] .stage,
+    :root[data-sides="left"] .stage.no-sidebar,
+    :root[data-sides="left"] .stage.no-context,
+    :root[data-sides="left"] .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; --soa-ctx-span: min(var(--soa-ctx-w, 256px), 86vw); }
+    :root[data-sides="left"] .stage { --soa-ctx-left: min(256px, 86vw); }
+    :root[data-sides="left"] .stage.no-sidebar { --soa-ctx-left: 0px; }
+    :root[data-sides="left"] .context-panel { left: 0; z-index: 6; }
+    :root[data-sides="left"] .ctx-pull { left: var(--soa-ctx-span); }
+}
