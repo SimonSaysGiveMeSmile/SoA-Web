@@ -1,0 +1,7 @@
+{
+  "name": "soa-engineering",
+  "version": "1.0.0",
+  "description": "An everyday engineering library by station: plan, build, test, secure, review and ship, each a short procedure with a clear stop.",
+  "author": "SoA-Web contributors",
+  "license": "MIT"
+}

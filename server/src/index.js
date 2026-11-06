@@ -1602,6 +1602,11 @@ function onListening() {
     // Headless self-heal: rehydrate the fleet even if no browser reconnects.
     scheduleBootResume();
 
+    // Mirror the skill library (presets included) into ~/.claude/skills and
+    // the Codex skills dir so new agents pick it up. Detached, best effort.
+    const skillSync = setTimeout(() => { try { require('./presetSync').startPresetSync(); } catch (_) {} }, 5000);
+    if (skillSync.unref) skillSync.unref();
+
     const registerTunnel = (url) => {
         if (url && !ALLOWED_ORIGINS.includes(url)) ALLOWED_ORIGINS.push(url);
     };
