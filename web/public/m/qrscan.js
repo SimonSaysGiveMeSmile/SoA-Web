@@ -25,20 +25,48 @@
 const QR_SCAN_INTERVAL_MS = 120;   // ~8 decodes/sec — plenty, and easy on battery
 
 export class QrScanner {
-    constructor({ onResult, onError, labels } = {}) {
+    /**
+     * @param {object} opts
+     * @param {(value: string) => void} [opts.onResult]
+     * @param {(err: Error) => void} [opts.onError]  fires on a camera failure. The
+     *        overlay now STAYS open on its own state panel (denied / no camera /
+     *        could not start) so the reason is readable; a caller may still
+     *        stop() here, which closes it the old way.
+     * @param {object} [opts.labels]   overrides for any string below.
+     * @param {{paste?: Function, password?: Function}} [opts.actions]
+     *        fallbacks offered in the overlay; a button renders only when its
+     *        action is given. Choosing one stops the scanner, then calls it.
+     * @param {DOMRect|{left:number,top:number,width:number,height:number}} [opts.fromRect]
+     *        where the aiming frame grows from (the button that opened it).
+     */
+    constructor({ onResult, onError, labels, actions, fromRect } = {}) {
         this.onResult = onResult || (() => {});
         this.onError = onError || (() => {});
-        // Chrome labels default to English so the /m/ companion keeps its
-        // existing strings verbatim; the localized root landing passes its own.
+        // English defaults keep the /m/ companion working as-is; the localized
+        // root landing passes its own strings.
         this.labels = Object.assign({
             cancel: 'Cancel',
-            hint: 'Point at the QR code on the desktop',
+            title: 'Scan the code on your computer',
+            hint: 'Point at the QR code in the sidebar of the other computer (Mobile link).',
+            starting: 'Starting the camera…',
+            connecting: 'Connecting…',
             torch: 'Light',
+            retry: 'Try again',
+            paste: 'Paste the link',
+            password: 'Use the pairing password',
+            deniedTitle: 'Camera access is off',
+            deniedText: 'Allow the camera for this site in your browser settings, then try again. Or connect another way.',
+            nocamTitle: 'No camera available',
+            nocamText: 'Paste the link from your computer, or use its pairing password.',
+            errorTitle: 'The camera could not start',
+            // The messages handed to onError (the page's own error line).
             errNoCam: 'This browser has no camera access.',
-            errDenied: 'Camera permission denied. Allow camera access for this site, then try again.',
+            errDenied: 'Camera access is off. Allow the camera for this site, then try again.',
             // '{detail}' is substituted with the underlying DOMException text.
-            errOpen: 'Could not open the camera: {detail}',
+            errOpen: 'The camera could not start: {detail}',
         }, labels || {});
+        this.actions = actions || {};
+        this.fromRect = fromRect || null;
         this.stream = null;
         this.el = null;
         this.video = null;
@@ -47,6 +75,9 @@ export class QrScanner {
         this.detector = null;
         this._jsQR = null;
         this._stopped = false;
+        this._returnFocus = null;
+        this._onKey = null;
+        this._run = 0;
     }
 
     static get supported() {
@@ -78,7 +109,7 @@ export class QrScanner {
             // the two whichever way it is written.
             s.src = new URL('./vendor/jsQR.min.js', import.meta.url).href;
             s.onload = () => resolve(window.jsQR);
-            s.onerror = () => reject(new Error('QR decoder failed to load'));
+            s.onerror = () => { QrScanner._loading = null; reject(new Error('QR decoder failed to load')); };
             document.head.appendChild(s);
         });
         return QrScanner._loading;
@@ -98,24 +129,35 @@ export class QrScanner {
 
     // ── lifecycle ─────────────────────────────────────────────────────────
     async start() {
-        if (!QrScanner.supported) {
-            this.onError(new Error(this.labels.errNoCam));
-            return false;
-        }
         this._stopped = false;
+        this._returnFocus = document.activeElement;
         this._mount();
-
-        try {
-            await this._initDecoder();
-        } catch (e) {
-            this._fail(e.message);
+        if (!QrScanner.supported) {
+            this._fail('nocam', this.labels.errNoCam);
             return false;
         }
+        return this._open();
+    }
+
+    /** Ask for the camera and start decoding. Re-run by "Try again". */
+    async _open() {
+        const run = ++this._run;
+        const hadPanelFocus = !!(this.el && this.el.querySelector('.qr-state').contains(document.activeElement));
+        this._setState('starting');
+        if (hadPanelFocus) { try { this.el.querySelector('.qr-cancel').focus({ preventScroll: true }); } catch (_) {} }
+        try {
+            if (!this.detector && !this._jsQR) await this._initDecoder();
+        } catch (e) {
+            if (run === this._run && !this._stopped) this._fail('error', e.message, e.message);
+            return false;
+        }
+        if (run !== this._run || this._stopped) return false;
 
         // Labels are blank before a grant, so take a permissive stream first,
         // then re-open on the lens we actually want.
+        let stream;
         try {
-            this.stream = await navigator.mediaDevices.getUserMedia({
+            stream = await navigator.mediaDevices.getUserMedia({
                 video: { facingMode: { ideal: 'environment' } }, audio: false,
             });
             const deviceId = await this._pickCamera();
@@ -124,32 +166,60 @@ export class QrScanner {
                     video: { deviceId: { exact: deviceId } }, audio: false,
                 }).catch(() => null);
                 if (better) {
-                    this.stream.getTracks().forEach(t => t.stop());
-                    this.stream = better;
+                    stream.getTracks().forEach(t => t.stop());
+                    stream = better;
                 }
             }
         } catch (e) {
-            // Distinguish "said no" from "no camera" — the fixes are different.
-            this._fail(e && e.name === 'NotAllowedError'
-                ? this.labels.errDenied
-                : this.labels.errOpen.replace('{detail}', String((e && e.message) || e)));
+            if (run !== this._run || this._stopped) return false;
+            // Distinguish "said no" from "no camera" from "broke" — the fixes differ.
+            const name = e && e.name;
+            const detail = String((e && e.message) || e);
+            if (name === 'NotAllowedError' || name === 'SecurityError') this._fail('denied', this.labels.errDenied);
+            else if (name === 'NotFoundError' || name === 'OverconstrainedError') this._fail('nocam', this.labels.errNoCam);
+            else this._fail('error', this.labels.errOpen.replace('{detail}', detail), detail);
             return false;
         }
-
+        // Cancelled (or retried) while the permission prompt was up.
+        if (run !== this._run || this._stopped || !this.el) {
+            stream.getTracks().forEach(t => t.stop());
+            return false;
+        }
+        this.stream = stream;
         this.video.srcObject = this.stream;
         try { await this.video.play(); } catch (_) {}
+        if (run !== this._run || this._stopped) return false;
+        this._setState('live');
         this._armTorch();
+        clearInterval(this.timer);
         this.timer = setInterval(() => this._tick(), QR_SCAN_INTERVAL_MS);
         return true;
     }
 
-    stop() {
-        this._stopped = true;
+    _release() {
         clearInterval(this.timer);
         this.timer = null;
         if (this.stream) this.stream.getTracks().forEach(t => t.stop());
         this.stream = null;
-        if (this.el) { this.el.remove(); this.el = null; }
+    }
+
+    stop() {
+        this._stopped = true;
+        this._run++;
+        this._release();
+        if (this._onKey) { document.removeEventListener('keydown', this._onKey, true); this._onKey = null; }
+        if (this.el) {
+            const hadFocus = this.el.contains(document.activeElement);
+            this.el.remove();
+            this.el = null;
+            // Back to the control that opened the scanner (a fallback action
+            // may then move it on to its own field).
+            const back = this._returnFocus;
+            this._returnFocus = null;
+            if (hadFocus && back && back.isConnected && typeof back.focus === 'function') {
+                try { back.focus({ preventScroll: true }); } catch (_) {}
+            }
+        }
     }
 
     async _tick() {
@@ -176,7 +246,7 @@ export class QrScanner {
                 if (res && res.data) value = res.data;
             }
 
-            if (value) {
+            if (value && !this._stopped) {
                 clearInterval(this.timer);
                 this.timer = null;
                 this._flash();
@@ -190,55 +260,179 @@ export class QrScanner {
     _armTorch() {
         const track = this.stream && this.stream.getVideoTracks()[0];
         const caps = track && track.getCapabilities && track.getCapabilities();
-        if (!caps || !caps.torch) return;
-        const btn = this.el.querySelector('.qr-torch');
+        const btn = this.el && this.el.querySelector('.qr-torch');
         if (!btn) return;
+        btn.hidden = true;
+        btn.onclick = null;
+        if (!caps || !caps.torch) return;
         btn.hidden = false;
         let on = false;
-        btn.addEventListener('click', async () => {
+        btn.setAttribute('aria-pressed', 'false');
+        btn.onclick = async () => {
             on = !on;
-            try { await track.applyConstraints({ advanced: [{ torch: on }] }); btn.classList.toggle('on', on); }
-            catch (_) {}
-        });
+            try {
+                await track.applyConstraints({ advanced: [{ torch: on }] });
+                btn.classList.toggle('on', on);
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            } catch (_) { on = !on; }
+        };
     }
 
     // ── UI ────────────────────────────────────────────────────────────────
     _mount() {
+        if (this.el) return;
         const el = document.createElement('div');
         el.className = 'qr-overlay';
+        el.setAttribute('role', 'dialog');
+        el.setAttribute('aria-modal', 'true');
+        const titleId = 'qr-title-' + Math.random().toString(36).slice(2, 8);
+        el.setAttribute('aria-labelledby', titleId);
+        el.dataset.state = 'starting';
         el.innerHTML = `
             <video class="qr-video" playsinline muted autoplay></video>
-            <div class="qr-mask">
-                <div class="qr-reticle"><i></i><i></i><i></i><i></i></div>
-            </div>
-            <div class="qr-bar">
+            <div class="qr-top">
                 <button class="qr-btn qr-cancel" type="button"></button>
-                <div class="qr-hint"></div>
-                <button class="qr-btn qr-torch" type="button" hidden></button>
-            </div>`;
+                <h2 class="qr-title"></h2>
+            </div>
+            <div class="qr-stage"><div class="qr-reticle"><i></i><i></i><i></i><i></i><span class="qr-check" aria-hidden="true"></span></div></div>
+            <p class="qr-hint" aria-live="polite"></p>
+            <div class="qr-bar">
+                <button class="qr-btn qr-torch" type="button" aria-pressed="false" hidden></button>
+                <button class="qr-btn qr-alt" type="button" hidden></button>
+            </div>
+            <section class="qr-state" hidden>
+                <h3 class="qr-state-title"></h3>
+                <p class="qr-state-p"></p>
+                <p class="qr-state-detail" hidden></p>
+                <div class="qr-state-actions"></div>
+            </section>`;
         // textContent, not interpolation: these strings are translated and a
         // language with an apostrophe or angle bracket must not break the markup.
-        el.querySelector('.qr-cancel').textContent = this.labels.cancel;
-        el.querySelector('.qr-hint').textContent = this.labels.hint;
-        el.querySelector('.qr-torch').textContent = this.labels.torch;
+        const L = this.labels;
+        el.querySelector('.qr-title').id = titleId;
+        el.querySelector('.qr-title').textContent = L.title;
+        el.querySelector('.qr-cancel').textContent = L.cancel;
+        el.querySelector('.qr-hint').textContent = L.starting;
+        el.querySelector('.qr-torch').textContent = L.torch;
+        const alt = el.querySelector('.qr-alt');
+        if (this.actions.paste) {
+            alt.textContent = L.paste;
+            alt.addEventListener('click', () => this._choose('paste'));
+        }
+        el.querySelector('.qr-cancel').addEventListener('click', () => this.stop());
+
+        const reduce = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+        if (!reduce) el.classList.add('qr-enter');
         document.body.appendChild(el);
         this.el = el;
         this.video = el.querySelector('.qr-video');
-        el.querySelector('.qr-cancel').addEventListener('click', () => this.stop());
+
+        // Escape cancels; Tab stays inside the dialog.
+        this._onKey = (e) => {
+            if (!this.el) return;
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.stop(); return; }
+            if (e.key !== 'Tab') return;
+            const items = [...this.el.querySelectorAll('button:not([hidden])')]
+                .filter(b => b.offsetParent !== null && !b.disabled);
+            if (!items.length) return;
+            const first = items[0], last = items[items.length - 1];
+            if (!this.el.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+            else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        };
+        document.addEventListener('keydown', this._onKey, true);
+        try { el.querySelector('.qr-cancel').focus({ preventScroll: true }); } catch (_) {}
+
+        // The aiming frame grows out of the control that opened it: one FLIP.
+        const from = this.fromRect;
+        if (from && !reduce && from.width > 0 && from.height > 0) {
+            const ret = el.querySelector('.qr-reticle');
+            const to = ret.getBoundingClientRect();
+            if (to.width > 0) {
+                const sx = from.width / to.width, sy = from.height / to.height;
+                const dx = (from.left + from.width / 2) - (to.left + to.width / 2);
+                const dy = (from.top + from.height / 2) - (to.top + to.height / 2);
+                ret.style.transition = 'none';
+                ret.style.transformOrigin = '50% 50%';
+                ret.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+                void ret.offsetWidth;
+                requestAnimationFrame(() => {
+                    ret.style.transition = 'transform 240ms cubic-bezier(.2,.8,.2,1)';
+                    ret.style.transform = '';
+                    setTimeout(() => { ret.style.transition = ''; ret.style.transformOrigin = ''; }, 300);
+                });
+            }
+        }
+    }
+
+    _setState(state) {
+        if (!this.el) return;
+        const el = this.el;
+        el.dataset.state = state;
+        const L = this.labels;
+        const hint = el.querySelector('.qr-hint');
+        const panel = el.querySelector('.qr-state');
+        const alt = el.querySelector('.qr-alt');
+        if (state === 'starting') hint.textContent = L.starting;
+        else if (state === 'live') hint.textContent = L.hint;
+        else if (state === 'hit') hint.textContent = L.connecting;
+        hint.classList.remove('qr-hint--err');
+        alt.hidden = !(this.actions.paste && state === 'live');
+        panel.hidden = !(state === 'denied' || state === 'nocam' || state === 'error');
+    }
+
+    /** Leave the scanner for one of the page's own ways in. */
+    _choose(kind) {
+        const fn = this.actions[kind];
+        this.stop();
+        if (typeof fn === 'function') { try { fn(); } catch (_) {} }
     }
 
     _flash() {
         if (!this.el) return;
         this.el.classList.add('qr-hit');
-        setTimeout(() => this.el && this.el.classList.remove('qr-hit'), 220);
+        this._setState('hit');
     }
 
-    _fail(message) {
-        this.onError(new Error(message));
+    /**
+     * A camera that cannot open: show why, on the overlay, with a way forward.
+     * The overlay stays until Cancel, Escape or a fallback is chosen.
+     */
+    _fail(kind, message, detail) {
+        this._release();
         if (this.el) {
-            const hint = this.el.querySelector('.qr-hint');
-            if (hint) { hint.textContent = message; hint.classList.add('qr-hint--err'); }
+            const L = this.labels;
+            this._setState(kind);
+            const panel = this.el.querySelector('.qr-state');
+            const title = kind === 'denied' ? L.deniedTitle : kind === 'nocam' ? L.nocamTitle : L.errorTitle;
+            const text = kind === 'denied' ? L.deniedText : kind === 'nocam' ? L.nocamText : '';
+            panel.querySelector('.qr-state-title').textContent = title;
+            const p = panel.querySelector('.qr-state-p');
+            p.textContent = text; p.hidden = !text;
+            const d = panel.querySelector('.qr-state-detail');
+            d.textContent = detail || ''; d.hidden = !detail;
+            const box = panel.querySelector('.qr-state-actions');
+            box.textContent = '';
+            const add = (label, fn, primary) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'qr-btn qr-state-btn' + (primary ? ' qr-primary' : '');
+                b.textContent = label;
+                b.addEventListener('click', fn);
+                box.appendChild(b);
+                return b;
+            };
+            const retry = () => this._open();
+            const list = [];
+            if (kind !== 'nocam' && QrScanner.supported) list.push([L.retry, retry]);
+            if (this.actions.paste) list.push([L.paste, () => this._choose('paste')]);
+            if (this.actions.password && kind !== 'error') list.push([L.password, () => this._choose('password')]);
+            list.forEach(([label, fn], i) => add(label, fn, i === 0));
+            const firstBtn = box.querySelector('button');
+            if (firstBtn) { try { firstBtn.focus({ preventScroll: true }); } catch (_) {} }
         }
+        // After the panel is drawn: a caller that still stop()s here closes it.
+        this.onError(new Error(message));
     }
 }
 

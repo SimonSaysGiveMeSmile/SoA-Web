@@ -2690,161 +2690,381 @@ button:active { background: var(--accent-bg-hover); }
    respect the notch: a phone held up to a desktop screen is exactly the case
    where a control tucked under the home indicator can't be tapped. */
 
+/* welcome-touch-20261105: the unpaired welcome and its pair screen.
+   Same palette and type as the root landing's touch welcome (--w-*: night desk / daylight, Ink, Quiet, Tide,
+   Lens), sentence case in Familjen Grotesk; mono only for typed machine text.
+   Dark by default; a light system swaps the tokens (here data-theme holds
+   skins, not light/dark). */
 .welcome-overlay {
+    --w-bg: #070b10;
+    --w-panel: #0e161c;
+    --w-ink: #d6e6e8;
+    --w-quiet: #8fa9ac;
+    --w-accent: #aacfd1;
+    --w-on-accent: #061317;
+    --w-accent-hover: #c9e3e5;
+    --w-done: #5fd49a;
+    --w-line: rgba(170, 207, 209, 0.18);
+    --w-line-strong: rgba(170, 207, 209, 0.34);
+    --w-lens: #0b1217;
+    --w-glass: rgba(156, 190, 214, 0.06);
+    --w-glass-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.65);
+    --w-sans: 'Familjen Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Noto Sans CJK SC', sans-serif;
+    --w-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
     position: fixed;
     inset: 0;
     z-index: 9000;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
-    padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
-    background: var(--bg, #0b0d0e);
+    overflow-y: auto;
+    padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    background: var(--w-bg);
+    color: var(--w-ink);
+    color-scheme: dark;
+    font-family: var(--w-sans);
+    font-size: 17px; line-height: 1.5; font-weight: 400;
+    letter-spacing: 0; text-transform: none; text-align: left;
 }
+@media (prefers-color-scheme: light) {
+    .welcome-overlay {
+        --w-bg: #f4f7f8;
+        --w-panel: #ffffff;
+        --w-ink: #15302e;
+        --w-quiet: #4e6668;
+        --w-accent: #0e6b73;
+        --w-on-accent: #ffffff;
+        --w-accent-hover: #0a5259;
+        --w-done: #15803d;
+        --w-line: rgba(21, 48, 46, 0.14);
+        --w-line-strong: rgba(21, 48, 46, 0.28);
+        --w-glass: rgba(170, 197, 217, 0.08);
+        --w-glass-shadow: 0 1px 2px rgba(16, 40, 48, 0.05), 0 14px 32px -14px rgba(16, 40, 48, 0.18);
+        color-scheme: light;
+    }
+}
+.welcome-overlay *, .welcome-overlay *::before, .welcome-overlay *::after { box-sizing: border-box; }
+/* Skins restyle bare buttons (minimal lowercases them); the welcome keeps its own. */
+:root .welcome-overlay :is(button, input, summary, a, label) {
+    font-family: inherit; letter-spacing: 0; text-transform: none; text-shadow: none;
+}
+:root .welcome-overlay :is(a, button, summary, input):focus-visible {
+    outline: 2px solid var(--w-accent); outline-offset: 3px; box-shadow: none;
+}
+.welcome-overlay a { color: var(--w-accent); }
 
-.welcome-card { width: 100%; max-width: 340px; text-align: center; }
-
+.welcome-card { width: 100%; max-width: 420px; margin: auto; padding-block: 4px 8px; text-align: left; }
+.welcome-brand { font-size: 17px; font-weight: 600; line-height: 1.2; color: var(--w-ink); margin: 0 0 28px; }
 .welcome-title {
-    font-size: 15px;
-    letter-spacing: .28em;
-    color: var(--fg, #dfe6e6);
-    margin-bottom: 10px;
+    margin: 0 0 6px;
+    font-size: 28px; font-weight: 600; line-height: 1.12; letter-spacing: -0.01em;
+    color: var(--w-ink); text-wrap: balance;
+}
+.welcome-sub { margin: 0 0 16px; font-size: 17px; line-height: 1.5; color: var(--w-quiet); }
+.welcome-back {
+    display: inline-flex; align-items: center; gap: 8px;
+    min-height: 44px; margin: -6px 0 14px -4px; padding: 0 8px 0 4px;
+    background: none; border: 0; border-radius: 8px; cursor: pointer;
+    color: var(--w-accent); font-size: 17px; font-weight: 500;
+}
+.welcome-back::before {
+    content: ""; width: 9px; height: 9px;
+    border-left: 2px solid currentColor; border-bottom: 2px solid currentColor;
+    transform: rotate(45deg); margin-left: 4px;
 }
 
-.welcome-sub {
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--dim, #7d8a8a);
-    margin-bottom: 22px;
+/* ── The viewfinder: the whole well is the scan button ── */
+.welcome-vf {
+    position: relative; display: flex; flex-direction: column; align-items: stretch;
+    width: 100%; margin: 0; padding: 14px;
+    background: var(--w-lens); color: #d6e6e8;
+    border: 0; border-radius: 20px; cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(170, 207, 209, 0.12);
+    font: inherit; text-align: center;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 90ms ease-out;
 }
-
-.welcome-scan {
-    display: block;
-    width: 100%;
-    /* 52px: a thumb target on a phone held at arm's length toward a screen. */
-    min-height: 52px;
-    margin-bottom: 14px;
-    font: inherit;
-    font-size: 13px;
-    letter-spacing: .14em;
-    color: var(--bg, #0b0d0e);
-    background: var(--accent, #aacfd1);
-    border: 0;
-    border-radius: 6px;
-    cursor: pointer;
+.welcome-vf:active { transform: scale(0.985); }
+:root .welcome-overlay .welcome-vf:focus-visible { border-radius: 20px; }
+.welcome-vf-frame { position: relative; display: block; aspect-ratio: 16 / 10; margin: 4px 4px 0; }
+.welcome-vf-frame > i { position: absolute; width: 30px; height: 30px; border: 4px solid #aacfd1; }
+.welcome-vf-frame > i:nth-of-type(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 14px; }
+.welcome-vf-frame > i:nth-of-type(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 14px; }
+.welcome-vf-frame > i:nth-of-type(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 14px; }
+.welcome-vf-frame > i:nth-of-type(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 14px; }
+.welcome-vf-art { position: absolute; inset: 12% 10%; width: 80%; height: 76%; overflow: visible; }
+.welcome-vf-art .vf-line { fill: none; stroke: rgba(214, 230, 232, 0.4); stroke-width: 2; }
+.welcome-vf-art .vf-faint { fill: none; stroke: rgba(214, 230, 232, 0.22); stroke-width: 4; stroke-linecap: round; }
+.welcome-vf-art .vf-label { fill: rgba(214, 230, 232, 0.72); font-family: var(--w-sans); font-size: 11px; font-weight: 600; }
+.welcome-vf-art .vf-qr-bg { fill: rgba(214, 230, 232, 0.12); stroke: rgba(170, 207, 209, 0.7); stroke-width: 1.5; }
+.welcome-vf-art .vf-qr-ink { fill: rgba(214, 230, 232, 0.62); fill-rule: evenodd; }
+.welcome-vf-pill {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 52px; margin-top: 14px; padding: 8px 20px;
+    border-radius: 999px; background: #aacfd1; color: #061317;
+    font-size: 17px; font-weight: 600; line-height: 1.2;
 }
-.welcome-scan:active { opacity: .82; }
+.welcome-how { margin: 12px 0 0; font-size: 15px; line-height: 1.5; color: var(--w-quiet); }
 
+/* "Open the camera automatically": a switch row. */
 .welcome-auto {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    margin-bottom: 18px;
-    font-size: 11px;
-    color: var(--dim, #7d8a8a);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    min-height: 48px; margin: 8px 0 0;
+    font-size: 15px; color: var(--w-ink); cursor: pointer;
 }
-.welcome-auto input { accent-color: var(--accent, #aacfd1); }
+.welcome-auto input {
+    appearance: none; -webkit-appearance: none; flex: 0 0 auto; position: relative;
+    width: 44px; height: 26px; margin: 0; border-radius: 999px; cursor: pointer;
+    background: var(--w-line-strong); transition: background 150ms;
+}
+.welcome-auto input::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); transition: transform 150ms;
+}
+.welcome-auto input:checked { background: var(--w-accent); }
+.welcome-auto input:checked::after { transform: translateX(18px); }
 
-.welcome-manual { text-align: left; }
-.welcome-manual summary {
-    font-size: 11px;
-    letter-spacing: .1em;
-    color: var(--dim, #7d8a8a);
-    cursor: pointer;
-    padding: 6px 0;
-    text-align: center;
+.welcome-h2 { margin: 24px 0 10px; font-size: 17px; font-weight: 600; line-height: 1.3; color: var(--w-ink); }
+
+/* ── Other ways to connect: one glass group, rows with a state chevron ── */
+.welcome-ways { border-radius: 16px; overflow: hidden; background: var(--w-glass); box-shadow: var(--w-glass-shadow); }
+.welcome-way {
+    position: relative; display: flex; align-items: center; gap: 12px;
+    width: 100%; min-height: 56px; margin: 0; padding: 10px 44px 10px 16px;
+    background: none; border: 0; border-radius: 0; cursor: pointer; list-style: none;
+    color: var(--w-ink); font: inherit; font-size: 17px; font-weight: 500; line-height: 1.3;
+    text-align: left; text-decoration: none;
 }
+.welcome-way::-webkit-details-marker { display: none; }
+.welcome-ways > * + *::before, .welcome-ways > * + * > .welcome-way::before {
+    content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--w-line);
+}
+.welcome-ways > * + details::before { content: none; }
+.welcome-ways > * { position: relative; }
+.welcome-way::after {
+    content: ""; position: absolute; right: 20px; top: 50%;
+    width: 8px; height: 8px; margin-top: -4px;
+    border-right: 2px solid var(--w-accent); border-bottom: 2px solid var(--w-accent);
+    transform: rotate(-45deg); transition: transform 150ms;
+}
+details[open] > .welcome-way::after { transform: rotate(45deg); }
+.welcome-way:active { background: var(--w-line); }
+:root .welcome-overlay .welcome-way:focus-visible { outline-offset: -3px; border-radius: 16px; }
+.welcome-way-body { padding: 2px 16px 16px; }
+.welcome-way[disabled] { opacity: 0.5; cursor: default; }
+
+.welcome-label { display: block; margin: 0 0 10px; font-size: 14px; font-weight: 500; color: var(--w-quiet); }
 .welcome-url {
-    width: 100%;
-    margin: 8px 0;
-    padding: 10px;
-    font: inherit;
-    font-size: 12px;
-    color: var(--fg, #dfe6e6);
-    background: rgba(255, 255, 255, .05);
-    border: 1px solid var(--line, rgba(255, 255, 255, .12));
-    border-radius: 5px;
+    display: block; width: 100%; min-height: 48px; margin: 4px 0 0; padding: 0 12px;
+    font: inherit; font-size: 16px;   /* 16px: iOS does not zoom the page */
+    color: var(--w-ink); background: var(--w-panel);
+    border: 1px solid var(--w-line-strong); border-radius: 10px;
 }
+.welcome-url[type="url"] { font-family: var(--w-mono); font-size: 15px; }
+.welcome-url::placeholder { color: var(--w-quiet); opacity: 0.8; }
+.welcome-card > .welcome-url { margin-bottom: 10px; }
+/* Primary action on the secondary screens. */
+.welcome-scan {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; min-height: 52px; margin: 6px 0 0; padding: 8px 20px;
+    font: inherit; font-size: 17px; font-weight: 600;
+    color: var(--w-on-accent); background: var(--w-accent);
+    border: 1px solid var(--w-accent); border-radius: 999px; cursor: pointer;
+}
+.welcome-scan:active { opacity: 0.86; }
+.welcome-scan[disabled] { opacity: 0.55; }
 .welcome-go {
-    width: 100%;
-    padding: 10px;
-    font: inherit;
-    font-size: 12px;
-    color: var(--fg, #dfe6e6);
-    background: rgba(255, 255, 255, .07);
-    border: 1px solid var(--line, rgba(255, 255, 255, .12));
-    border-radius: 5px;
-    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; min-height: 48px; margin: 8px 0 0; padding: 8px 18px;
+    font: inherit; font-size: 17px; font-weight: 600;
+    color: var(--w-ink); background: transparent;
+    border: 1px solid var(--w-line-strong); border-radius: 999px; cursor: pointer;
+}
+.welcome-way-body .welcome-go { color: var(--w-on-accent); background: var(--w-accent); border-color: var(--w-accent); }
+.welcome-link, .welcome-note {
+    display: inline-flex; align-items: center; min-height: 44px; margin: 12px 0 0; padding: 0;
+    background: none; border: 0; cursor: pointer;
+    font: inherit; font-size: 15px; color: var(--w-accent); text-align: left;
+}
+.welcome-note { display: block; color: var(--w-quiet); cursor: default; }
+/* Errors are direction, not alarm: Ink, plain words, under what failed. */
+.welcome-err { margin: 12px 0 0; font-size: 15px; line-height: 1.5; color: var(--w-ink); }
+.welcome-err[hidden] { display: none; }
+.welcome-manual > summary:not(.welcome-way) {
+    display: flex; align-items: center; min-height: 44px; margin-top: 8px;
+    font-size: 15px; color: var(--w-accent); cursor: pointer; list-style: none;
+}
+.welcome-manual > summary:not(.welcome-way)::-webkit-details-marker { display: none; }
+
+@media (min-width: 700px) {
+    .welcome-card { max-width: 480px; }
+    .welcome-title { font-size: 36px; }
+    .welcome-sub { font-size: 18px; }
+    .welcome-vf { padding: 20px; }
+    .welcome-vf-frame { aspect-ratio: 4 / 3; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .welcome-ways { background: var(--w-panel); border: 1px solid var(--w-line-strong); box-shadow: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .welcome-vf, .welcome-way::after, .welcome-auto input, .welcome-auto input::after { transition: none; }
+    .welcome-vf:active { transform: none; }
+}
+@media (forced-colors: active) {
+    .welcome-vf { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }
+    .welcome-vf-frame > i { border-color: CanvasText; }
+    .welcome-vf-art .vf-line, .welcome-vf-art .vf-faint, .welcome-vf-art .vf-qr-bg { stroke: CanvasText; }
+    .welcome-vf-art .vf-label, .welcome-vf-art .vf-qr-ink { fill: CanvasText; }
+    .welcome-vf-pill, .welcome-way, .welcome-scan, .welcome-go { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; forced-color-adjust: none; }
+    .welcome-ways { background: Canvas; border: 1px solid CanvasText; box-shadow: none; }
+    .welcome-way::after { border-color: ButtonText; }
+    .welcome-auto input { appearance: auto; -webkit-appearance: auto; width: auto; height: auto; }
+    .welcome-auto input::after { content: none; }
 }
 
-.welcome-err {
-    margin-top: 14px;
-    font-size: 11px;
-    line-height: 1.5;
-    color: var(--err, #ff6b6b);
+/* ── In-app QR camera overlay — SHARED: keep identical in /assets/styles.css
+   and /m/styles.css (the root landing lazy-imports /m/qrscan.js, which ships
+   no stylesheet). Literal colours on purpose: the overlay is appended to
+   <body>, outside every themed scope, and a lens is dark in daylight too.
+   Above the welcome page (10000), the pair sheet and diagnostics (9999): the scanner must never open behind its opener. */
+.qr-overlay {
+  position: fixed; inset: 0; z-index: 10500; overflow: hidden;
+  display: flex; flex-direction: column;
+  background: #0b1217; color: #fff;
+  font-family: 'Familjen Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Noto Sans CJK SC', sans-serif;
+  font-size: 15px; line-height: 1.45; font-weight: 400;
+  letter-spacing: 0; text-transform: none; text-align: left;
+  -webkit-tap-highlight-color: transparent;
 }
-
-/* ── camera overlay ── */
-.qr-overlay { position: fixed; inset: 0; z-index: 9500; background: #000; overflow: hidden; }
-
+.qr-overlay * { box-sizing: border-box; }
+.qr-overlay.qr-enter { animation: qr-fade 240ms cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes qr-fade { from { opacity: 0; } to { opacity: 1; } }
 .qr-video {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    /* cover, not contain: a letterboxed preview makes people hold the phone
-       further away than the focus distance the lens actually wants. */
-    object-fit: cover;
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  /* cover, not contain: a letterboxed preview makes people hold the phone
+     further away than the focus distance the lens actually wants. */
+  object-fit: cover;
 }
-
-.qr-mask {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    /* Dim everything but the reticle so the aim point is unmistakable. */
-    background: radial-gradient(ellipse 46% 26% at 50% 46%, transparent 0 99%, rgba(0, 0, 0, .55) 100%);
+.qr-overlay:not([data-state="live"]):not([data-state="hit"]) .qr-video { visibility: hidden; }
+.qr-top {
+  position: relative; z-index: 4;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 14px;
+  padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px));
 }
-
-.qr-reticle { position: relative; width: min(64vw, 260px); aspect-ratio: 1; margin-bottom: 8vh; }
-.qr-reticle i { position: absolute; width: 30px; height: 30px; border: 2px solid var(--accent, #aacfd1); }
-.qr-reticle i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
-.qr-reticle i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
-.qr-reticle i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
-.qr-reticle i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
-
-.qr-overlay.qr-hit .qr-reticle i { border-color: #5dbd5a; }
-.qr-overlay.qr-hit::after { content: ''; position: absolute; inset: 0; background: rgba(93, 189, 90, .25); }
-
+.qr-title {
+  margin: 0; max-width: 24em;
+  font: inherit; font-size: 17px; font-weight: 600; line-height: 1.25; color: #fff;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, .45);
+}
+.qr-stage {
+  position: relative; z-index: 1; flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; justify-content: center; padding: 12px 0;
+}
+/* The dim mask IS the reticle's own shadow, so the bright hole and the
+   corners can never drift apart. */
+.qr-reticle {
+  position: relative; flex: 0 0 auto;
+  width: min(68vmin, 300px); aspect-ratio: 1; border-radius: 20px;
+  box-shadow: 0 0 0 200vmax rgba(4, 8, 12, .58);
+}
+.qr-reticle i {
+  position: absolute; width: 34px; height: 34px;
+  border: 4px solid #aacfd1;
+  transition: transform 180ms cubic-bezier(.2, .8, .2, 1), border-color 180ms;
+}
+.qr-reticle i:nth-child(1) { top: -2px; left: -2px; border-right: 0; border-bottom: 0; border-top-left-radius: 20px; }
+.qr-reticle i:nth-child(2) { top: -2px; right: -2px; border-left: 0; border-bottom: 0; border-top-right-radius: 20px; }
+.qr-reticle i:nth-child(3) { bottom: -2px; left: -2px; border-right: 0; border-top: 0; border-bottom-left-radius: 20px; }
+.qr-reticle i:nth-child(4) { bottom: -2px; right: -2px; border-left: 0; border-top: 0; border-bottom-right-radius: 20px; }
+.qr-check {
+  position: absolute; left: 50%; top: 50%; width: 22px; height: 40px;
+  margin: -26px 0 0 -11px;
+  border-right: 5px solid #5fd49a; border-bottom: 5px solid #5fd49a; border-radius: 2px;
+  transform: rotate(45deg); opacity: 0; transition: opacity 180ms;
+}
+.qr-overlay[data-state="hit"] .qr-reticle i { border-color: #5fd49a; }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(1) { transform: translate(6px, 6px); }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(2) { transform: translate(-6px, 6px); }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(3) { transform: translate(6px, -6px); }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(4) { transform: translate(-6px, -6px); }
+.qr-overlay[data-state="hit"] .qr-check { opacity: 1; }
+.qr-hint {
+  position: relative; z-index: 2;
+  margin: 0 auto; max-width: 34em;
+  padding: 4px max(24px, env(safe-area-inset-right, 0px)) 8px max(24px, env(safe-area-inset-left, 0px));
+  text-align: center; font-size: 15px; line-height: 1.45; color: rgba(255, 255, 255, .86);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, .5);
+}
+.qr-hint--err { color: #fff; }
+.qr-overlay[data-state="hit"] .qr-hint { color: #5fd49a; font-weight: 600; }
 .qr-bar {
-    position: absolute;
-    left: 0; right: 0; bottom: 0;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
-    background: linear-gradient(transparent, rgba(0, 0, 0, .75) 40%);
+  position: relative; z-index: 2;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px;
+  min-height: 60px;
+  padding: 8px 16px max(16px, env(safe-area-inset-bottom, 0px));
 }
-
+/* Over moving video, legibility wins over glass: a smoke pill, not a tint. */
 .qr-btn {
-    flex: 0 0 auto;
-    min-height: 40px;
-    padding: 0 16px;
-    font: inherit;
-    font-size: 12px;
-    letter-spacing: .12em;
-    color: var(--fg, #dfe6e6);
-    background: rgba(255, 255, 255, .12);
-    border: 1px solid rgba(255, 255, 255, .2);
-    border-radius: 5px;
-    cursor: pointer;
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 0 18px; cursor: pointer;
+  font: inherit; font-size: 15px; font-weight: 600; line-height: 1.2;
+  letter-spacing: 0; text-transform: none; text-shadow: none;
+  color: #fff; background: rgba(8, 12, 16, .62);
+  border: 1px solid rgba(255, 255, 255, .18); border-radius: 999px;
+  transition: transform 90ms, background 120ms;
 }
-.qr-btn.on { background: var(--accent, #aacfd1); color: #000; }
-
-.qr-hint { flex: 1 1 auto; text-align: center; font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, .8); }
-.qr-hint--err { color: #ff8a8a; }
+.qr-btn:active { transform: scale(.985); }
+/* Out-specify the packs' [data-ui] button { font-family } and /m/ skins' lowercase. */
+.qr-overlay .qr-btn { font-family: inherit; letter-spacing: 0; text-transform: none; }
+.qr-btn.on, .qr-btn[aria-pressed="true"] { background: #aacfd1; color: #061317; border-color: #aacfd1; }
+.qr-btn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.qr-btn[hidden] { display: none !important; }
+.qr-overlay:not([data-state="live"]) .qr-bar { visibility: hidden; }
+/* Denied / no camera / could not start: an instruction, not an alarm. */
+.qr-state {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 120px max(24px, env(safe-area-inset-right, 0px)) max(32px, env(safe-area-inset-bottom, 0px)) max(24px, env(safe-area-inset-left, 0px));
+  background: #0b1217;
+  animation: qr-fade 120ms ease-out both;
+}
+.qr-state[hidden] { display: none; }
+.qr-state > * { width: 100%; max-width: 34em; margin-left: auto; margin-right: auto; }
+.qr-state-title { margin: 0 auto 10px; font: inherit; font-size: 22px; font-weight: 600; line-height: 1.25; color: #fff; }
+.qr-state-p { margin: 0 auto; font-size: 17px; line-height: 1.5; color: rgba(255, 255, 255, .86); }
+.qr-state-detail {
+  margin: 12px auto 0; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; color: #8fa9ac; overflow-wrap: anywhere;
+}
+.qr-state-actions { display: flex; flex-direction: column; gap: 10px; margin: 24px auto 0; }
+.qr-state-actions .qr-btn { width: 100%; min-height: 48px; }
+.qr-state-actions .qr-primary { min-height: 52px; background: #aacfd1; color: #061317; border-color: #aacfd1; font-size: 17px; }
+.qr-overlay:is([data-state="denied"], [data-state="nocam"], [data-state="error"]) :is(.qr-stage, .qr-hint) { visibility: hidden; }
+@media (min-width: 700px) and (min-height: 600px) {
+  .qr-reticle { width: min(52vmin, 360px); }
+  .qr-title { font-size: 20px; }
+  .qr-hint { font-size: 17px; }
+  .qr-state-actions { flex-direction: row; flex-wrap: wrap; }
+  .qr-state-actions .qr-btn { width: auto; flex: 0 1 auto; padding: 0 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qr-overlay.qr-enter, .qr-state { animation: none; }
+  .qr-reticle, .qr-reticle i, .qr-check, .qr-btn { transition: none !important; }
+  .qr-btn:active { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .qr-btn { background: #0b1217; border-color: rgba(255, 255, 255, .5); }
+  .qr-title, .qr-hint { text-shadow: none; }
+  .qr-hint { background: #0b1217; border-radius: 8px; padding-top: 6px; }
+}
+@media (forced-colors: active) {
+  .qr-overlay, .qr-state { background: Canvas; color: CanvasText; }
+  .qr-title, .qr-hint, .qr-state-title, .qr-state-p { color: CanvasText; }
+  .qr-reticle { box-shadow: none; outline: 3px solid Highlight; outline-offset: 0; }
+  .qr-reticle i { border-color: Highlight; }
+  .qr-btn, .qr-state-actions .qr-primary { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; forced-color-adjust: none; }
+  .qr-btn:focus-visible { outline-color: Highlight; }
+}
 
 /* ── soa-android perf ────────────────────────────────────────────────────
    Android only (index.html sets html.soa-android before first paint; iOS

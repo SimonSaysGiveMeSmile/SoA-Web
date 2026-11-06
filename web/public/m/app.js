@@ -31,6 +31,19 @@ import { MobileFullscreen } from './fullscreen.js';
 import { SessionHistory, openHistory } from './session-history.js';
 import { loadRecord, saveRecord, reconcile, isArchived, archivedIds, setArchived, archivedAt, markUsed, lastUsed, sortIds, matches, ago as agoText, SORT_MODES, SORT_LABELS, SORT_HINTS } from './tabOrganizer.js';
 
+// Open the Mac control page. Inside a Home Screen app on iOS, window.open
+// hands the page to an in-app browser sheet that keeps its own bars and has
+// no full-screen API, so a same-origin page is opened in place instead: it
+// keeps the app's bar-less window, and its Back button returns here.
+function openMacControl(url) {
+    let inApp = false;
+    try { inApp = !!navigator.standalone || ['standalone', 'fullscreen'].some(m => matchMedia(`(display-mode: ${m})`).matches); } catch (_) {}
+    let same = false;
+    try { same = new URL(url, location.href).origin === location.origin; } catch (_) {}
+    if (inApp && same) location.assign(url);
+    else window.open(url, '_blank', 'noopener');
+}
+
 // Build marker — bump on every mobile-client change. Shown in the on-screen
 // diagnostics panel so a phone (no console) can confirm whether it loaded the
 // latest code or a stale cached bundle. If the panel shows an old marker, the
@@ -749,28 +762,44 @@ class App {
 
     /** Welcome / re-pair screen. An overlay, not an innerHTML replacement, so
      *  the app shell underneath survives and we can connect in place. */
-    _showWelcome(message) {
+    _showWelcome(message, { noAuto = false } = {}) {
         if (this._welcomeEl) this._welcomeEl.remove();
         const auto = this._autoScanPref();
         const el = document.createElement('div');
         el.className = 'welcome-overlay';
+        // The top of the card IS a viewfinder: the aiming corners around a
+        // schematic of the computer's sidebar QR (Mobile link), so the user
+        // sees what to point at before the camera is on. Tapping it opens the
+        // scanner, whose frame grows from these corners.
         el.innerHTML = `
-            <div class="welcome-card">
-                <div class="welcome-title">SON OF ANTON</div>
-                <div class="welcome-sub">${escapeHtml(message || 'Scan the QR code on your desktop to connect this phone.')}</div>
-                <button class="welcome-scan" type="button">Scan QR code</button>
-                <button class="welcome-history welcome-scan" type="button">Read saved history</button>
+            <div class="welcome-card welcome-pair">
+                <div class="welcome-brand">Son of Anton</div>
+                <h1 class="welcome-title">Pair with your computer</h1>
+                <p class="welcome-sub">${escapeHtml(message || 'Scan the code your computer shows.')}</p>
+                <button class="welcome-qr welcome-vf" type="button">
+                    <span class="welcome-vf-frame" aria-hidden="true">${WELCOME_VF_ART}<i></i><i></i><i></i><i></i></span>
+                    <span class="welcome-vf-pill">Scan the code</span>
+                </button>
+                <p class="welcome-how">On your computer, open Son of Anton and click Mobile link in the sidebar.</p>
                 <label class="welcome-auto">
-                    <input type="checkbox" ${auto ? 'checked' : ''}>
                     <span>Open the camera automatically</span>
+                    <input type="checkbox" role="switch" ${auto ? 'checked' : ''}>
                 </label>
-                <details class="welcome-manual">
-                    <summary>Paste a pairing link instead</summary>
-                    <input class="welcome-url" type="url" inputmode="url" autocapitalize="off"
-                           autocorrect="off" spellcheck="false" placeholder="https://…/m/?t=…">
-                    <button class="welcome-go" type="button">Connect</button>
-                </details>
-                <div class="welcome-err" hidden></div>
+                <h2 class="welcome-h2" id="welcome-ways-h">Other ways to connect</h2>
+                <div class="welcome-ways" role="group" aria-labelledby="welcome-ways-h">
+                    <details class="welcome-manual">
+                        <summary class="welcome-way">Paste the link</summary>
+                        <div class="welcome-way-body">
+                            <label class="welcome-label">Pairing link
+                                <input class="welcome-url" type="url" inputmode="url" autocapitalize="off"
+                                       autocorrect="off" spellcheck="false" placeholder="https://…/m/?t=…">
+                            </label>
+                            <button class="welcome-go" type="button">Connect</button>
+                        </div>
+                    </details>
+                </div>
+                <div class="welcome-err" role="alert" hidden></div>
+                <button class="welcome-history welcome-link" type="button">Read history saved on this phone</button>
             </div>`;
         document.body.appendChild(el);
         this._welcomeEl = el;
@@ -781,7 +810,7 @@ class App {
             err.hidden = !m;
         };
 
-        el.querySelector('.welcome-scan').addEventListener('click', () => this._openScanner());
+        el.querySelector('.welcome-qr').addEventListener('click', () => this._openScanner());
         el.querySelector('.welcome-history').addEventListener('click', () => this._openHistory());
         el.querySelector('.welcome-auto input').addEventListener('change', (e) => {
             this._autoScanPref(e.target.checked);
@@ -798,7 +827,7 @@ class App {
         // The opt-in the user sets once: land here, camera already open. Only
         // on a genuine cold start — never when we got here from an error, or
         // the camera would reopen in a loop the user can't escape.
-        if (auto && !message && QrScanner.supported) {
+        if (auto && !message && !noAuto && QrScanner.supported) {
             setTimeout(() => this._openScanner(), 150);
         }
         return el;
@@ -821,16 +850,39 @@ class App {
 
     _openScanner() {
         if (this._scanner) this._scanner.stop();
-        this._scanner = new QrScanner({
-            onResult: (value) => this._connectFromScan(value),
-            onError: (e) => {
-                if (this._welcomeError) this._welcomeError(e.message);
-                // A camera that can't open must not leave the user stuck
-                // behind a black overlay with no way back to the paste field.
-                if (this._scanner) { this._scanner.stop(); this._scanner = null; }
+        const frame = this._welcomeEl && this._welcomeEl.querySelector('.welcome-vf-frame');
+        let fromRect = null;
+        try { if (frame && frame.offsetParent !== null) fromRect = frame.getBoundingClientRect(); } catch (_) {}
+        const scanner = new QrScanner({
+            onResult: (value) => {
+                // A code this app cannot use closes the camera, so the reason
+                // (on the welcome card) can be read.
+                if (!this._connectFromScan(value) && this._scanner === scanner) { scanner.stop(); this._scanner = null; }
             },
+            // A refused or missing camera keeps the overlay open on its own
+            // panel (Try again · Paste the link), so
+            // it is never a dead end; the welcome line records why for later.
+            onError: (e) => { if (this._welcomeError) this._welcomeError(e.message); },
+            actions: {
+                paste: () => this._openWelcomeManual(),
+            },
+            labels: { nocamText: 'Paste the link from your computer.' },
+            fromRect,
         });
-        this._scanner.start();
+        this._scanner = scanner;
+        scanner.start();
+    }
+
+    /** The scanner's "Paste the link": the welcome's paste row, open and focused. */
+    _openWelcomeManual() {
+        if (!this._welcomeEl || !this._welcomeEl.isConnected || !this._welcomeEl.querySelector('.welcome-manual')) {
+            this._showWelcome('', { noAuto: true });
+        }
+        const d = this._welcomeEl && this._welcomeEl.querySelector('.welcome-manual');
+        if (!d) return;
+        d.open = true;
+        const input = d.querySelector('.welcome-url');
+        try { input.focus(); d.scrollIntoView({ block: 'nearest' }); } catch (_) {}
     }
 
     /**
@@ -845,11 +897,11 @@ class App {
     _connectFromScan(raw) {
         const p = parsePairingPayload(raw);
         if (!p) {
-            if (this._welcomeError) this._welcomeError('That is not a pairing code.');
+            if (this._welcomeError) this._welcomeError('That is not a Son of Anton pairing code.');
             return false;
         }
         if (!p.token) {
-            if (this._welcomeError) this._welcomeError('That QR has no session token in it.');
+            if (this._welcomeError) this._welcomeError('That code has no pairing token. On your computer, open Mobile link and scan the code it shows.');
             return false;
         }
 
@@ -3601,12 +3653,12 @@ class App {
         // whole viewport and its own gesture handling.
         const control = document.getElementById('desktop-control');
         if (control) control.addEventListener('click', () => {
-            window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
+            openMacControl(this._proxyUrl('/preview/6081/'));
         });
         // The same page from the ⋯ sheet, so it is reachable without finding WEB.
         const macTile = document.getElementById('btn-mac');
         if (macTile) macTile.addEventListener('click', () => {
-            window.open(this._proxyUrl('/preview/6081/'), '_blank', 'noopener');
+            openMacControl(this._proxyUrl('/preview/6081/'));
         });
         // System health (⋯ → Health): temperature, heavy processes and the
         // monitor / auto-stop switches, from soa-health via /preview/6084/.
@@ -4260,7 +4312,7 @@ class App {
         // screen, so it never bounces out to the system browser.
         const scanBtn = document.getElementById('btn-scan');
         if (scanBtn) scanBtn.addEventListener('click', () => {
-            this._showWelcome('Scan the desktop QR code to reconnect this phone.');
+            this._showWelcome('Scan the code on your computer again to reconnect this phone.');
             this._openScanner();
         });
         const reloadBtn = document.getElementById('btn-reload-app');
@@ -5233,6 +5285,20 @@ class App {
             </div>`;
     }
 }
+
+// The /m/ welcome's viewfinder drawing: a schematic (window, sidebar strip,
+// its Mobile link label, a QR block), not a screenshot of the app.
+const WELCOME_VF_ART = `<svg class="welcome-vf-art" viewBox="0 0 320 200" focusable="false">
+    <rect class="vf-line" x="28" y="18" width="264" height="164" rx="10"/>
+    <path class="vf-line" d="M108 18v164"/>
+    <path class="vf-faint" d="M44 40h44M44 54h34M44 68h40"/>
+    <text class="vf-label" x="44" y="96">Mobile link</text>
+    <g transform="translate(44 106)">
+        <rect class="vf-qr-bg" width="52" height="52" rx="4"/>
+        <path class="vf-qr-ink" d="M6 6h14v14H6zM32 6h14v14H32zM6 32h14v14H6zM10 10v6h6v-6zM36 10v6h6v-6zM10 36v6h6v-6zM24 6h4v4h-4zM24 14h4v8h-4zM26 26h6v4h-6zM34 26h4v4h-4zM42 26h4v6h-4zM24 34h4v4h-4zM32 32h6v6h-6zM40 38h6v4h-6zM26 42h4v4h-4zM34 42h4v4h-4z"/>
+    </g>
+    <path class="vf-faint" d="M124 44h96M124 60h132M124 76h72M124 92h112M124 108h56"/>
+</svg>`;
 
 function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => (

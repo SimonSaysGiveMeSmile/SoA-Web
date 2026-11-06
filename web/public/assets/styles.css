@@ -2817,44 +2817,150 @@ html[data-theme="light"] .wiz-pair-err, html[data-theme="dim"] .wiz-pair-err { c
   .mwel-scan { animation: none; }
 }
 
-/* ── In-app QR camera overlay (shared shape with the /m/ companion) ──────
-   Lives here too because the root landing page loads only /assets/styles.css,
-   and the scanner it lazy-imports from /m/ ships no stylesheet of its own. */
-.qr-overlay { position: fixed; inset: 0; z-index: 9500; background: #000; overflow: hidden; }
+/* ── In-app QR camera overlay — SHARED: keep identical in /assets/styles.css
+   and /m/styles.css (the root landing lazy-imports /m/qrscan.js, which ships
+   no stylesheet). Literal colours on purpose: the overlay is appended to
+   <body>, outside every themed scope, and a lens is dark in daylight too.
+   Above the welcome page (10000), the pair sheet, /m/'s cloud finder (9600)
+   and diagnostics (9999): the scanner must never open behind its opener. */
+.qr-overlay {
+  position: fixed; inset: 0; z-index: 10500; overflow: hidden;
+  display: flex; flex-direction: column;
+  background: #0b1217; color: #fff;
+  font-family: 'Familjen Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Noto Sans CJK SC', sans-serif;
+  font-size: 15px; line-height: 1.45; font-weight: 400;
+  letter-spacing: 0; text-transform: none; text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+.qr-overlay * { box-sizing: border-box; }
+.qr-overlay.qr-enter { animation: qr-fade 240ms cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes qr-fade { from { opacity: 0; } to { opacity: 1; } }
 .qr-video {
   position: absolute; inset: 0; width: 100%; height: 100%;
   /* cover, not contain: a letterboxed preview makes people hold the phone
      further away than the focus distance the lens actually wants. */
   object-fit: cover;
 }
-.qr-mask {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  /* Dim everything but the reticle so the aim point is unmistakable. */
-  background: radial-gradient(ellipse 46% 26% at 50% 46%, transparent 0 99%, rgba(0, 0, 0, .55) 100%);
+.qr-overlay:not([data-state="live"]):not([data-state="hit"]) .qr-video { visibility: hidden; }
+.qr-top {
+  position: relative; z-index: 4;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 14px;
+  padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px));
 }
-.qr-reticle { position: relative; width: min(64vw, 260px); aspect-ratio: 1; margin-bottom: 8vh; }
-.qr-reticle i { position: absolute; width: 30px; height: 30px; border: 2px solid var(--soa-accent, #aacfd1); }
-.qr-reticle i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
-.qr-reticle i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
-.qr-reticle i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
-.qr-reticle i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
-.qr-overlay.qr-hit .qr-reticle i { border-color: #5dbd5a; }
-.qr-overlay.qr-hit::after { content: ''; position: absolute; inset: 0; background: rgba(93, 189, 90, .25); }
+.qr-title {
+  margin: 0; max-width: 24em;
+  font: inherit; font-size: 17px; font-weight: 600; line-height: 1.25; color: #fff;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, .45);
+}
+.qr-stage {
+  position: relative; z-index: 1; flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; justify-content: center; padding: 12px 0;
+}
+/* The dim mask IS the reticle's own shadow, so the bright hole and the
+   corners can never drift apart. */
+.qr-reticle {
+  position: relative; flex: 0 0 auto;
+  width: min(68vmin, 300px); aspect-ratio: 1; border-radius: 20px;
+  box-shadow: 0 0 0 200vmax rgba(4, 8, 12, .58);
+}
+.qr-reticle i {
+  position: absolute; width: 34px; height: 34px;
+  border: 4px solid #aacfd1;
+  transition: transform 180ms cubic-bezier(.2, .8, .2, 1), border-color 180ms;
+}
+.qr-reticle i:nth-child(1) { top: -2px; left: -2px; border-right: 0; border-bottom: 0; border-top-left-radius: 20px; }
+.qr-reticle i:nth-child(2) { top: -2px; right: -2px; border-left: 0; border-bottom: 0; border-top-right-radius: 20px; }
+.qr-reticle i:nth-child(3) { bottom: -2px; left: -2px; border-right: 0; border-top: 0; border-bottom-left-radius: 20px; }
+.qr-reticle i:nth-child(4) { bottom: -2px; right: -2px; border-left: 0; border-top: 0; border-bottom-right-radius: 20px; }
+.qr-check {
+  position: absolute; left: 50%; top: 50%; width: 22px; height: 40px;
+  margin: -26px 0 0 -11px;
+  border-right: 5px solid #5fd49a; border-bottom: 5px solid #5fd49a; border-radius: 2px;
+  transform: rotate(45deg); opacity: 0; transition: opacity 180ms;
+}
+.qr-overlay[data-state="hit"] .qr-reticle i { border-color: #5fd49a; }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(1) { transform: translate(6px, 6px); }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(2) { transform: translate(-6px, 6px); }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(3) { transform: translate(6px, -6px); }
+.qr-overlay[data-state="hit"] .qr-reticle i:nth-child(4) { transform: translate(-6px, -6px); }
+.qr-overlay[data-state="hit"] .qr-check { opacity: 1; }
+.qr-hint {
+  position: relative; z-index: 2;
+  margin: 0 auto; max-width: 34em;
+  padding: 4px max(24px, env(safe-area-inset-right, 0px)) 8px max(24px, env(safe-area-inset-left, 0px));
+  text-align: center; font-size: 15px; line-height: 1.45; color: rgba(255, 255, 255, .86);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, .5);
+}
+.qr-hint--err { color: #fff; }
+.qr-overlay[data-state="hit"] .qr-hint { color: #5fd49a; font-weight: 600; }
 .qr-bar {
-  position: absolute; left: 0; right: 0; bottom: 0;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
-  background: linear-gradient(transparent, rgba(0, 0, 0, .75) 40%);
+  position: relative; z-index: 2;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px;
+  min-height: 60px;
+  padding: 8px 16px max(16px, env(safe-area-inset-bottom, 0px));
 }
+/* Over moving video, legibility wins over glass: a smoke pill, not a tint. */
 .qr-btn {
-  flex: 0 0 auto; min-height: 40px; padding: 0 16px; cursor: pointer;
-  font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em;
-  color: #dfe6e6; background: rgba(255, 255, 255, .12);
-  border: 1px solid rgba(255, 255, 255, .2); border-radius: 5px;
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 0 18px; cursor: pointer;
+  font: inherit; font-size: 15px; font-weight: 600; line-height: 1.2;
+  letter-spacing: 0; text-transform: none; text-shadow: none;
+  color: #fff; background: rgba(8, 12, 16, .62);
+  border: 1px solid rgba(255, 255, 255, .18); border-radius: 999px;
+  transition: transform 90ms, background 120ms;
 }
-.qr-btn.on { background: var(--soa-accent, #aacfd1); color: #000; }
-.qr-hint { flex: 1 1 auto; text-align: center; font-family: var(--font-mono); font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, .8); }
-.qr-hint--err { color: #ff8a8a; }
+.qr-btn:active { transform: scale(.985); }
+/* Out-specify the packs' [data-ui] button { font-family } and /m/ skins' lowercase. */
+.qr-overlay .qr-btn { font-family: inherit; letter-spacing: 0; text-transform: none; }
+.qr-btn.on, .qr-btn[aria-pressed="true"] { background: #aacfd1; color: #061317; border-color: #aacfd1; }
+.qr-btn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.qr-btn[hidden] { display: none !important; }
+.qr-overlay:not([data-state="live"]) .qr-bar { visibility: hidden; }
+/* Denied / no camera / could not start: an instruction, not an alarm. */
+.qr-state {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 120px max(24px, env(safe-area-inset-right, 0px)) max(32px, env(safe-area-inset-bottom, 0px)) max(24px, env(safe-area-inset-left, 0px));
+  background: #0b1217;
+  animation: qr-fade 120ms ease-out both;
+}
+.qr-state[hidden] { display: none; }
+.qr-state > * { width: 100%; max-width: 34em; margin-left: auto; margin-right: auto; }
+.qr-state-title { margin: 0 auto 10px; font: inherit; font-size: 22px; font-weight: 600; line-height: 1.25; color: #fff; }
+.qr-state-p { margin: 0 auto; font-size: 17px; line-height: 1.5; color: rgba(255, 255, 255, .86); }
+.qr-state-detail {
+  margin: 12px auto 0; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; color: #8fa9ac; overflow-wrap: anywhere;
+}
+.qr-state-actions { display: flex; flex-direction: column; gap: 10px; margin: 24px auto 0; }
+.qr-state-actions .qr-btn { width: 100%; min-height: 48px; }
+.qr-state-actions .qr-primary { min-height: 52px; background: #aacfd1; color: #061317; border-color: #aacfd1; font-size: 17px; }
+.qr-overlay:is([data-state="denied"], [data-state="nocam"], [data-state="error"]) :is(.qr-stage, .qr-hint) { visibility: hidden; }
+@media (min-width: 700px) and (min-height: 600px) {
+  .qr-reticle { width: min(52vmin, 360px); }
+  .qr-title { font-size: 20px; }
+  .qr-hint { font-size: 17px; }
+  .qr-state-actions { flex-direction: row; flex-wrap: wrap; }
+  .qr-state-actions .qr-btn { width: auto; flex: 0 1 auto; padding: 0 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qr-overlay.qr-enter, .qr-state { animation: none; }
+  .qr-reticle, .qr-reticle i, .qr-check, .qr-btn { transition: none !important; }
+  .qr-btn:active { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .qr-btn { background: #0b1217; border-color: rgba(255, 255, 255, .5); }
+  .qr-title, .qr-hint { text-shadow: none; }
+  .qr-hint { background: #0b1217; border-radius: 8px; padding-top: 6px; }
+}
+@media (forced-colors: active) {
+  .qr-overlay, .qr-state { background: Canvas; color: CanvasText; }
+  .qr-title, .qr-hint, .qr-state-title, .qr-state-p { color: CanvasText; }
+  .qr-reticle { box-shadow: none; outline: 3px solid Highlight; outline-offset: 0; }
+  .qr-reticle i { border-color: Highlight; }
+  .qr-btn, .qr-state-actions .qr-primary { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; forced-color-adjust: none; }
+  .qr-btn:focus-visible { outline-color: Highlight; }
+}
 
 /* ── New-tab folder picker ─────────────────────────────────────── */
 .soa-folder-picker { width: min(560px, calc(100vw - 32px)); }
@@ -3679,15 +3785,201 @@ html[data-theme="light"] .wiz-pair-err, html[data-theme="dim"] .wiz-pair-err { c
   mix-blend-mode: multiply;
 }
 
-/* Welcome on a phone or tablet (data-welcome-touch): the same page, but the
-   setup card pairs this device with the computer instead of installing here.
-   The install steps and the in-browser sandbox need a desktop browser. */
-.wiz-touch { display: none; }
+/* Welcome on a phone or tablet (data-welcome-touch) — welcome-touch-20261105.
+   The same page, but pairing comes first: the setup card moves above the
+   story (index.html moves #wiz after .wel-top) and its top IS a viewfinder —
+   a dark lens with the four aiming corners and a schematic of the computer's
+   sidebar QR. Everything else is quiet: one heading, one how-to line, one
+   grouped list of other ways in. All of it is scoped to the touch flag, so the
+   desktop welcome is untouched. The install steps and the in-browser sandbox
+   need a desktop browser. */
+.wiz-touch, .wel-story-h, .wiz-field-label { display: none; }
+.welcome {
+    --w-lens: #0b1217;
+    --w-glass: rgba(156, 190, 214, 0.06);
+    --w-glass-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.65);
+}
+html[data-theme="light"] .welcome,
+html[data-theme="dim"] .welcome {
+    --w-glass: rgba(170, 197, 217, 0.08);
+    --w-glass-shadow: 0 1px 2px rgba(16, 40, 48, 0.05), 0 14px 32px -14px rgba(16, 40, 48, 0.18);
+}
+@media (prefers-color-scheme: light) {
+    html[data-welcome-auto] .welcome {
+        --w-glass: rgba(170, 197, 217, 0.08);
+        --w-glass-shadow: 0 1px 2px rgba(16, 40, 48, 0.05), 0 14px 32px -14px rgba(16, 40, 48, 0.18);
+    }
+}
 :root[data-welcome-touch="1"] .wiz-touch { display: block; }
-:root[data-welcome-touch="1"] .wiz-touch .wiz-primary { width: 100%; margin-top: 12px; }
-:root[data-welcome-touch="1"] .wiz-touch .wiz-alt { margin-top: 14px; }
 :root[data-welcome-touch="1"] #wiz .wiz-steps,
-:root[data-welcome-touch="1"] .wel-sandbox { display: none; }
+:root[data-welcome-touch="1"] .wel-sandbox,
+:root[data-welcome-touch="1"] .wel-jump { display: none; }
+
+/* The card is the page here, not a box on it. */
+:root[data-welcome-touch="1"] #wiz {
+    background: none; border: 0; border-radius: 0; padding: 4px 0 40px;
+    max-width: 100%; margin: 0;
+}
+:root[data-welcome-touch="1"] #wiz .wiz-card-title {
+    margin: 0 0 6px; font-size: 28px; font-weight: 600; line-height: 1.12; letter-spacing: -0.01em;
+    color: var(--w-ink); text-wrap: balance;
+}
+html[lang="zh"][data-welcome-touch="1"] #wiz .wiz-card-title { line-height: 1.25; letter-spacing: 0; }
+.wiz-touch-lead { font-size: 17px; line-height: 1.5; color: var(--w-quiet); }
+
+/* ── The viewfinder: the whole well is the scan button ── */
+.wiz-vf {
+    position: relative; display: flex; flex-direction: column; align-items: stretch;
+    width: 100%; margin: 16px 0 0; padding: 14px 14px 14px;
+    background: var(--w-lens); color: #d6e6e8;
+    border: 0; border-radius: 20px; cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(170, 207, 209, 0.12);
+    font: inherit; text-align: center;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 90ms ease-out;
+}
+.wiz-vf:active { transform: scale(0.985); }
+.wiz-vf-frame {
+    position: relative; display: block; flex: 1 1 auto;
+    aspect-ratio: 16 / 10; margin: 4px 4px 0;
+}
+.wiz-vf-frame > i { position: absolute; width: 30px; height: 30px; border: 4px solid #aacfd1; }
+.wiz-vf-frame > i:nth-of-type(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 14px; }
+.wiz-vf-frame > i:nth-of-type(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 14px; }
+.wiz-vf-frame > i:nth-of-type(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 14px; }
+.wiz-vf-frame > i:nth-of-type(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 14px; }
+/* A schematic, not a screenshot: a window, a sidebar strip, its Mobile link
+   label and a QR block, in Ink at 40% on the lens. */
+.wiz-vf-art { position: absolute; inset: 12% 10%; width: 80%; height: 76%; overflow: visible; }
+.wiz-vf-art .vf-line { fill: none; stroke: rgba(214, 230, 232, 0.4); stroke-width: 2; }
+.wiz-vf-art .vf-faint { fill: none; stroke: rgba(214, 230, 232, 0.22); stroke-width: 4; stroke-linecap: round; }
+.wiz-vf-art .vf-label { fill: rgba(214, 230, 232, 0.72); font-family: var(--w-sans); font-size: 11px; font-weight: 600; }
+.wiz-vf-art .vf-qr-bg { fill: rgba(214, 230, 232, 0.12); stroke: rgba(170, 207, 209, 0.7); stroke-width: 1.5; }
+.wiz-vf-art .vf-qr-ink { fill: rgba(214, 230, 232, 0.62); fill-rule: evenodd; }
+.wiz-vf-pill {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 52px; margin-top: 14px; padding: 8px 20px;
+    border-radius: 999px; background: #aacfd1; color: #061317;
+    font-size: 17px; font-weight: 600; line-height: 1.2;
+    transition: background 120ms;
+}
+@media (hover: hover) { .wiz-vf:hover .wiz-vf-pill { background: #c9e3e5; } }
+#welcome .wiz-vf:focus-visible { outline: 2px solid var(--w-accent); outline-offset: 3px; border-radius: 20px; }
+
+.wiz-touch-how { margin-top: 12px; font-size: 15px; line-height: 1.5; color: var(--w-quiet); }
+.wiz-touch-tablet { display: none; }
+.wiz-touch-h { margin: 28px 0 10px; font-size: 17px; font-weight: 600; line-height: 1.3; color: var(--w-ink); }
+
+/* ── Other ways to connect: one glass group, rows with a state chevron ── */
+.wiz-ways {
+    border-radius: 16px; overflow: hidden;
+    background: var(--w-glass); box-shadow: var(--w-glass-shadow);
+}
+.wiz-way {
+    position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    width: 100%; min-height: 56px; margin: 0; padding: 10px 44px 10px 16px;
+    background: none; border: 0; border-radius: 0; cursor: pointer;
+    color: var(--w-ink); font: inherit; font-size: 17px; font-weight: 500; line-height: 1.3;
+    text-align: left; text-decoration: none;
+}
+.welcome a.wiz-way { color: var(--w-ink); }
+/* Inset hairline between rows (not above the first). */
+.wiz-ways > * + .wiz-way::before {
+    content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--w-line);
+}
+.wiz-way::after {
+    content: ""; position: absolute; right: 20px; top: 50%;
+    width: 8px; height: 8px; margin-top: -4px;
+    border-right: 2px solid var(--w-accent); border-bottom: 2px solid var(--w-accent);
+    transform: rotate(-45deg); transition: transform 150ms;
+}
+.wiz-way[aria-expanded="true"]::after { transform: rotate(45deg); }
+@media (hover: hover) { .wiz-way:hover { background: var(--w-line); } }
+.wiz-way:active { background: var(--w-line); }
+#welcome .wiz-way:focus-visible { outline-offset: -3px; border-radius: 16px; }
+.wiz-way-panel { padding: 2px 16px 16px; }
+:root[data-welcome-touch="1"] #wiz-pair-manual { margin: 0; }
+:root[data-welcome-touch="1"] #wiz-pair-manual > summary { display: none; }
+:root[data-welcome-touch="1"] .wiz-field-label {
+    display: block; margin: 6px 0 4px; font-size: 14px; font-weight: 500; color: var(--w-quiet);
+}
+:root[data-welcome-touch="1"] .wiz-way-panel .welcome-cmdwrap { flex-wrap: wrap; margin-top: 0; }
+:root[data-welcome-touch="1"] .wiz-way-panel .welcome-cmdwrap > .wiz-field-label { flex: 1 1 100%; }
+:root[data-welcome-touch="1"] .wiz-way-panel .wiz-pair-url {
+    min-height: 48px; font-size: 16px; background: var(--w-panel);   /* 16px: iOS does not zoom */
+}
+:root[data-welcome-touch="1"] .wiz-way-panel #wiz-pair-url { font-family: var(--w-mono); font-size: 15px; }
+:root[data-welcome-touch="1"] .wiz-way-panel .welcome-copy {
+    min-height: 48px; border-color: var(--w-accent); background: var(--w-accent); color: var(--w-on-accent); font-weight: 600;
+}
+:root[data-welcome-touch="1"] .wiz-way-panel .wiz-pair-pwrow { margin-top: 10px; }
+/* Connect sits under both fields (index.html moves it there on touch). */
+:root[data-welcome-touch="1"] .wiz-way-panel .wiz-way-go { width: 100%; margin-top: 12px; }
+:root[data-welcome-touch="1"] .wiz-way-panel .wiz-pair-err { margin-top: 10px; color: var(--w-ink); font-size: 15px; }
+
+.wiz-touch-foot { display: flex; flex-direction: column; align-items: flex-start; gap: 0; margin-top: 16px; }
+.wiz-touch-foot .wiz-alt { margin-top: 0; width: 100%; }
+.wiz-touch-foot .wiz-alt > summary, .wiz-touch-foot .wiz-link { font-size: 15px; color: var(--w-accent); }
+.wiz-touch-foot .wiz-alt > summary::before { display: none; }
+.wiz-touch-foot .wiz-alt .wiz-p { font-size: 15px; color: var(--w-quiet); }
+
+/* The story below the pair block. */
+:root[data-welcome-touch="1"] .wel-story-h {
+    display: block; padding-top: 28px; margin: 0 0 20px; border-top: 1px solid var(--w-line);
+    font-size: 17px; font-weight: 600; color: var(--w-quiet); scroll-margin-top: 16px;
+}
+:root[data-welcome-touch="1"] .wel-story-h:focus { outline: none; }
+
+/* Tablet: tablet type, a centred 560px column. */
+@media (min-width: 700px) {
+    :root[data-welcome-touch="1"] #wiz { max-width: 560px; margin: 8px auto 0; padding-bottom: 56px; }
+    :root[data-welcome-touch="1"] #wiz .wiz-card-title { font-size: 36px; }
+    :root[data-welcome-touch="1"] .wiz-touch-lead { font-size: 18px; }
+    :root[data-welcome-touch="1"] .wiz-vf { padding: 20px; }
+    :root[data-welcome-touch="1"] .wiz-vf-frame { aspect-ratio: 4 / 3; margin: 4px 8px 0; }
+    :root[data-welcome-touch="1"] .wiz-vf-pill { align-self: center; width: 320px; max-width: 100%; margin-top: 18px; }
+    :root[data-welcome-touch="1"] .wiz-touch-tablet { display: inline; }
+    :root[data-welcome-touch="1"] .wiz-touch-foot { flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 0 24px; }
+    :root[data-welcome-touch="1"] .wiz-touch-foot .wiz-alt { width: auto; flex: 0 1 auto; }
+    :root[data-welcome-touch="1"] .wiz-touch-foot .wiz-alt[open] { flex-basis: 100%; order: 2; }
+    :root[data-welcome-touch="1"] .wel-story-h { max-width: 560px; margin-left: auto; margin-right: auto; }
+    :root[data-welcome-touch="1"] .wiz-way-panel .welcome-cmdwrap { flex-direction: row; }
+}
+/* Tablet landscape: the viewfinder takes 7/12, everything above the fold. */
+@media (min-width: 1000px) and (orientation: landscape) {
+    :root[data-welcome-touch="1"] #wiz {
+        display: grid; max-width: 1140px; margin-top: 8px;
+        grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: 48px;
+        grid-template-rows: auto auto auto auto auto 1fr;
+        align-items: start;
+    }
+    :root[data-welcome-touch="1"] .wiz-touch { display: contents; }
+    :root[data-welcome-touch="1"] #wiz .wiz-card-title { grid-column: 1; font-size: 40px; }
+    :root[data-welcome-touch="1"] #wiz > .wiz-touch > * { grid-column: 1; }
+    :root[data-welcome-touch="1"] #wiz > .wiz-touch > .wiz-vf { grid-column: 2; grid-row: 1 / span 6; margin-top: 0; max-height: 560px; }
+    :root[data-welcome-touch="1"] .wiz-vf-frame { aspect-ratio: 4 / 3; max-height: 440px; }
+    :root[data-welcome-touch="1"] .wiz-touch-h { margin-top: 24px; }
+    :root[data-welcome-touch="1"] .wel-story-h { max-width: none; }
+}
+
+/* Glass falls back to a solid surface where transparency is unwelcome. */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .wiz-ways { background: var(--w-panel); border: 1px solid var(--w-line-strong); box-shadow: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .wiz-vf, .wiz-vf-pill, .wiz-way::after { transition: none; }
+    .wiz-vf:active { transform: none; }
+}
+@media (forced-colors: active) {
+    .wiz-vf { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }
+    .wiz-vf-frame > i { border-color: CanvasText; }
+    .wiz-vf-art .vf-line, .wiz-vf-art .vf-faint, .wiz-vf-art .vf-qr-bg { stroke: CanvasText; }
+    .wiz-vf-art .vf-label, .wiz-vf-art .vf-qr-ink { fill: CanvasText; }
+    .wiz-vf-pill, .wiz-way { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; forced-color-adjust: none; }
+    .wiz-ways { background: Canvas; border: 1px solid CanvasText; box-shadow: none; }
+    .wiz-way::after { border-color: ButtonText; }
+    #welcome .wiz-vf:focus-visible, #welcome .wiz-way:focus-visible { outline-color: Highlight; }
+}
 
 /* ── Tab manager (search · sort · archive) — tab-organizer-20261105 ──────
    Topbar button before the strip + a popover under it. Per-device view

@@ -94,6 +94,9 @@ async function jget(url) {
     if (!r.ok) throw new Error(`${r.status} ${url}`);
     return r.json();
 }
+// /api/pair/password answers flat ({ ok, enabled, login, … }); older code
+// read it as { data }, so the password row never rendered. Accept both.
+const pwBody = (r) => (r && r.data && typeof r.data === 'object' ? r.data : r) || {};
 async function jpost(url, body) {
     const r = await fetch(api(url), {
         method: 'POST', credentials: 'include',
@@ -2082,6 +2085,25 @@ class MobileQRWidget extends Widget {
         );
     }
 
+    _setPw(data) {
+        const prev = this._pw;
+        this._pw = {
+            enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login,
+            local: typeof data.local === 'boolean' ? data.local : (prev ? prev.local : undefined),
+        };
+    }
+
+    // Only the Mac itself may set, change or remove the password (the daemon
+    // refuses the rest). The daemon says which we are; an older daemon does
+    // not, so fall back to "is the backend this machine's loopback".
+    _pwLocal() {
+        if (this._pw && typeof this._pw.local === 'boolean') return this._pw.local;
+        try {
+            const b = (window.__SOA_WEB__ || {})._resolvedBackend || location.origin;
+            return /^(127\.0\.0\.1|localhost|\[::1\])$/.test(new URL(b).hostname);
+        } catch (_) { return false; }
+    }
+
     /**
      * The pairing password, right under the QR that hands out the token.
      *
@@ -2114,15 +2136,15 @@ class MobileQRWidget extends Widget {
             const save = async () => {
                 const value = input.value;
                 try {
-                    const { data } = await jpost('/api/pair/password', { password: value });
-                    this._pw = { enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login };
+                    const data = pwBody(await jpost('/api/pair/password', { password: value }));
+                    this._setPw(data);
                     this._pwEditing = false;
                     this._pwError = null;
                     this._render(this._lastState, this._lastSnap);
                 } catch (e) {
                     // 400 = the server's own rule (too short). Anything else is
                     // a transport problem, and saying "wrong" would be a lie.
-                    err(/^400/.test(e.message) ? 'Too short — use at least 4 characters.' : 'Could not reach the daemon.');
+                    err(/^400/.test(e.message) ? 'Too short — use at least 4 characters.' : /^403/.test(e.message) ? 'Only the Mac itself can change the password.' : 'Could not reach the daemon.');
                 }
             };
             // The widget re-renders every 6s; that would wipe what is being
@@ -2145,14 +2167,34 @@ class MobileQRWidget extends Widget {
 
         const remove = async () => {
             try {
-                const { data } = await jpost('/api/pair/password', { clear: true });
-                this._pw = { enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login };
+                const data = pwBody(await jpost('/api/pair/password', { clear: true }));
+                this._setPw(data);
                 this._render(this._lastState, this._lastSnap);
             } catch (_) { err('Could not reach the daemon.'); }
         };
 
-        return $el('div', { class: `mqr-pw ${pw.enabled ? 'mqr-pw-on' : 'mqr-pw-off'}` }, [
-            $el('span', { class: 'mqr-pw-state', text: pw.enabled ? 'PASSWORD ON' : 'PASSWORD OFF' }),
+        const stateText = pw.enabled ? 'PASSWORD ON' : 'PASSWORD OFF';
+        // A remote session sees the state, never the controls.
+        if (!this._pwLocal()) {
+            return $el('div', { class: `mqr-pw ${pw.enabled ? 'mqr-pw-on' : 'mqr-pw-off'}` }, [
+                $el('span', { class: 'mqr-pw-state', text: stateText }),
+                $el('div', { class: 'mqr-note mqr-pw-remote', text: 'Set or change it on the Mac itself.' }),
+            ]);
+        }
+        // On the Mac: one quiet line under the QR; the controls open on click.
+        const reveal = $el('button', {
+            class: 'mqr-pw-reveal', type: 'button',
+            'aria-expanded': this._pwOpen ? 'true' : 'false',
+            title: this._pwOpen ? 'Hide password settings' : 'Show password settings',
+            onclick: () => { this._pwOpen = !this._pwOpen; this._render(this._lastState, this._lastSnap); },
+        }, [
+            $el('span', { class: 'mqr-pw-state', text: stateText }),
+            $el('span', { class: 'mqr-pw-chev', 'aria-hidden': 'true', text: this._pwOpen ? '\u25BE' : '\u25B8' }),
+        ]);
+        if (!this._pwOpen) return $el('div', { class: `mqr-pw ${pw.enabled ? 'mqr-pw-on' : 'mqr-pw-off'}` }, [reveal]);
+
+        return $el('div', { class: `mqr-pw mqr-pw-open ${pw.enabled ? 'mqr-pw-on' : 'mqr-pw-off'}` }, [
+            reveal,
             // Carried here too, not just in the editor: a REMOVE that fails to
             // reach the daemon must say so rather than look like it worked.
             $el('div', { class: 'mqr-pw-err', text: '', hidden: '' }),
@@ -2175,8 +2217,8 @@ class MobileQRWidget extends Widget {
                         : 'Let a phone or tablet reconnect with this desktop\'s link + the password alone — no QR re-scan after a dropped link.',
                     onclick: async () => {
                         try {
-                            const { data } = await jpost('/api/pair/password', { login: !pw.login });
-                            this._pw = { enabled: !!data.enabled, updatedAt: data.updatedAt || null, login: !!data.login };
+                            const data = pwBody(await jpost('/api/pair/password', { login: !pw.login }));
+                            this._setPw(data);
                             this._render(this._lastState, this._lastSnap);
                         } catch (_) { err('Could not reach the daemon.'); }
                     },
@@ -2194,7 +2236,7 @@ class MobileQRWidget extends Widget {
                 jget('/api/pair/status'),
                 jget('/api/pair/password').catch(() => null),   // older backend: just hide the row
             ]);
-            if (pw && pw.data) this._pw = { enabled: !!pw.data.enabled, updatedAt: pw.data.updatedAt || null, login: !!pw.data.login };
+            if (pw) this._setPw(pwBody(pw));
             this._render(status.data.state, status.data);
         } catch (e) { /* ignore polling failures */ }
     }
