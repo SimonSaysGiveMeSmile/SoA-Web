@@ -23,7 +23,7 @@ import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=web-20261102';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
-import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-20261005b';
+import { mountContextPanel } from '/assets/contextPanel.js?v=code-20261106b';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=web-20261102';
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
 import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=web-20261102';
@@ -1876,6 +1876,8 @@ class Shell {
             try { localStorage.setItem('soa_context_off', off ? '1' : '0'); } catch (_) {}
             this._fitActive();
         };
+        // The context panel's Code shortcut opens the panel through this.
+        this._setContextOff = setContextOff;
         // Reflect the initial state without persisting it: an unvisited phone
         // shouldn't have "closed" written into localStorage as a preference.
         if (ctxPull) ctxPull.setAttribute('aria-expanded', ctxOff ? 'false' : 'true');
@@ -8384,6 +8386,11 @@ async function bootServerMode({ backend, token }) {
     // changes instead of ever mounting a second one.
     mountContextPanel($('#context'), {
         backend,
+        // The Code view reaches the file service through the daemon's
+        // /preview/ proxy with the same pairing token + unlock.
+        token,
+        unlock: UNLOCK,
+        showPanel: () => { if (shell._setContextOff && $('#context')?.closest('.stage')?.classList.contains('no-context')) shell._setContextOff(false); },
         getCwd: () => shell._tabCwd.get(shell.activeId) || null,
         // The message queue is per TAB, not per workspace: three tabs on one
         // repo are three agents, each with its own turn to wait for.

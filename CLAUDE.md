@@ -458,6 +458,37 @@ Auto-start plist:
 `deploy/launchd/com.soa-web.desktop-remote.plist`. Log:
 `~/.soa-web-local/logs/desktop-remote.log`.
 
+## Code panel (soa-code)
+
+The dashboard's right panel has a **Context | Code** switch (Mod-Shift-E opens
+Code from anywhere, the terminal included); the phone companion has a **CODE**
+view in the bottom bar. Both mount `web/public/assets/codePanel.js` lazily
+(CodeMirror 6 is vendored as one ES module in `assets/vendor/codemirror-6/`,
+rebuild steps in its `BUILD.md`) and follow the active tab's cwd. The code view
+may widen the panel to 60% of the window (Widen, or a drag past the canvas cap).
+
+The browser never touches the disk. `scripts/soa-code` is a loopback file
+service on `127.0.0.1:6083` (`SOA_CODE_PORT`), reached only through the
+daemon's `/preview/6083/` proxy — same tunnel, same pairing gate (token +
+password), **no daemon restart**. Policy: every path is realpath'd and must
+stay inside `SOA_CODE_ROOTS` (colon-separated; default the home directory), so
+a symlink cannot walk out; `~/.ssh`, `~/.gnupg`, `~/.aws`, the keychains and
+the SoA state dir are never read; writes are also refused under `~/Library`
+and inside any `.git`. Defence in depth on top of the proxy: `Host` must be
+`127.0.0.1:<port>` / `localhost:<port>` (DNS rebinding), every `/api/*` request
+must carry `x-soa-code: 1` (a custom header forces a CORS preflight that is
+never answered, so no other origin can even send a write), and an `Origin`, when
+present, must be loopback/an IP literal, this Mac's name, `s0a.app`, the native
+shells, the current tunnel host, or `SOA_CODE_ORIGINS`. Saves carry the sha the
+buffer was loaded from (a file that moved on is refused, never silently overwritten) and are
+sent as **POST with a `text/plain` body**: the daemon's CORS preflight allows
+only GET/POST, and its global JSON parser would consume and 16 KB-cap an
+`application/json` body before the proxy saw it. Files over 2 MB or binary are
+not opened. The companion's service worker never caches `/preview/`.
+Auto-start plist: `deploy/launchd/com.soa-web.code.plist`. Log:
+`~/.soa-web-local/logs/code.log`. Tests: `server/test/soaCode.test.js`.
+Design: `docs/code-panel.md`.
+
 ## Backup doors (soa-doors)
 
 The primary tunnel can die (a free ngrok over its monthly quota, a quick

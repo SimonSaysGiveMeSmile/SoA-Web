@@ -7,7 +7,7 @@
  */
 
 // Scope-relative shell cache supports both standalone / and hosted /m/ apps.
-const VERSION = 'soa-mobile-welcome-touch-20261105-' + new URL(self.registration.scope).pathname;
+const VERSION = 'soa-mobile-code-20261106b-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
     '/index.html',
@@ -82,6 +82,9 @@ self.addEventListener('fetch', (e) => {
     if (url.origin !== scope.origin || !url.pathname.startsWith(scope.pathname)) return;
     // Don't cache API or WS upgrade calls
     if (url.pathname.startsWith('/api/') || url.pathname === '/ws') return;
+    // Proxied local services (code, previews) are live data: a cache-first
+    // copy of /preview/6083/api/file would hand back stale code.
+    if (url.pathname.startsWith('/preview/')) return;
 
     if (req.mode === 'navigate' || req.headers.get('accept')?.includes('text/html')) {
         e.respondWith((async () => {
