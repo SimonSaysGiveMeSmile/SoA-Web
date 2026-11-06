@@ -298,6 +298,7 @@
 <div id="tip" role="status" aria-live="polite"></div>
 <input id="kb" type="text" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="true" aria-label="System keyboard input">
 <nav id="strip" aria-label="Remote controls">
+  <button class="sb" id="b-back" aria-label="Back to Son of Anton" title="Back to Son of Anton" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 4 6.5 10l6 6"/></svg></button>
   <button class="sb" id="b-conn" aria-haspopup="dialog" aria-label="Connection and stream quality"><span class="dot" id="conn-dot"></span><span id="conn-t">Connecting</span></button>
   <button class="sb" id="b-res" aria-haspopup="dialog" aria-label="Mac resolution"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="3.5" width="16" height="10.5" rx="1.5"/><path d="M7 17h6M10 14v3"/></svg><span class="lbl" id="res-t">—</span></button>
   <span class="grow" aria-hidden="true"></span>
@@ -309,7 +310,7 @@
   <button class="sb ovonly" id="b-pad" aria-pressed="false" aria-label="Show trackpad" title="Trackpad"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/></svg></button>
   <button class="sb" id="b-ime" aria-label="System keyboard, for long text and dictation" title="System keyboard (dictation, autocorrect)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 15.5 7 4.5l4 11M4.4 12h5.2"/><path d="M13 9.5c.6-.6 1.3-.9 2.1-.9 1.3 0 2 .7 2 2v4.9M17.1 12.6c-2.6 0-4.2.6-4.2 1.7 0 .8.6 1.3 1.6 1.3 1.6 0 2.6-1 2.6-2.4"/></svg></button>
   <button class="sb" id="b-air" aria-pressed="false" aria-label="Air trackpad (experimental, uses the camera)" title="Air trackpad: point with your hand (camera, experimental)" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.2 10.4V4.6a1.25 1.25 0 0 1 2.5 0v4.8M9.7 9.2V3.4a1.25 1.25 0 0 1 2.5 0v5.9M12.2 9.4V5a1.25 1.25 0 0 1 2.5 0v6.2c0 3.4-2.2 5.6-5.2 5.6H8.7c-1.5 0-2.8-.7-3.6-1.9l-2.4-3.6a1.2 1.2 0 0 1 1.9-1.4l2.6 2.4"/></svg><span class="rec" aria-hidden="true"></span></button>
-  <button class="sb ovonly" id="b-full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 7.5V3h4.5M17 7.5V3h-4.5M3 12.5V17h4.5M17 12.5V17h-4.5"/></svg></button>
+  <button class="sb" id="b-full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 7.5V3h4.5M17 7.5V3h-4.5M3 12.5V17h4.5M17 12.5V17h-4.5"/></svg></button>
 </nav>
 <section id="air" aria-label="Air trackpad (experimental)" hidden>
   <div class="hd"><span class="rec" aria-hidden="true"></span><strong>Camera on</strong><span class="beta">beta</span></div>
@@ -1126,7 +1127,9 @@
     const fo = $('fz-other'); fo.style.left = (st.l + st.w / 2) + 'px'; fo.style.top = (st.t + 8 + (slowOn && !stack ? SLOW_H + 6 : 0)) + 'px'; fo.style.maxWidth = Math.max(160, st.w - 16) + 'px';
     tip.style.top = (st.t + (slowOn && !stack ? SLOW_H + 14 : 8)) + 'px';
     stageRect = stage.getBoundingClientRect();
-    $('b-full').hidden = stack || !(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    // Inside a Home Screen app there are no browser bars left to hide; anywhere
+    // else the button stays, and explains itself where the API is missing (iOS).
+    $('b-full').hidden = inHomeScreenApp() && !canFullscreen();
     syncToggles();
     lay = { kind: stack ? 'stack' : 'overlay', rail: root.dataset.rail, area, vw: innerWidth, vh: innerHeight };
     onResize();
@@ -1649,11 +1652,34 @@
     }
   });
   $('b-ime').addEventListener('click', () => { if (document.activeElement === kb) kb.blur(); else kb.focus(); });
-  $('b-full').addEventListener('click', () => { const el = document.documentElement; if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document); else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el); });
+  $('b-full').addEventListener('click', () => {
+    const el = document.documentElement;
+    if (document.fullscreenElement || document.webkitFullscreenElement) { (document.exitFullscreen || document.webkitExitFullscreen)?.call(document); return; }
+    if (!canFullscreen()) { showTip(FS_HELP, 7000); return; }
+    try {
+      const p = (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+      if (p && p.catch) p.catch(() => showTip(FS_HELP, 7000));
+    } catch (_) { showTip(FS_HELP, 7000); }
+  });
+  // Opened in place from the Home Screen app: there is no browser back button.
+  if (inHomeScreenApp() && history.length > 1) {
+    $('b-back').hidden = false;
+    $('b-back').addEventListener('click', () => history.back());
+  };
   // Strip and keys must not take focus from the field, or the soft keyboard closes mid-shortcut.
   for (const el of [strip, deck]) el.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
   $('slow').addEventListener('click', () => { slowHidden = true; $('slow').hidden = true; layout(); });
 
+  // ── full screen ───────────────────────────────────────────────────────
+  // iOS gives a web page no full-screen API outside a Home Screen app (and the
+  // in-app browser a Home Screen app opens links in has none either), so the
+  // way to lose the bars there is to open this page inside that app.
+  const FS_HELP = 'This browser can\u2019t hide its bars. On iPhone or iPad: Share \u2192 Add to Home Screen, open Son of Anton from there and tap Control.';
+  function canFullscreen() { return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled); }
+  function inHomeScreenApp() {
+    try { if (navigator.standalone) return true; } catch (_) {}
+    return ['standalone', 'fullscreen'].some(m => { try { return matchMedia(`(display-mode: ${m})`).matches; } catch (_) { return false; } });
+  }
   // ── tips + the landing mark ──────────────────────────────────────────
   function showTip(t, ms = 1600) {
     // A picture this small (landscape, keyboard open) would be mostly tip: the strip and the sheet say it.

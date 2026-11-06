@@ -163,8 +163,8 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=tab-organizer-20261105">
-  <link rel="stylesheet" href="/assets/sidebar.css?v=usage-hover-20261103">
+  <link rel="stylesheet" href="/assets/styles.css?v=welcome-touch-20261105">
+  <link rel="stylesheet" href="/assets/sidebar.css?v=pw-local-20261105">
   <link rel="stylesheet" href="/assets/health.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/minimal.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/liquid.css?v=web-20261102">
@@ -250,6 +250,8 @@
         </nav>
       </div>
 
+      <!-- Touch only: the story sits below the pair block under this heading. -->
+      <h2 class="wel-story-h" id="wel-story" tabindex="-1" data-w="touch_what">What is Son of Anton?</h2>
       <div class="wel-hero">
         <div class="wel-copy">
           <p class="wel-headline" role="heading" aria-level="2" data-w="hero_title">Your AI agent keeps working at home. Answer it from your phone.</p>
@@ -347,19 +349,50 @@
           <section class="wiz" id="wiz" data-step="1" aria-labelledby="wiz-card-title">
             <h2 class="wiz-card-title" id="wiz-card-title" data-w="wiz_card_title">Get it on this computer</h2>
             <!-- Touch devices (data-welcome-touch): nothing installs on a phone or
-                 tablet, so the card pairs it with the computer that runs SoA. -->
+                 tablet, so the card pairs it with the computer that runs SoA.
+                 The top of it IS a viewfinder: a dark lens with the four aiming
+                 corners and a schematic of the computer's sidebar QR (Mobile
+                 link), so the user sees what to point at before the camera is
+                 on. Tapping it opens the scanner, whose frame grows from these
+                 corners. The camera never starts on load. -->
             <div class="wiz-touch">
-              <p class="wiz-p" data-w="touch_sub">Son of Anton runs on your computer. Pair this device with it using your camera.</p>
-              <button type="button" class="wiz-primary" id="wiz-touch-pair" data-w="touch_pair">Pair with my computer</button>
-              <p class="wiz-meta" data-w="touch_how">On your computer, open Son of Anton, then Mobile link in the sidebar, and scan its QR code.</p>
-              <details class="wiz-alt">
-                <summary data-w="touch_notyet">Not installed on your computer yet?</summary>
-                <p class="wiz-p" data-w="touch_install">Open www.s0a.app on your computer, or paste this into its Terminal:</p>
-                <div class="welcome-cmdwrap">
-                  <pre class="welcome-cmd" id="welcome-cmd-touch">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
-                  <button type="button" class="welcome-copy" id="welcome-copy-touch" data-w="copy">Copy</button>
-                </div>
-              </details>
+              <p class="wiz-touch-lead" data-w="touch_sub">Scan the code your computer shows.</p>
+              <button type="button" class="wiz-vf" id="wiz-touch-pair">
+                <span class="wiz-vf-frame" aria-hidden="true">
+                  <svg class="wiz-vf-art" viewBox="0 0 320 200" focusable="false">
+                    <rect class="vf-line" x="28" y="18" width="264" height="164" rx="10"/>
+                    <path class="vf-line" d="M108 18v164"/>
+                    <path class="vf-faint" d="M44 40h44M44 54h34M44 68h40"/>
+                    <text class="vf-label" x="44" y="96" data-w="touch_widget">Mobile link</text>
+                    <g class="vf-qr" transform="translate(44 106)">
+                      <rect class="vf-qr-bg" width="52" height="52" rx="4"/>
+                      <path class="vf-qr-ink" d="M6 6h14v14H6zM32 6h14v14H32zM6 32h14v14H6zM10 10v6h6v-6zM36 10v6h6v-6zM10 36v6h6v-6zM24 6h4v4h-4zM24 14h4v8h-4zM26 26h6v4h-6zM34 26h4v4h-4zM42 26h4v6h-4zM24 34h4v4h-4zM32 32h6v6h-6zM40 38h6v4h-6zM26 42h4v4h-4zM34 42h4v4h-4z"/>
+                    </g>
+                    <path class="vf-faint" d="M124 44h96M124 60h132M124 76h72M124 92h112M124 108h56"/>
+                  </svg>
+                  <i></i><i></i><i></i><i></i>
+                </span>
+                <span class="wiz-vf-pill" data-w="touch_pair">Scan the code</span>
+              </button>
+              <p class="wiz-touch-how"><span data-w="touch_how">On your computer, open Son of Anton and click Mobile link in the sidebar.</span> <span class="wiz-touch-tablet" data-w="touch_tablet">Opens the full dashboard on this tablet.</span></p>
+              <h3 class="wiz-touch-h" id="wiz-ways-h" data-w="touch_other">Other ways to connect</h3>
+              <div class="wiz-ways" id="wiz-ways" role="group" aria-labelledby="wiz-ways-h">
+                <button type="button" class="wiz-way" id="wiz-way-paste" data-way="paste" aria-expanded="false" aria-controls="wiz-way-panel"><span data-w="touch_paste">Paste the link</span></button>
+                <button type="button" class="wiz-way" id="wiz-way-pw" data-way="pw" aria-expanded="false" aria-controls="wiz-way-panel"><span data-w="touch_pw">Use the pairing password</span></button>
+                <div class="wiz-way-panel" id="wiz-way-panel" hidden></div>
+                <!-- #wiz-account moves here (touch only), relabelled "Find it with my account". -->
+              </div>
+              <div class="wiz-touch-foot">
+                <details class="wiz-alt wiz-notyet">
+                  <summary data-w="touch_notyet">Not installed yet?</summary>
+                  <p class="wiz-p" data-w="touch_install">Open www.s0a.app on your computer, or paste this into its Terminal:</p>
+                  <div class="welcome-cmdwrap">
+                    <pre class="welcome-cmd" id="welcome-cmd-touch">curl -fsSL https://www.s0a.app/install.sh | sh</pre>
+                    <button type="button" class="welcome-copy" id="welcome-copy-touch" data-w="copy">Copy</button>
+                  </div>
+                </details>
+                <a class="wiz-link wiz-what" href="#wel-story" data-w="touch_what">What is Son of Anton?</a>
+              </div>
             </div>
             <ol class="wiz-progress sr-only">
               <li class="wiz-dot" data-w="wiz_dot1">Download</li>
@@ -397,11 +430,13 @@
                       </div>
                       <details class="wiz-alt wiz-pair-manual" id="wiz-pair-manual">
                         <summary data-w="wiz_pair_paste">Paste its link</summary>
+                        <label class="wiz-field-label" for="wiz-pair-url" id="wiz-pair-url-label" data-w="touch_link_label">Pairing link</label>
                         <div class="welcome-cmdwrap">
                           <input class="wiz-pair-url" id="wiz-pair-url" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://…/m/?t=…" aria-label="Pairing link">
                           <button type="button" class="welcome-copy" id="wiz-pair-go" data-w="wiz_pair_go">Connect</button>
                         </div>
                         <div class="welcome-cmdwrap wiz-pair-pwrow" id="wiz-pair-pwrow" hidden>
+                          <label class="wiz-field-label" for="wiz-pair-pw" data-w="wiz_pair_pw_ph">Pairing password</label>
                           <input class="wiz-pair-url" id="wiz-pair-pw" type="password" autocapitalize="off" autocomplete="current-password" spellcheck="false" placeholder="Pairing password" aria-label="Pairing password">
                         </div>
                       </details>
@@ -582,12 +617,30 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: "Next, connect your phone: in the sidebar, open Mobile link and scan the QR code with your phone's camera.",
                 wiz_sandbox: 'Try it in this browser first',
                 wiz_sandbox_note: "A practice shell that runs in this tab. It can't see your files or your computer.",
-                touch_title: 'Pair this device',
-                touch_sub: 'Son of Anton runs on your computer. Pair this device with it using your camera.',
-                touch_pair: 'Pair with my computer',
-                touch_how: 'On your computer, open Son of Anton, then Mobile link in the sidebar, and scan its QR code.',
-                touch_notyet: 'Not installed on your computer yet?',
+                touch_title: 'Pair with your computer',
+                touch_sub: 'Scan the code your computer shows.',
+                touch_pair: 'Scan the code',
+                touch_how: 'On your computer, open Son of Anton and click Mobile link in the sidebar.',
+                touch_notyet: 'Not installed yet?',
                 touch_install: 'Open www.s0a.app on your computer, or paste this into its Terminal:',
+                touch_tablet: 'Opens the full dashboard on this tablet.',
+                touch_other: 'Other ways to connect',
+                touch_paste: 'Paste the link',
+                touch_pw: 'Use the pairing password',
+                touch_find: 'Find it with my account',
+                touch_addr: 'Computer\'s address',
+                touch_what: 'What is Son of Anton?',
+                touch_widget: 'Mobile link',
+                touch_link_label: 'Pairing link',
+                qr_title: 'Scan the code on your computer',
+                qr_starting: 'Starting the camera…',
+                qr_connecting: 'Connecting…',
+                qr_denied_t: 'Camera access is off',
+                qr_denied_p: 'Allow the camera for this site in your browser settings, then try again. Or connect another way.',
+                qr_nocam_t: 'No camera available',
+                qr_nocam_p: 'Paste the link from your computer, or use its pairing password.',
+                qr_error_t: 'The camera could not start',
+                qr_retry: 'Try again',
                 feat_title: 'What it does for you',
                 feat_g1: 'At your desk', feat_g2: 'Away from your desk', feat_g3: 'If something goes wrong',
                 f_tabs_t: 'Nothing lost on reload or restart.', f_tabs_d: 'Your tabs and their history come back after a page reload or a reboot.',
@@ -645,7 +698,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_pair_title: '已经在另一台电脑上装好了？',
                 wiz_pair_p: '把这个浏览器连接到那台电脑，而不是在这里安装。',
                 wiz_pair_scan: '扫描它的二维码', wiz_pair_paste: '粘贴它的链接', wiz_pair_go: '连接',
-                wiz_pair_cancel: '取消', wiz_pair_hint: '将相机对准另一台电脑侧栏中的二维码（Mobile Link）。', wiz_pair_torch: '补光',
+                wiz_pair_cancel: '取消', wiz_pair_hint: '将相机对准另一台电脑侧边栏中的二维码（移动链接）。', wiz_pair_torch: '补光',
                 wiz_pair_err_code: '这不是 Son of Anton 的配对码。', wiz_pair_err_token: '该链接没有配对令牌。请在另一台电脑上打开 Mobile Link，扫描它显示的二维码。', wiz_pair_err_cam: '此设备没有相机。请改为粘贴配对链接。',
                 wiz_pair_err_denied: '相机权限被拒绝。请在浏览器中允许，或粘贴链接。', wiz_pair_err_open: '相机无法启动（{detail}）。请改为粘贴链接。',
                 wiz_pair_pw_hint: '这台电脑需要配对密码，请在下方输入。', wiz_pair_pw_ph: '配对密码', wiz_pair_err_pw: '密码错误。', wiz_pair_err_nologin: '密码正确，但密码登录未开启。请在另一台电脑上打开 Mobile Link 并允许密码登录。', wiz_pair_err_unreach: '无法连接那台电脑。请检查链接，并确认它在线。',
@@ -659,12 +712,30 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: '下一步，连接手机：在侧栏中打开 Mobile Link，用手机相机扫描二维码。',
                 wiz_sandbox: '先在浏览器里试试',
                 wiz_sandbox_note: '一个在本标签页中运行的练习用 shell，它看不到你的文件，也接触不到你的电脑。',
-                touch_title: '配对这台设备',
-                touch_sub: 'Son of Anton 运行在你的电脑上。用摄像头把这台设备和它配对。',
-                touch_pair: '与我的电脑配对',
-                touch_how: '在电脑上打开 Son of Anton，点侧边栏的「手机连接」，然后扫描它的二维码。',
-                touch_notyet: '电脑上还没安装？',
+                touch_title: '与你的电脑配对',
+                touch_sub: '扫描电脑上显示的二维码。',
+                touch_pair: '扫描二维码',
+                touch_how: '在电脑上打开 Son of Anton，点击侧边栏的「移动链接」。',
+                touch_notyet: '还没安装？',
                 touch_install: '在电脑上打开 www.s0a.app，或把这条命令粘贴到它的终端：',
+                touch_tablet: '在这台平板上打开完整的控制台。',
+                touch_other: '其他连接方式',
+                touch_paste: '粘贴链接',
+                touch_pw: '使用配对密码',
+                touch_find: '用我的账户找到它',
+                touch_addr: '电脑的地址',
+                touch_what: '什么是 Son of Anton？',
+                touch_widget: '移动链接',
+                touch_link_label: '配对链接',
+                qr_title: '扫描电脑上的二维码',
+                qr_starting: '正在打开相机…',
+                qr_connecting: '正在连接…',
+                qr_denied_t: '相机权限已关闭',
+                qr_denied_p: '请在浏览器设置中允许此网站使用相机，然后重试。也可以换一种方式连接。',
+                qr_nocam_t: '没有可用的相机',
+                qr_nocam_p: '粘贴电脑上的链接，或使用它的配对密码。',
+                qr_error_t: '相机无法启动',
+                qr_retry: '重试',
                 feat_title: '它能为你做什么',
                 feat_g1: '在电脑前', feat_g2: '离开电脑时', feat_g3: '出问题时',
                 f_tabs_t: '刷新或重启都不会丢失。', f_tabs_d: '页面刷新或电脑重启后，你的标签页和历史记录都会恢复。',
@@ -722,7 +793,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_pair_title: 'Déjà installé sur un autre ordinateur ?',
                 wiz_pair_p: 'Connectez ce navigateur à celui-ci au lieu d’installer ici.',
                 wiz_pair_scan: 'Scanner son QR code', wiz_pair_paste: 'Coller son lien', wiz_pair_go: 'Connecter',
-                wiz_pair_cancel: 'Annuler', wiz_pair_hint: 'Visez le QR code dans la barre latérale de l’autre ordinateur (Mobile Link).', wiz_pair_torch: 'Lampe',
+                wiz_pair_cancel: 'Annuler', wiz_pair_hint: 'Visez le QR code dans la barre latérale de l’autre ordinateur (Lien mobile).', wiz_pair_torch: 'Lampe',
                 wiz_pair_err_code: 'Ce n’est pas un code d’association Son of Anton.', wiz_pair_err_token: 'Ce lien n’a pas de jeton d’association. Sur l’autre ordinateur, ouvrez Mobile Link et scannez le QR code affiché.', wiz_pair_err_cam: 'Pas de caméra ici. Collez plutôt le lien.',
                 wiz_pair_err_denied: 'Accès à la caméra refusé. Autorisez-le dans le navigateur, ou collez le lien.', wiz_pair_err_open: 'La caméra n’a pas pu démarrer ({detail}). Collez plutôt le lien.',
                 wiz_pair_pw_hint: 'Cet ordinateur demande son mot de passe d’association. Saisissez-le ci-dessous.', wiz_pair_pw_ph: 'Mot de passe d’association', wiz_pair_err_pw: 'Mot de passe incorrect.', wiz_pair_err_nologin: 'Le mot de passe est bon, mais la connexion par mot de passe est désactivée. Sur l’autre ordinateur, ouvrez Mobile Link et autorisez-la.', wiz_pair_err_unreach: 'Impossible de joindre cet ordinateur. Vérifiez le lien et qu’il est en ligne.',
@@ -736,12 +807,30 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: 'Ensuite, connectez votre téléphone : dans la barre latérale, ouvrez Mobile Link et scannez le QR code avec l’appareil photo du téléphone.',
                 wiz_sandbox: 'L’essayer d’abord dans ce navigateur',
                 wiz_sandbox_note: 'Un shell d’entraînement qui tourne dans cet onglet. Il ne voit ni vos fichiers ni votre ordinateur.',
-                touch_title: 'Associer cet appareil',
-                touch_sub: 'Son of Anton tourne sur votre ordinateur. Associez cet appareil avec l’appareil photo.',
-                touch_pair: 'Associer à mon ordinateur',
-                touch_how: 'Sur votre ordinateur, ouvrez Son of Anton, puis Lien mobile dans la barre latérale, et scannez son code QR.',
-                touch_notyet: 'Pas encore installé sur votre ordinateur ?',
+                touch_title: 'Associer à votre ordinateur',
+                touch_sub: 'Scannez le code affiché par votre ordinateur.',
+                touch_pair: 'Scanner le code',
+                touch_how: 'Sur votre ordinateur, ouvrez Son of Anton et cliquez sur Lien mobile dans la barre latérale.',
+                touch_notyet: 'Pas encore installé ?',
                 touch_install: 'Ouvrez www.s0a.app sur votre ordinateur, ou collez ceci dans son Terminal :',
+                touch_tablet: 'Ouvre le tableau de bord complet sur cette tablette.',
+                touch_other: 'Autres façons de se connecter',
+                touch_paste: 'Coller le lien',
+                touch_pw: 'Utiliser le mot de passe d’association',
+                touch_find: 'Le retrouver avec mon compte',
+                touch_addr: 'Adresse de l’ordinateur',
+                touch_what: 'Qu’est-ce que Son of Anton ?',
+                touch_widget: 'Lien mobile',
+                touch_link_label: 'Lien d’association',
+                qr_title: 'Scannez le code sur votre ordinateur',
+                qr_starting: 'Ouverture de la caméra…',
+                qr_connecting: 'Connexion…',
+                qr_denied_t: 'L’accès à la caméra est désactivé',
+                qr_denied_p: 'Autorisez la caméra pour ce site dans les réglages du navigateur, puis réessayez. Ou connectez-vous autrement.',
+                qr_nocam_t: 'Aucune caméra disponible',
+                qr_nocam_p: 'Collez le lien de votre ordinateur ou utilisez son mot de passe d’association.',
+                qr_error_t: 'La caméra n’a pas pu démarrer',
+                qr_retry: 'Réessayer',
                 feat_title: 'Ce qu’il fait pour vous',
                 feat_g1: 'À votre bureau', feat_g2: 'Loin de votre bureau', feat_g3: 'Si quelque chose tourne mal',
                 f_tabs_t: 'Rien de perdu au rechargement ou au redémarrage.', f_tabs_d: 'Vos onglets et leur historique reviennent après un rechargement de la page ou un redémarrage.',
@@ -799,7 +888,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_pair_title: 'Schon auf einem anderen Computer eingerichtet?',
                 wiz_pair_p: 'Verbinde diesen Browser damit, statt hier zu installieren.',
                 wiz_pair_scan: 'Seinen QR-Code scannen', wiz_pair_paste: 'Seinen Link einfügen', wiz_pair_go: 'Verbinden',
-                wiz_pair_cancel: 'Abbrechen', wiz_pair_hint: 'Richte die Kamera auf den QR-Code in der Seitenleiste des anderen Computers (Mobile Link).', wiz_pair_torch: 'Licht',
+                wiz_pair_cancel: 'Abbrechen', wiz_pair_hint: 'Richte die Kamera auf den QR-Code in der Seitenleiste des anderen Computers (Mobil-Link).', wiz_pair_torch: 'Licht',
                 wiz_pair_err_code: 'Das ist kein Son-of-Anton-Kopplungscode.', wiz_pair_err_token: 'Dieser Link hat kein Kopplungs-Token. Öffne auf dem anderen Computer Mobile Link und scanne den angezeigten QR-Code.', wiz_pair_err_cam: 'Keine Kamera hier. Füge stattdessen den Link ein.',
                 wiz_pair_err_denied: 'Kamerazugriff abgelehnt. Erlaube ihn im Browser oder füge den Link ein.', wiz_pair_err_open: 'Die Kamera konnte nicht starten ({detail}). Füge stattdessen den Link ein.',
                 wiz_pair_pw_hint: 'Dieser Computer verlangt sein Kopplungspasswort. Gib es unten ein.', wiz_pair_pw_ph: 'Kopplungspasswort', wiz_pair_err_pw: 'Falsches Passwort.', wiz_pair_err_nologin: 'Das Passwort stimmt, aber die Anmeldung per Passwort ist aus. Öffne auf dem anderen Computer Mobile Link und erlaube sie.', wiz_pair_err_unreach: 'Dieser Computer ist nicht erreichbar. Prüfe den Link und ob er online ist.',
@@ -813,12 +902,30 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: 'Verbinde als Nächstes dein Handy: Öffne in der Seitenleiste Mobile Link und scanne den QR-Code mit der Handykamera.',
                 wiz_sandbox: 'Erst in diesem Browser ausprobieren',
                 wiz_sandbox_note: 'Eine Übungs-Shell, die in diesem Tab läuft. Sie sieht weder deine Dateien noch deinen Computer.',
-                touch_title: 'Dieses Gerät koppeln',
-                touch_sub: 'Son of Anton läuft auf deinem Computer. Kopple dieses Gerät mit der Kamera.',
-                touch_pair: 'Mit meinem Computer koppeln',
-                touch_how: 'Öffne auf deinem Computer Son of Anton, dann Mobile-Link in der Seitenleiste, und scanne den QR-Code.',
-                touch_notyet: 'Noch nicht auf deinem Computer installiert?',
+                touch_title: 'Mit deinem Computer koppeln',
+                touch_sub: 'Scanne den Code, den dein Computer zeigt.',
+                touch_pair: 'Code scannen',
+                touch_how: 'Öffne auf deinem Computer Son of Anton und klicke in der Seitenleiste auf Mobil-Link.',
+                touch_notyet: 'Noch nicht installiert?',
                 touch_install: 'Öffne www.s0a.app auf deinem Computer oder füge das in sein Terminal ein:',
+                touch_tablet: 'Öffnet auf diesem Tablet das volle Dashboard.',
+                touch_other: 'Andere Verbindungswege',
+                touch_paste: 'Link einfügen',
+                touch_pw: 'Kopplungspasswort verwenden',
+                touch_find: 'Mit meinem Konto finden',
+                touch_addr: 'Adresse des Computers',
+                touch_what: 'Was ist Son of Anton?',
+                touch_widget: 'Mobil-Link',
+                touch_link_label: 'Kopplungslink',
+                qr_title: 'Scanne den Code auf deinem Computer',
+                qr_starting: 'Kamera wird gestartet …',
+                qr_connecting: 'Verbinde …',
+                qr_denied_t: 'Kamerazugriff ist aus',
+                qr_denied_p: 'Erlaube die Kamera für diese Website in den Browser-Einstellungen und versuche es erneut. Oder verbinde dich anders.',
+                qr_nocam_t: 'Keine Kamera verfügbar',
+                qr_nocam_p: 'Füge den Link deines Computers ein oder verwende sein Kopplungspasswort.',
+                qr_error_t: 'Die Kamera konnte nicht starten',
+                qr_retry: 'Erneut versuchen',
                 feat_title: 'Was es für dich tut',
                 feat_g1: 'Am Schreibtisch', feat_g2: 'Unterwegs', feat_g3: 'Wenn etwas schiefgeht',
                 f_tabs_t: 'Nichts geht beim Neuladen oder Neustart verloren.', f_tabs_d: 'Deine Tabs und ihr Verlauf kommen nach dem Neuladen der Seite oder einem Neustart zurück.',
@@ -876,7 +983,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz_pair_title: '¿Ya lo tienes en otro ordenador?',
                 wiz_pair_p: 'Conecta este navegador a ese ordenador en lugar de instalarlo aquí.',
                 wiz_pair_scan: 'Escanear su código QR', wiz_pair_paste: 'Pegar su enlace', wiz_pair_go: 'Conectar',
-                wiz_pair_cancel: 'Cancelar', wiz_pair_hint: 'Apunta la cámara al código QR de la barra lateral del otro ordenador (Mobile Link).', wiz_pair_torch: 'Luz',
+                wiz_pair_cancel: 'Cancelar', wiz_pair_hint: 'Apunta la cámara al código QR de la barra lateral del otro ordenador (Enlace móvil).', wiz_pair_torch: 'Luz',
                 wiz_pair_err_code: 'Eso no es un código de emparejamiento de Son of Anton.', wiz_pair_err_token: 'Ese enlace no tiene token de emparejamiento. En el otro ordenador, abre Mobile Link y escanea el código QR que muestra.', wiz_pair_err_cam: 'Aquí no hay cámara. Pega el enlace en su lugar.',
                 wiz_pair_err_denied: 'Se denegó el acceso a la cámara. Permítelo en el navegador o pega el enlace.', wiz_pair_err_open: 'La cámara no pudo iniciarse ({detail}). Pega el enlace en su lugar.',
                 wiz_pair_pw_hint: 'Este ordenador pide su contraseña de emparejamiento. Escríbela abajo.', wiz_pair_pw_ph: 'Contraseña de emparejamiento', wiz_pair_err_pw: 'Contraseña incorrecta.', wiz_pair_err_nologin: 'La contraseña es correcta, pero el inicio de sesión con contraseña está desactivado. En el otro ordenador, abre Mobile Link y permítelo.', wiz_pair_err_unreach: 'No se pudo conectar con ese ordenador. Revisa el enlace y que esté en línea.',
@@ -890,12 +997,30 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 wiz3_next: 'Después, conecta tu móvil: en la barra lateral, abre Mobile Link y escanea el código QR con la cámara del móvil.',
                 wiz_sandbox: 'Pruébalo primero en este navegador',
                 wiz_sandbox_note: 'Una shell de práctica que se ejecuta en esta pestaña. No puede ver tus archivos ni tu ordenador.',
-                touch_title: 'Vincula este dispositivo',
-                touch_sub: 'Son of Anton se ejecuta en tu ordenador. Vincula este dispositivo con la cámara.',
-                touch_pair: 'Vincular con mi ordenador',
-                touch_how: 'En tu ordenador, abre Son of Anton, luego Enlace móvil en la barra lateral, y escanea su código QR.',
-                touch_notyet: '¿Aún no está instalado en tu ordenador?',
+                touch_title: 'Vincula con tu ordenador',
+                touch_sub: 'Escanea el código que muestra tu ordenador.',
+                touch_pair: 'Escanear el código',
+                touch_how: 'En tu ordenador, abre Son of Anton y haz clic en Enlace móvil en la barra lateral.',
+                touch_notyet: '¿Aún no está instalado?',
                 touch_install: 'Abre www.s0a.app en tu ordenador o pega esto en su Terminal:',
+                touch_tablet: 'Abre el panel completo en esta tableta.',
+                touch_other: 'Otras formas de conectar',
+                touch_paste: 'Pegar el enlace',
+                touch_pw: 'Usar la contraseña de emparejamiento',
+                touch_find: 'Encontrarlo con mi cuenta',
+                touch_addr: 'Dirección del ordenador',
+                touch_what: '¿Qué es Son of Anton?',
+                touch_widget: 'Enlace móvil',
+                touch_link_label: 'Enlace de emparejamiento',
+                qr_title: 'Escanea el código de tu ordenador',
+                qr_starting: 'Abriendo la cámara…',
+                qr_connecting: 'Conectando…',
+                qr_denied_t: 'El acceso a la cámara está desactivado',
+                qr_denied_p: 'Permite la cámara para este sitio en los ajustes del navegador y vuelve a intentarlo. O conéctate de otra forma.',
+                qr_nocam_t: 'No hay cámara disponible',
+                qr_nocam_p: 'Pega el enlace de tu ordenador o usa su contraseña de emparejamiento.',
+                qr_error_t: 'La cámara no pudo iniciarse',
+                qr_retry: 'Reintentar',
                 feat_title: 'Lo que hace por ti',
                 feat_g1: 'En tu mesa', feat_g2: 'Lejos de tu mesa', feat_g3: 'Si algo sale mal',
                 f_tabs_t: 'Nada se pierde al recargar o reiniciar.', f_tabs_d: 'Tus pestañas y su historial vuelven tras recargar la página o reiniciar el ordenador.',
@@ -939,9 +1064,42 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         var lang = pickLang();
         var strings = DICT[lang] || DICT.en;
         var enter = document.getElementById('welcome-enter');
-        if (html.dataset.welcomeTouch === '1') {
+        var TOUCH = html.dataset.welcomeTouch === '1';
+        var QR_MOD = '/m/qrscan.js?v=welcome-touch-20261105';
+        if (TOUCH) {
             var touchTitle = document.getElementById('wiz-card-title');
             if (touchTitle) touchTitle.setAttribute('data-w', 'touch_title');
+            // Pair first: a phone or tablet has one job here, so the card moves
+            // to the top of the page and the story (headline, demo, features)
+            // follows under "What is Son of Anton?". Same nodes, same ids.
+            var wizCard = document.getElementById('wiz'), welTop = document.querySelector('.wel-top');
+            if (wizCard && welTop) welTop.after(wizCard);
+            // "Other ways to connect": the paste form and its error line live in
+            // one disclosure panel that opens under whichever row was chosen;
+            // the account finder becomes the list's last row.
+            var wayPanel = document.getElementById('wiz-way-panel');
+            var manualEl = document.getElementById('wiz-pair-manual'), errEl0 = document.getElementById('wiz-pair-err');
+            if (wayPanel && manualEl) wayPanel.appendChild(manualEl);
+            // Connect goes under both fields, so the password (when shown) is
+            // filled before it, not after.
+            var goEl = document.getElementById('wiz-pair-go');
+            if (manualEl && goEl) { goEl.classList.add('wiz-way-go'); manualEl.appendChild(goEl); }
+            if (wayPanel && errEl0) wayPanel.appendChild(errEl0);
+            var acct = document.getElementById('wiz-account'), waysEl = document.getElementById('wiz-ways');
+            if (acct && waysEl) { acct.className = 'wiz-way wiz-way-link'; acct.setAttribute('data-w', 'touch_find'); waysEl.appendChild(acct); }
+            var devEl = document.getElementById('wiz-devhist'), footEl = document.querySelector('.wiz-touch-foot');
+            if (devEl && footEl) footEl.appendChild(devEl);
+        }
+        // The link field doubles as the address field for password login.
+        var wayMode = 'paste';
+        function labelWay() {
+            var u = document.getElementById('wiz-pair-url'), lab = document.getElementById('wiz-pair-url-label');
+            if (!u) return;
+            var key = wayMode === 'pw' ? 'touch_addr' : 'touch_link_label';
+            var text = strings[key] || '';
+            if (lab) { lab.setAttribute('data-w', key); lab.textContent = text; }
+            if (text) u.setAttribute('aria-label', text);
+            u.placeholder = wayMode === 'pw' ? 'https://…' : 'https://…/m/?t=…';
         }
 
         function apply() {
@@ -956,6 +1114,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
             if (nameLink && strings.name_aria) nameLink.setAttribute('aria-label', strings.name_aria);
             var pwField = document.getElementById('wiz-pair-pw');
             if (pwField && strings.wiz_pair_pw_ph) { pwField.placeholder = strings.wiz_pair_pw_ph; pwField.setAttribute('aria-label', strings.wiz_pair_pw_ph); }
+            labelWay();
             var learn = document.getElementById('wiz-learn'), more = document.getElementById('wiz-more');
             if (learn && more) learn.textContent = more.hidden ? strings.wiz_learn : (strings.wiz_learn_hide || strings.wiz_learn);
             renderStar();
@@ -1251,13 +1410,47 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         var pairErr = document.getElementById('wiz-pair-err');
         var pairManual = document.getElementById('wiz-pair-manual');
         var pairBox = document.getElementById('wiz-pair-box');
+        var pairPwRow = document.getElementById('wiz-pair-pwrow');
+        var pairPw = document.getElementById('wiz-pair-pw');
+        var pairUrl = document.getElementById('wiz-pair-url');
+        var wayOpen = null;
         function pairFail(msg) {
             if (pairErr) { pairErr.textContent = msg || ''; pairErr.hidden = !msg; }
             if (msg && pairBox) pairBox.open = true;
             if (msg && pairManual) pairManual.open = true;
+            // Touch: the error sits under the open form, so open one.
+            if (msg && TOUCH && !wayOpen) openWay(wayMode, false);
         }
-        var pairPwRow = document.getElementById('wiz-pair-pwrow');
-        var pairPw = document.getElementById('wiz-pair-pw');
+        // Open "Paste the link" or "Use the pairing password" (the same form;
+        // the password row shows up front for the second). Rows on touch, the
+        // "Already set up" disclosure on a desktop.
+        function openWay(kind, focus) {
+            wayMode = kind === 'pw' ? 'pw' : 'paste';
+            if (TOUCH) {
+                var row = document.getElementById(wayMode === 'pw' ? 'wiz-way-pw' : 'wiz-way-paste');
+                var panel = document.getElementById('wiz-way-panel');
+                if (row && panel) { row.after(panel); panel.hidden = false; }
+                ['wiz-way-paste', 'wiz-way-pw'].forEach(function (id) {
+                    var r = document.getElementById(id);
+                    if (r) r.setAttribute('aria-expanded', r === row ? 'true' : 'false');
+                });
+                wayOpen = wayMode;
+                if (pairPwRow && wayMode === 'paste' && !(pairPw && pairPw.value)) pairPwRow.hidden = true;
+            } else if (pairBox) pairBox.open = true;
+            if (pairManual) pairManual.open = true;
+            if (pairPwRow && wayMode === 'pw') pairPwRow.hidden = false;
+            labelWay();
+            if (focus && pairUrl) { try { pairUrl.focus(); } catch (_) {} }
+        }
+        function closeWay() {
+            var panel = document.getElementById('wiz-way-panel');
+            if (panel) panel.hidden = true;
+            ['wiz-way-paste', 'wiz-way-pw'].forEach(function (id) {
+                var r = document.getElementById(id);
+                if (r) r.setAttribute('aria-expanded', 'false');
+            });
+            wayOpen = null;
+        }
         // A phone lands in the companion at /m/ (its own storage, service
         // worker and touch UI), as the boot path's pairing screen does; a
         // tablet keeps the full dashboard. `alt` (the second transport) and
@@ -1315,7 +1508,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 });
         }
         function pairGo(raw) {
-            return import('/m/qrscan.js').then(function (mod) {
+            return import(QR_MOD).then(function (mod) {
                 var p = mod.parsePairingPayload(raw);
                 if (!p) { pairFail(strings.wiz_pair_err_code); return false; }
                 var backend = (p.backend || p.origin).replace(/\/+$/, '');
@@ -1333,32 +1526,65 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
             devBtn.addEventListener('click', function () { m.openDeviceHistory(new m.DeviceHistory(localStorage)); });
         }).catch(function () {});
         var scanBtn = document.getElementById('wiz-scan');
+        var scanFrom = null;   // where the scanner's aiming frame grows from
         if (scanBtn) scanBtn.addEventListener('click', function () {
             pairFail('');
-            import('/m/qrscan.js').then(function (mod) {
-                if (!mod.QrScanner.supported) { pairFail(strings.wiz_pair_err_cam); return; }
+            var from = scanFrom || scanBtn.querySelector('.wiz-pair-ico');
+            scanFrom = null;
+            var rect = null;
+            try { if (from) rect = from.getBoundingClientRect(); } catch (_) {}
+            import(QR_MOD).then(function (mod) {
                 var scanner = new mod.QrScanner({
-                    onResult: function (v) { scanner.stop(); pairGo(v); },
-                    onError: function (e) { scanner.stop(); pairFail((e && e.message) || strings.wiz_pair_err_cam); },
+                    // Stays on "Connecting…" while pairGo works; closes only if
+                    // the code was not one it can use (the reason is then on the page).
+                    onResult: function (v) { pairGo(v).then(function (ok) { if (!ok) scanner.stop(); }); },
+                    // A refused or missing camera keeps the overlay open on its
+                    // own panel (with Try again / the other ways in); the page
+                    // line just records why.
+                    onError: function (e) { pairFail((e && e.message) || strings.wiz_pair_err_cam); },
                     labels: {
-                        cancel: strings.wiz_pair_cancel, hint: strings.wiz_pair_hint, torch: strings.wiz_pair_torch,
+                        cancel: strings.wiz_pair_cancel, title: strings.qr_title, hint: strings.wiz_pair_hint,
+                        starting: strings.qr_starting, connecting: strings.qr_connecting, torch: strings.wiz_pair_torch,
+                        retry: strings.qr_retry, paste: strings.touch_paste, password: strings.touch_pw,
+                        deniedTitle: strings.qr_denied_t, deniedText: strings.qr_denied_p,
+                        nocamTitle: strings.qr_nocam_t, nocamText: strings.qr_nocam_p, errorTitle: strings.qr_error_t,
                         errNoCam: strings.wiz_pair_err_cam, errDenied: strings.wiz_pair_err_denied, errOpen: strings.wiz_pair_err_open,
                     },
+                    actions: {
+                        paste: function () { openWay('paste', true); },
+                        password: function () { openWay('pw', true); },
+                    },
+                    fromRect: rect,
                 });
                 scanner.start();
             }).catch(function () { pairFail(strings.wiz_pair_err_cam); });
         });
-        // Phone / tablet: the card's own button opens the same camera scanner,
-        // and the paste field and error line move into that card, since the
-        // install steps that hold them are hidden there.
-        if (html.dataset.welcomeTouch === '1') {
-            var touchCard = document.querySelector('.wiz-touch');
-            var touchHow = touchCard && touchCard.querySelector('[data-w="touch_how"]');
-            if (touchHow && pairManual) touchHow.after(pairManual);
-            if (touchHow && pairErr) touchHow.after(pairErr);
-            if (touchPair && scanBtn) touchPair.addEventListener('click', function () { scanBtn.click(); });
+        // Phone / tablet: the viewfinder opens the same camera scanner (its
+        // frame grows from the viewfinder's corners); the rows open the paste
+        // form in place.
+        if (TOUCH) {
+            if (touchPair && scanBtn) touchPair.addEventListener('click', function () {
+                scanFrom = touchPair.querySelector('.wiz-vf-frame');
+                scanBtn.click();
+            });
+            ['wiz-way-paste', 'wiz-way-pw'].forEach(function (id) {
+                var row = document.getElementById(id);
+                if (!row) return;
+                row.addEventListener('click', function () {
+                    var kind = row.getAttribute('data-way');
+                    if (wayOpen === kind) closeWay(); else openWay(kind, true);
+                });
+            });
+            var whatLink = document.querySelector('.wiz-what');
+            if (whatLink) whatLink.addEventListener('click', function (e) {
+                var h = document.getElementById('wel-story');
+                if (!h) return;
+                e.preventDefault();
+                var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+                h.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+                try { h.focus({ preventScroll: true }); } catch (_) {}
+            });
         }
-        var pairUrl = document.getElementById('wiz-pair-url');
         var pairGoBtn = document.getElementById('wiz-pair-go');
         if (pairGoBtn && pairUrl) {
             pairGoBtn.addEventListener('click', function () { pairGo(pairUrl.value); });

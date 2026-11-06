@@ -18,7 +18,7 @@
 
 import { Bridge, INPUT_KIND } from '/assets/bridge.js?v=19';
 import { AudioFX } from '/assets/audiofx.js?v=18';
-import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=usage-hover-20261103';
+import { mountSidebar, setSidebarHidden } from '/assets/widgets.js?v=pw-local-20261105';
 import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v=35';
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=web-20261102';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
@@ -31,6 +31,19 @@ import { attachDesktopFailover, findWorkingDoor, doorsSupported } from '/assets/
 import { loadRecord as loadTabOrg, saveRecord as saveTabOrg, reconcile as reconcileTabOrg, isArchived, archivedIds, setArchived, archivedAt, markUsed, lastUsed, sortIds, matches as tabMatches, ago as agoText, SORT_MODES, SORT_LABELS, SORT_HINTS } from '/m/tabOrganizer.js?v=tab-organizer-20261105';
 
 const CFG = (window.__SOA_WEB__ = window.__SOA_WEB__ || {});
+
+// Open the Mac control page. Inside a Home Screen app on iOS, window.open
+// hands the page to an in-app browser sheet that keeps its own bars and has
+// no full-screen API, so a same-origin page is opened in place instead: it
+// keeps the app's bar-less window, and its Back button returns here.
+function openMacControl(url) {
+    let inApp = false;
+    try { inApp = !!navigator.standalone || ['standalone', 'fullscreen'].some(m => matchMedia(`(display-mode: ${m})`).matches); } catch (_) {}
+    let same = false;
+    try { same = new URL(url, location.href).origin === location.origin; } catch (_) {}
+    if (inApp && same) location.assign(url);
+    else window.open(url, '_blank', 'noopener');
+}
 const LS_KEY = 'soa_web_backend';
 
 // On HTTPS pages, http://127.0.0.1 is blocked as mixed content but
@@ -1985,7 +1998,7 @@ class Shell {
             const backend = CFG._resolvedBackend || '';
             let url = path;
             if (backend) { try { url = apiUrl(backend, CFG._resolvedToken || '', path); } catch (_) {} }
-            window.open(url, '_blank', 'noopener');
+            openMacControl(url);
         });
 
         // Theme toggle (toolbar): flip between dark and light. The full set
