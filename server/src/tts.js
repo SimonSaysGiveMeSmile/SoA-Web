@@ -19,6 +19,7 @@ const os = require('os');
 const path = require('path');
 const { MSG, frame } = require('./protocol');
 const localKey = require('./localKey');
+const localHost = require('./localHost');
 
 let _port = null;
 
@@ -69,6 +70,8 @@ function isLoopback(req) {
     const h = req.headers || {};
     if (localKey.matches(h['x-soa-local-key'])) return true;
     if (h['cf-connecting-ip'] || h['x-forwarded-for'] || h['x-real-ip'] || h['forwarded']) return false;
+    // Same DNS-rebinding guard as sessionManager.isLocalRequest (see localHost.js).
+    if (!localHost.isLoopbackHost(h.host) || !localHost.isTrustedOrigin(h.origin)) return false;
     const ip = (req.ip || (req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
     return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
 }

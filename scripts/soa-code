@@ -324,6 +324,34 @@ function git(args, cwd) {
     });
 }
 
+// A repo's own .git/config + .gitattributes can name a clean/process filter,
+// and status runs it whenever it has to hash a file whose stat changed. Read
+// the filter drivers first (reading config runs nothing) and blank each one
+// on the command line: an empty clean/smudge/process is "no filter", and
+// required=false keeps the missing driver from failing the status. Verified
+// against a marker-writing clean and process filter (server/test/soaCode.test.js).
+// Returns null when a driver name cannot be expressed as `-c key=value`
+// (a quoted subsection holding '='): the caller then skips status entirely.
+async function filterOverrides(cwd) {
+    let raw = '';
+    // Exit 1 just means "no filter.* keys".
+    try { raw = await git(['config', '--null', '--get-regexp', '^filter\\.'], cwd); } catch (_) { return []; }
+    const names = new Set();
+    for (const ent of raw.split('\0')) {
+        const key = ent.split('\n')[0];
+        const dot = key.lastIndexOf('.');
+        if (!key.startsWith('filter.') || dot <= 'filter.'.length) continue;
+        names.add(key.slice('filter.'.length, dot));
+    }
+    const args = [];
+    for (const name of names) {
+        if (name.includes('=')) return null;
+        for (const k of ['clean', 'smudge', 'process']) args.push('-c', `filter.${name}.${k}=`);
+        args.push('-c', `filter.${name}.required=false`);
+    }
+    return args;
+}
+
 function statusLetter(xy) {
     if (xy === '??') return '?';
     if (xy.includes('D')) return 'D';
@@ -469,7 +497,12 @@ const handlers = {
         }
         const files = {};
         let raw = '';
-        try { raw = await git(['status', '--porcelain=v1', '-z'], root); } catch (_) {}
+        try {
+            const neutral = await filterOverrides(root);
+            // --ignore-submodules=dirty: never run a status inside a submodule,
+            // whose own config names filters this list cannot see.
+            if (neutral) raw = await git([...neutral, 'status', '--porcelain=v1', '-z', '--ignore-submodules=dirty'], root);
+        } catch (_) {}
         const parts = raw.split('\0');
         for (let i = 0; i < parts.length; i++) {
             const ent = parts[i];

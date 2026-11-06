@@ -72,6 +72,7 @@ const windowControl    = require('./windowControl');
 const sessionManager   = require('./sessionManager');
 const meetings         = require('./meetings');
 const tunnelGate       = require('./tunnelGate');
+const localHost        = require('./localHost');
 const voice            = require('./voice');
 const entitlements     = require('./entitlements');
 const userProfile      = require('./userProfile');
@@ -153,6 +154,10 @@ const ALLOWED_ORIGINS = Array.from(new Set([
         .split(',').map(s => s.trim()).filter(Boolean),
 ]));
 const CROSS_SITE = ALLOWED_ORIGINS.some(o => !/^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(o));
+// isLocalRequest trusts a loopback caller only when its Origin (if any) is a
+// loopback page or one of these — by reference, so the tunnel origin pushed on
+// later counts too. Anything else is a third-party page reaching for 127.0.0.1.
+localHost.setTrustedOrigins(ALLOWED_ORIGINS);
 
 const sessions = new SessionStore({ idleTtlMs: SESSION_TTL_MS });
 

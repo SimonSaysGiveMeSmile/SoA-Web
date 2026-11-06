@@ -966,6 +966,22 @@ body.ctx-resizing * { cursor: inherit !important; }
     .stage.no-sidebar { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
 }
 
+/* The block above re-adds the sidebar column and comes after the phone rules,
+   so at phone width the open sidebar left a 256px empty column beside its own
+   slide-over. Below 768px the stage is one terminal column in every state. */
+@media (max-width: 768px) {
+    .stage, .stage.no-sidebar, .stage.no-context, .stage.no-sidebar.no-context { grid-template-columns: 1fr; grid-template-areas: 'terms' 'status'; }
+    /* Liquid paints its sidebar transparent (a column over a quiet ground). As
+       the slide-over it sits on the terminal and the scrim, which showed through
+       it, so it read as lying under the dim. Phones get no per-surface filters
+       in this pack, so the slide-over takes a solid fill instead of frost. */
+    :root[data-ui="liquid"] .stage .sidebar { background: var(--soa-bg); }
+    /* Windows 11 leaves the sidebar transparent over the Mica on .stage: the
+       same see-through slide-over, so it takes the layer fill as the context
+       overlay does above. */
+    :root[data-ui="windows11"] .stage .sidebar { background: var(--soa-bg-panel); }
+}
+
 /* The pull handle is the ONLY control for the canvas (the topbar CTX button was
    removed), so it stays visible at every width. On a phone-sized dashboard it
    shrinks so it sits clear of the thumb that scrolls the terminal. */

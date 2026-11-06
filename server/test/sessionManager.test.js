@@ -267,9 +267,10 @@ test('schedule/unschedule: newest-per-tab wins; _fireDue submits due text', asyn
 
 // ── isLocalRequest: the loopback trust gate (CRITICAL tunnel-bypass fix) ──────
 test('isLocalRequest: genuine local caller is trusted', () => {
-    assert.equal(isLocalRequest({ ip: '127.0.0.1', headers: {} }), true);
-    assert.equal(isLocalRequest({ ip: '::1', headers: {} }), true);
-    assert.equal(isLocalRequest({ socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: {} }), true);
+    // A real request always carries Host; a local caller names this machine.
+    assert.equal(isLocalRequest({ ip: '127.0.0.1', headers: { host: '127.0.0.1:4010' } }), true);
+    assert.equal(isLocalRequest({ ip: '::1', headers: { host: '[::1]:4010' } }), true);
+    assert.equal(isLocalRequest({ socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: { host: 'localhost:4010' } }), true);
 });
 test('isLocalRequest: a tunneled/forwarded request is REJECTED even from a loopback socket', () => {
     // cloudflared dials localhost → socket is loopback, but it injects these headers.
@@ -286,7 +287,7 @@ test('isLocalRequest: a valid local key is trusted even with forwarding headers 
     assert.equal(isLocalRequest({ ip: '203.0.113.7', headers: { 'x-soa-local-key': LOCAL_KEY, 'x-forwarded-for': '203.0.113.7' } }), true);
 });
 test('isLocalRequest: a wrong key falls back to the loopback+no-forwarding-header rule', () => {
-    assert.equal(isLocalRequest({ ip: '127.0.0.1', headers: { 'x-soa-local-key': 'nope' } }), true);
+    assert.equal(isLocalRequest({ ip: '127.0.0.1', headers: { host: '127.0.0.1:4010', 'x-soa-local-key': 'nope' } }), true);
     assert.equal(isLocalRequest({ ip: '127.0.0.1', headers: { 'x-soa-local-key': 'nope', 'x-forwarded-for': '1.2.3.4' } }), false);
 });
 

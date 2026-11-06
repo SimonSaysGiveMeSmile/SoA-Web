@@ -528,6 +528,67 @@ test('git status never runs a repo-configured fsmonitor command', { skip: !hasGi
     assert.equal(fs.existsSync(marker), false);
 });
 
+test('git status never runs a repo-configured clean or process filter', { skip: !hasGit() && 'git not installed' }, async () => {
+    const repo = path.join(fx.root, 'filtered');
+    fs.mkdirSync(repo, { recursive: true });
+    const marker = path.join(fx.tmp, 'filter-ran');
+    const hook = path.join(fx.tmp, 'filter.sh');
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\ncat\n`);
+    fs.chmodSync(hook, 0o755);
+    const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore', env: { ...process.env, HOME: fx.home, GIT_CONFIG_NOSYSTEM: '1' } });
+    g('init', '-q');
+    g('config', 'user.email', 'test@example.com');
+    g('config', 'user.name', 'test');
+    fs.writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=evil\n*.md filter=other.dotted\n');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+    fs.writeFileSync(path.join(repo, 'b.md'), 'b\n');
+    g('add', '.');
+    g('commit', '-q', '-m', 'init');
+    // Configured after the commit, so only a status can be what runs it.
+    g('config', 'filter.evil.clean', hook);
+    g('config', 'filter.evil.required', 'true');
+    g('config', 'filter.other.dotted.process', hook);
+    // Same size, new mtime: status must hash the content, which is where a
+    // clean/process filter would run.
+    const past = new Date(Date.now() - 3600e3);
+    fs.utimesSync(path.join(repo, 'a.txt'), past, past);
+    fs.utimesSync(path.join(repo, 'b.md'), past, past);
+    const r = await request(svc.port, 'GET', `/api/git?root=${enc(repo)}`);
+    assert.equal(r.json.repo, true);
+    assert.equal(fs.existsSync(marker), false);
+    fs.writeFileSync(path.join(repo, 'new.txt'), 'n\n');
+    const r2 = await request(svc.port, 'GET', `/api/git?root=${enc(repo)}`);
+    assert.equal(r2.json.files['new.txt'], '?');
+    assert.equal(fs.existsSync(marker), false);
+});
+
+test('git status never descends into a submodule (its own config could name a filter)', { skip: !hasGit() && 'git not installed' }, async () => {
+    const env = { ...process.env, HOME: fx.home, GIT_CONFIG_NOSYSTEM: '1' };
+    const src = path.join(fx.tmp, 'subsrc');
+    const repo = path.join(fx.root, 'super');
+    fs.mkdirSync(src, { recursive: true });
+    fs.mkdirSync(repo, { recursive: true });
+    const marker = path.join(fx.tmp, 'sub-filter-ran');
+    const hook = path.join(fx.tmp, 'sub-filter.sh');
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\ncat\n`);
+    fs.chmodSync(hook, 0o755);
+    const g = (cwd, ...a) => execFileSync('git', ['-C', cwd, '-c', 'user.email=test@example.com', '-c', 'user.name=test', ...a], { stdio: 'ignore', env });
+    g(src, 'init', '-q');
+    fs.writeFileSync(path.join(src, '.gitattributes'), '*.txt filter=evil\n');
+    fs.writeFileSync(path.join(src, 'x.txt'), 'x\n');
+    g(src, 'add', '.');
+    g(src, 'commit', '-q', '-m', 'init');
+    g(repo, 'init', '-q');
+    g(repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', src, 'sm');
+    g(repo, 'commit', '-q', '-m', 'sub');
+    g(path.join(repo, 'sm'), 'config', 'filter.evil.clean', hook);
+    const past = new Date(Date.now() - 3600e3);
+    fs.utimesSync(path.join(repo, 'sm', 'x.txt'), past, past);
+    const r = await request(svc.port, 'GET', `/api/git?root=${enc(repo)}`);
+    assert.equal(r.json.repo, true);
+    assert.equal(fs.existsSync(marker), false);
+});
+
 test('a request that never finishes its body is cut off', async () => {
     const own = await startService({ ...fx.env, SOA_CODE_REQUEST_TIMEOUT_MS: '400' });
     try {

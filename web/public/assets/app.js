@@ -8867,8 +8867,18 @@ function bootFailed(err) {
     if (node) node.textContent = tr('boot.failed', { detail });
 }
 
+// What's new: a once-per-release note card plus ⋯ More → What's new. The
+// module waits for itself until the welcome, pairing and boot screens are
+// gone, so it is safe to start here. Loaded lazily: it never blocks boot.
+function mountWhatsNewLater() {
+    import('/assets/whatsNew.js')
+        .then(m => m.mountWhatsNew({ layout: 'desktop' }))
+        .catch(err => console.warn('[whats-new] unavailable', err));
+}
+
 async function boot() {
     const html = document.documentElement;
+    mountWhatsNewLater();
     // Welcome gate: first visit stops here, but we expose __soaBootNow so
     // the "ENTER TERMINAL" button can drop the gate and finish boot
     // without a full reload. The .catch matters: this path used to swallow
