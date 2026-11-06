@@ -58,6 +58,13 @@ function ago(ms) {
 const WIDTH_MIN = 190, WIDTH_MAX = 720;
 const BAND_MIN = 42;
 const LS_WIDTH = 'soa_ctx_w', LS_BANDS = 'soa_ctx_bands';
+// The panel's top-level view (Context canvas | Code editor) and the code view's
+// Widen state. Per device, like every other panel preference.
+const LS_VIEW = 'soa_ctx_view', LS_CODE_WIDE = 'soa_code_wide';
+// Widen gives the code view about this much of the window.
+const WIDE_FRAC = 0.6;
+const CODE_PANEL_URL = '/assets/codePanel.js?v=code-20261106b';
+const IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
 const KEY_STEP = 8;
 
 function lsGet(k, fallback) {
@@ -66,6 +73,12 @@ function lsGet(k, fallback) {
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
 function lsDel(k) { try { localStorage.removeItem(k); } catch (_) {} }
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+// <html data-sides="swapped"> (panel left, sidebar right) and "left" (panel
+// beside the sidebar) both put this panel on the LEFT of the terminal.
+const panelOnLeft = () => {
+    const s = document.documentElement.dataset.sides;
+    return s === 'swapped' || s === 'left';
+};
 
 const STATUS_CYCLE = { pending: 'in_progress', in_progress: 'completed', completed: 'pending' };
 const STATUS_MARK = { pending: '○', in_progress: '◐', completed: '●' };
@@ -74,6 +87,12 @@ class ContextCanvas {
     constructor(root, ctx) {
         this.root = root;
         this.backend = ctx.backend || '';
+        this.token = ctx.token || '';
+        this.unlock = ctx.unlock || '';
+        // Opens the panel when it is tucked away (the Code shortcut needs it).
+        this.showPanel = ctx.showPanel || (() => {});
+        this._view = lsGet(LS_VIEW, 'context') === 'code' ? 'code' : 'context';
+        this._codeWide = lsGet(LS_CODE_WIDE, '0') === '1';
         this.getCwd = ctx.getCwd || (() => null);
         this.getTabId = ctx.getTabId || (() => null);
         this.queue = [];
@@ -85,9 +104,10 @@ class ContextCanvas {
         // width the panel just gave back (or took).
         this.onResize = ctx.onResize || (() => {});
         this._bands = {};
-        this._applySavedWidth();
+        this._applyWidth({ fit: false });
         this._build();
         this._applySavedBands();
+        this._wireCodeKeys();
         this._timer = setInterval(() => this.tick(), 2500);
         this.tick();
     }
@@ -188,15 +208,137 @@ class ContextCanvas {
             this._thread,
         ]);
 
+        // The panel's top-level switch: the session canvas, or the code editor.
+        // A segmented pair above the canvas header, so the canvas keeps its
+        // own layout untouched underneath Context.
+        this._viewBtns = {};
+        const viewBtn = (key, label, hint) => {
+            const b = el('button', {
+                class: 'ctx-view-btn', type: 'button', role: 'tab', text: label,
+                'aria-selected': 'false', title: hint,
+                onclick: () => this.setView(key, { focus: key === 'code' }),
+            });
+            this._viewBtns[key] = b;
+            return b;
+        };
+        const views = el('div', { class: 'ctx-views', role: 'tablist', 'aria-label': 'Side panel view' }, [
+            viewBtn('context', 'Context', 'Session context'),
+            viewBtn('code', 'Code', `View and edit files (${IS_MAC ? '⌘⇧E' : 'Ctrl+Shift+E'})`),
+        ]);
+        views.addEventListener('keydown', (e) => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+            e.preventDefault();
+            // Bare arrows also switch terminal tabs at the window level.
+            e.stopPropagation();
+            const next = this._view === 'code' ? 'context' : 'code';
+            this.setView(next);
+            this._viewBtns[next].focus();
+        });
+        this._codeRoot = el('div', { class: 'ctx-mode ctx-mode-code', hidden: '' });
+        ensureViewStyle();
+
         this.root.replaceChildren(
             this._widthGrip(),
+            views,
             head,
             this._threadBand,
             this._queueBand,
             this._factsBand,
             this._artsBand,
             this._stepsBand,
+            this._codeRoot,
         );
+        this.setView(this._view, { save: false });
+    }
+
+    // ── Context | Code ──────────────────────────────────────────────────────
+    // Code hides the canvas header and every band by class (CSS), so nothing
+    // the canvas does while parked can leak through.
+    setView(key, { save = true, focus = false } = {}) {
+        if (key !== 'code') key = 'context';
+        const prev = this._view;
+        this._view = key;
+        const code = key === 'code';
+        for (const [k, b] of Object.entries(this._viewBtns)) {
+            b.classList.toggle('active', k === key);
+            b.setAttribute('aria-selected', String(k === key));
+            b.tabIndex = k === key ? 0 : -1;
+        }
+        this.root.classList.toggle('ctx-code', code);
+        this._codeRoot.hidden = !code;
+        if (save) lsSet(LS_VIEW, key);
+        if (code) {
+            this._mountCode().then((p) => {
+                if (!p || this._view !== 'code') return;
+                p.show();
+                if (focus) setTimeout(() => p.focus(), 0);
+            });
+        } else {
+            if (this._code) this._code.hide();
+            if (prev === 'code') this.tick();
+        }
+        if (prev !== key) this._applyWidth();
+    }
+
+    openCode() {
+        this.showPanel();
+        this.setView('code', { focus: true });
+    }
+
+    _mountCode() {
+        if (this._codeP) return this._codeP;
+        this._codeP = import(CODE_PANEL_URL).then((m) => {
+            this._code = m.mountCodePanel(this._codeRoot, {
+                backend: this.backend,
+                token: this.token,
+                unlock: this.unlock,
+                getCwd: () => this.getCwd(),
+                layout: 'side',
+                isWide: () => this._codeWide,
+                onRequestWide: (on) => this.setCodeWide(on),
+            });
+            return this._code;
+        }).catch((err) => {
+            console.warn('[code] panel failed to load', err);
+            this._codeP = null;
+            this._codeRoot.replaceChildren(el('p', { class: 'ctx-muted', text: 'The code view failed to load. Reload the page to try again.' }));
+            return null;
+        });
+        return this._codeP;
+    }
+
+    // Mod-Shift-E from anywhere, the terminal included. Capture phase on
+    // window, so xterm never sees it as input.
+    _wireCodeKeys() {
+        window.addEventListener('keydown', (e) => {
+            const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+            if (!mod || !e.shiftKey || e.altKey) return;
+            if ((e.key || '').toLowerCase() !== 'e' && e.code !== 'KeyE') return;
+            e.preventDefault();
+            e.stopPropagation();
+            this.openCode();
+        }, true);
+        // A widened panel tracks the window, so 60% stays 60%.
+        let raf = 0;
+        const rewiden = () => {
+            if (this._view !== 'code' || !this._codeWide || raf) return;
+            raf = requestAnimationFrame(() => { raf = 0; this._applyWidth({ fit: false }); });
+        };
+        window.addEventListener('resize', rewiden);
+        // Beside the sidebar the room Widen measures changes with the layout
+        // and with the sidebar, so it follows both.
+        if (typeof MutationObserver === 'function') {
+            new MutationObserver(rewiden).observe(document.documentElement, { attributes: true, attributeFilter: ['data-sides'] });
+            const stage = this.root.closest('.stage');
+            if (stage) new MutationObserver(rewiden).observe(stage, { attributes: true, attributeFilter: ['class'] });
+        }
+    }
+
+    setCodeWide(on) {
+        this._codeWide = !!on;
+        lsSet(LS_CODE_WIDE, this._codeWide ? '1' : '0');
+        this._applyWidth();
+        if (this._code) this._code.syncWide();
     }
 
     // ── Drag machinery ──────────────────────────────────────────────────────
@@ -244,18 +386,25 @@ class ContextCanvas {
         });
         const width = () => this.root.getBoundingClientRect().width;
         const setW = (w) => {
-            const px = clamp(Math.round(w), WIDTH_MIN, Math.min(WIDTH_MAX, Math.round(window.innerWidth * 0.6)));
+            const px = clamp(Math.round(w), WIDTH_MIN, this._maxW());
             document.documentElement.style.setProperty('--soa-ctx-w', px + 'px');
             lsSet(LS_WIDTH, String(px));
+            // A hand-set width replaces Widen; the button follows.
+            if (this._codeWide && this._view === 'code') this._dropWide();
         };
         this._drag(grip,
             (e) => ({ x: e.clientX, w: width() }),
-            // The panel is on the RIGHT, so dragging left (negative dx) grows it.
-            (ev, s) => { setW(s.w + (s.x - ev.clientX)); this.onResize(); },
-            () => { document.documentElement.style.removeProperty('--soa-ctx-w'); lsDel(LS_WIDTH); },
+            // On the RIGHT (standard) dragging left grows the panel; in the
+            // swapped and both-left layouts it sits on the LEFT, so dragging
+            // right, toward the terminal, grows it.
+            (ev, s) => { setW(s.w + (panelOnLeft() ? ev.clientX - s.x : s.x - ev.clientX)); this.onResize(); },
+            () => { this._dropWide(); document.documentElement.style.removeProperty('--soa-ctx-w'); lsDel(LS_WIDTH); },
         );
         grip.addEventListener('keydown', (e) => {
-            const d = e.key === 'ArrowLeft' ? KEY_STEP : e.key === 'ArrowRight' ? -KEY_STEP : 0;
+            // The arrow pointing the way the drag widens it widens the panel.
+            const grow = panelOnLeft() ? 'ArrowRight' : 'ArrowLeft';
+            const shrink = panelOnLeft() ? 'ArrowLeft' : 'ArrowRight';
+            const d = e.key === grow ? KEY_STEP : e.key === shrink ? -KEY_STEP : 0;
             if (!d) return;
             e.preventDefault();
             setW(width() + d);
@@ -301,12 +450,42 @@ class ContextCanvas {
         return grip;
     }
 
-    _applySavedWidth() {
-        const w = parseInt(lsGet(LS_WIDTH, ''), 10);
-        if (Number.isFinite(w) && w >= WIDTH_MIN) {
-            document.documentElement.style.setProperty(
-                '--soa-ctx-w', clamp(w, WIDTH_MIN, WIDTH_MAX) + 'px');
+    // The canvas tops out at WIDTH_MAX; the code view may take up to WIDE_FRAC
+    // of the window, by drag or by Widen.
+    _maxW() {
+        // Measured from the panel's own position: beside the sidebar (both
+        // left) it shares the window with the sidebar column, so the fraction
+        // is of what is left past it. A slide-over sidebar (phone widths) or a
+        // hidden one takes no room.
+        let room = window.innerWidth;
+        if (document.documentElement.dataset.sides === 'left' && window.innerWidth > 768) {
+            const stage = this.root.closest('.stage');
+            const side = stage && !stage.classList.contains('no-sidebar') ? stage.querySelector('.sidebar') : null;
+            if (side) room -= side.getBoundingClientRect().width;
         }
+        const frac = Math.round(room * WIDE_FRAC);
+        return this._view === 'code' ? Math.max(WIDTH_MIN, frac) : Math.max(WIDTH_MIN, Math.min(WIDTH_MAX, frac));
+    }
+
+    // One place decides the panel width: Widen (code view only, never saved as
+    // the hand-set width) or the saved drag width clamped to the current view.
+    _applyWidth({ fit = true } = {}) {
+        const rs = document.documentElement.style;
+        if (this._view === 'code' && this._codeWide) {
+            rs.setProperty('--soa-ctx-w', this._maxW() + 'px');
+        } else {
+            const w = parseInt(lsGet(LS_WIDTH, ''), 10);
+            if (Number.isFinite(w) && w >= WIDTH_MIN) rs.setProperty('--soa-ctx-w', clamp(w, WIDTH_MIN, this._maxW()) + 'px');
+            else rs.removeProperty('--soa-ctx-w');
+        }
+        if (fit) this.onResize();
+    }
+
+    _dropWide() {
+        if (!this._codeWide) return;
+        this._codeWide = false;
+        lsSet(LS_CODE_WIDE, '0');
+        if (this._code) this._code.syncWide();
     }
 
     _applySavedBands() {
@@ -324,6 +503,9 @@ class ContextCanvas {
     async tick() {
         if (this.root.closest('.stage')?.classList.contains('no-context')) return;
         if (document.hidden) return;
+        // The poll feeds the canvas bands; parked behind Code it would paint
+        // into hidden nodes every 2.5s for nothing. Switching back repaints.
+        if (this._view === 'code') return;
         // Task delivery is shared by both CLIs; it must not depend on the
         // Claude context endpoint being available for this workspace.
         this._queueFetch();
@@ -633,6 +815,47 @@ class ContextCanvas {
         // rendering bug rather than an empty state.
         this._arts.replaceChildren(el('p', { class: 'ctx-muted', text: '—' }));
     }
+}
+
+// The Context | Code switch. Injected here, so the switch ships with this
+// module and needs no stylesheet cache-bust of its own.
+function ensureViewStyle() {
+    if (document.getElementById('ctx-view-style')) return;
+    const style = document.createElement('style');
+    style.id = 'ctx-view-style';
+    style.textContent = `
+.ctx-views {
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    padding: 6px 10px; border-bottom: 1px solid var(--soa-line-soft);
+}
+.ctx-view-btn {
+    appearance: none; flex: 1 1 0; min-width: 0; height: 22px; padding: 0 10px;
+    background: transparent; color: var(--soa-accent-dim);
+    border: 1px solid var(--soa-line); border-radius: 0;
+    font-family: var(--font-display); font-size: 10.5px; letter-spacing: 0.12em;
+    cursor: pointer; transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+.ctx-view-btn:first-child { border-radius: var(--desk-control-radius, 4px) 0 0 var(--desk-control-radius, 4px); }
+.ctx-view-btn:last-child { border-radius: 0 var(--desk-control-radius, 4px) var(--desk-control-radius, 4px) 0; margin-left: -1px; }
+.ctx-view-btn:hover { color: var(--soa-accent); }
+.ctx-view-btn.active {
+    color: var(--soa-accent); border-color: var(--soa-accent-dim);
+    background: rgba(var(--soa-accent-rgb), 0.12); position: relative; z-index: 1;
+}
+.ctx-view-btn:focus-visible { outline: 2px solid var(--soa-accent); outline-offset: 1px; position: relative; z-index: 2; }
+.context-panel.ctx-code > :not(.ctx-grip-w, .ctx-views, .ctx-mode-code) { display: none !important; }
+.ctx-mode-code { overflow: hidden; }
+:root[data-ui="neumorphism"] .ctx-views { border-color: transparent; }
+:root[data-ui="neumorphism"] .ctx-view-btn { border: 0; margin: 0; border-radius: 50px; }
+:root[data-ui="neumorphism"] .ctx-view-btn.active { background: var(--soa-bg); box-shadow: var(--desk-inset-sm); }
+@media (pointer: coarse) { .ctx-view-btn { height: 34px; } }
+@media (prefers-reduced-motion: reduce) { .ctx-view-btn { transition: none; } }
+@media (forced-colors: active) {
+    .ctx-view-btn { border-color: ButtonText; }
+    .ctx-view-btn.active { outline: 2px solid Highlight; outline-offset: -3px; }
+}
+`;
+    document.head.appendChild(style);
 }
 
 // Module-level singleton enforces the one-canvas rule even if a caller mounts twice.

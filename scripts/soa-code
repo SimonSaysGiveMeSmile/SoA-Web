@@ -1,0 +1,589 @@
+#!/usr/bin/env node
+/**
+ * soa-code — view, edit and save files from the dashboard's code panel.
+ *
+ * A loopback-only file service (default 127.0.0.1:6083) reached ONLY through
+ * the daemon's /preview/<port>/ proxy, so it rides the same tunnel and the
+ * same pairing gate (token + password) as the terminal and needs no daemon
+ * restart. The proxy strips SoA credentials and rewrites Host to
+ * 127.0.0.1:<port>; everything below is defence in depth on top of that:
+ *
+ *   - Host must be 127.0.0.1:<port> or localhost:<port> (DNS rebinding: a
+ *     page on evil.example resolving to 127.0.0.1 still sends its own Host).
+ *   - every /api/* request carries "x-soa-code: 1". A custom header forces a
+ *     CORS preflight, which is never answered with Access-Control-* headers,
+ *     so another origin cannot even send a write.
+ *   - paths are realpath'd and must stay inside an allowed root
+ *     (SOA_CODE_ROOTS, colon-separated; default the home directory), so a
+ *     symlink cannot walk out. Credentials and the SoA state dir are never
+ *     read; writes are also refused under ~/Library and any ".git".
+ *
+ *     GET /api/health             {version, roots}
+ *     GET /api/tree?path=&hidden= one directory level
+ *     GET /api/file?path=         utf8 text + sha1 (<= 2 MB, not binary)
+ *     PUT /api/file               {path, content, baseSha, create?} atomic write
+ *     POST /api/file              the same write; the daemon's CORS preflight
+ *                                 allows only GET/POST, so a cross-origin
+ *                                 dashboard (s0a.app over a tunnel) uses POST
+ *     GET /api/stat?path=         poll the open file for external changes
+ *     GET /api/find?root=&q=      quick-open fuzzy file-name search
+ *     GET /api/grep?root=&q=      literal text search (rg when present)
+ *     GET /api/git?root=          git status letters (read-only git)
+ */
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const net = require('node:net');
+const { spawn, execFile } = require('node:child_process');
+
+const VERSION = '1';
+const PORT = parseInt(process.env.SOA_CODE_PORT || '6083', 10);
+const HOST = '127.0.0.1';
+const HOME = os.homedir();
+const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(HOME, '.soa-web-local');
+const MAX_FILE = 2 * 1024 * 1024;
+const MAX_BODY = 4 * 1024 * 1024;
+const MAX_TREE = 5000;
+const FIND_MAX_FILES = 20000;
+const FIND_BUDGET_MS = 1500;
+const GREP_MAX_FILE = 1024 * 1024;
+const GREP_BUDGET_MS = 3000;
+// A request must arrive whole in this long (a phone on a slow uplink sending a
+// 4 MB body still fits); a client that stalls mid-body is cut off.
+const REQUEST_TIMEOUT_MS = intParam(process.env.SOA_CODE_REQUEST_TIMEOUT_MS, 120000, 600000);
+// Shown dimmed in the tree, never descended into by find/grep.
+const IGNORED = new Set(['node_modules', 'dist', 'build', '.next', '__pycache__', '.venv', 'target', '.DS_Store']);
+
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// ── path policy ─────────────────────────────────────────────────────────
+// .native, like fs/promises realpath, returns the on-disk case on a
+// case-insensitive volume, so the guards compare against the same spelling.
+function realOrResolved(p) {
+    try { return fs.realpathSync.native(p); } catch (_) { return path.resolve(p); }
+}
+
+// Both spellings of each guarded dir: /var vs /private/var, a symlinked home.
+function guardList(dirs) {
+    const out = new Set();
+    for (const d of dirs) { out.add(path.resolve(d)); out.add(realOrResolved(d)); }
+    return [...out];
+}
+
+const ROOTS = (process.env.SOA_CODE_ROOTS ? process.env.SOA_CODE_ROOTS.split(':') : [HOME])
+    .filter(Boolean)
+    .map(r => { try { return fs.realpathSync.native(r); } catch (_) { return null; } })
+    .filter(Boolean);
+
+const READ_DENY = guardList([
+    path.join(HOME, '.ssh'), path.join(HOME, '.gnupg'), path.join(HOME, '.aws'),
+    path.join(HOME, 'Library', 'Keychains'), STATE_DIR,
+]);
+const WRITE_DENY = guardList([
+    path.join(HOME, '.ssh'), path.join(HOME, '.gnupg'), path.join(HOME, '.aws'),
+    path.join(HOME, 'Library'), STATE_DIR,
+]);
+
+function isInside(p, dir) {
+    const rel = path.relative(dir, p);
+    return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
+}
+
+class PolicyError extends Error {
+    constructor(code, message, status = 403) { super(message); this.code = code; this.status = status; }
+}
+
+function checkInput(p) {
+    if (typeof p !== 'string' || !p || p.includes('\0')) throw new PolicyError('BAD_PATH', 'path required', 400);
+    if (!path.isAbsolute(p)) throw new PolicyError('BAD_PATH', 'path must be absolute', 400);
+    return path.resolve(p);
+}
+
+function checkReadable(real) {
+    if (!ROOTS.some(r => isInside(real, r))) throw new PolicyError('OUTSIDE_ROOT', 'outside the allowed roots');
+    if (READ_DENY.some(d => isInside(real, d))) throw new PolicyError('DENIED', 'this path is never read');
+    return real;
+}
+
+function writeRefusal(real) {
+    if (!ROOTS.some(r => isInside(real, r))) return 'outside the allowed roots';
+    if (WRITE_DENY.some(d => isInside(real, d))) return 'this path is never written';
+    if (real.split(path.sep).includes('.git')) return 'files inside .git are never written';
+    return null;
+}
+
+// A missing path is "not found" only inside the roots; anywhere else it is
+// refused like an existing one, so the answers cannot map the disk outside.
+async function notFound(abs, message) {
+    let dir = abs, rest = [];
+    for (;;) {
+        try { checkReadable(path.join(await fsp.realpath(dir), ...rest)); break; } catch (e) {
+            if (e instanceof PolicyError) throw e;
+            if (path.dirname(dir) === dir) break;
+            rest.unshift(path.basename(dir));
+            dir = path.dirname(dir);
+        }
+    }
+    return new PolicyError('NOT_FOUND', message, 404);
+}
+
+// An existing path: realpath it (follows every symlink) and check that.
+async function resolveRead(p) {
+    const abs = checkInput(p);
+    let real;
+    try { real = await fsp.realpath(abs); } catch (e) {
+        if (e.code === 'ENOENT' || e.code === 'ENOTDIR') throw await notFound(abs, 'no such file or directory');
+        throw e;
+    }
+    return checkReadable(real);
+}
+
+// A path that may not exist yet: realpath the parent, then (if the target
+// exists, e.g. a symlink) the target itself, so a link cannot point outside.
+async function resolveTarget(p) {
+    const abs = checkInput(p);
+    const base = path.basename(abs);
+    let parent;
+    try { parent = await fsp.realpath(path.dirname(abs)); } catch (e) {
+        if (e.code === 'ENOENT' || e.code === 'ENOTDIR') throw await notFound(abs, 'parent directory does not exist');
+        throw e;
+    }
+    let real = path.join(parent, base);
+    try { real = await fsp.realpath(real); } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+        // A dangling symlink would let the write land wherever it points.
+        try { if ((await fsp.lstat(real)).isSymbolicLink()) throw new PolicyError('DENIED', 'dangling symlink'); } catch (e2) {
+            if (e2 instanceof PolicyError) throw e2;
+        }
+    }
+    return checkReadable(real);
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────
+const sha1 = buf => crypto.createHash('sha1').update(buf).digest('hex');
+
+function isBinary(buf) {
+    if (buf.subarray(0, 8192).includes(0)) return true;
+    try { new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (_) { return true; }
+    return false;
+}
+
+function intParam(v, def, max) {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) && n > 0 ? Math.min(n, max) : def;
+}
+
+async function canWrite(real) {
+    if (writeRefusal(real)) return false;
+    try { await fsp.access(real, fs.constants.W_OK); return true; } catch (_) { return false; }
+}
+
+// Walk a tree breadth-first, skipping .git and the ignored dirs, never
+// following directory symlinks (loops). Calls visit(abs, rel) per file;
+// visit returns false to stop.
+async function walk(root, deadline, maxFiles, visit) {
+    const queue = [''];
+    let files = 0;
+    while (queue.length) {
+        if (Date.now() > deadline) return true;
+        const relDir = queue.shift();
+        let ents;
+        try { ents = await fsp.readdir(path.join(root, relDir), { withFileTypes: true }); } catch (_) { continue; }
+        ents.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+        for (const e of ents) {
+            if (e.name === '.git' || IGNORED.has(e.name)) continue;
+            const rel = relDir ? relDir + '/' + e.name : e.name;
+            const abs = path.join(root, rel);
+            if (e.isDirectory()) {
+                if (!READ_DENY.some(d => isInside(abs, d))) queue.push(rel);
+                continue;
+            }
+            if (!e.isFile() && !e.isSymbolicLink()) continue;
+            if (e.isSymbolicLink()) {
+                // grep reads what the link points at: hold it to the read policy.
+                try { checkReadable(await fsp.realpath(abs)); if (!(await fsp.stat(abs)).isFile()) continue; } catch (_) { continue; }
+            }
+            if (++files > maxFiles) return true;
+            if ((await visit(abs, rel)) === false) return true;
+            if (Date.now() > deadline) return true;
+        }
+    }
+    return false;
+}
+
+function fuzzyScore(rel, q) {
+    const s = rel.toLowerCase();
+    const baseStart = s.lastIndexOf('/') + 1;
+    let score = 0, si = 0, prev = -2;
+    for (const ch of q) {
+        const i = s.indexOf(ch, si);
+        if (i < 0) return -Infinity;
+        score += 1;
+        if (i === prev + 1) score += 5;
+        if (i >= baseStart) score += 3;
+        if (i === 0 || s[i - 1] === '/' || s[i - 1] === '-' || s[i - 1] === '_' || s[i - 1] === '.') score += 4;
+        prev = i;
+        si = i + 1;
+    }
+    if (s.slice(baseStart).includes(q)) score += 20;
+    return score - rel.length * 0.05;
+}
+
+function snippet(line, col) {
+    if (line.length <= 200) return line;
+    const start = Math.max(0, Math.min(col - 1 - 60, line.length - 200));
+    return line.slice(start, start + 200);
+}
+
+function findRg() {
+    if (process.env.SOA_CODE_RG !== undefined) return /^(off|0|none)?$/.test(process.env.SOA_CODE_RG) ? null : process.env.SOA_CODE_RG;
+    for (const dir of (process.env.PATH || '').split(':')) {
+        if (!dir) continue;
+        const p = path.join(dir, 'rg');
+        try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return p; } catch (_) {}
+    }
+    return null;
+}
+const RG = findRg();
+
+function grepRg(root, q, limit) {
+    return new Promise(resolve => {
+        const args = ['--json', '--fixed-strings', '--ignore-case', '--hidden', '--max-filesize', '1M', '-g', '!.git'];
+        for (const name of IGNORED) args.push('-g', '!' + name);
+        // rg walks on its own, so the read denylist has to be handed to it
+        // (anchored globs) and is re-checked on every match below.
+        for (const d of READ_DENY) {
+            if (d !== root && isInside(d, root)) args.push('-g', '!/' + path.relative(root, d).split(path.sep).join('/'));
+        }
+        args.push('--', q, '.');
+        const child = spawn(RG, args, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] });
+        const matches = [];
+        let buf = '', truncated = false, done = false;
+        const finish = () => { if (done) return; done = true; clearTimeout(timer); try { child.kill('SIGKILL'); } catch (_) {} resolve({ matches, truncated }); };
+        const timer = setTimeout(() => { truncated = true; finish(); }, GREP_BUDGET_MS);
+        child.stdout.on('data', chunk => {
+            buf += chunk;
+            let nl;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+                const raw = buf.slice(0, nl); buf = buf.slice(nl + 1);
+                let m; try { m = JSON.parse(raw); } catch (_) { continue; }
+                if (m.type !== 'match' || !m.data.path || m.data.path.text === undefined || !m.data.lines || m.data.lines.text === undefined) continue;
+                const lineText = m.data.lines.text.replace(/\r?\n$/, '');
+                const file = m.data.path.text.replace(/^\.\//, '');
+                if (READ_DENY.some(d => isInside(path.join(root, file), d))) continue;
+                for (const sm of m.data.submatches || []) {
+                    // rg reports byte offsets; the UI wants a character column.
+                    const col = Buffer.from(lineText).subarray(0, sm.start).toString().length + 1;
+                    matches.push({ file, line: m.data.line_number, col, text: snippet(lineText, col) });
+                    if (matches.length >= limit) { truncated = true; return finish(); }
+                }
+            }
+        });
+        child.on('error', finish);
+        child.on('close', finish);
+    });
+}
+
+async function grepNode(root, q, limit) {
+    const needle = q.toLowerCase();
+    const matches = [];
+    let full = false;
+    const truncated = await walk(root, Date.now() + GREP_BUDGET_MS, Infinity, async (abs, rel) => {
+        let st; try { st = await fsp.stat(abs); } catch (_) { return; }
+        if (st.size > GREP_MAX_FILE || st.size === 0) return;
+        let buf; try { buf = await fsp.readFile(abs); } catch (_) { return; }
+        if (buf.subarray(0, 8192).includes(0)) return;
+        const lines = buf.toString('utf8').split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+            const low = lines[i].toLowerCase();
+            let at = low.indexOf(needle);
+            while (at >= 0) {
+                matches.push({ file: rel, line: i + 1, col: at + 1, text: snippet(lines[i], at + 1) });
+                if (matches.length >= limit) { full = true; return false; }
+                at = low.indexOf(needle, at + Math.max(1, needle.length));
+            }
+        }
+    });
+    return { matches, truncated: truncated || full };
+}
+
+function git(args, cwd) {
+    return new Promise((resolve, reject) => {
+        // core.fsmonitor is a command a repo's own config can name, and status
+        // runs it: never let a folder someone opens decide what executes.
+        execFile('git', ['-C', cwd, '-c', 'core.fsmonitor=false', ...args], {
+            encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 5000,
+            // Read-only: no index refresh, no lock files, never a prompt.
+            env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+        }, (err, stdout) => err ? reject(err) : resolve(stdout));
+    });
+}
+
+function statusLetter(xy) {
+    if (xy === '??') return '?';
+    if (xy.includes('D')) return 'D';
+    if (xy.includes('R')) return 'R';
+    if (xy.includes('A')) return 'A';
+    return 'M';
+}
+
+// ── handlers ────────────────────────────────────────────────────────────
+const handlers = {
+    'GET /api/health': async () => ({ ok: true, version: VERSION, roots: ROOTS }),
+
+    'GET /api/tree': async (q) => {
+        const dir = await resolveRead(q.get('path'));
+        const hidden = q.get('hidden') === '1';
+        let ents;
+        try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) {
+            if (e.code === 'ENOTDIR') throw new PolicyError('NOT_DIR', 'not a directory', 400);
+            throw e;
+        }
+        ents = ents.filter(e => e.name !== '.git' && (hidden || !e.name.startsWith('.')));
+        const truncated = ents.length > MAX_TREE;
+        if (truncated) ents = ents.slice(0, MAX_TREE);
+        const entries = await Promise.all(ents.map(async e => {
+            const abs = path.join(dir, e.name);
+            let st = null; try { st = await fsp.lstat(abs); } catch (_) {}
+            const type = e.isSymbolicLink() ? 'link' : e.isDirectory() ? 'dir' : 'file';
+            const out = { name: e.name, type, size: st ? st.size : 0, mtimeMs: st ? Math.round(st.mtimeMs) : 0, ignored: IGNORED.has(e.name) };
+            if (type === 'link') {
+                // What the link points at, so the tree knows whether it expands.
+                try { out.target = (await fsp.stat(abs)).isDirectory() ? 'dir' : 'file'; } catch (_) { out.target = 'missing'; }
+            }
+            return out;
+        }));
+        const rank = e => (e.type === 'dir' || e.target === 'dir') ? 0 : 1;
+        entries.sort((a, b) => rank(a) - rank(b) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || (a.name < b.name ? -1 : 1));
+        const res = { ok: true, path: dir, entries };
+        if (truncated) res.truncated = true;
+        return res;
+    },
+
+    'GET /api/file': async (q) => {
+        const file = await resolveRead(q.get('path'));
+        const st = await fsp.stat(file);
+        if (!st.isFile()) throw new PolicyError('NOT_FILE', 'not a regular file', 400);
+        if (st.size > MAX_FILE) return { status: 413, body: { ok: false, error: 'file is larger than 2 MB', code: 'TOO_LARGE', size: st.size } };
+        const buf = await fsp.readFile(file);
+        if (isBinary(buf)) return { status: 415, body: { ok: false, error: 'binary file', code: 'BINARY', size: buf.length } };
+        const content = buf.toString('utf8');
+        return {
+            ok: true, path: file, content, size: buf.length, mtimeMs: Math.round(st.mtimeMs), sha: sha1(buf),
+            eol: /\r\n/.test(content) ? 'crlf' : 'lf', readonly: !(await canWrite(file)),
+        };
+    },
+
+    'PUT /api/file': async (_q, body) => {
+        if (!body || typeof body !== 'object') throw new PolicyError('BAD_REQUEST', 'JSON body required', 400);
+        if (typeof body.content !== 'string') throw new PolicyError('BAD_REQUEST', 'content must be a string', 400);
+        const target = await resolveTarget(body.path);
+        const refusal = writeRefusal(target);
+        if (refusal) throw new PolicyError('READ_ONLY', refusal);
+        let cur = null;
+        try { cur = await fsp.stat(target); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        if (cur && !cur.isFile()) throw new PolicyError('NOT_FILE', 'not a regular file', 400);
+        // rename() only needs the directory to be writable; a file its owner
+        // made read-only (or someone else's file) must stay as it is.
+        if (cur) { try { await fsp.access(target, fs.constants.W_OK); } catch (_) { throw new PolicyError('READ_ONLY', 'no write permission'); } }
+        const baseSha = body.baseSha == null ? null : String(body.baseSha);
+        if (cur && body.create) return { status: 409, body: { ok: false, error: 'file already exists', code: 'EXISTS', sha: sha1(await fsp.readFile(target)), mtimeMs: Math.round(cur.mtimeMs) } };
+        if (cur) {
+            const sha = sha1(await fsp.readFile(target));
+            if (sha !== baseSha) return { status: 409, body: { ok: false, error: 'changed on disk', code: 'CONFLICT', sha, mtimeMs: Math.round(cur.mtimeMs) } };
+        } else if (baseSha) {
+            // Opened at baseSha, deleted since: saving would silently resurrect it.
+            return { status: 409, body: { ok: false, error: 'deleted on disk', code: 'CONFLICT', sha: null, mtimeMs: null, exists: false } };
+        }
+        const data = Buffer.from(body.content, 'utf8');
+        const tmp = path.join(path.dirname(target), `.${path.basename(target)}.soa-code-${crypto.randomBytes(6).toString('hex')}.tmp`);
+        try {
+            const fh = await fsp.open(tmp, 'wx', cur ? (cur.mode & 0o7777) : 0o666);
+            try { await fh.writeFile(data); await fh.sync(); } finally { await fh.close(); }
+            // open() applies the umask; restore the file's own mode exactly.
+            if (cur) await fsp.chmod(tmp, cur.mode & 0o7777);
+            await fsp.rename(tmp, target);
+        } catch (e) {
+            await fsp.unlink(tmp).catch(() => {});
+            if (e.code === 'EACCES' || e.code === 'EPERM') throw new PolicyError('READ_ONLY', 'no write permission');
+            throw e;
+        }
+        const st = await fsp.stat(target);
+        log(`write ${target} ${data.length} bytes`);
+        return { ok: true, path: target, sha: sha1(data), mtimeMs: Math.round(st.mtimeMs), size: data.length };
+    },
+
+    'GET /api/stat': async (q) => {
+        let target;
+        try { target = await resolveTarget(q.get('path')); } catch (e) {
+            if (e instanceof PolicyError && e.code === 'NOT_FOUND') return { ok: true, exists: false };
+            throw e;
+        }
+        let st;
+        try { st = await fsp.stat(target); } catch (e) {
+            if (e.code === 'ENOENT') return { ok: true, exists: false };
+            throw e;
+        }
+        const out = { ok: true, exists: true, type: st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other', size: st.size, mtimeMs: Math.round(st.mtimeMs) };
+        if (st.isFile() && st.size <= MAX_FILE) out.sha = sha1(await fsp.readFile(target));
+        return out;
+    },
+
+    'GET /api/find': async (q) => {
+        const root = await resolveRead(q.get('root'));
+        if (!(await fsp.stat(root)).isDirectory()) throw new PolicyError('NOT_DIR', 'not a directory', 400);
+        const needle = (q.get('q') || '').toLowerCase().replace(/\s+/g, '');
+        const limit = intParam(q.get('limit'), 50, 500);
+        const scored = [];
+        const truncated = await walk(root, Date.now() + FIND_BUDGET_MS, FIND_MAX_FILES, (_abs, rel) => {
+            const s = needle ? fuzzyScore(rel, needle) : -rel.length;
+            if (s > -Infinity) scored.push([s, rel]);
+        });
+        scored.sort((a, b) => b[0] - a[0] || a[1].length - b[1].length || (a[1] < b[1] ? -1 : 1));
+        return { ok: true, root, files: scored.slice(0, limit).map(x => x[1]), truncated: truncated || scored.length > limit };
+    },
+
+    'GET /api/grep': async (q) => {
+        const root = await resolveRead(q.get('root'));
+        if (!(await fsp.stat(root)).isDirectory()) throw new PolicyError('NOT_DIR', 'not a directory', 400);
+        const needle = q.get('q') || '';
+        if (!needle) throw new PolicyError('BAD_REQUEST', 'q required', 400);
+        const limit = intParam(q.get('limit'), 200, 1000);
+        const r = RG ? await grepRg(root, needle, limit) : await grepNode(root, needle, limit);
+        return { ok: true, root, matches: r.matches, truncated: r.truncated, engine: RG ? 'rg' : 'node' };
+    },
+
+    'GET /api/git': async (q) => {
+        const root = await resolveRead(q.get('root'));
+        let top;
+        try { top = (await git(['rev-parse', '--show-toplevel'], root)).trim(); } catch (_) { return { ok: true, repo: false, branch: null, files: {} }; }
+        top = realOrResolved(top);
+        let branch = null;
+        try { branch = (await git(['symbolic-ref', '--short', '-q', 'HEAD'], root)).trim() || null; } catch (_) {
+            try { branch = (await git(['rev-parse', '--short', 'HEAD'], root)).trim() || null; } catch (_) {}
+        }
+        const files = {};
+        let raw = '';
+        try { raw = await git(['status', '--porcelain=v1', '-z'], root); } catch (_) {}
+        const parts = raw.split('\0');
+        for (let i = 0; i < parts.length; i++) {
+            const ent = parts[i];
+            if (ent.length < 4) continue;
+            const xy = ent.slice(0, 2);
+            if (xy === '!!') continue;
+            if (xy[0] === 'R' || xy[0] === 'C') i++;   // -z: the original path follows
+            const abs = path.join(top, ent.slice(3));
+            if (!isInside(abs, root)) continue;
+            files[path.relative(root, abs).split(path.sep).join('/')] = statusLetter(xy);
+        }
+        return { ok: true, repo: true, top, branch, files };
+    },
+};
+
+// ── server ──────────────────────────────────────────────────────────────
+function send(res, status, body) {
+    const data = JSON.stringify(body);
+    res.writeHead(status, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(data),
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+    });
+    res.end(data);
+}
+
+function readBody(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        req.on('data', c => {
+            size += c.length;
+            if (size > MAX_BODY) { reject(new PolicyError('BODY_TOO_LARGE', 'request body is larger than 4 MB', 413)); req.destroy(); return; }
+            chunks.push(c);
+        });
+        req.on('end', () => {
+            if (!size) return resolve(null);
+            try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (_) { reject(new PolicyError('BAD_JSON', 'invalid JSON body', 400)); }
+        });
+        req.on('error', reject);
+    });
+}
+
+function hostAllowed(host, port) {
+    return host === `127.0.0.1:${port}` || host === `localhost:${port}`;
+}
+
+// The daemon's proxy rewrites Host, so a page that DNS-rebinds its own name
+// onto the daemon would pass hostAllowed. Its fetches still carry its Origin
+// (every write does), so an Origin must be one the dashboard is really served
+// from: loopback or an IP literal (neither can be rebound), this Mac's own
+// name, s0a.app, the native shells, the current tunnel, or SOA_CODE_ORIGINS.
+const MY_NAME = os.hostname().toLowerCase().replace(/\.local$/, '');
+const SAFE_SITES = new Set(['s0a.app', 'www.s0a.app', 'localhost', MY_NAME, MY_NAME + '.local']);
+function tunnelHosts() {
+    const out = [];
+    for (const f of ['tunnel.json', 'channels.json', 'tunnel-config.json']) {
+        let j; try { j = JSON.parse(fs.readFileSync(path.join(STATE_DIR, f), 'utf8')); } catch (_) { continue; }
+        for (const k of ['url', 'userUrl', 'publicUrl', 'domain', 'hostname']) {
+            if (typeof j[k] !== 'string' || !j[k]) continue;
+            try { out.push(new URL(/^[a-z]+:\/\//i.test(j[k]) ? j[k] : 'https://' + j[k]).hostname.toLowerCase()); } catch (_) {}
+        }
+    }
+    return out;
+}
+function originAllowed(origin) {
+    if (origin === undefined) return true;
+    let u; try { u = new URL(origin); } catch (_) { return false; }
+    if (u.protocol === 'capacitor:' || u.protocol === 'ionic:') return u.hostname === 'localhost';
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const extra = [process.env.SOA_CODE_ORIGINS, process.env.SOA_WEB_ALLOWED_ORIGINS].join(',').split(',').map(s => s.trim()).filter(Boolean);
+    if (extra.includes(u.origin)) return true;
+    const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (net.isIP(host) || SAFE_SITES.has(host)) return true;
+    return tunnelHosts().includes(host);
+}
+
+handlers['POST /api/file'] = handlers['PUT /api/file'];
+
+const server = http.createServer({
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    headersTimeout: Math.min(REQUEST_TIMEOUT_MS, 20000),
+    connectionsCheckingInterval: Math.min(REQUEST_TIMEOUT_MS / 2, 1000),
+}, async (req, res) => {
+    const port = server.address().port;
+    if (!hostAllowed(req.headers.host, port)) return send(res, 403, { ok: false, error: 'bad host', code: 'BAD_HOST' });
+    let url;
+    try { url = new URL(req.url, `http://${HOST}:${port}`); } catch (_) { return send(res, 400, { ok: false, error: 'bad url', code: 'BAD_REQUEST' }); }
+    if (!url.pathname.startsWith('/api/')) return send(res, 404, { ok: false, error: 'not found', code: 'NOT_FOUND' });
+    if (req.headers['x-soa-code'] !== '1') return send(res, 403, { ok: false, error: 'missing x-soa-code header', code: 'NO_HEADER' });
+    if (!originAllowed(req.headers.origin)) return send(res, 403, { ok: false, error: 'origin not allowed (add it to SOA_CODE_ORIGINS)', code: 'BAD_ORIGIN' });
+    const handler = handlers[`${req.method} ${url.pathname}`];
+    if (!handler) {
+        const known = Object.keys(handlers).some(k => k.endsWith(' ' + url.pathname));
+        return send(res, known ? 405 : 404, { ok: false, error: known ? 'method not allowed' : 'not found', code: known ? 'BAD_METHOD' : 'NOT_FOUND' });
+    }
+    try {
+        const body = req.method === 'PUT' || req.method === 'POST' ? await readBody(req) : null;
+        const out = await handler(url.searchParams, body);
+        if (out && out.status) return send(res, out.status, out.body);
+        send(res, 200, out);
+    } catch (e) {
+        if (e instanceof PolicyError) return send(res, e.status, { ok: false, error: e.message, code: e.code });
+        if (e.code === 'ENOENT') return send(res, 404, { ok: false, error: 'no such file or directory', code: 'NOT_FOUND' });
+        if (e.code === 'EACCES' || e.code === 'EPERM') return send(res, 403, { ok: false, error: 'permission denied', code: 'DENIED' });
+        log('error', req.method, url.pathname, e && e.message);
+        send(res, 500, { ok: false, error: 'internal error', code: 'INTERNAL' });
+    }
+});
+
+server.on('error', e => { log('listen failed:', e.message); process.exit(1); });
+server.listen(PORT, HOST, () => {
+    log(`soa-code on http://${HOST}:${server.address().port} roots=${ROOTS.join(':') || '(none)'} grep=${RG ? 'rg' : 'node'}`);
+});
+
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { server.close(); process.exit(0); });

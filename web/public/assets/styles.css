@@ -608,6 +608,7 @@ html[data-load="high"] .set-row { transition: none !important; }
     --soa-icon-audio-off: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 9.5v5h3.5L12 18V6L7.5 9.5H4z'/><path d='m16 9.5 4 5'/><path d='m20 9.5-4 5'/></svg>");
     --soa-icon-tts: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5h16v10H9l-4 3.5V15H4z'/><path d='M8 9h8'/><path d='M8 12h5'/></svg>");
     --soa-icon-reload: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 12a8 8 0 1 1-2.34-5.66'/><path d='M20 4v5h-5'/></svg>");
+    --soa-icon-swap: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M5 8h13'/><path d='m15 4.5 3.5 3.5-3.5 3.5'/><path d='M19 16H6'/><path d='m9 12.5-3.5 3.5 3.5 3.5'/></svg>");
     --soa-icon-monitor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4.5' width='18' height='11.5' rx='1.5'/><path d='M9 20h6'/><path d='M12 16v4'/></svg>");
     /* View-switcher icons — one crisp monochrome line glyph per view, same
        CSS-mask technique so each inherits currentColor / the active-cell ink. */
@@ -687,6 +688,68 @@ html[data-load="high"] .set-row { transition: none !important; }
 #more-menu .mi-monitor  { --mi-icon: var(--soa-icon-monitor); }
 #more-menu .mi-clock    { --mi-icon: var(--soa-icon-clock); }
 #more-menu .mi-reload   { --mi-icon: var(--soa-icon-reload); }
+#more-menu .mi-layout   { --mi-icon: var(--soa-icon-swap); }
+/* Panel layout: one row, three choices. Each choice is a map of its own
+   layout — the wide block is the terminal, the accent-filled sliver the
+   context and code panel, the outlined one the sidebar — so the row shows all
+   three arrangements at once and rings the one in use. The label is absolutely
+   placed and adds no width, so the row reserves its own room (min-width) for
+   label + maps. The row itself is not a target: only the maps are. */
+#more-menu .mi-layout { min-width: 272px; padding-right: 104px; cursor: default; }
+#more-menu .mi-layout:hover { background: transparent; border-color: transparent; box-shadow: none; }
+/* The desktop packs colour their menu rows through a button-only rule; this
+   row is a frame, not a button, so it takes the same ink by hand. */
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) #more-menu .mi-layout { color: var(--soa-fg); }
+/* Those packs also rest every row as a control (capsule, card, raised slab);
+   this row keeps that chrome, at rest and under the pointer, so it reads as
+   one of the set rather than a gap in it. */
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) #more-menu .mi-layout,
+:is([data-ui="macos27"],[data-ui="windows11"],[data-ui="neumorphism"]) #more-menu .mi-layout:hover {
+    border: 1px solid var(--desk-control-line); border-radius: var(--desk-control-radius);
+    background: var(--desk-control); box-shadow: var(--desk-control-shadow);
+}
+[data-ui="macos27"] #more-menu .mi-layout { border-radius: 999px; }
+[data-ui="windows11"] #more-menu .mi-layout,
+[data-ui="windows11"] #more-menu .mi-layout:hover { border-bottom-color: var(--desk-control-line-b); }
+[data-ui="neumorphism"] #more-menu .mi-layout,
+[data-ui="neumorphism"] #more-menu .mi-layout:hover { border: 0; font-weight: 700; }
+.mi-layout-opts {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    display: flex; gap: 2px;
+}
+/* Two ids: every pack styles topbar buttons (pills, bevels, soft shadows)
+   through selectors that carry one, and these maps must stay bare. */
+#more-menu #panel-layout .mi-layout-opt {
+    position: relative; display: block; box-sizing: border-box;
+    width: 30px; height: 24px; min-width: 0; min-height: 0; padding: 0; margin: 0;
+    background: transparent; color: inherit; font-size: 0;
+    border: 0; border-radius: 4px; box-shadow: none; text-shadow: none;
+    cursor: pointer; opacity: 0.6; transform: none;
+    transition: opacity 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+#more-menu #panel-layout .mi-layout-opt:hover { opacity: 1; background: rgba(var(--soa-accent-rgb), 0.12); }
+#more-menu #panel-layout .mi-layout-opt[aria-checked="true"] { opacity: 1; box-shadow: inset 0 0 0 1px var(--soa-accent); }
+#more-menu #panel-layout .mi-layout-opt:focus-visible { outline: 1px solid var(--soa-accent); outline-offset: 1px; }
+.mi-swap-glyph {
+    position: absolute; left: 50%; top: 50%;
+    width: 22px; height: 14px; margin: -7px 0 0 -11px;
+    pointer-events: none;
+}
+.mi-swap-glyph i {
+    position: absolute; top: 0; bottom: 0; box-sizing: border-box;
+    border: 1px solid currentColor; border-radius: 1.5px;
+}
+.mi-swap-glyph .g-side { left: 0; width: 4px; }
+.mi-swap-glyph .g-term { left: 5px; width: 12px; opacity: 0.45; }
+.mi-swap-glyph .g-ctx  { left: 18px; width: 4px; background: var(--soa-accent); border-color: var(--soa-accent); }
+.mi-layout-opt[data-layout="swapped"] .g-side { left: 18px; }
+.mi-layout-opt[data-layout="swapped"] .g-ctx  { left: 0; }
+.mi-layout-opt[data-layout="left"] .g-ctx  { left: 5px; }
+.mi-layout-opt[data-layout="left"] .g-term { left: 10px; }
+@media (prefers-reduced-motion: reduce) { #more-menu #panel-layout .mi-layout-opt { transition: none; } }
+/* The topbar's sidebar toggle draws a panel on one side; mirror it so it
+   points at the edge the sidebar now lives on. */
+:root[data-sides="swapped"] .brand #toggle-sidebar::before { display: inline-block; transform: scaleX(-1); }
 
 /* ── User profile chip ────────────────────────────────────────────────────── */
 .user-chip {

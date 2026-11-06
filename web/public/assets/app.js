@@ -23,7 +23,7 @@ import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=web-20261102';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
-import { mountContextPanel } from '/assets/contextPanel.js?v=cli-support-20261005b';
+import { mountContextPanel } from '/assets/contextPanel.js?v=layouts-20261106';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=web-20261102';
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
 import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=web-20261102';
@@ -1876,6 +1876,8 @@ class Shell {
             try { localStorage.setItem('soa_context_off', off ? '1' : '0'); } catch (_) {}
             this._fitActive();
         };
+        // The context panel's Code shortcut opens the panel through this.
+        this._setContextOff = setContextOff;
         // Reflect the initial state without persisting it: an unvisited phone
         // shouldn't have "closed" written into localStorage as a preference.
         if (ctxPull) ctxPull.setAttribute('aria-expanded', ctxOff ? 'false' : 'true');
@@ -1959,10 +1961,63 @@ class Shell {
                 else closeMore();
             });
             // Picking an action runs its own handler, then the menu dismisses.
+            // The Panel layout row is only a frame: its three maps are the targets.
             moreMenu.addEventListener('click', (e) => {
-                if (e.target.closest('.more-item')) setTimeout(closeMore, 0);
+                const item = e.target.closest('.more-item');
+                if (!item || (item.classList.contains('mi-layout') && !e.target.closest('.mi-layout-opt'))) return;
+                setTimeout(closeMore, 0);
             });
         }
+
+        // Panel layout (⋯ MORE → Panel layout, Ctrl/Cmd+Shift+\ cycles):
+        // standard (sidebar left, panel right), swapped (panel left, sidebar
+        // right) or left (the panel beside the sidebar). Per device; the <head>
+        // script applies the saved choice pre-paint and CSS keyed on data-sides
+        // does the arranging, so this only sets the attribute and re-fits.
+        const SIDES = ['standard', 'swapped', 'left'];
+        const layoutRow = $('#panel-layout');
+        const layoutOpts = layoutRow ? [...layoutRow.querySelectorAll('.mi-layout-opt')] : [];
+        const curSides = () => {
+            const v = document.documentElement.dataset.sides;
+            return SIDES.includes(v) ? v : 'standard';
+        };
+        const syncLayout = () => {
+            const cur = curSides();
+            for (const b of layoutOpts) {
+                const on = b.dataset.layout === cur;
+                b.setAttribute('aria-checked', on ? 'true' : 'false');
+                b.tabIndex = on ? 0 : -1;
+            }
+        };
+        this._setSides = (mode) => {
+            if (!SIDES.includes(mode) || mode === curSides()) { syncLayout(); return; }
+            const root = document.documentElement;
+            if (mode === 'standard') delete root.dataset.sides;
+            else root.dataset.sides = mode;
+            try { localStorage.setItem('soa-web:sides', mode); } catch (_) {}
+            syncLayout();
+            this.audio.play('panels');
+            // The terminal column moved and may have changed width.
+            this._fitActive();
+            requestAnimationFrame(() => this._fitActive());
+        };
+        this._toggleSides = () => this._setSides(SIDES[(SIDES.indexOf(curSides()) + 1) % SIDES.length]);
+        for (const b of layoutOpts) b.addEventListener('click', () => this._setSides(b.dataset.layout));
+        // Arrow keys move between the three maps; Enter/Space (the button's own
+        // activation) picks one.
+        if (layoutRow) layoutRow.addEventListener('keydown', (e) => {
+            const at = layoutOpts.indexOf(document.activeElement);
+            if (at < 0) return;
+            const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+            const to = e.key === 'Home' ? 0 : e.key === 'End' ? layoutOpts.length - 1
+                : step ? (at + step + layoutOpts.length) % layoutOpts.length : -1;
+            if (to < 0) return;
+            e.preventDefault();
+            for (const b of layoutOpts) b.tabIndex = -1;
+            layoutOpts[to].tabIndex = 0;
+            layoutOpts[to].focus();
+        });
+        syncLayout();
 
         // Full screen (inside the expandable tray). Hidden where the Fullscreen
         // API is missing; aria-pressed follows the real state, so Esc / F11
@@ -5068,6 +5123,13 @@ class Shell {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'h') {
             e.preventDefault();
             if (this._toggleActions) this._toggleActions();
+        }
+        // Ctrl/Cmd+Shift+\ — cycle the panel layout (standard → swapped → both
+        // left). By code: Shift turns the key into '|' on US layouts and into
+        // something else elsewhere.
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'Backslash') {
+            e.preventDefault();
+            if (this._toggleSides) this._toggleSides();
         }
     }
 
@@ -8384,6 +8446,11 @@ async function bootServerMode({ backend, token }) {
     // changes instead of ever mounting a second one.
     mountContextPanel($('#context'), {
         backend,
+        // The Code view reaches the file service through the daemon's
+        // /preview/ proxy with the same pairing token + unlock.
+        token,
+        unlock: UNLOCK,
+        showPanel: () => { if (shell._setContextOff && $('#context')?.closest('.stage')?.classList.contains('no-context')) shell._setContextOff(false); },
         getCwd: () => shell._tabCwd.get(shell.activeId) || null,
         // The message queue is per TAB, not per workspace: three tabs on one
         // repo are three agents, each with its own turn to wait for.

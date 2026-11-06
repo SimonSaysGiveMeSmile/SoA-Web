@@ -445,6 +445,7 @@ const VIEW_ALIASES = {
     meet: 'meet-view', meeting: 'meet-view', room: 'meet-view',
     dash: 'tiles-view', fleet: 'tiles-view', tiles: 'tiles-view',
     browser: 'web-view', web: 'web-view',
+    code: 'code-view', editor: 'code-view', files: 'code-view',
     system: 'widgets-view', widgets: 'widgets-view',
 };
 const INITIAL_VIEW = (() => {
@@ -2042,6 +2043,10 @@ class App {
             clearInterval(this._tilesTimer);
             this._tilesTimer = null;
         }
+        // Code: mounted on first entry; hidden (not destroyed) on leave so
+        // unsaved buffers survive switching to the terminal and back.
+        if (target === 'code-view') this._showCode();
+        else if (this._code) this._code.hide();
         // System: poll host/cpu/ram/device while the view is open.
         if (target === 'widgets-view') {
             this._refreshWidgets();
@@ -3830,6 +3835,64 @@ class App {
         } catch (_) { return null; }
     }
 
+    /* ── CODE view ── */
+
+    // The active tab's folder, from the daemon's own snapshot (tabs[].cwd —
+    // the same field Artifacts uses), so a `cd` in the shell moves it too.
+    _activeCwd() {
+        const t = this._snapshot?.tabs?.find(x => x.id === this._activeTabId);
+        return (t && t.cwd) || '';
+    }
+
+    async _showCode() {
+        const section = document.getElementById('code-view');
+        if (!section) return;
+        if (this._code) { this._code.show(); this._codeFollowCwd(); return; }
+        if (this._codeLoading) return;
+        this._codeLoading = true;
+        try {
+            const mod = await import('/assets/codePanel.js?v=code-20261106b');
+            // The same origin + credentials as _apiUrl / _proxyUrl: the paired
+            // Mac's http(s) origin, its token, and its unlock. Passed as
+            // functions so a reconnect through another door is picked up.
+            const backend = () => ((this.socket && this.socket.baseUrl)
+                ? this.socket.baseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '')
+                : location.origin);
+            const token = () => (this.socket && this.socket.token) || '';
+            const unlock = () => {
+                let u = this.socket?.unlock || '';
+                try { u = u || localStorage.getItem('soa.m.unlock') || ''; } catch (_) {}
+                return u;
+            };
+            section.textContent = '';
+            this._code = mod.mountCodePanel(section, {
+                layout: 'phone', backend, token, unlock,
+                getCwd: () => this._activeCwd(),
+            });
+            this._codeCwd = this._activeCwd();
+            if (this._currentView === 'code-view') this._code.show();
+            else this._code.hide();
+        } catch (e) {
+            console.warn('[code]', e);
+            section.innerHTML = '<p class="code-view-msg">The code editor could not load. Reload the app and try again.</p>';
+        } finally {
+            this._codeLoading = false;
+        }
+    }
+
+    // Follow tab switches (and cds) while nothing is unsaved; with unsaved
+    // edits the panel keeps its project and offers the switch itself.
+    _codeFollowCwd() {
+        if (!this._code) return;
+        const cwd = this._activeCwd();
+        if (!cwd || cwd === this._codeCwd) return;
+        // While it is on screen the panel follows the tab by itself.
+        if (this._currentView === 'code-view') { this._codeCwd = cwd; return; }
+        if (this._code.isDirty()) return;
+        this._codeCwd = cwd;
+        this._code.setRoot(cwd);
+    }
+
     // Build an absolute /preview/ URL against the BACKEND origin (not the page
     // origin — the client may be served from Vercel or a cached SW, where a
     // relative /preview/ would 404 to the SoA landing page). Carry the session
@@ -4224,6 +4287,7 @@ class App {
         if (this._activeTabId !== activeId) this._markTabUsed(activeId, true);
         this._activeTab = newActiveTab;
         this._activeTabId = activeId;
+        this._codeFollowCwd();
         pushLog(`snapshot: raw=${JSON.stringify(snap.activeId)} → resolved activeId=${activeId} tabs=[${idList.join(',')}]`);
         console.log('%c[app] snapshot activeId=' + activeId + ' (type: ' + typeof activeId + ')', 'color:#ff9');
 
