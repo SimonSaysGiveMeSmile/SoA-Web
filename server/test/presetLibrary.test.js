@@ -100,12 +100,16 @@ test('boot sync hook: honours both kill switches without spawning', () => {
     assert.match(logs[0], /could not start \(EAGAIN\)/);
 });
 
-test('boot sync hook: mirrors every preset into temp skills dirs and leaves user dirs alone', async () => {
+test('boot sync hook: mirrors every preset into temp skills dirs and leaves user dirs alone', async (t) => {
     const CL = path.join(T, 'boot-claude'), CX = path.join(T, 'boot-codex');
     fs.mkdirSync(path.join(CL, 'eng-code-review'), { recursive: true });
     fs.writeFileSync(path.join(CL, 'eng-code-review', 'SKILL.md'), 'USER OWNED');
     const env = { PATH: process.env.PATH, HOME: path.join(T, 'home'), SOA_WEB_STATE_DIR: path.join(T, 'boot-state'),
         SOA_MCP_CLAUDE_SKILLS_DIR: CL, SOA_MCP_CODEX_SKILLS_DIR: CX };
+    // The hook unrefs its child and timer (it must never hold the daemon open),
+    // so keep this test's event loop alive until the child reports back.
+    const keepAlive = setInterval(() => {}, 1000);
+    t.after(() => clearInterval(keepAlive));
     const line = await new Promise((resolve) => {
         const r = startPresetSync({ env, timeoutMs: 20000, log: resolve });
         assert.deepStrictEqual(r, { started: true });
