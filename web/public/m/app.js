@@ -5422,6 +5422,13 @@ function formatRate(bps) {
 
 window.addEventListener('DOMContentLoaded', () => {
     window._app = new App();
+    // What's new: the once-per-release note card and ⋯ → What's new. It lives
+    // beside the desktop's assets (same origin as this page) and waits on its
+    // own until the welcome and reconnect screens are gone. Lazy and guarded:
+    // offline, or in the native shell without /assets/, it simply never shows.
+    import('/assets/whatsNew.js')
+        .then(m => m.mountWhatsNew({ layout: 'phone' }))
+        .catch(() => { document.getElementById('btn-whats-new')?.closest('.overflow-tile')?.remove(); });
     // Cache the shell relative to its own root, including the /m/ deployment.
     // Skip the SW inside the native shell: Capacitor already serves the assets
     // from the app bundle (offline works without it) and registering a SW on the

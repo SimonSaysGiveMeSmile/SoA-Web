@@ -7,7 +7,7 @@
  */
 
 // Scope-relative shell cache supports both standalone / and hosted /m/ apps.
-const VERSION = 'soa-mobile-code-20261106b-' + new URL(self.registration.scope).pathname;
+const VERSION = 'soa-mobile-news-20261106-' + new URL(self.registration.scope).pathname;
 const SHELL = [
     '/',
     '/index.html',
@@ -85,6 +85,9 @@ self.addEventListener('fetch', (e) => {
     // Proxied local services (code, previews) are live data: a cache-first
     // copy of /preview/6083/api/file would hand back stale code.
     if (url.pathname.startsWith('/preview/')) return;
+    // Release notes must always be fresh (the What's new card reads them with
+    // cache: 'no-store'): never answer them from, or store them in, the cache.
+    if (url.pathname.endsWith('/release-notes.json')) return;
 
     if (req.mode === 'navigate' || req.headers.get('accept')?.includes('text/html')) {
         e.respondWith((async () => {

@@ -1,0 +1,40 @@
+{
+  "notes": [
+    {
+      "id": "2026-11-06-panel-layouts",
+      "date": "2026-11-06",
+      "kind": "feature",
+      "title": "Arrange the side panels your way",
+      "body": "Swap the sidebar and the context panel, or put both on the left, side by side. The layouts are called Standard, Swapped and Both left.",
+      "where": "⋯ More → Panel layout, or Ctrl/Cmd+Shift+\\",
+      "surfaces": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "2026-11-06-code-panel",
+      "date": "2026-11-06",
+      "kind": "feature",
+      "title": "Read and edit code in the side panel",
+      "body": "Open your project’s files in tabs, make a change and save it. Jump to any file or search the whole project, on your Mac or your phone.",
+      "detail": "Shortcuts: Cmd-S saves, Cmd-P opens a file, Cmd-Shift-F finds in files. Editing goes through a small code service that runs on your Mac.",
+      "where": "Right panel → Code, or Cmd-Shift-E",
+      "where_phone": "Tap Code in the view bar",
+      "surfaces": [
+        "desktop",
+        "phone"
+      ]
+    },
+    {
+      "id": "2026-11-06-fixes",
+      "date": "2026-11-06",
+      "kind": "fix",
+      "title": "A few fixes",
+      "body": "Narrow windows no longer leave an empty column, and the sidebar stays solid over the terminal in Liquid Glass and Windows 11. Restart server has its icon back.",
+      "where": "",
+      "surfaces": [
+        "desktop"
+      ]
+    }
+  ]
+}
