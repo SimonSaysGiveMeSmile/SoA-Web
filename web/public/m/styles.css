@@ -3185,3 +3185,13 @@ html.soa-android .chat-status[data-state="working"] .chat-status-text::after {
 /* Tab organizer: searched words inside a row name */
 .tabsheet-name mark { background: transparent; color: var(--accent); text-decoration: underline 1px; text-underline-offset: 2px; }
 @media (forced-colors: active) { .tabsheet-name mark { color: Highlight; } }
+
+/* ── iOS Safari: tuck the bars away by scrolling the page (layoutPrefs.js) ──
+   Safari hides its address bar and toolbar only when the PAGE scrolls, and
+   #app is a fixed shell whose views scroll inside it. Give the page a little
+   room behind the shell: a swipe the terminal cannot take any further carries
+   on to the page, the page moves, and Safari hides its bars. The shell stays
+   pinned (position: fixed), so nothing on screen moves with it. */
+html.soa-scrollbars { height: auto; overflow-x: hidden; overflow-y: auto; }
+html.soa-scrollbars body { height: auto; overflow: visible; min-height: calc(100lvh + 96px); }
+html.soa-scrollbars #app { position: fixed; top: 0; left: 0; }

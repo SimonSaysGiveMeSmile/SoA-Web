@@ -8476,6 +8476,14 @@ async function bootServerMode({ backend, token }) {
 }
 
 async function _doBoot() {
+    // A touch screen can switch to the phone companion (⋯ → Phone layout), and
+    // reopens there when that was the last choice (/m/layoutPrefs.js).
+    if (isPhone()) {
+        try {
+            const lp = await import('/m/layoutPrefs.js?v=layout-20261108');
+            if (lp.mountDashboardLayout({ touch: true, saved: loadSaved })) return;
+        } catch (_) {}
+    }
     if (isPhone()) armTouchFullscreen();
     wireLangSelector();
     wireReleaseLink();
