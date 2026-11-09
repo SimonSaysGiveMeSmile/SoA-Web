@@ -28,6 +28,7 @@ import { Dictation } from './dictation.js';
 import { openHealthSheet, sameOrigin, parseHealthLink, healthLinkHash } from './health.js';
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
+import { mountCompanionLayout } from './layoutPrefs.js';
 import { SessionHistory, openHistory } from './session-history.js';
 import { loadRecord, saveRecord, reconcile, isArchived, archivedIds, setArchived, archivedAt, markUsed, lastUsed, sortIds, matches, ago as agoText, SORT_MODES, SORT_LABELS, SORT_HINTS } from './tabOrganizer.js';
 
@@ -693,6 +694,15 @@ class App {
         this._wireOverflow();
         this._wireIdleHide();
         this.fullscreen = new MobileFullscreen();
+        // Layout (phone / full dashboard) and, on iOS Safari, hiding its bars
+        // by letting the page scroll behind the shell (layoutPrefs.js).
+        mountCompanionLayout({
+            fullscreen: this.fullscreen,
+            link: () => ({
+                backend: this._doorPrimary || this._historySource || location.origin,
+                token: (this.socket && this.socket.token) || '',
+            }),
+        });
 
         const { token, backend, altOrigin } = readToken();
         const primaryOrigin = backend || location.origin;

@@ -1,6 +1,20 @@
 {
   "notes": [
     {
+      "id": "2026-11-08-ios-layout",
+      "date": "2026-11-08",
+      "kind": "feature",
+      "title": "More screen on iPhone, and a layout switch",
+      "body": "In Safari, swipe up in the terminal and the address bar and toolbar slide away. You can also switch between the phone layout and the full dashboard on any phone or tablet.",
+      "detail": "For no Safari bars at all, add Son of Anton to your Home Screen (Share → Add to Home Screen).",
+      "where": "⋯ More → Phone (on a touch screen)",
+      "where_phone": "Settings → Layout, and Settings → Hide Safari bars when scrolling",
+      "surfaces": [
+        "phone",
+        "desktop"
+      ]
+    },
+    {
       "id": "2026-11-06-panel-layouts",
       "date": "2026-11-06",
       "kind": "feature",
