@@ -1,6 +1,20 @@
 {
   "notes": [
     {
+      "id": "2026-11-09-home-screen",
+      "date": "2026-11-09",
+      "kind": "feature",
+      "title": "Home Screen app without Safari bars",
+      "body": "Pairing on a phone now stays on this site, so an app added to the Home Screen opens full screen with no address bar or toolbar. A phone that asks for the desktop site now gets the full dashboard.",
+      "detail": "If your Home Screen icon still shows the bars, remove it and add it again from this site: Share → Add to Home Screen.",
+      "where": "Share → Add to Home Screen (Safari or Chrome)",
+      "where_phone": "Share → Add to Home Screen, or aA → Request Desktop Website",
+      "surfaces": [
+        "phone",
+        "desktop"
+      ]
+    },
+    {
       "id": "2026-11-08-ios-layout",
       "date": "2026-11-08",
       "kind": "feature",

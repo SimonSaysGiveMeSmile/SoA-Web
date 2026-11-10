@@ -82,7 +82,7 @@ function go(url, pref) {
 
 // Hand this pairing to the dashboard's own storage on this origin, then open
 // it. Nothing goes in the URL, so no token lands in history or a tunnel log.
-export function openDashboard(link) {
+export function openDashboard(link, remember = true) {
     if (link && link.backend && link.token) {
         const unlock = link.unlock || (get(localStorage, M_UNLOCK_OWNER_KEY) === originOf(link.backend)
             ? get(localStorage, M_UNLOCK_KEY) || '' : '');
@@ -91,7 +91,22 @@ export function openDashboard(link) {
         }));
     }
     set(localStorage, 'soa_web_welcomed', '1');
-    go(new URL('/', location.origin).href, 'full');
+    go(new URL('/', location.origin).href, remember ? 'full' : '');
+}
+
+// A phone browser says so in its user agent. Asking for the desktop site
+// (Safari's aA menu, Chrome's "Request desktop site") swaps in a computer's,
+// while the screen stays phone-sized; that request is honoured below.
+export function mobileUA() {
+    const ua = navigator.userAgent || '';
+    return /iPhone|iPod/.test(ua) || (/Android/.test(ua) && /Mobile/.test(ua));
+}
+export function desktopSiteOnPhone() {
+    try {
+        return !mobileUA()
+            && (navigator.maxTouchPoints > 0 || matchMedia('(pointer: coarse)').matches)
+            && Math.min(screen.width, screen.height) < 600;
+    } catch (_) { return false; }
 }
 
 // ── Full dashboard → companion ───────────────────────────────────────────
@@ -129,6 +144,15 @@ export function mountCompanionLayout({ link, fullscreen } = {}) {
         && !/[#&?]t=/.test(location.href)) {
         set(sessionStorage, HOP_KEY, String(Date.now()));
         location.replace(new URL('/', location.origin).href);
+        return;
+    }
+    // A phone that asked for the desktop site gets it, without changing the
+    // saved layout: asking for the mobile site again brings the phone back.
+    if (desktopSiteOnPhone() && layoutPref() !== 'phone' && !chromeless() && !recentHop()
+        && !/[#&?]t=/.test(location.href)) {
+        const s = readJson(M_SESSION_KEY);
+        openDashboard(s && s.token && s.origin === location.origin
+            ? { backend: s.backend || location.origin, token: s.token } : null, false);
         return;
     }
 
