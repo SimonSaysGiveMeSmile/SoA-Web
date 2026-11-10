@@ -1458,15 +1458,50 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
             });
             wayOpen = null;
         }
-        // A phone lands in the companion at /m/ (its own storage, service
-        // worker and touch UI), as the boot path's pairing screen does; a
-        // tablet keeps the full dashboard. `alt` (the second transport) and
-        // `backend` ride in the hash, where /m/ reads them.
+        // A phone browser lands in the companion at /m/ (its own storage,
+        // service worker and touch UI), as the boot path's pairing screen
+        // does. A tablet, or a phone that asked for the desktop site (it then
+        // sends a computer's user agent), keeps the full dashboard. No width
+        // rule: a phone on its side is still a phone. A layout picked on this
+        // device (soa-web:layout) wins over all of it.
         function pairToCompanion() {
-            return html.dataset.welcomeTouch === '1'
-                && !(window.matchMedia && matchMedia('(min-width: 700px)').matches);
+            if (html.dataset.welcomeTouch !== '1') return false;
+            var pref = '';
+            try { pref = localStorage.getItem('soa-web:layout') || ''; } catch (_) {}
+            if (pref === 'phone' || pref === 'full') return pref === 'phone';
+            var ua = navigator.userAgent || '';
+            return /iPhone|iPod/.test(ua) || (/Android/.test(ua) && /Mobile/.test(ua));
         }
+        // The companion on THIS address, pointed at the desktop, instead of a
+        // walk to the desktop's own (tunnel) address: a Home Screen app shows
+        // Safari's bars on any address but its own. Only where the desktop
+        // accepts this page (its own origin, or the public site), and never
+        // https → http, which the browser would block.
+        function companionHere(url, token, alt, backend) {
+            try {
+                var primary = (backend || new URL(url).origin).replace(/\/+$/, '');
+                var second = alt || '';
+                var secure = location.protocol === 'https:';
+                if (secure && /^http:/.test(primary) && /^https:/.test(second)) { var sw = primary; primary = second; second = sw; }
+                if (secure && /^http:/.test(primary)) return '';
+                var same = new URL(primary).origin === location.origin;
+                if (!same && !/^(www\.)?s0a\.app$/.test(location.hostname)) return '';
+                var h = new URLSearchParams();
+                h.set('t', token);
+                if (!same) h.set('backend', primary);
+                if (second) h.set('alt', second);
+                return location.origin + '/m/#' + h.toString();
+            } catch (_) { return ''; }
+        }
+        // `alt` (the second transport) and `backend` ride in the hash, where
+        // /m/ reads them.
         function pairPhone(url, token, alt, backend) {
+            var here = companionHere(url, token, alt, backend);
+            if (here) {
+                if (!PREVIEW) { try { localStorage.setItem('soa_web_welcomed', '1'); } catch (_) {} }
+                location.href = here;
+                return true;
+            }
             var target = new URL(url);
             if (!target.searchParams.get('t')) target.searchParams.set('t', token);
             var hash = new URLSearchParams();
@@ -1970,7 +2005,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
   <script src="/assets/voice-commands.js?v=official-usage-20260929"></script>
   <script src="/assets/voice-audio.js?v=2"></script>
   <script src="/assets/voice-vision.js?v=2"></script>
-  <script type="module" src="/assets/app.js?v=layout-20261108"></script>
+  <script type="module" src="/assets/app.js?v=layout-20261109"></script>
   <script>
     // Cloudflare Web Analytics — loaded only when a token is configured (Vercel
     // env SOA_WEB_CF_ANALYTICS_TOKEN). Skipped on dev / self-host so localhost

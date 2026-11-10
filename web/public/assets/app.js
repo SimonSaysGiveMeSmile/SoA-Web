@@ -8480,7 +8480,7 @@ async function _doBoot() {
     // reopens there when that was the last choice (/m/layoutPrefs.js).
     if (isPhone()) {
         try {
-            const lp = await import('/m/layoutPrefs.js?v=layout-20261108');
+            const lp = await import('/m/layoutPrefs.js?v=layout-20261109');
             if (lp.mountDashboardLayout({ touch: true, saved: loadSaved })) return;
         } catch (_) {}
     }
@@ -8625,8 +8625,36 @@ function armTouchFullscreen() {
 }
 
 // A tablet has room for the full dashboard, so it is offered the choice.
-function isTabletWidth() {
-    try { return window.matchMedia('(min-width: 700px)').matches; } catch (_) { return false; }
+// Where a pairing made on a touch screen opens: the phone companion for a
+// phone browser; the full dashboard for a tablet, or for a phone that asked
+// for the desktop site (it then sends a computer's user agent). No width rule.
+// A layout picked on this device (soa-web:layout) wins.
+function companionByDefault() {
+    try {
+        const pref = localStorage.getItem('soa-web:layout');
+        if (pref === 'phone' || pref === 'full') return pref === 'phone';
+    } catch (_) {}
+    const ua = navigator.userAgent || '';
+    return /iPhone|iPod/.test(ua) || (/Android/.test(ua) && /Mobile/.test(ua));
+}
+// The companion on THIS address, pointed at the desktop, instead of a walk to
+// the desktop's own (tunnel) address: a Home Screen app shows Safari's bars on
+// any address but its own. Only where the desktop accepts this page (its own
+// origin, or the public site), and never https → http. '' = navigate instead.
+function companionHere(url, token, alt, backend) {
+    try {
+        let primary = (backend || new URL(url).origin).replace(/\/+$/, '');
+        let second = alt || '';
+        const secure = location.protocol === 'https:';
+        if (secure && /^http:/.test(primary) && /^https:/.test(second)) [primary, second] = [second, primary];
+        if (secure && /^http:/.test(primary)) return '';
+        const same = new URL(primary).origin === location.origin;
+        if (!same && !/^(www\.)?s0a\.app$/.test(location.hostname)) return '';
+        const h = new URLSearchParams({ t: token });
+        if (!same) h.set('backend', primary);
+        if (second) h.set('alt', second);
+        return location.origin + '/m/#' + h.toString();
+    } catch (_) { return ''; }
 }
 
 // Friendly mobile landing. A phone with no paired desktop gets ONE decisive
@@ -8651,12 +8679,12 @@ function renderMobileWelcome() {
     // ── Pair by camera (primary action) ───────────────────────────────────
     let scanner = null;
 
-    // Where the pairing lands. The phone companion at /m/ is built for a
-    // phone; a tablet can hold this dashboard, so it gets a switch and
-    // defaults to it. Phones never see the switch.
-    const openAs = { value: isTabletWidth() ? 'desktop' : 'companion' };
+    // Where the pairing lands: the phone companion at /m/, or this dashboard.
+    // Every touch screen gets the switch; it starts on companionByDefault()
+    // and a tap is remembered as this device's layout.
+    const openAs = { value: companionByDefault() ? 'companion' : 'desktop' };
     let openAsEl = null;
-    if (isTabletWidth()) {
+    {
         // Three labels, kept here rather than in i18n.js so this screen does
         // not need every importer of that module re-versioned.
         const OPENAS_T = {
@@ -8672,6 +8700,7 @@ function renderMobileWelcome() {
                 role: 'radio', 'aria-checked': String(openAs.value === v), text: label });
             b.addEventListener('click', () => {
                 openAs.value = v;
+                try { localStorage.setItem('soa-web:layout', v === 'desktop' ? 'full' : 'phone'); } catch (_) {}
                 openAsEl.querySelectorAll('.mwel-openas-o').forEach((o) => {
                     const on = o === b; o.classList.toggle('on', on); o.setAttribute('aria-checked', String(on));
                 });
@@ -8726,6 +8755,8 @@ function renderMobileWelcome() {
         // reads them: `alt` is the second transport (LAN↔tunnel), so dropping
         // it costs the phone its failover and forces a re-pair the next time
         // the network flips.
+        const here = companionHere(p.url, p.token, p.altOrigin, p.backend);
+        if (here) { location.href = here; return true; }
         const target = new URL(p.url);
         if (!target.searchParams.get('t')) target.searchParams.set('t', p.token);
         const hash = new URLSearchParams();
