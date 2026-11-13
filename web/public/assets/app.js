@@ -7640,46 +7640,91 @@ class Shell {
 
         // ---- target selector: one checkbox row per tab --------------------
         const STATUS_LABELS = { working: 'Working', attention: 'Needs input', done: 'Done', idle: 'Idle' };
+        const KIND_LABELS = { claude: 'Claude', codex: 'Codex' };
         const rows = ids.map((id) => {
             const rt = this.tabs.get(id);
             const title = (rt && rt.title) || tr('tab.default', { id });
             const status = this._agentStatus.get(id) || 'idle';
             const pct = this._ctxPct.get(id) || 0;
+            const kind = KIND_LABELS[this._agentKind.get(id)] ? this._agentKind.get(id) : '';
             const chk = el('input', { type: 'checkbox', class: 'bcast-row-chk' });
             chk.checked = selected.has(id);
-            const row = el('label', { class: 'bcast-row', 'data-agent': status }, [
+            const row = el('label', { class: 'bcast-row', 'data-agent': status, 'data-kind': kind || 'shell' }, [
                 chk,
                 el('span', { class: 'bcast-row-dot' }),
                 el('span', { class: 'bcast-row-title', text: title }),
+                kind ? el('span', { class: 'bcast-row-kind', text: KIND_LABELS[kind] }) : null,
                 el('span', { class: 'bcast-row-ctx', text: pct ? pct + '%' : '' }),
-            ]);
+            ].filter(Boolean));
             chk.addEventListener('change', () => {
                 if (chk.checked) selected.add(id); else selected.delete(id);
                 refresh(); persistSel();
             });
-            return { row, chk, id, status };
+            return { row, chk, id, status, kind };
         });
         const listEl = el('div', { class: 'bcast-list' }, rows.map(r => r.row));
 
         // Quick-select chips: All / None, plus one per agent status present, so
         // "send to everyone that needs input" is a single tap.
+        // The agent filter (All / Claude / Codex) hides the other agent's tabs
+        // and takes them out of the selection, so a Claude command never lands
+        // in a Codex prompt. The status chips then pick within what is shown.
+        // Shown only when the fleet holds more than one kind of tab.
+        let kindSel = 'all';
+        try { const k = localStorage.getItem('soa_bcast_kind'); if (KIND_LABELS[k]) kindSel = k; } catch (_) {}
+        const kindsPresent = [...new Set(rows.map(r => r.kind))];
+        if (!kindsPresent.includes(kindSel)) kindSel = 'all';
+        const inKind = (r) => kindSel === 'all' || r.kind === kindSel;
+        const shown = () => rows.filter(inKind);
         const setSel = (predicate) => {
             selected.clear();
             for (const r of rows) {
-                r.chk.checked = predicate(r);
+                r.chk.checked = inKind(r) && predicate(r);
                 if (r.chk.checked) selected.add(r.id);
             }
             refresh(); persistSel();
         };
-        const present = [...new Set(rows.map(r => r.status))].filter(s => STATUS_LABELS[s]);
-        const quickEl = el('div', { class: 'bcast-quick-row' }, [
-            el('button', { class: 'bcast-quick', type: 'button', text: `All ${n}`, onclick: () => setSel(() => true) }),
-            el('button', { class: 'bcast-quick', type: 'button', text: 'None', onclick: () => setSel(() => false) }),
-            ...present.map(s => el('button', {
-                class: 'bcast-quick', type: 'button', 'data-agent': s,
-                text: STATUS_LABELS[s], onclick: () => setSel(r => r.status === s),
-            })),
-        ]);
+        const quickEl = el('div', { class: 'bcast-quick-row' });
+        const renderQuick = () => {
+            const vis = shown();
+            const present = [...new Set(vis.map(r => r.status))].filter(s => STATUS_LABELS[s]);
+            quickEl.replaceChildren(
+                el('button', { class: 'bcast-quick', type: 'button', text: `All ${vis.length}`, onclick: () => setSel(() => true) }),
+                el('button', { class: 'bcast-quick', type: 'button', text: 'None', onclick: () => setSel(() => false) }),
+                ...present.map(s => el('button', {
+                    class: 'bcast-quick', type: 'button', 'data-agent': s,
+                    text: STATUS_LABELS[s], onclick: () => setSel(r => r.status === s),
+                })),
+            );
+        };
+        const kindEl = el('div', { class: 'bcast-kind-row', role: 'group', 'aria-label': 'Agent' });
+        const renderKinds = () => {
+            const opts = [['all', 'All agents', rows.length],
+                ...Object.keys(KIND_LABELS).map(k => [k, KIND_LABELS[k], rows.filter(r => r.kind === k).length]).filter(o => o[2])];
+            kindEl.replaceChildren(...opts.map(([k, label, c]) => {
+                const b = el('button', { class: 'bcast-kind' + (k === kindSel ? ' is-on' : ''), type: 'button', 'data-kind': k,
+                    'aria-pressed': k === kindSel ? 'true' : 'false', onclick: () => pickKind(k) }, [
+                    label, el('span', { class: 'bcast-kind-n', text: String(c) }),
+                ]);
+                return b;
+            }));
+        };
+        // Hide the rows outside the filter and drop them from the selection.
+        const applyKind = () => {
+            for (const r of rows) {
+                r.row.hidden = !inKind(r);
+                if (r.row.hidden && r.chk.checked) { r.chk.checked = false; selected.delete(r.id); }
+            }
+            renderKinds(); renderQuick(); renderPresets();
+        };
+        // Choosing Claude or Codex selects all of that agent's tabs; All agents
+        // shows everything again and leaves the selection as it was.
+        const pickKind = (k) => {
+            kindSel = k;
+            try { localStorage.setItem('soa_bcast_kind', k); } catch (_) {}
+            applyKind();
+            if (k !== 'all') setSel(() => true); else { refresh(); persistSel(); }
+        };
         const countEl = el('span', { class: 'bcast-count' });
 
         const input = el('input', { class: 'bcast-input', type: 'text', spellcheck: 'false',
@@ -7696,15 +7741,23 @@ class Shell {
         // first. `claude --continue` resumes the most recent conversation in each
         // tab's cwd in-place — the fix for "tabs reopened after a restart but
         // Claude is a dead shell". (Bare `claude` would start fresh and lose context.)
-        const presets = [
-            { label: 'Resume ⟲ (claude -c)', text: 'claude --continue' },
-            { label: 'claude --resume (pick)', text: 'claude --resume' },
-            { label: '/model opus', text: '/model opus' },
+        // With the Codex filter on, the resume and model presets are Codex's own.
+        const keyPresets = [
             { label: 'Enter ⏎ (retry)', key: '\r' },
             { label: 'Esc', key: '\x1b' },
             { label: 'Ctrl-C', key: '\x03' },
         ];
-        const chips = el('div', { class: 'bcast-presets' }, presets.map(p => el('button', {
+        const presetsFor = (k) => (k === 'codex' ? [
+            { label: 'Resume ⟲ (codex resume --last)', text: 'codex resume --last' },
+            { label: 'codex resume (pick)', text: 'codex resume' },
+            { label: '/model', text: '/model' },
+        ] : [
+            { label: 'Resume ⟲ (claude -c)', text: 'claude --continue' },
+            { label: 'claude --resume (pick)', text: 'claude --resume' },
+            { label: '/model opus', text: '/model opus' },
+        ]).concat(keyPresets);
+        const chips = el('div', { class: 'bcast-presets' });
+        const renderPresets = () => chips.replaceChildren(...presetsFor(kindSel).map(p => el('button', {
             class: 'bcast-chip', type: 'button', text: p.label,
             onclick: () => {
                 if (p.key != null) {
@@ -7746,15 +7799,19 @@ class Shell {
         // current selection.
         const refresh = () => {
             const k = selected.size;
-            countEl.textContent = `${k} of ${n} selected`;
+            const m = shown().length;
+            countEl.textContent = kindSel === 'all' ? `${k} of ${n} selected` : `${k} of ${m} ${KIND_LABELS[kindSel]} selected`;
             sendBtn.textContent = k === n ? `SEND TO ALL ${n}` : `SEND TO ${k}`;
             sendBtn.classList.toggle('is-empty', k === 0);
         };
+        applyKind();
+        if (kindsPresent.length < 2) kindEl.hidden = true;
         refresh();
 
         card.append(
             el('div', { class: 'bcast-title', text: 'BROADCAST' }),
-            el('div', { class: 'bcast-sub', text: 'Types into the selected terminals at once — resume Claude after a restart (claude -c), switch model, or recover from a disruption. Pick targets below; defaults to all.' }),
+            el('div', { class: 'bcast-sub', text: 'Types into the selected terminals at once — resume Claude or Codex after a restart, switch model, or recover from a disruption. Pick targets below; defaults to all.' }),
+            kindEl,
             quickEl,
             countEl,
             listEl,
@@ -8480,7 +8537,7 @@ async function _doBoot() {
     // reopens there when that was the last choice (/m/layoutPrefs.js).
     if (isPhone()) {
         try {
-            const lp = await import('/m/layoutPrefs.js?v=layout-20261109');
+            const lp = await import('/m/layoutPrefs.js?v=bcast-kind-20261112');
             if (lp.mountDashboardLayout({ touch: true, saved: loadSaved })) return;
         } catch (_) {}
     }

@@ -17,7 +17,7 @@ import { BridgeSocket, SocketState, Diagnosis, getLogBuffer, pushLog } from './s
 import { DoorFailover, preferredDoor } from './doors.js';
 import { TermBuffer } from './terminal.js';
 import { classifyAgent, cssStatus } from './agentDetect.js';
-import { modelBadge } from './sessionMetadata.js';
+import { modelBadge, sessionMetadata } from './sessionMetadata.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { maybeFocus, getAutoFocusPref, setAutoFocusPref } from './focusPolicy.js';
 import { PhoneSizeClaim, colsThatFit } from './sizeClaim.js';
@@ -2531,8 +2531,28 @@ class App {
         if (overlay) overlay.classList.remove('visible');
     }
 
+    // The tab's agent, from the same fields as its model badge.
+    _bcastKindOf(s) { return sessionMetadata(s || {}).agent || ''; }
+
     _renderBroadcast() {
-        const sessions = (this._manager && this._manager.sessions) || [];
+        const all = (this._manager && this._manager.sessions) || [];
+        // Agent filter (All / Claude / Codex): the cohort counts and the send
+        // both work inside it, so a Claude command never lands in a Codex tab.
+        const kinds = ['claude', 'codex'].filter(k => all.some(s => this._bcastKindOf(s) === k));
+        if (this._bcastKind == null) { try { this._bcastKind = localStorage.getItem('soa.m.bcastKind') || 'all'; } catch (_) { this._bcastKind = 'all'; } }
+        if (!kinds.includes(this._bcastKind)) this._bcastKind = 'all';
+        const kEl = document.getElementById('bcast-kinds');
+        const kLbl = document.getElementById('bcast-kinds-label');
+        const showKinds = kinds.length > 1 || (kinds.length === 1 && all.some(s => !this._bcastKindOf(s)));
+        if (kEl) {
+            kEl.hidden = !showKinds;
+            if (kLbl) kLbl.hidden = !showKinds;
+            const KL = { all: 'All agents', claude: 'Claude', codex: 'Codex' };
+            kEl.innerHTML = ['all', ...kinds].map(k =>
+                `<button class="bcast-chip${k === this._bcastKind ? ' on' : ''}" data-kind="${k}" aria-pressed="${k === this._bcastKind}">${KL[k]}<span class="bcast-n">${k === 'all' ? all.length : all.filter(s => this._bcastKindOf(s) === k).length}</span></button>`
+            ).join('');
+        }
+        const sessions = this._bcastKind === 'all' ? all : all.filter(s => this._bcastKindOf(s) === this._bcastKind);
         const count = (pred) => sessions.filter(pred).length;
         const cohorts = [
             { key: 'all', label: 'All', n: sessions.length },
@@ -2547,10 +2567,11 @@ class App {
         if (cEl) cEl.innerHTML = cohorts.map(c =>
             `<button class="bcast-chip${c.key === this._bcastCohort ? ' on' : ''}${c.n ? '' : ' empty'}" data-cohort="${c.key}">${escapeHtml(c.label)}<span class="bcast-n">${c.n}</span></button>`
         ).join('');
+        // Codex starts a fresh thread with /new, not /clear.
         const presets = [
             { label: 'continue', text: 'continue', enter: true },
             { label: '/compact', text: '/compact', enter: true },
-            { label: '/clear', text: '/clear', enter: true },
+            this._bcastKind === 'codex' ? { label: '/new', text: '/new', enter: true } : { label: '/clear', text: '/clear', enter: true },
             { label: 'Esc', hotkey: 'esc' },
             { label: 'Ctrl-C', hotkey: 'ctrl+c' },
         ];
@@ -2564,6 +2585,13 @@ class App {
                 const c = e.target.closest('[data-cohort]');
                 if (c) { this._bcastCohort = c.dataset.cohort; this._renderBroadcast(); }
             });
+            if (kEl) kEl.addEventListener('click', (e) => {
+                const c = e.target.closest('[data-kind]');
+                if (!c) return;
+                this._bcastKind = c.dataset.kind;
+                try { localStorage.setItem('soa.m.bcastKind', this._bcastKind); } catch (_) {}
+                this._renderBroadcast();
+            });
             if (pEl) pEl.addEventListener('click', (e) => {
                 const b = e.target.closest('[data-preset]');
                 if (!b) return;
@@ -2575,7 +2603,9 @@ class App {
     }
 
     _broadcastTargets() {
-        const sessions = (this._manager && this._manager.sessions) || [];
+        const all = (this._manager && this._manager.sessions) || [];
+        const k = this._bcastKind || 'all';
+        const sessions = k === 'all' ? all : all.filter(s => this._bcastKindOf(s) === k);
         const c = this._bcastCohort;
         if (c === 'selected' && this._bcastPreIds) return this._bcastPreIds.slice();
         if (c === 'all') return sessions.map(s => s.id);
@@ -2589,7 +2619,7 @@ class App {
 
     _sendBroadcast(preset) {
         const ids = this._broadcastTargets();
-        if (!ids.length) { this._toast('No sessions in that cohort.'); return; }
+        if (!ids.length) { this._toast(this._bcastKind && this._bcastKind !== 'all' ? 'No sessions in that cohort for this agent.' : 'No sessions in that cohort.'); return; }
         const enterEl = document.getElementById('bcast-enter');
         const wantEnter = enterEl ? enterEl.checked : true;
         if (preset && preset.hotkey) {
