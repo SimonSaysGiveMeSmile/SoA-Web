@@ -1,6 +1,20 @@
 {
   "notes": [
     {
+      "id": "2026-11-12-broadcast-agent",
+      "date": "2026-11-12",
+      "kind": "feature",
+      "title": "Broadcast to Claude or Codex only",
+      "body": "Broadcast can now target one agent: pick Claude or Codex and only those terminals are selected, so a Claude command never lands in a Codex prompt. Each terminal in the list shows which agent it runs.",
+      "detail": "With Codex picked, the resume preset becomes codex resume --last. On the phone, the agent choice combines with the cohort (Needs you, Idle, …).",
+      "where": "⇶ SEND → All agents / Claude / Codex",
+      "where_phone": "FLEET → CAST → Agent",
+      "surfaces": [
+        "phone",
+        "desktop"
+      ]
+    },
+    {
       "id": "2026-11-09-home-screen",
       "date": "2026-11-09",
       "kind": "feature",
