@@ -19,7 +19,7 @@
 #   soa-work reap [--post]                                     show (or release) dead/expired claims
 #
 # Scope = an absolute path (repo root or subtree — overlaps by ancestor/descendant)
-# or a tag like asset:@macncheese/desktop-ui or project:anthropic-proxy (exact
+# or a tag like asset:@acme/desktop-ui or project:anthropic-proxy (exact
 # match). Advisory: check's non-zero exit is the signal; nothing is force-locked.
 set -u
 

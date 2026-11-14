@@ -300,7 +300,7 @@ it has not been committed, published, or loaded by restarting the live daemon.
 
 ---
 
-## 2026-09-07 → 2026-09-09 · tab #1 `app` · session `6321e8b7`
+## 2026-09-07 → 2026-09-09 · tab #1 `app`
 
 Continuation of the session below. Two threads: a long hunt for terminal lag
 and layout corruption, and a run of UI work (clock, settings, skins). 20 PRs
@@ -515,7 +515,7 @@ near-zero with low FPS means paint. It named `xterm write` correctly.
    them when editing assets.
 6. `scripts/soa-version-nag` is loaded on this machine as
    `gui/503/com.soa-web.version-nag`; the repo copy of the plist still uses the
-   canonical `/Users/test/.soa-web` paths.
+   canonical `~/.soa-web` paths.
 
 ### Machine facts added this session
 
@@ -529,7 +529,7 @@ near-zero with low FPS means paint. It named `xterm write` correctly.
 
 ---
 
-## 2026-08-31 → 2026-09-07 · tab #1 `app` · session `6321e8b7`
+## 2026-08-31 → 2026-09-07 · tab #1 `app`
 
 Working directory `~/.s0a-local/app`, branch `main`. One continuous thread:
 **the dashboard was misreporting its own state in five different places**, plus
@@ -542,7 +542,7 @@ verified directly and cost real time to discover:
 
 | CLAUDE.md says | This machine actually |
 |---|---|
-| Repo at `/Users/test/Desktop/Hireal/soa-web` | `~/.s0a-local/app` |
+| Repo at `~/Desktop/Hireal/soa-web` | `~/.s0a-local/app` |
 | State dir `~/.soa-web-local` | `~/.s0a-local/state` (the former does not exist) |
 | Install dir `~/.soa-web`, mirror edits into it | No mirror step — the daemon serves this repo directly |
 | Logs in `~/.soa-web/logs` | `~/.s0a-local/logs/{out,err}.log` |

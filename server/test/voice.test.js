@@ -333,7 +333,7 @@ test('synchronous microphone startup failure returns to Off and allows retry', t
 test('project matching scores titles and cwd basenames', () => {
     const tabs = [
         { id: 1, title: 'soa-web', cwd: '/Users/x/Desktop/Hireal/soa-web' },
-        { id: 2, title: 'iPlan', cwd: '/Users/x/Desktop/Summer-2026/iPlan' },
+        { id: 2, title: 'iPlan', cwd: '/Users/x/Desktop/work/iPlan' },
         { id: 3, title: 'manager', cwd: '/Users/x/.soa-web' },
     ];
     assert.equal(VoiceCommands.bestMatch('iplan', tabs, ['title', 'basename']).item.id, 2);

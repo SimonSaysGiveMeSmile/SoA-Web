@@ -11,7 +11,7 @@ Submitting to the App Store requires a **paid Apple Developer Program membership
 also gets), but a free account can only run the app on your own devices — it
 **cannot** publish to the App Store. 
 → **Confirm you have (or will enroll in) the paid Developer Program** at
-https://developer.apple.com/programs/ (Team ID `3UVU9962N7`, tianjiahe11@gmail.com).
+https://developer.apple.com/programs/ (note your Team ID, shown as `<YOUR_TEAM_ID>` below).
 
 ## 1. Register the App ID (needs your login)
 developer.apple.com → Certificates, IDs & Profiles → Identifiers → +:
@@ -52,7 +52,7 @@ This is the single most likely rejection cause — worth getting right.
 ## 5. Archive & upload the build (needs your signing session)
 In Xcode (`npm run open`): set the run destination to *Any iOS Device (arm64)*,
 Product → Archive, then Distribute App → App Store Connect → Upload. Automatic
-signing will use Team `3UVU9962N7`. (First device/App-Store build will prompt you
+signing will use Team `<YOUR_TEAM_ID>`. (First device/App-Store build will prompt you
 to create a Distribution certificate + provisioning profile — that needs your login.)
 - Before archiving, set a **stable production backend** (not the throwaway
   `*.trycloudflare.com`): `SOA_BACKEND="https://your-host" npm run build`.
@@ -63,7 +63,7 @@ HTTPS/WSS encryption → usually "no" to proprietary encryption, "yes" it uses
 encryption but is exempt), and Submit.
 
 ## What's already done (agent side)
-- ✅ Capacitor app builds & runs (iOS 18.6 sim), signed with Team `3UVU9962N7`
+- ✅ Capacitor app builds & runs (iOS 18.6 sim), signed with Team `<YOUR_TEAM_ID>`
 - ✅ App icon (1024, no alpha) + black splash + native status bar / safe-area
 - ✅ Bundled offline web client; `CapacitorHttp` + server `ALLOWED_ORIGINS` fix
 - ✅ Draft metadata (`METADATA.md`), privacy policy (`PRIVACY.md`)

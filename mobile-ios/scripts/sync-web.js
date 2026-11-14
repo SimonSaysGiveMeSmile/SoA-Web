@@ -16,8 +16,9 @@
  */
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
-const SRC = process.env.SOA_WEB_SRC || '/Users/test/.soa-web/web/public/m';
+const SRC = process.env.SOA_WEB_SRC || path.join(os.homedir(), '.soa-web/web/public/m');
 const DEST = path.join(__dirname, '..', 'www');
 // Default backend: supplied at sync time via SOA_BACKEND=... (a public
 // https/wss origin reachable from a real device AND the simulator; a

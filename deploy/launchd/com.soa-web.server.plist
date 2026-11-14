@@ -24,11 +24,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/test/.soa-web/server/src/index.js</string>
+        <string>/Users/YOUR_USER/.soa-web/server/src/index.js</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -37,10 +37,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/stdout.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/stderr.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

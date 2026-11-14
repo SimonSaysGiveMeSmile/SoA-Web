@@ -8,7 +8,7 @@ remote-URL webview (that risks App Store guideline 4.2 rejection).
 
 - **appId:** `com.soaweb.mobile`  ·  **name:** Son of Anton
 - **Capacitor:** 8.4.1 (Swift Package Manager)  ·  **min iOS:** 15.0
-- **Signing team:** `3UVU9962N7` (Apple Development: tianjiahe11@gmail.com)
+- **Signing team:** `<YOUR_TEAM_ID>` (set under Signing & Capabilities in Xcode)
 
 ## Build & run (simulator)
 
