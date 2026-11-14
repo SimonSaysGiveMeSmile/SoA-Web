@@ -16,11 +16,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/test/.soa-web/scripts/soa-heartbeat</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-heartbeat</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -32,9 +32,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/heartbeat.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/heartbeat.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/heartbeat.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/heartbeat.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

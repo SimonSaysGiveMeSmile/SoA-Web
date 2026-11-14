@@ -8013,7 +8013,7 @@ class Shell {
         const rt = this.tabs.get(id);
         const title = (rt && rt.title) || '';
         // Suppress the chip when it would just echo the tab name — the title line
-        // already shows it, so a redundant "socialrizz · socialrizz" is noise.
+        // already shows it, so a redundant "api · api" is noise.
         // Right-clicking the head still reassigns the group (see _tileHead).
         const redundant = group && title && group.trim().toLowerCase() === title.trim().toLowerCase();
         let chip = meta.querySelector('.tile-group-chip');

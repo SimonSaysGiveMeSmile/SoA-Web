@@ -23,11 +23,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/test/.soa-web/scripts/soa-fleet-loop</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-fleet-loop</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -42,9 +42,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/fleet-loop.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/fleet-loop.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/fleet-loop.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/fleet-loop.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

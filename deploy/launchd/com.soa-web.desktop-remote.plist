@@ -20,10 +20,10 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/test/.soa-web/scripts/soa-desktop-remote</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-desktop-remote</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -31,15 +31,15 @@
     <key>ThrottleInterval</key>
     <integer>5</integer>
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web-local/logs/desktop-remote.log</string>
+    <string>/Users/YOUR_USER/.soa-web-local/logs/desktop-remote.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web-local/logs/desktop-remote.log</string>
+    <string>/Users/YOUR_USER/.soa-web-local/logs/desktop-remote.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>SOA_WEB_STATE_DIR</key>
-        <string>/Users/test/.soa-web-local</string>
+        <string>/Users/YOUR_USER/.soa-web-local</string>
     </dict>
 </dict>
 </plist>

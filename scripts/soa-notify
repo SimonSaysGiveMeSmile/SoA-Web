@@ -13,8 +13,8 @@
 # string that doubles as a shared secret.
 #
 # Usage:
-#   soa-notify "MacnCheese deploy is failing — need a decision"
-#   soa-notify -t "Fleet blocker" -p high -T warning "socialrizz needs LinkedIn login"
+#   soa-notify "api deploy is failing — need a decision"
+#   soa-notify -t "Fleet blocker" -p high -T warning "web needs a login"
 #   echo "piped body" | soa-notify -t "Heartbeat"
 #   soa-notify --click "https://s0a.app" "tap to open the dashboard"
 #   soa-notify --test           # send a self-test notification

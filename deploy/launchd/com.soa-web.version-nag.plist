@@ -34,11 +34,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/test/.soa-web/scripts/soa-version-nag</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-version-nag</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -50,9 +50,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/version-nag.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/version-nag.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/version-nag.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/version-nag.log</string>
 </dict>
 </plist>

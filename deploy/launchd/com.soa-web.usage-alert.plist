@@ -22,11 +22,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/test/.soa-web/scripts/soa-usage-alert</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-usage-alert</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -38,9 +38,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/usage-alert.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/usage-alert.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/usage-alert.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/usage-alert.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

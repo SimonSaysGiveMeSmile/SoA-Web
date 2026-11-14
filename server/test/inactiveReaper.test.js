@@ -90,7 +90,7 @@ test('never closes a manager tab, however silent', () => {
     const s = fakeSession([
         { id: 1, title: 'manager', cwd: '/tmp/reap-test/x' },
         { id: 2, title: '.soa-web-3', cwd: '/tmp/reap-test/y' },
-        { id: 3, title: 'ops', cwd: '/Users/test/.soa-web' },
+        { id: 3, title: 'ops', cwd: '/home/user/.soa-web' },
         { id: 4, title: 'proj', cwd: '/tmp/reap-test/proj' },
         { id: 5, title: 'proj2', cwd: '/tmp/reap-test/proj2' },
     ]);
