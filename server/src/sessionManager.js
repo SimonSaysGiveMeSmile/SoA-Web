@@ -573,6 +573,12 @@ function writeToTab(tab, text) {
 // `claude` there starts a FRESH session, losing pre-restart context AND
 // poisoning future --continue (see feedback: never bare-claude after a restart),
 // so index.js passes coldFallback:false to keep the original 2-step chain.
+// Reset BEFORE as well as after a CLI: the previous TUI may have exited with
+// mouse reporting armed. Otherwise a resumed Codex can receive pointer reports
+// as prompt text until it exits, when a trailing-only reset would finally run.
+const SANE_SHELL_RESET =
+    "printf '\\033[?9l\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?1049l\\033[?2004l\\033[?25h\\033>'";
+
 // agent: 'claude' | 'codex' | null (null → whichever agent's transcript for the
 // cwd is newer, defaulting to claude). A Codex tab relaunches `codex resume`.
 function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true, agent = null } = {}) {
@@ -586,7 +592,7 @@ function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, c
         const line = !resume ? `codex${flag}`
             : sid ? `codex resume ${sid}${flag} || codex resume --last${flag}${tail}`
             : `codex resume --last${flag}${tail}`;
-        submitToTab(tab, line);
+        submitToTab(tab, `${SANE_SHELL_RESET}; ${line}; ${SANE_SHELL_RESET}`);
         return sid;
     }
     let sid = sessionId;
@@ -599,7 +605,7 @@ function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, c
     const line = sid
         ? `claude --resume ${sid}${flag} || claude --continue${flag}${tail}`
         : `claude${flag}`;
-    submitToTab(tab, line);
+    submitToTab(tab, `${SANE_SHELL_RESET}; ${line}; ${SANE_SHELL_RESET}`);
     return sid;
 }
 // Resolved agent kind for a live tab: what the supervisor saw it paint, else the
