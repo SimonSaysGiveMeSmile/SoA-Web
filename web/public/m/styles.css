@@ -3036,7 +3036,7 @@ details[open] > .welcome-way::after { transform: rotate(45deg); }
 .qr-btn.on, .qr-btn[aria-pressed="true"] { background: #aacfd1; color: #061317; border-color: #aacfd1; }
 .qr-btn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 .qr-btn[hidden] { display: none !important; }
-.qr-overlay:not([data-state="live"]) .qr-bar { visibility: hidden; }
+.qr-overlay:not([data-state="live"]):not([data-state="starting"]) .qr-bar { visibility: hidden; }
 /* Denied / no camera / could not start: an instruction, not an alarm. */
 .qr-state {
   position: absolute; inset: 0; z-index: 3;
@@ -3056,7 +3056,10 @@ details[open] > .welcome-way::after { transform: rotate(45deg); }
 .qr-state-actions { display: flex; flex-direction: column; gap: 10px; margin: 24px auto 0; }
 .qr-state-actions .qr-btn { width: 100%; min-height: 48px; }
 .qr-state-actions .qr-primary { min-height: 52px; background: #aacfd1; color: #061317; border-color: #aacfd1; font-size: 17px; }
-.qr-overlay:is([data-state="denied"], [data-state="nocam"], [data-state="error"]) :is(.qr-stage, .qr-hint) { visibility: hidden; }
+.qr-overlay:is([data-state="denied"], [data-state="nocam"], [data-state="error"], [data-state="paused"]) :is(.qr-stage, .qr-hint) { visibility: hidden; }
+@media (max-height: 520px) {
+  .qr-state { justify-content: flex-start; overflow-y: auto; padding-top: 110px; }
+}
 @media (min-width: 700px) and (min-height: 600px) {
   .qr-reticle { width: min(52vmin, 360px); }
   .qr-title { font-size: 20px; }
