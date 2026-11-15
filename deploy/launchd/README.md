@@ -50,6 +50,15 @@ load can hit ~100 on 10 cores):
 > URL needs a Cloudflare **named tunnel** (`cloudflared tunnel login` + create),
 > which this box has no creds for yet.
 
+## Paths in these plists
+
+launchd does not expand `~` or `$HOME`, so the plists carry absolute paths with
+the placeholder `/Users/YOUR_USER`. Swap in your home before copying one:
+
+```sh
+sed "s#/Users/YOUR_USER#$HOME#g" deploy/launchd/<job>.plist > ~/Library/LaunchAgents/<job>.plist
+```
+
 ## Install
 
 Copy `scripts/soa-watchdog` to `~/.soa-web/scripts/` (chmod +x), edit the absolute

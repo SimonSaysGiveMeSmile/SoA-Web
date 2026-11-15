@@ -1,33 +1,15 @@
 #!/bin/bash
-# One-shot: restore the 18 tabs the manager closed (reopen + claude --resume).
-# Staggered so we don't cold-start 18 Claude agents at once. Skips agents that
-# are already alive (RealJobPro, auradot-work, macmirror, anton) and the manager.
+# One-shot: restore a list of closed tabs (reopen + claude --resume).
+# Staggered so we don't cold-start many Claude agents at once. The list is
+# local and untracked: one "cwd<TAB>title" per line in $SOA_RESTORE_LIST
+# (default ~/.soa-web-local/restore-fleet.tsv; blank lines and # comments skipped).
 set -u
 LOG="$(dirname "$0")/../logs/restore.log"
 STAGGER="${STAGGER:-6}"
+LIST="${SOA_RESTORE_LIST:-${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}/restore-fleet.tsv}"
 
-# cwd<TAB>title for the 18 closed tabs (from tabs.json, minus alive + manager).
-RESTORE=$(cat <<'EOF'
-/Users/test/Desktop/Hireal/soa-web	soa-web
-/Users/test/Desktop/Side-Proj/MacnCheese	MacnCheese
-/Users/test/Desktop/Side-Proj/socialrizz	socialrizz
-/Users/test/Desktop/Side-Proj/PayAuthDeploy	PayAuthDeploy
-/Users/test/Desktop/Side-Proj	Side-Proj
-/Users/test/Desktop/Milton/ESP32-Knob	ESP32-Knob
-/Users/test/Desktop/Side-Proj/Personal-Site	Personal-Site
-/Users/test/Desktop/HiOS/HiOS	HiOS
-/Users/test/Desktop/Milton	MCPmaxxing
-/Users/test/Desktop/Side-Proj/mom-car-sell	mom-car-sell
-/Users/test/Desktop/Side-Proj/catfishcam	catfishcam
-/Users/test/Desktop/Summer-2026	Summer-2026
-/Users/test/Desktop/Milton/auradot-site	auradot-site
-/Users/test/Desktop/Yifu/STTR-SBIR	STTR-SBIR
-/Users/test/Desktop/Side-Proj/cutshort	cutshort
-/Users/test/Desktop/housing-S26	housing-S26
-/Users/test/Desktop/Side-Proj/Games	Games
-/Users/test/Desktop/Side-Proj/sidequestmaxxing	sidequestmaxxing
-EOF
-)
+[ -r "$LIST" ] || { echo "soa-restore-fleet: no restore list at $LIST (cwd<TAB>title per line)" >&2; exit 1; }
+RESTORE=$(grep -v '^[[:space:]]*#' "$LIST")
 
 echo "[$(date '+%H:%M:%S')] restore starting ($(echo "$RESTORE" | wc -l | tr -d ' ') tabs, stagger=${STAGGER}s)" >>"$LOG"
 n=0

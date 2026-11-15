@@ -34,11 +34,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/realsimon/.s0a-local/app/scripts/soa-selfupdate</string>
+        <string>/Users/YOUR_USER/.s0a-local/app/scripts/soa-selfupdate</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/realsimon/.s0a-local/app</string>
+    <string>/Users/YOUR_USER/.s0a-local/app</string>
 
     <key>RunAtLoad</key>
     <false/>
@@ -50,14 +50,14 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/realsimon/.s0a-local/logs/selfupdate.log</string>
+    <string>/Users/YOUR_USER/.s0a-local/logs/selfupdate.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/realsimon/.s0a-local/logs/selfupdate.err.log</string>
+    <string>/Users/YOUR_USER/.s0a-local/logs/selfupdate.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/realsimon/.s0a-local/app/scripts</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/YOUR_USER/.s0a-local/app/scripts</string>
         <key>SOA_UPDATE_CHANNEL</key>
         <string>release</string>
         <key>SOA_UPDATE_WINDOW</key>

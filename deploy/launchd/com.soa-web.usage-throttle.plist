@@ -19,11 +19,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/test/.soa-web/scripts/soa-usage-throttle</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-usage-throttle</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -35,9 +35,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/usage-throttle.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/usage-throttle.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/usage-throttle.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/usage-throttle.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

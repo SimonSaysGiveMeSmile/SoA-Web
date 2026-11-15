@@ -17,7 +17,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/test/.soa-web/scripts/soa-manager-watchdog</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-manager-watchdog</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -30,10 +30,10 @@
     <integer>90</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web-local/logs/manager-watchdog.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web-local/logs/manager-watchdog.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web-local/logs/manager-watchdog.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web-local/logs/manager-watchdog.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -42,7 +42,7 @@
         <key>SOA_WEB_PORT</key>
         <string>4010</string>
         <key>SOA_WEB_STATE_DIR</key>
-        <string>/Users/test/.soa-web-local</string>
+        <string>/Users/YOUR_USER/.soa-web-local</string>
         <key>SOA_WEB_TTS_URL</key>
         <string>http://127.0.0.1:4010/api/tts</string>
     </dict>

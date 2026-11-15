@@ -109,7 +109,7 @@ class VoiceCommands {
     if (c.startsWith(q) || q.startsWith(c)) return 0.9;
     if (c.includes(q)) return 0.8;
     if (q.includes(c)) return 0.7;
-    // Token overlap: "summer twenty twenty six" vs "Summer-2026".
+    // Token overlap: "web app twenty twenty six" vs "web-app-2026".
     const qt = String(query).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     const hit = qt.filter(w => w.length > 2 && c.includes(w)).length;
     return qt.length ? (hit / qt.length) * 0.6 : 0;

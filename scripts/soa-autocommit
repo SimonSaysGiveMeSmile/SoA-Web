@@ -14,7 +14,7 @@
 # Env overrides: SOA_AUTOCOMMIT_REPO, SOA_AUTOCOMMIT_BRANCH, SOA_AUTOCOMMIT_LOG.
 set -uo pipefail
 
-REPO="${SOA_AUTOCOMMIT_REPO:-/Users/test/Desktop/Hireal/soa-web}"
+REPO="${SOA_AUTOCOMMIT_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 BRANCH="${SOA_AUTOCOMMIT_BRANCH:-main}"
 LOG="${SOA_AUTOCOMMIT_LOG:-$HOME/.soa-web-local/logs/autocommit.log}"
 

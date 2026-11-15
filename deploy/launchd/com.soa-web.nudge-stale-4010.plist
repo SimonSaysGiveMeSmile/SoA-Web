@@ -16,11 +16,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/test/.soa-web/scripts/soa-nudge-stale</string>
+        <string>/Users/YOUR_USER/.soa-web/scripts/soa-nudge-stale</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/.soa-web</string>
+    <string>/Users/YOUR_USER/.soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -32,9 +32,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web/logs/nudge-stale.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/nudge-stale.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web/logs/nudge-stale.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web/logs/nudge-stale.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

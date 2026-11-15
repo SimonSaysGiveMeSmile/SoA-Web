@@ -19,11 +19,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/test/Desktop/Hireal/soa-web/scripts/soa-autocommit</string>
+        <string>/Users/YOUR_USER/Desktop/Hireal/soa-web/scripts/soa-autocommit</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/test/Desktop/Hireal/soa-web</string>
+    <string>/Users/YOUR_USER/Desktop/Hireal/soa-web</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -35,14 +35,14 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/test/.soa-web-local/logs/autocommit.out.log</string>
+    <string>/Users/YOUR_USER/.soa-web-local/logs/autocommit.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/test/.soa-web-local/logs/autocommit.err.log</string>
+    <string>/Users/YOUR_USER/.soa-web-local/logs/autocommit.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
-        <string>/Users/test</string>
+        <string>/Users/YOUR_USER</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>

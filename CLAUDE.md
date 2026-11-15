@@ -349,8 +349,8 @@ soa-work conflicts                                # all live overlaps (manager v
 
 `<scope>` is the **narrowest** thing you'll modify: an absolute path (your repo
 root or a subtree — overlap is by **ancestor/descendant**, so a claim on
-`…/Summer-2026` collides with `…/Summer-2026/iPlan` in *both* directions) or a tag
-like `asset:@macncheese/desktop-ui` / `project:anthropic-proxy` (exact match). If
+`…/projects` collides with `…/projects/api` in *both* directions) or a tag
+like `asset:@acme/desktop-ui` / `project:anthropic-proxy` (exact match). If
 `check` reports `[CONFLICT]`, do **not** proceed — narrow to a non-overlapping
 subdir, `soa-bus dm #<id> "coordinating on <scope>?"` the owner, or ask the
 manager; never double-edit a claimed scope. Claims are **advisory** (the non-zero
@@ -573,7 +573,7 @@ The production instance is the **consolidated daemon**: launchd label
 `app.s0a.web.local`, port `:4010`, code `~/.soa-web/server/src`, static
 `~/.soa-web/web/public`, state dir `~/.soa-web-local` (`SOA_WEB_STATE_DIR`).
 
-Edit this repo (`/Users/test/Desktop/Hireal/soa-web`), then mirror changed files
+Edit this repo (`~/Desktop/Hireal/soa-web`), then mirror changed files
 to the install dir (`~/.soa-web`) — that is the code the live daemon runs (it
 reads code only at startup). Static client files (`web/public/**`) take effect
 on reload (bump the SW `VERSION` in `web/public/m/sw.js`). Server changes
@@ -587,7 +587,7 @@ stable.
 ## Self-healing (no more manual restores)
 
 The supervision plists are tracked in `deploy/launchd/` in the **canonical
-repo** (`/Users/test/Desktop/Hireal/soa-web/deploy/launchd/`; the install dir
+repo** (`~/Desktop/Hireal/soa-web/deploy/launchd/`; the install dir
 `~/.soa-web` has no copy, and the daemon's own `app.s0a.web.local.plist` lives
 only in `~/Library/LaunchAgents`). Layers of supervision (all `gui/501`
 launchd jobs):
