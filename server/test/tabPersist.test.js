@@ -59,6 +59,7 @@ function reset() {
         }
     } catch (_) { /* dir absent */ }
     tabPersist._resetLiveTabsSeen();
+    tabPersist._resetUserCloses();
 }
 
 test('clobber guard: transient empty does NOT overwrite a good tabs.json', () => {
@@ -77,11 +78,32 @@ test('clobber guard: transient empty does NOT overwrite a good tabs.json', () =>
 test('close-all: a real empty (after tabs seen) persists and is marked closedByUser', () => {
     reset();
     tabPersist.saveImmediate(mkMgr([{ cwd: '/a' }]));   // sets _liveTabsSeen
+    // A genuine close-all arrives as CLOSE_TAB input, which reports intent via
+    // noteUserClose() (index.js INPUT_KIND.CLOSE_TAB). The tombstone requires
+    // that signal, so the simulation must emit it — an empty list ALONE is
+    // ambiguous with a teardown flush (see the regression test below).
+    tabPersist.noteUserClose();
     tabPersist.saveImmediate(mkMgr([]));                 // genuine user close-all
 
     const saved = tabPersist.load();
     assert.equal(saved.tabs.length, 0);
     assert.equal(saved.closedByUser, true, 'intent marker must be recorded');
+});
+
+test('teardown flush (empty list, ZERO user closes) must NOT tombstone the fleet', () => {
+    // The 2026-09-24 fleet loss. shutdown() flushes via persistableSession(); if
+    // that resolves to a session holding no tabs, the empty write was recorded as
+    // closedByUser. On the next boot the tombstone defeated BOTH self-heal paths
+    // (reconcile noops on closedByUser; the fleet-restore watchdog logs `ok` and
+    // skips), stranding 28 tabs with lastgood sitting right there.
+    reset();
+    tabPersist.saveImmediate(mkMgr([{ cwd: '/a' }, { cwd: '/b' }, { cwd: '/c' }]));
+    tabPersist.saveImmediate(mkMgr([]));   // teardown: no noteUserClose() ever fired
+
+    const saved = tabPersist.load();
+    assert.equal(saved.closedByUser, undefined, 'teardown must not be read as user intent');
+    assert.equal(saved.tabs.length, 3, 'the fleet must survive a teardown flush');
+    assert.notEqual(tabPersist.reconcileTabsFromScrollback().reason, 'closedByUser — respecting intent');
 });
 
 test('reconcile: rebuilds a lost tabs.json from scrollback.json', () => {
