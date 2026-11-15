@@ -26,6 +26,7 @@ import { QrScanner, parsePairingPayload } from './qrscan.js';
 import { VoiceChat } from './voice-chat.js';
 import { Dictation } from './dictation.js';
 import { openHealthSheet, sameOrigin, parseHealthLink, healthLinkHash } from './health.js';
+import { openArtifactsSheet } from './artifacts.js';
 import { ChatAttachments } from './chat-attachments.js';
 import { MobileFullscreen } from './fullscreen.js';
 import { mountCompanionLayout } from './layoutPrefs.js';
@@ -3716,6 +3717,10 @@ class App {
                 openQuotaAccountsSheet({ api: p => this._proxyUrl(p), available: !!this.socket?.baseUrl });
             } catch (_) { this._toast?.('Account monitor could not load. Reload and retry.'); }
         });
+        // ⋯ → Artifacts: the claude.ai pages the agents made, from soa-artifacts
+        // via /preview/6085/, scoped to this tab's project or to all of them.
+        const artifactsTile = document.getElementById('btn-artifacts');
+        if (artifactsTile) artifactsTile.addEventListener('click', () => this._openArtifacts());
         // A second notification tapped while this page is already open.
         window.addEventListener('hashchange', () => {
             const f = parseHealthLink(location.hash);
@@ -3844,6 +3849,21 @@ class App {
         const home = paired && !local ? this._healthHomeUrl(focus) : null;
         if (!paired && !local) return openHealthSheet({ urlFor, away: { href: null }, focus });
         openHealthSheet({ urlFor, focus, fallback: home ? { href: home } : null });
+    }
+
+    // ⋯ → Artifacts. Same origin rules as Health: never call this page's own
+    // origin when it is not the Mac; on another origin call the paired Mac's
+    // /preview/6085/ cross-origin, with its own companion as the way out if
+    // that is refused.
+    _openArtifacts() {
+        const urlFor = p => this._proxyUrl('/preview/6085' + p);
+        const paired = !!(this.socket && this.socket.baseUrl);
+        const local = sameOrigin(urlFor('/artifacts'));
+        const t = this._snapshot?.tabs?.find(x => x.id === this._activeTabId);
+        const tab = t && t.cwd ? { cwd: t.cwd, title: this._tabName(t.id) } : null;
+        if (!paired && !local) return openArtifactsSheet({ urlFor, tab, away: { href: null } });
+        const home = paired && !local ? this._healthHomeUrl(null) : null;
+        openArtifactsSheet({ urlFor, tab, fallback: home ? { href: home } : null });
     }
 
     _openPendingHealth() {

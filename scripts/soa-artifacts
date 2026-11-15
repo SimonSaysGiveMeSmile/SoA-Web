@@ -1,0 +1,785 @@
+#!/usr/bin/env node
+/**
+ * soa-artifacts — the artifact library: every claude.ai artifact any agent on
+ * this Mac published, opened, registered or mentioned, in one searchable list.
+ *
+ * Sources, all local files the agents already write (read-only):
+ *   ~/.claude/projects/<enc-cwd>/<sid>.jsonl          Claude Code transcripts
+ *   ~/.claude/projects/<enc-cwd>/<sid>/**\/*.jsonl     subagent transcripts (credited to <sid>)
+ *   <state>/context/<sid>.json                         artifacts registered with soa-ctx
+ *   ~/.codex/sessions/**\/*.jsonl                       Codex rollouts (URL mentions only)
+ *
+ * What counts, strongest first: a `frame-link` record or a successful Artifact
+ * publish (kind "published"), a soa-ctx registration ("registered"), any other
+ * Artifact / ArtifactData / ArtifactComments call on a URL ("opened"), and a bare URL in
+ * any message or tool output ("mentioned"). A successful Artifact delete marks
+ * the artifact deleted until it is published again.
+ *
+ * The index is incremental: each file's byte offset, size and mtime are kept in
+ * <state>/artifacts/index.json, so a rescan reads only the bytes appended since.
+ * The first scan streams every file (several GB) without blocking the server:
+ * lines are split as raw bytes and only a line holding "claude.ai/" or
+ * "frame-link" is ever decoded and parsed.
+ *
+ * A loopback-only service (default 127.0.0.1:6085), reached by browsers through
+ * the daemon's authed /preview/6085/ proxy. Same request guard as soa-health:
+ * loopback peer + loopback Host (DNS-rebinding guard), and a cross-site request
+ * only from the public front end through a forwarding proxy. Nothing here
+ * mutates anything but the service's own index.
+ *
+ * HTTP API (JSON):
+ *     GET  /health                                       liveness
+ *     GET  /artifacts?q=&cwd=&session=&limit=&kind=      newest first
+ *     GET  /artifacts/<id>                               one artifact
+ *     POST /rescan                                       an incremental scan now
+ *
+ * CLI: soa-artifacts serve | list [--q TEXT] [--cwd DIR|.] [--session ID]
+ *      [--kind K] [--json] [--limit N] | open <id> [--launch] | rescan
+ *
+ * Env: SOA_ARTIFACTS_PORT (6085), SOA_WEB_STATE_DIR, SOA_ARTIFACTS_DIR,
+ *      SOA_ARTIFACTS_RESCAN_S (20), SOA_ARTIFACTS_CLAUDE_DIR (~/.claude/projects),
+ *      SOA_ARTIFACTS_CODEX_DIR (~/.codex/sessions), SOA_ARTIFACTS_DAEMON
+ *      (http://127.0.0.1:4010, for the live tab list), SOA_ARTIFACTS_LOG,
+ *      SOA_ARTIFACTS_ALLOWED_ORIGINS (extra cross-site front ends, comma list).
+ *
+ * Docs: docs/soa-artifacts.md. Tests: server/test/artifactsLibrary.test.js.
+ */
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { execFile } = require('node:child_process');
+
+const VERSION = '1.0.0';
+const env = process.env;
+const HOME = os.homedir();
+const PORT = clampInt(env.SOA_ARTIFACTS_PORT, 6085, 1, 65535);
+const HOST = '127.0.0.1';
+const STATE_DIR = env.SOA_WEB_STATE_DIR || path.join(HOME, '.soa-web-local');
+const ART_DIR = env.SOA_ARTIFACTS_DIR || path.join(STATE_DIR, 'artifacts');
+const INDEX_FILE = path.join(ART_DIR, 'index.json');
+const CONTEXT_DIR = path.join(STATE_DIR, 'context');
+const TABS_FILE = path.join(STATE_DIR, 'tabs.json');
+const LOG_FILE = env.SOA_ARTIFACTS_LOG || path.join(STATE_DIR, 'logs', 'artifacts.log');
+const CLAUDE_DIR = env.SOA_ARTIFACTS_CLAUDE_DIR || path.join(HOME, '.claude', 'projects');
+const CODEX_DIR = env.SOA_ARTIFACTS_CODEX_DIR || path.join(HOME, '.codex', 'sessions');
+const DAEMON = (env.SOA_ARTIFACTS_DAEMON || 'http://127.0.0.1:4010').replace(/\/+$/, '');
+const RESCAN_MS = clampInt(env.SOA_ARTIFACTS_RESCAN_S, 20, 2, 3600) * 1000;
+const INDEX_VERSION = 3;   // 2: first publishes and URL-less results are no longer skipped
+                           // 3: subagent and fixture-shaped mentions are dropped
+const CHUNK = 4 << 20;
+// A line past this is not decoded as JSON; its URLs still count as mentions.
+const MAX_PARSE = 8 << 20;
+// A line past this is dropped outright (nothing a transcript writes is that long).
+const MAX_LINE = 64 << 20;
+const PENDING_MAX = 64;
+const TABS_TTL_MS = 5000;
+// Front ends that may call this service cross-site — ONLY through the daemon's
+// authenticated /preview/<port>/ proxy (see guardReason), as with soa-health.
+const CROSS_SITE_ORIGINS = new Set(['https://www.s0a.app', 'https://s0a.app',
+    ...String(env.SOA_ARTIFACTS_ALLOWED_ORIGINS || '').split(',').map((x) => x.trim().replace(/\/+$/, '')).filter(Boolean)]);
+
+function clampInt(v, d, lo, hi) { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; }
+
+function log(...a) {
+    const line = new Date().toISOString() + ' ' + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n';
+    try { fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); fs.appendFileSync(LOG_FILE, line); } catch (_) { process.stderr.write(line); }
+}
+
+// ── parsing ──────────────────────────────────────────────────────────────
+// The three real URL forms, with ids held to their real shapes: a v4 UUID, or
+// (claude.ai/artifact/ only) a 21–22 character base58 id. Placeholders ({id},
+// <uuid>, 12345678-aaaa-…) and ids cut short by a truncated tool output
+// (…/artifact/NVNbroS) do not match, and the id must end where the URL does.
+const UUID_V4 = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
+const URL_RE = new RegExp(`https://claude\\.ai/(?:(?:code/artifact|public/artifacts)/(${UUID_V4})|artifact/(${UUID_V4}|[1-9A-HJ-NP-Za-km-z]{21,22}))(?![A-Za-z0-9_-])`, 'g');
+const KIND_RANK = { mentioned: 0, opened: 1, registered: 2, published: 3 };
+const B_URL = Buffer.from('claude.ai/');
+const B_FRAME = Buffer.from('frame-link');
+const B_BLOB = Buffer.from('{"type":"api-request-blob"');
+// An Artifact call names no URL on a first publish, and its result line ("Deleted…",
+// a refusal) need not carry one either — both must still be decoded.
+const B_TOOL = Buffer.from('"name":"Artifact');
+const B_RESULT = Buffer.from('"tool_result"');
+const ARTIFACT_TOOL = /^Artifact(?:Data|Comments)?$/;
+// A delete the person declined, or one the server refused, is not a delete.
+const DELETE_FAILED = /<tool_use_error>|\b(?:declin\w*|cancel\w*|denied|refus\w*|reject\w*|fail\w*|errors?|unable|cannot|can't|couldn't|could not|did not|didn't|not (?:been )?deleted|not found|no such)\b/i;
+
+function urlsIn(text) {
+    const out = [];
+    URL_RE.lastIndex = 0;
+    let m;
+    while ((m = URL_RE.exec(text))) {
+        const id = m[1] || m[2];
+        out.push({ id: id.includes('-') ? id.toLowerCase() : id, url: m[0] });
+    }
+    return out;
+}
+// A random id uses most of its alphabet; a typed fixture (aaaa…, 1111…-4111-…,
+// AbCdEf…) does not. Only bare mentions are held to this — a real publish never is.
+function plausibleId(id) {
+    const chars = id.replace(/-/g, '');
+    if (new Set(chars.toLowerCase()).size < 10) return false;
+    return !/(.)\1{5}/.test(chars);
+}
+function firstUrl(text) { const u = urlsIn(String(text || '')); return u.length ? u[0] : null; }
+function resultText(c) {
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) return c.map((p) => (p && typeof p.text === 'string' ? p.text : '')).join('\n');
+    return '';
+}
+const clip = (s, n) => { const t = String(s == null ? '' : s).trim(); return t ? t.slice(0, n) : null; };
+
+function isToolOutput(d) {
+    if (!d) return false;
+    const c = d.message && d.message.content;
+    if (d.type === 'user' && Array.isArray(c) && c.length && c.every((p) => p && p.type === 'tool_result')) return true;
+    const pt = d.payload && d.payload.type;   // Codex rollouts
+    return !!pt && ((d.type === 'response_item' && /_output$/.test(pt)) || (d.type === 'event_msg' && /^(?:exec_command|mcp_tool_call|patch_apply)/.test(pt)));
+}
+
+// Is this raw line worth decoding? Request blobs repeat the conversation and the
+// prompt snapshot is the system prompt — neither says anything new.
+// `pending` (optional): tool_use ids still waiting for their result.
+function interesting(buf, pending) {
+    if (buf.length >= B_BLOB.length && buf.compare(B_BLOB, 0, B_BLOB.length, 0, B_BLOB.length) === 0) return false;
+    if (buf.indexOf(B_URL) === -1 && buf.indexOf(B_FRAME) === -1 && buf.indexOf(B_TOOL) === -1) {
+        const ids = pending ? Object.keys(pending) : [];
+        if (!ids.length || buf.indexOf(B_RESULT) === -1 || !ids.some((id) => buf.indexOf(id) !== -1)) return false;
+    }
+    if (buf.subarray(0, 600).toString('latin1').includes('"attachment":{"type":"prompt_snapshot"')) return false;
+    return true;
+}
+
+/**
+ * One transcript line → artifact events. `st` is the file's carried state:
+ * {sessionId, cwd, agent, pending: {toolUseId: call}} — a publish or delete only
+ * counts once its tool_result says it worked, and that result can arrive in a
+ * later scan, so pending calls persist with the file's offset.
+ */
+function extractEvents(line, st, fallbackAt = 0) {
+    const events = [];
+    const strong = new Set();
+    let d = null;
+    if (line.length <= MAX_PARSE) { try { d = JSON.parse(line); } catch (_) { d = null; } }
+    const at = (d && Date.parse(d.timestamp)) || fallbackAt || 0;
+    if (d && typeof d.cwd === 'string' && d.cwd) st.cwd = d.cwd;
+    const base = () => ({ sessionId: st.sessionId, cwd: st.cwd || null, agent: st.agent || 'claude', at });
+    const push = (u, ev) => { strong.add(u.id); events.push(Object.assign(base(), { id: u.id, url: u.url }, ev)); };
+    st.pending = st.pending || {};
+
+    if (d && d.type === 'frame-link') {
+        const u = firstUrl(d.frameUrl);
+        if (u) push(u, { action: 'frame-link', kind: 'published', title: clip(d.title, 200), filePath: d.path || null });
+    }
+    const content = d && d.message && Array.isArray(d.message.content) ? d.message.content : [];
+    for (const part of content) {
+        if (!part || typeof part !== 'object') continue;
+        if (part.type === 'tool_use' && ARTIFACT_TOOL.test(String(part.name)) && part.input && typeof part.input === 'object') {
+            const inp = part.input;
+            const act = String(inp.action || 'publish');
+            const u = firstUrl(inp.url);
+            const call = { act, url: u, title: clip(inp.title, 200), description: clip(inp.description, 400), filePath: inp.file_path || null, at };
+            // Only the Artifact tool itself publishes or deletes a whole artifact.
+            if (part.name === 'Artifact' && (act === 'publish' || (act === 'delete' && !inp.collection && !inp.db_op && !inp.asset_id))) {
+                st.pending[part.id] = call;
+                const keys = Object.keys(st.pending);
+                if (keys.length > PENDING_MAX) delete st.pending[keys[0]];
+                if (u) strong.add(u.id);
+            } else if (u) {
+                push(u, { action: act, kind: 'opened' });
+            }
+        } else if (part.type === 'tool_result') {
+            const call = st.pending[part.tool_use_id];
+            const text = resultText(part.content);
+            if (call) {
+                delete st.pending[part.tool_use_id];
+                if (part.is_error) continue;
+                if (call.act === 'publish') {
+                    const m = /^Published (.+?) at (https:\/\/claude\.ai\/\S+)/.exec(text);
+                    const tur = d.toolUseResult && typeof d.toolUseResult === 'object' ? d.toolUseResult : {};
+                    const u = (m && firstUrl(m[2])) || firstUrl(tur.url) || call.url;
+                    if (u && (m || tur.url)) {
+                        push(u, { action: 'publish', kind: 'published', title: call.title || clip(tur.title, 200), description: call.description,
+                            filePath: call.filePath || (m && m[1]) || tur.path || null });
+                    }
+                } else if (call.act === 'delete' && call.url && !DELETE_FAILED.test(text.slice(0, 400))) {
+                    push(call.url, { action: 'delete', kind: 'opened', deleted: true });
+                }
+            } else if (/^Published .+? at https:\/\/claude\.ai\//.test(text) && d.toolUseResult && d.toolUseResult.url) {
+                // The call itself was missed (an oversized line): the structured result is proof enough.
+                const u = firstUrl(d.toolUseResult.url);
+                if (u) push(u, { action: 'publish', kind: 'published', title: clip(d.toolUseResult.title, 200), filePath: d.toolUseResult.path || null });
+            }
+        }
+    }
+    // A URL in a tool's output (a grep over transcripts, a listing) is the weakest
+    // signal of all: it must never make an artifact look recently used.
+    // A subagent's transcript echoes what its parent already has, plus whatever
+    // it typed while testing, so only its publishes and opens count.
+    const act = isToolOutput(d) ? 'output' : 'mention';
+    for (const u of st.sub ? [] : urlsIn(line)) {
+        if (strong.has(u.id) || !plausibleId(u.id)) continue;
+        strong.add(u.id);
+        events.push(Object.assign(base(), { id: u.id, url: u.url, action: act, kind: 'mentioned' }));
+    }
+    return events;
+}
+
+// ── the index ────────────────────────────────────────────────────────────
+function emptyIndex() { return { version: INDEX_VERSION, updatedAt: 0, files: {}, artifacts: {} }; }
+
+// How much an action says about where an artifact lives: 3 = it was worked on
+// there, 2 = someone wrote its URL, 1 = it only showed up in a tool's output.
+const tierOf = (action) => (action === 'output' ? 1 : action === 'mention' ? 2 : 3);
+const TIER_KEY = { 1: 'o', 2: 'm', 3: 's' };
+
+// Applying the same event twice changes nothing (actions are a set, times are
+// min/max), so re-reading a rewritten file can never double-count.
+function applyEvent(idx, ev) {
+    if (!ev || !ev.id) return;
+    let a = idx.artifacts[ev.id];
+    if (!a) a = idx.artifacts[ev.id] = { id: ev.id, url: ev.url, urlKind: -1, titles: {}, description: null, filePath: null, publishedAt: 0, deletedAt: 0, sessions: {} };
+    const rank = KIND_RANK[ev.kind] || 0;
+    if (rank > a.urlKind) { a.url = ev.url; a.urlKind = rank; }
+    const setTitle = (k, v) => { if (v && (!a.titles[k] || (a.titles[k + 'At'] || 0) <= ev.at)) { a.titles[k] = v; a.titles[k + 'At'] = ev.at; } };
+    if (ev.action === 'frame-link') setTitle('frame', ev.title);
+    else if (ev.action === 'publish') setTitle('input', ev.title);
+    else if (ev.action === 'register') setTitle('registered', ev.title);
+    if (ev.description && (!a.descriptionAt || a.descriptionAt <= ev.at)) { a.description = ev.description; a.descriptionAt = ev.at; }
+    if (ev.filePath && (ev.action === 'publish' || ev.action === 'frame-link')) {
+        if (!a.filePathAt || a.filePathAt <= ev.at) { a.filePath = ev.filePath; a.filePathAt = ev.at; }
+    }
+    if (ev.kind === 'published') a.publishedAt = Math.max(a.publishedAt, ev.at);
+    if (ev.deleted) a.deletedAt = Math.max(a.deletedAt, ev.at);
+    const sid = ev.sessionId || 'unknown';
+    let s = a.sessions[sid];
+    if (!s) s = a.sessions[sid] = { sessionId: sid, cwd: null, agent: ev.agent || 'claude', actions: [] };
+    if (ev.cwd) s.cwd = ev.cwd;
+    if (!s.actions.includes(ev.action)) s.actions.push(ev.action);
+    const pre = TIER_KEY[tierOf(ev.action)];
+    if (ev.at) {
+        if (!s[pre + 'First'] || ev.at < s[pre + 'First']) s[pre + 'First'] = ev.at;
+        if (ev.at > (s[pre + 'Last'] || 0)) s[pre + 'Last'] = ev.at;
+    }
+}
+
+const fileTitles = new Map();
+function titleOfFile(p) {
+    if (!p || !/\.html?$/i.test(p)) return null;
+    let st;
+    try { st = fs.statSync(p); } catch (_) { return null; }
+    const hit = fileTitles.get(p);
+    if (hit && hit.mtimeMs === st.mtimeMs) return hit.title;
+    let title = null;
+    try {
+        const fd = fs.openSync(p, 'r');
+        const b = Buffer.alloc(8192);
+        const n = fs.readSync(fd, b, 0, b.length, 0);
+        fs.closeSync(fd);
+        const m = /<title[^>]*>([^<]{1,300})<\/title>/i.exec(b.subarray(0, n).toString('utf8'));
+        if (m) title = clip(m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, ' '), 200);
+    } catch (_) {}
+    fileTitles.set(p, { mtimeMs: st.mtimeMs, title });
+    return title;
+}
+
+// Internal record → the contract's A. Mentions alone never set the project or
+// the times of an artifact somebody actually published or opened: a URL pasted
+// into another session (or a grep over the transcripts) is not where it lives.
+function toPublic(a, tabs) {
+    const all = Object.values(a.sessions).map((s) => {
+        const tier = Math.max(...s.actions.map(tierOf));
+        const k = TIER_KEY[tier];
+        return { sessionId: s.sessionId, cwd: s.cwd, project: s.cwd ? path.basename(s.cwd) : null, agent: s.agent,
+            firstAt: s[k + 'First'] || 0, lastAt: s[k + 'Last'] || 0, actions: s.actions.slice(), tier };
+    });
+    const top = Math.max(0, ...all.map((s) => s.tier));
+    let use = all.filter((s) => s.tier === top);
+    // Seen only in tool output: every later listing or grep would re-surface it,
+    // so it keeps the session it first appeared in.
+    if (top === 1 && use.length > 1) use = [use.reduce((x, y) => ((y.firstAt || Infinity) < (x.firstAt || Infinity) ? y : x))];
+    const acts = new Set(all.flatMap((s) => s.actions));
+    const weak = (x) => x === 'mention' || x === 'output';
+    const kind = (acts.has('publish') || acts.has('frame-link')) ? 'published' : acts.has('register') ? 'registered'
+        : [...acts].some((x) => !weak(x)) ? 'opened' : 'mentioned';
+    const firstAt = Math.min(...use.map((s) => s.firstAt || Infinity));
+    const lastAt = Math.max(0, ...use.map((s) => s.lastAt));
+    const primary = use.slice().sort((x, y) => (x.firstAt || Infinity) - (y.firstAt || Infinity)).find((s) => s.cwd) || null;
+    const t = a.titles || {};
+    const title = t.frame || t.input || t.registered || titleOfFile(a.filePath) || null;
+    const homeCwds = new Set(use.map((s) => s.cwd).filter(Boolean));
+    const sids = new Set(use.map((s) => s.sessionId));
+    const tabList = (tabs || []).filter((tb) => (tb.sessionId && sids.has(tb.sessionId)) || (tb.cwd && homeCwds.has(tb.cwd)))
+        .map((tb) => ({ id: tb.id, title: tb.title }));
+    const out = {
+        id: a.id, url: a.url, title, description: a.description || null, kind,
+        deleted: !!(a.deletedAt && a.deletedAt >= (a.publishedAt || 0)),
+        firstAt: Number.isFinite(firstAt) ? firstAt : 0, lastAt,
+        project: primary ? path.basename(primary.cwd) : null, cwd: primary ? primary.cwd : null,
+        // A session that only saw the URL in a tool's output is listed only when
+        // nothing better exists.
+        sessions: all.filter((s) => s.tier > 1 || top === 1).sort((x, y) => y.lastAt - x.lastAt).map(({ tier, ...s }) => s),
+        tabs: tabList,
+    };
+    Object.defineProperty(out, 'home', { value: new Set(use.map((s) => s.sessionId)), enumerable: false });
+    return out;
+}
+
+function under(cwd, dir) { return !!cwd && (cwd === dir || cwd.startsWith(dir.replace(/\/+$/, '') + '/')); }
+// Pure filter (exported for tests). opts: {q, cwd, session, kind, limit}.
+function query(list, opts = {}) {
+    const q = String(opts.q || '').trim().toLowerCase();
+    const kinds = opts.kind ? new Set(String(opts.kind).split(',').map((x) => x.trim()).filter(Boolean)) : null;
+    const cwd = opts.cwd ? String(opts.cwd).replace(/\/+$/, '') || '/' : null;
+    let out = list.filter((a) => {
+        if (kinds && !kinds.has(a.kind)) return false;
+        if (opts.session && !a.sessions.some((s) => s.sessionId === opts.session)) return false;
+        if (cwd) {
+            // The artifact's home sessions; a bare mention elsewhere does not move it.
+            const home = a.home ? a.sessions.filter((s) => a.home.has(s.sessionId)) : a.sessions;
+            if (!home.some((s) => under(s.cwd, cwd))) return false;
+        }
+        if (q && ![a.title, a.description, a.project, a.url, a.id].some((v) => v && String(v).toLowerCase().includes(q))) return false;
+        return true;
+    });
+    out.sort((x, y) => y.lastAt - x.lastAt);
+    const total = out.length;
+    out = out.slice(0, clampInt(opts.limit, 500, 1, 10000));
+    return { total, artifacts: out };
+}
+
+// ── scanning ─────────────────────────────────────────────────────────────
+const tick = () => new Promise((r) => setImmediate(r));
+
+// Claude transcripts: <enc>/<sid>.jsonl, and anything under <enc>/<sid>/ (subagents)
+// is credited to that parent session.
+async function listClaudeFiles(root) {
+    const out = [];
+    let projects;
+    try { projects = await fsp.readdir(root, { withFileTypes: true }); } catch (_) { return out; }
+    for (const p of projects) {
+        if (!p.isDirectory()) continue;
+        const pdir = path.join(root, p.name);
+        let ents;
+        try { ents = await fsp.readdir(pdir, { withFileTypes: true }); } catch (_) { continue; }
+        for (const e of ents) {
+            if (e.isFile() && e.name.endsWith('.jsonl')) out.push({ file: path.join(pdir, e.name), sessionId: e.name.slice(0, -6), agent: 'claude' });
+            else if (e.isDirectory()) {
+                for (const f of await walkJsonl(path.join(pdir, e.name))) out.push({ file: f, sessionId: e.name, agent: 'claude', sub: true });
+            }
+        }
+    }
+    return out;
+}
+async function walkJsonl(dir, depth = 0, out = []) {
+    if (depth > 6) return out;
+    let ents;
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch (_) { return out; }
+    for (const e of ents) {
+        const f = path.join(dir, e.name);
+        if (e.isDirectory()) await walkJsonl(f, depth + 1, out);
+        else if (e.isFile() && e.name.endsWith('.jsonl')) out.push(f);
+    }
+    return out;
+}
+
+/**
+ * Read `file` from st.offset to EOF, line by line as raw bytes. Only complete
+ * lines are consumed: a trailing partial line is left for the next scan, so the
+ * offset always sits on a line boundary.
+ */
+async function readFrom(file, st, onLine) {
+    const fh = await fsp.open(file, 'r');
+    try {
+        const buf = Buffer.allocUnsafe(CHUNK);
+        let pos = st.offset || 0, consumed = pos, parts = [], partLen = 0, skipping = false;
+        for (;;) {
+            const { bytesRead } = await fh.read(buf, 0, CHUNK, pos);
+            if (!bytesRead) break;
+            const chunk = buf.subarray(0, bytesRead);
+            const chunkStart = pos;
+            pos += bytesRead;
+            let start = 0, nl;
+            while ((nl = chunk.indexOf(10, start)) !== -1) {
+                if (skipping) skipping = false;
+                else {
+                    const line = partLen ? Buffer.concat([...parts, chunk.subarray(start, nl)]) : chunk.subarray(start, nl);
+                    if (line.length) onLine(line);
+                }
+                parts = []; partLen = 0;
+                start = nl + 1;
+                consumed = chunkStart + start;
+            }
+            if (start < chunk.length && !skipping) {
+                partLen += chunk.length - start;
+                if (partLen > MAX_LINE) { parts = []; partLen = 0; skipping = true; }
+                else parts.push(Buffer.from(chunk.subarray(start)));
+            }
+            await tick();
+        }
+        st.offset = consumed;
+        st.size = pos;
+    } finally { await fh.close(); }
+}
+
+async function scanFile(idx, item, stat) {
+    const prev = idx.files[item.file];
+    let st = prev;
+    // Shorter than what was read, or a different file under the same name: start over.
+    if (!st || stat.size < (st.offset || 0) || (st.ino && stat.ino && st.ino !== stat.ino)) {
+        st = { offset: 0, size: 0, mtimeMs: 0, sessionId: item.sessionId, agent: item.agent, sub: !!item.sub, cwd: null, pending: {} };
+        if (prev) log('rescanning rewritten file', path.basename(item.file));
+    }
+    const fallbackAt = Math.round(stat.mtimeMs);
+    let n = 0, firstLine = st.offset === 0;
+    await readFrom(item.file, st, (buf) => {
+        if (firstLine && item.agent === 'codex') {
+            // The rollout's first record names the thread and its directory.
+            firstLine = false;
+            if (buf.length <= MAX_PARSE) {
+                try {
+                    const d = JSON.parse(buf.toString('utf8'));
+                    const p = d && d.payload;
+                    if (p && p.id) st.sessionId = String(p.id);
+                    if (p && p.cwd) st.cwd = String(p.cwd);
+                } catch (_) {}
+            }
+        }
+        firstLine = false;
+        if (!interesting(buf, st.pending)) return;
+        for (const ev of extractEvents(buf.toString('utf8'), st, fallbackAt)) { applyEvent(idx, ev); n++; }
+    });
+    st.mtimeMs = stat.mtimeMs;
+    st.ino = stat.ino;
+    idx.files[item.file] = st;
+    return n;
+}
+
+// rollout-<date>-<uuid>.jsonl; the session_meta record overrides it when present.
+function codexId(f) { const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(f); return m ? m[1] : path.basename(f, '.jsonl'); }
+
+// soa-ctx registrations: <state>/context/<sid>.json {artifacts:[{id,url,title,at}]}.
+function applyRegistered(idx) {
+    let names;
+    try { names = fs.readdirSync(CONTEXT_DIR).filter((f) => f.endsWith('.json')); } catch (_) { return 0; }
+    const cwdOf = new Map();
+    for (const st of Object.values(idx.files)) if (st.sessionId && st.cwd) cwdOf.set(st.sessionId, st.cwd);
+    let n = 0;
+    for (const f of names) {
+        let d;
+        try { d = JSON.parse(fs.readFileSync(path.join(CONTEXT_DIR, f), 'utf8')); } catch (_) { continue; }
+        if (!d || !Array.isArray(d.artifacts)) continue;
+        const sid = f.slice(0, -5);
+        for (const r of d.artifacts) {
+            const u = firstUrl(r && r.url);
+            if (!u) continue;
+            applyEvent(idx, { id: u.id, url: u.url, action: 'register', kind: 'registered', title: clip(r.title, 200),
+                sessionId: sid, cwd: cwdOf.get(sid) || null, agent: 'claude', at: Number(r.at) || Date.parse(r.at) || 0 });
+            n++;
+        }
+    }
+    return n;
+}
+
+function loadIndex() {
+    try {
+        const d = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf8'));
+        if (d && d.version === INDEX_VERSION && d.files && d.artifacts) return d;
+    } catch (_) {}
+    return emptyIndex();
+}
+function saveIndex(idx) {
+    fs.mkdirSync(ART_DIR, { recursive: true, mode: 0o700 });
+    const tmp = INDEX_FILE + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(idx), { mode: 0o600 });
+    fs.renameSync(tmp, INDEX_FILE);
+}
+
+const svc = { idx: null, scanning: false, queued: false, lastScan: null, timer: null, startedAt: Date.now(), lastEnd: 0, deferred: null };
+// POST /rescan can arrive in a loop; scans run back to back no closer than this.
+const MIN_RESCAN_GAP_MS = 3000;
+function requestScan() {
+    if (svc.scanning) { svc.queued = true; return 'queued'; }
+    const wait = svc.lastEnd + MIN_RESCAN_GAP_MS - Date.now();
+    if (wait <= 0) { scan('request'); return 'started'; }
+    if (!svc.deferred) svc.deferred = setTimeout(() => { svc.deferred = null; scan('request'); }, wait);
+    return 'deferred';
+}
+
+async function scan(reason = 'timer') {
+    if (svc.scanning) { svc.queued = true; return svc.lastScan; }
+    svc.scanning = true;
+    const t0 = Date.now();
+    let read = 0, events = 0, bytes = 0;
+    try {
+        const idx = svc.idx || (svc.idx = loadIndex());
+        const items = (await listClaudeFiles(CLAUDE_DIR)).concat((await walkJsonl(CODEX_DIR)).map((f) => ({ file: f, sessionId: codexId(f), agent: 'codex' })));
+        const seen = new Set();
+        for (const item of items) {
+            seen.add(item.file);
+            let stat;
+            try { stat = await fsp.stat(item.file); } catch (_) { continue; }
+            const st = idx.files[item.file];
+            if (st && st.size === stat.size && st.mtimeMs === stat.mtimeMs) continue;
+            const before = st && stat.size >= (st.offset || 0) && (!st.ino || st.ino === stat.ino) ? st.offset || 0 : 0;
+            try { events += await scanFile(idx, item, stat); } catch (e) { log('scan failed', path.basename(item.file), e.message); continue; }
+            bytes += Math.max(0, idx.files[item.file].offset - before);
+            read++;
+            await tick();
+        }
+        // A transcript that is gone keeps its artifacts; only its offset is forgotten.
+        for (const f of Object.keys(idx.files)) if (!seen.has(f)) delete idx.files[f];
+        applyRegistered(idx);
+        idx.updatedAt = Date.now();
+        if (read || reason !== 'timer') saveIndex(idx);
+        svc.lastScan = { reason, ms: Date.now() - t0, files: items.length, read, bytes, events, artifacts: Object.keys(idx.artifacts).length, at: idx.updatedAt };
+        if (read || reason !== 'timer') log('scan', svc.lastScan);
+    } catch (e) {
+        log('scan error', e.stack || e.message);
+    } finally {
+        svc.scanning = false;
+        svc.lastEnd = Date.now();
+    }
+    if (svc.queued) { svc.queued = false; requestScan(); }
+    return svc.lastScan;
+}
+
+// ── live tabs ────────────────────────────────────────────────────────────
+// /api/tabs carries id/title/cwd; tabs.json carries each tab's saved session id
+// in the same order. Join the two only when every position's cwd agrees.
+let tabsCache = { at: 0, tabs: [] };
+function getJson(url, ms) {
+    return new Promise((resolve) => {
+        const req = http.get(url, { timeout: ms }, (res) => {
+            let b = ''; res.setEncoding('utf8');
+            res.on('data', (d) => { b += d; if (b.length > 4 << 20) req.destroy(); });
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch (_) { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => req.destroy());
+    });
+}
+function joinTabs(live, saved) {
+    const tabs = (Array.isArray(live) ? live : []).filter((t) => t && !t.exited).map((t) => ({ id: t.id, title: t.title || null, cwd: t.cwd || null, sessionId: t.sessionId || t.claudeSessionId || null }));
+    const all = Array.isArray(live) ? live : [];
+    if (Array.isArray(saved) && saved.length === all.length && saved.every((s, i) => s && all[i] && s.cwd === all[i].cwd)) {
+        const byId = new Map(all.map((t, i) => [t.id, saved[i].sessionId || null]));
+        for (const t of tabs) if (!t.sessionId) t.sessionId = byId.get(t.id) || null;
+    }
+    return tabs;
+}
+async function liveTabs() {
+    if (Date.now() - tabsCache.at < TABS_TTL_MS) return tabsCache.tabs;
+    const d = await getJson(DAEMON + '/api/tabs', 1500);
+    let saved = null;
+    try { saved = JSON.parse(fs.readFileSync(TABS_FILE, 'utf8')).tabs; } catch (_) {}
+    tabsCache = { at: Date.now(), tabs: d && Array.isArray(d.tabs) ? joinTabs(d.tabs, saved) : tabsCache.tabs };
+    return tabsCache.tabs;
+}
+
+async function publicList() {
+    return publicOf(svc.idx, await liveTabs());
+}
+// A mention-only id that is a strict prefix of another id is that id cut short
+// (a 21-character slice of a 22-character one still has a valid shape).
+function publicOf(idx, tabs) {
+    const recs = Object.values(idx ? idx.artifacts : {});
+    const ids = recs.map((a) => a.id).sort();
+    const isPrefix = (id) => { const i = ids.indexOf(id); return i >= 0 && i + 1 < ids.length && ids[i + 1].startsWith(id); };
+    return recs.map((a) => toPublic(a, tabs)).filter((a) => a.kind !== 'mentioned' || !isPrefix(a.id));
+}
+
+// ── HTTP ─────────────────────────────────────────────────────────────────
+// The request guard is soa-health's, line for line (see the reasoning there).
+const PROXY_HEADER = /^(?:x-forwarded-.*|x-real-ip|forwarded|via|cf-.*|x-soa-.*|true-client-ip|x-client-ip|x-original-.*)$/i;
+const DAEMON_REMOTE_HEADERS = ['cf-connecting-ip', 'x-forwarded-for', 'x-real-ip', 'forwarded'];
+function guardReason(req, port) {
+    const ra = String(req.socket && req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    if (ra !== '127.0.0.1' && ra !== '::1') return 'non-loopback peer';
+    const h = String(req.headers.host || '').toLowerCase();
+    if (h !== `127.0.0.1:${port}` && h !== `localhost:${port}` && h !== `[::1]:${port}`) return 'bad host';
+    const sfs = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+    if (sfs === 'cross-site' || (sfs === 'same-site' && req.method !== 'GET')) {
+        if (!viaTrustedProxy(req)) return 'cross-site request';
+    }
+    return null;
+}
+function viaTrustedProxy(req) {
+    const origin = String(req.headers.origin || '').replace(/\/+$/, '');
+    return !!origin && CROSS_SITE_ORIGINS.has(origin) && DAEMON_REMOTE_HEADERS.some((k) => req.headers[k]);
+}
+function json(res, code, obj) { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(obj)); }
+function forbid(res, why) { log('403', why); res.writeHead(403, { 'content-type': 'text/plain', 'cache-control': 'no-store' }); res.end('forbidden\n'); }
+
+function createServer() {
+    return http.createServer(async (req, res) => {
+        const why = guardReason(req, PORT);
+        if (why) { req.resume(); return forbid(res, why); }
+        let url; try { url = new URL(req.url, 'http://x'); } catch (_) { res.writeHead(400); return res.end(); }
+        const p = url.pathname.replace(/\/+$/, '') || '/';
+        try {
+            if (req.method === 'GET') {
+                if (p === '/health') return json(res, 200, { ok: true, service: 'soa-artifacts', version: VERSION, scanning: svc.scanning,
+                    total: svc.idx ? Object.keys(svc.idx.artifacts).length : 0, updatedAt: svc.idx ? svc.idx.updatedAt || null : null,
+                    uptimeSec: Math.round((Date.now() - svc.startedAt) / 1000) });
+                if (p === '/artifacts') {
+                    const sp = url.searchParams;
+                    const r = query(await publicList(), { q: sp.get('q'), cwd: sp.get('cwd'), session: sp.get('session'), kind: sp.get('kind'), limit: sp.get('limit') });
+                    return json(res, 200, { ok: true, updatedAt: svc.idx ? svc.idx.updatedAt || null : null, scanning: svc.scanning, total: r.total, artifacts: r.artifacts });
+                }
+                const m = /^\/artifacts\/([A-Za-z0-9_-]{6,64})$/.exec(p);
+                if (m) {
+                    const id = m[1].includes('-') ? m[1].toLowerCase() : m[1];   // UUIDs are stored lower-case
+                    const a = svc.idx && svc.idx.artifacts[id];
+                    if (!a) return json(res, 404, { ok: false, error: 'not found', id });
+                    return json(res, 200, { ok: true, artifact: toPublic(a, await liveTabs()) });
+                }
+                if (p === '/') return json(res, 200, { ok: true, service: 'soa-artifacts', endpoints: ['GET /health', 'GET /artifacts?q=&cwd=&session=&limit=&kind=', 'GET /artifacts/<id>', 'POST /rescan'] });
+                return json(res, 404, { ok: false, error: 'not found' });
+            }
+            if (req.method === 'POST') {
+                // No body is read; a large one is not worth draining.
+                if (Number(req.headers['content-length']) > 4096) { res.on('finish', () => req.destroy()); res.writeHead(413, { connection: 'close' }); return res.end(); }
+                req.resume();
+                const ct = String(req.headers['content-type'] || '');
+                // Through /preview only text/plain survives (see soa-health); an empty POST is fine too.
+                if (ct && !/^(?:application\/json|text\/plain)\b/i.test(ct)) return forbid(res, 'POST must be empty or carry a JSON body');
+                if (p === '/rescan') {
+                    // Idempotent and coalesced: at most one scan queued, none closer than MIN_RESCAN_GAP_MS.
+                    return json(res, 200, { ok: true, scanning: true, scan: requestScan() });
+                }
+                return json(res, 404, { ok: false, error: 'not found' });
+            }
+            res.writeHead(405, { allow: 'GET, POST' }); return res.end();
+        } catch (e) { log('request failed', e.stack || e.message); if (!res.headersSent) json(res, 500, { ok: false, error: 'internal' }); }
+    });
+}
+
+function serve() {
+    fs.mkdirSync(ART_DIR, { recursive: true, mode: 0o700 });
+    svc.idx = loadIndex();
+    const server = createServer();
+    server.on('error', (e) => { log('listen failed:', e.code || e.message); process.exit(1); });
+    server.listen(PORT, HOST, () => {
+        log(`soa-artifacts ${VERSION} listening on ${HOST}:${PORT} (pid ${process.pid}, ${Object.keys(svc.idx.artifacts).length} indexed, rescan ${RESCAN_MS / 1000}s)`);
+        const loop = async () => { await scan(svc.lastScan ? 'timer' : 'boot'); svc.timer = setTimeout(loop, RESCAN_MS); };
+        loop();
+    });
+    const stop = () => { log('soa-artifacts stopping'); clearTimeout(svc.timer); server.close(); setTimeout(() => process.exit(0), 200); };
+    process.on('SIGTERM', stop); process.on('SIGINT', stop);
+    process.on('uncaughtException', (e) => log('uncaught', e && e.stack || e));
+    process.on('unhandledRejection', (e) => log('unhandled', e && e.stack || e));
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────
+function api(method, p) {
+    return new Promise((resolve, reject) => {
+        const req = http.request({ host: HOST, port: PORT, method, path: p, timeout: 30000, headers: { host: `127.0.0.1:${PORT}` } }, (res) => {
+            let b = ''; res.on('data', (d) => (b += d)); res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch (_) {} resolve({ status: res.statusCode, body: j }); });
+        });
+        req.on('error', reject); req.on('timeout', () => req.destroy(new Error('timeout')));
+        req.end();
+    });
+}
+// Without the service: the saved index, brought up to date in-process.
+async function offlineList() {
+    svc.idx = loadIndex();
+    await scan('cli');
+    return publicList();
+}
+function rel(ms) {
+    if (!ms) return '—';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    if (s < 86400 * 60) return Math.round(s / 86400) + 'd ago';
+    return new Date(ms).toISOString().slice(0, 10);
+}
+function parseFlags(args) {
+    const o = { _: [] };
+    for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === '--json' || a === '--launch') o[a.slice(2)] = true;
+        else if (/^--(q|cwd|session|limit|kind)$/.test(a)) o[a.slice(2)] = args[++i];
+        else if (/^--(q|cwd|session|limit|kind)=/.test(a)) { const [k, ...v] = a.slice(2).split('='); o[k] = v.join('='); }
+        else o._.push(a);
+    }
+    if (o.cwd === '.' || o.cwd === './') o.cwd = process.cwd();
+    else if (o.cwd) o.cwd = path.resolve(o.cwd);
+    return o;
+}
+const HELP = `soa-artifacts — the artifact library (loopback service on 127.0.0.1:${PORT})
+
+  soa-artifacts serve                          run the service
+  soa-artifacts list [--q TEXT] [--cwd DIR|.] [--session ID] [--kind K] [--limit N] [--json]
+  soa-artifacts open <id> [--launch]           print the URL (and open it with --launch)
+  soa-artifacts rescan                         an incremental scan now
+`;
+async function cli(argv) {
+    const [cmd, ...rest] = argv;
+    const o = parseFlags(rest);
+    try {
+        if (cmd === 'list' || cmd === 'ls') {
+            let list = null, total = 0;
+            try {
+                const qs = new URLSearchParams();
+                for (const k of ['q', 'cwd', 'session', 'kind', 'limit']) if (o[k]) qs.set(k, o[k]);
+                const r = await api('GET', '/artifacts?' + qs);
+                if (r.status === 200 && r.body) { list = r.body.artifacts; total = r.body.total; }
+            } catch (e) { if (e.code !== 'ECONNREFUSED') throw e; }
+            if (!list) { const r = query(await offlineList(), o); list = r.artifacts; total = r.total; }
+            if (o.json) { process.stdout.write(JSON.stringify({ total, artifacts: list }, null, 1) + '\n'); return; }
+            if (!list.length) { console.log('no artifacts'); return; }
+            const rows = list.map((a) => [(a.title || '(untitled)').slice(0, 48) + (a.deleted ? ' [deleted]' : a.kind !== 'published' ? ` [${a.kind}]` : ''), a.project || '—', rel(a.lastAt), a.url]);
+            const w = [0, 1, 2].map((i) => Math.max(...rows.map((r) => r[i].length)));
+            for (const r of rows) console.log(r.slice(0, 3).map((c, i) => c.padEnd(w[i])).join('  ') + '  ' + r[3]);
+            if (total > list.length) console.log(`… ${total - list.length} more (--limit)`);
+            return;
+        }
+        if (cmd === 'open') {
+            const raw = String(o._[0] || '').replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/^.*\//, '');
+            const id = raw.includes('-') ? raw.toLowerCase() : raw;
+            if (!id) { process.stderr.write('usage: soa-artifacts open <id> [--launch]\n'); process.exit(2); }
+            let list;
+            try { const r = await api('GET', '/artifacts?limit=10000'); list = r.body && r.body.artifacts; } catch (e) { if (e.code !== 'ECONNREFUSED') throw e; }
+            if (!list) list = await offlineList();
+            const hits = list.filter((a) => a.id === id).concat(list.filter((a) => a.id !== id && a.id.startsWith(id)));
+            if (!hits.length || (hits[0].id !== id && hits.length > 1)) { console.error(hits.length ? `ambiguous id: ${hits.map((a) => a.id).join(', ')}` : `no artifact ${id}`); process.exit(3); }
+            console.log(hits[0].url);
+            if (o.launch) execFile(process.platform === 'darwin' ? 'open' : 'xdg-open', [hits[0].url], () => {});
+            return;
+        }
+        if (cmd === 'rescan') {
+            try {
+                const r = await api('POST', '/rescan');
+                console.log(r.body && r.body.ok ? 'rescan started' : `rescan failed (${r.status})`);
+            } catch (e) {
+                if (e.code !== 'ECONNREFUSED') throw e;
+                svc.idx = loadIndex();
+                const s = await scan('cli');
+                console.log(`scanned in-process: ${s ? `${s.read} files read, ${s.artifacts} artifacts, ${s.ms} ms` : 'failed'}`);
+            }
+            return;
+        }
+        process.stdout.write(HELP); process.exit(cmd === 'help' || cmd === '--help' || cmd === '-h' ? 0 : 2);
+    } catch (e) {
+        console.error(`soa-artifacts: ${e.message}`);
+        process.exit(1);
+    }
+}
+
+module.exports = {
+    URL_RE, urlsIn, interesting, isToolOutput, extractEvents, applyEvent, toPublic, publicOf, query, emptyIndex, readFrom, scanFile,
+    titleOfFile, joinTabs, guardReason, CROSS_SITE_ORIGINS, PROXY_HEADER,
+};
+
+if (require.main === module) {
+    const a = process.argv.slice(2);
+    if (!a.length || a[0] === 'serve') serve();
+    else cli(a);
+}

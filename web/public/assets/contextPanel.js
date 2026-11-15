@@ -12,7 +12,10 @@
  *
  * ARTIFACTS updates itself: the daemon reads published claude.ai artifact URLs
  * out of the session's own transcript, and an agent can register one explicitly
- * (`soa-ctx artifact <url>`). Same for NEXT STEPS — the canvas is a surface the
+ * (`soa-ctx artifact <url>`). When the soa-artifacts library is running the
+ * band lists EVERY artifact the session recorded, and ALL opens the library: a
+ * searchable index of every artifact on this machine, in the same column.
+ * Same for NEXT STEPS — the canvas is a surface the
  * session's agent writes to and reads back, not just a view of chat history.
  *
  * Every edge is draggable. The panel's left border sets its width; the divider
@@ -79,6 +82,71 @@ const panelOnLeft = () => {
     const s = document.documentElement.dataset.sides;
     return s === 'swapped' || s === 'left';
 };
+
+// The artifact library is scripts/soa-artifacts, a loopback service reached
+// through the daemon's /preview/6085/ proxy (the same door soa-health uses on
+// 6084). It indexes every transcript, so it sees what /api/context cannot: every
+// artifact a session ever published, opened or registered, not just the newest
+// twenty. It is optional — when it is not running the band falls back to the
+// daemon's own list without saying anything.
+const ARTS_PREFIX = '/preview/6085';
+const ARTS_POLL_MS = 20000;
+const ARTS_TIMEOUT_MS = 6000;
+// Not running is the normal state of an install that never started it, and
+// every failed fetch is a red line in the console: after one, the band leaves
+// the library alone this long (opening the library still asks at once).
+const ARTS_DOWN_MS = 300000;
+const LIB_LIMIT = 500;
+
+function sameOrigin(url) {
+    try { return new URL(url, location.href).origin === location.origin; } catch (_) { return true; }
+}
+
+const DAY_MS = 86400000;
+function dayLabel(ms) {
+    const d = new Date(ms);
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const t = start.getTime();
+    if (ms >= t) return 'Today';
+    if (ms >= t - DAY_MS) return 'Yesterday';
+    const opts = { weekday: 'short', month: 'short', day: 'numeric' };
+    if (d.getFullYear() !== start.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+}
+
+// Only a claude.ai link is ever an artifact. Both lists come from outside this
+// page (a transcript, a loopback service), so anything else — javascript:,
+// data:, another host — is dropped before it can become an href or a copy.
+function artUrl(u) {
+    if (typeof u !== 'string' || u.length > 2048) return null;
+    try {
+        const x = new URL(u);
+        return x.protocol === 'https:' && x.hostname === 'claude.ai' && !x.username && !x.password ? x.href : null;
+    } catch (_) { return null; }
+}
+
+// The two real id shapes (a v4 UUID, or a 21–22 character base58 id) — the same
+// test scripts/soa-artifacts applies.
+const REAL_ART_ID = /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|[1-9A-HJ-NP-Za-km-z]{21,22})$/;
+
+function artTitle(a) {
+    return a.title || a.description || `artifact ${String(a.id || '').slice(0, 8)}`;
+}
+
+async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+    // The clipboard API needs a secure context and focus; the paired desktop on
+    // a LAN http:// origin has neither, so fall back to the old selection copy.
+    const ta = el('textarea', { readonly: '', 'aria-hidden': 'true' });
+    ta.value = text;
+    Object.assign(ta.style, { position: 'fixed', top: '-1000px', opacity: '0' });
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    ta.remove();
+    return ok;
+}
 
 const STATUS_CYCLE = { pending: 'in_progress', in_progress: 'completed', completed: 'pending' };
 const STATUS_MARK = { pending: '○', in_progress: '◐', completed: '●' };
@@ -148,11 +216,25 @@ class ContextCanvas {
             el('div', { class: 'ctx-band-h' }, [el('span', { text: 'WORKSPACE' })]),
             this._facts,
         ]);
+        this._artsCount = el('span', { class: 'ctx-sub ctx-arts-n', text: '' });
+        this._artsAll = el('button', {
+            class: 'ctx-arts-all', type: 'button', text: 'ALL ›',
+            title: 'All artifacts', 'aria-label': 'All artifacts: open the artifact library',
+            onclick: () => this.openLibrary(),
+        });
         this._artsBand = el('div', { class: 'ctx-band ctx-band-arts' }, [
             this._bandGrip('arts', 'ARTIFACTS'),
-            el('div', { class: 'ctx-band-h' }, [el('span', { text: 'ARTIFACTS' })]),
+            el('div', { class: 'ctx-band-h' }, [
+                el('span', { text: 'ARTIFACTS' }),
+                el('span', { class: 'ctx-arts-hr' }, [this._artsCount, this._artsAll]),
+            ]),
             this._arts,
         ]);
+        this._ctxArts = [];       // the daemon's list, from /api/context
+        this._svcArts = null;     // the library's list for this session; null = unreachable
+        this._artsKey = null;     // which session/cwd _svcArts belongs to
+        this._artsAt = 0;
+        this._artsSig = '';
         // QUEUE — what you have lined up for THIS agent's next turn.
         //
         // The terminal takes your typing immediately, which is the problem: mid
@@ -237,15 +319,26 @@ class ContextCanvas {
         this._codeRoot = el('div', { class: 'ctx-mode ctx-mode-code', hidden: '' });
         ensureViewStyle();
 
-        this.root.replaceChildren(
-            this._widthGrip(),
-            views,
-            head,
+        // The bands live in a wrapper so the LIBRARY can take the column
+        // without touching the band machinery — same flex column, same scroll.
+        this._canvasWrap = el('div', { class: 'ctx-mode ctx-mode-canvas' }, [
             this._threadBand,
             this._queueBand,
             this._factsBand,
             this._artsBand,
             this._stepsBand,
+        ]);
+        // LIBRARY is a drill-in of the canvas: it is reached from the ARTIFACTS
+        // band and its Back returns there.
+        this._libRoot = this._buildLibrary();
+        this._libOpen = false;
+
+        this.root.replaceChildren(
+            this._widthGrip(),
+            views,
+            head,
+            this._canvasWrap,
+            this._libRoot,
             this._codeRoot,
         );
         this.setView(this._view, { save: false });
@@ -506,6 +599,13 @@ class ContextCanvas {
         // The poll feeds the canvas bands; parked behind Code it would paint
         // into hidden nodes every 2.5s for nothing. Switching back repaints.
         if (this._view === 'code') return;
+        if (this._libOpen) {
+            // A tab switch moves "This project" with it; otherwise a light poll.
+            const cwd = this.getCwd();
+            if (cwd !== this._libCwd) { this._libSyncChips(); this._libFetch(); }
+            else if (Date.now() - this._libAt >= ARTS_POLL_MS) this._libFetch({ quiet: true });
+            return;
+        }
         // Task delivery is shared by both CLIs; it must not depend on the
         // Claude context endpoint being available for this workspace.
         this._queueFetch();
@@ -536,7 +636,9 @@ class ContextCanvas {
         this._turns.textContent = d.prompts.length ? `${d.prompts.length} turns · ${ago(d.lastActivity)}` : '';
         this._renderThread(d.prompts || []);
         this._renderFacts(d.workspace || {}, d);
-        this._renderArtifacts(d.artifacts || []);
+        this._ctxArts = d.artifacts || [];
+        this._artsMaybeFetch(d.sessionId, (d.workspace && d.workspace.cwd) || this.getCwd());
+        this._renderArtifacts();
         this._renderSteps();
     }
 
@@ -613,19 +715,308 @@ class ContextCanvas {
         ])));
     }
 
-    _renderArtifacts(list) {
+    // ── ARTIFACTS ─────────────────────────────────────────────────────────
+    _artsUrl(path) { return api(this.backend, ARTS_PREFIX + path); }
+
+    // One GET against the library. Anything that is not its JSON — the proxy's
+    // 502 page when nothing listens, a pairing 401, a timeout — is a throw, and
+    // every caller treats a throw as "the library is not here".
+    async _artsGet(path) {
+        const url = this._artsUrl(path);
+        const headers = {};
+        // Cross-origin (a paired desktop on another origin → the Mac's tunnel):
+        // ngrok's free tier answers a browser request with an HTML warning page
+        // unless this header is present; the daemon's CORS preflight allows it.
+        if (!sameOrigin(url)) headers['ngrok-skip-browser-warning'] = '1';
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), ARTS_TIMEOUT_MS);
+        try {
+            const r = await fetch(url, { credentials: 'include', cache: 'no-store', headers, signal: ac.signal });
+            if (!/json/i.test(r.headers.get('content-type') || '')) throw new Error(r.ok ? 'unexpected reply' : String(r.status));
+            const j = await r.json();
+            if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || String(r.status));
+            return j;
+        } finally { clearTimeout(timer); }
+    }
+
+    // The band follows the session: a new session (or tab) fetches at once,
+    // otherwise every ARTS_POLL_MS. tick() already stands down while the panel
+    // is closed or the page is hidden.
+    _artsMaybeFetch(sessionId, cwd) {
+        const key = sessionId ? 's:' + sessionId : (cwd ? 'c:' + cwd : null);
+        const tab = this.getTabId();
+        const changed = key !== this._artsKey || tab !== this._artsTab;
+        if (!changed && (this._artsBusy || Date.now() - this._artsAt < ARTS_POLL_MS)) return;
+        if (key !== this._artsKey) { this._svcArts = null; this._artsSig = ''; }
+        this._artsKey = key;
+        this._artsTab = tab;
+        this._artsAt = Date.now();
+        if (!key) return;
+        if (Date.now() < (this._artsDownUntil || 0)) { this._svcArts = null; return; }
+        const q = sessionId ? `session=${encodeURIComponent(sessionId)}` : `cwd=${encodeURIComponent(cwd)}`;
+        this._artsBusy = true;
+        this._artsGet(`/artifacts?${q}&limit=${LIB_LIMIT}`).then(j => {
+            if (this._artsKey !== key) return;   // the user moved on mid-flight
+            this._artsDownUntil = 0;
+            this._svcArts = Array.isArray(j.artifacts) ? j.artifacts : [];
+            this._renderArtifacts();
+        }).catch(() => {
+            this._artsDownUntil = Date.now() + ARTS_DOWN_MS;
+            if (this._artsKey !== key) return;
+            this._svcArts = null;               // silent: the daemon's list stands
+            this._renderArtifacts();
+        }).finally(() => { this._artsBusy = false; });
+    }
+
+    // The library's list merged with the daemon's, one row per id, newest
+    // first: the thing you just made is the thing you want to open.
+    _artsMerged() {
+        const byId = new Map();
+        for (const a of this._svcArts || []) {
+            if (!a || !a.id || a.deleted || !artUrl(a.url)) continue;
+            byId.set(a.id, { id: a.id, url: artUrl(a.url), title: a.title, description: a.description, kind: a.kind || 'published', at: a.lastAt || 0 });
+        }
+        for (const a of this._ctxArts || []) {
+            if (!a || !a.id || !artUrl(a.url)) continue;
+            // With the library up, its parser is the stricter one: the daemon's
+            // scan also catches ids a truncated tool output cut short
+            // (…/artifact/4f3a9b1), which the library rightly ignores.
+            if (this._svcArts && !REAL_ART_ID.test(a.id)) continue;
+            const id = a.id.includes('-') ? a.id.toLowerCase() : a.id;   // the library lowercases UUIDs
+            const have = byId.get(id);
+            // A deleted one the library knows about stays gone.
+            if ((this._svcArts || []).some(s => s && s.id === id && s.deleted)) continue;
+            if (have) {
+                if (!have.title && a.title) have.title = a.title;
+                if (a.at && a.at > have.at) have.at = a.at;
+            } else {
+                byId.set(id, { id, url: artUrl(a.url), title: a.title, kind: 'published', at: a.at || 0 });
+            }
+        }
+        return [...byId.values()].sort((x, y) => (y.at || 0) - (x.at || 0));
+    }
+
+    _copyBtn(url, cls) {
+        const label = 'Copy link';
+        const b = el('button', { class: cls, type: 'button', text: 'COPY', title: url, 'aria-label': label });
+        b.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const ok = await copyText(url);
+            b.textContent = ok ? 'COPIED' : 'FAILED';
+            b.setAttribute('aria-label', ok ? 'Link copied' : 'Copy failed');
+            clearTimeout(b._t);
+            b._t = setTimeout(() => { b.textContent = 'COPY'; b.setAttribute('aria-label', label); }, 1400);
+        });
+        return b;
+    }
+
+    _renderArtifacts() {
+        const list = this._artsMerged();
+        this._artsCount.textContent = list.length ? String(list.length) : '';
+        // The poll runs every 2.5 s; repainting identical rows would steal focus
+        // from a keyboard user sitting on a Copy button and reset "COPIED".
+        const sig = list.map(a => `${a.id}|${a.at}|${a.title || ''}|${a.kind}`).join('\n');
+        if (sig === this._artsSig && this._arts.childElementCount) return;
+        this._artsSig = sig;
         if (!list.length) {
             this._arts.replaceChildren(el('p', { class: 'ctx-muted', text: 'nothing published yet' }));
             return;
         }
-        // Newest first: the thing you just made is the thing you want to open.
-        this._arts.replaceChildren(...[...list].reverse().map(a => el('a', {
-            class: 'ctx-art', href: a.url, target: '_blank', rel: 'noopener noreferrer',
-            title: a.url,
-        }, [
-            el('span', { class: 'ctx-art-x', text: a.title || a.id.slice(0, 8) }),
+        this._arts.replaceChildren(...list.map(a => el('div', { class: 'ctx-art' }, [
+            el('a', {
+                class: 'ctx-art-a', href: a.url, target: '_blank', rel: 'noopener noreferrer',
+                title: a.url, 'aria-label': `Open ${artTitle(a)} in a new tab`,
+            }, [
+                el('span', { class: 'ctx-art-x', text: artTitle(a) }),
+                a.kind && a.kind !== 'published' ? el('span', { class: 'ctx-art-k', text: a.kind }) : null,
+            ]),
             el('span', { class: 'ctx-art-t', text: a.at ? ago(a.at) : '' }),
+            this._copyBtn(a.url, 'ctx-art-copy'),
         ])));
+    }
+
+    // ── LIBRARY ───────────────────────────────────────────────────────────
+    // Every artifact on this machine, searchable, in the same column. The
+    // server does the matching (q=) so a search covers the whole index, not
+    // just what happens to be loaded.
+    _buildLibrary() {
+        this._libScope = 'project';
+        this._libDeleted = false;
+        this._libAt = 0;
+        this._libSeq = 0;
+        this._libSig = '';
+        this._libBack = el('button', {
+            class: 'np-tool np-back', type: 'button', text: '‹ CANVAS',
+            'aria-label': 'Back to the canvas', onclick: () => this.closeLibrary(),
+        });
+        this._libN = el('span', { class: 'ctx-sub', text: '' });
+        this._libQ = el('input', {
+            class: 'np-search ctx-lib-q', type: 'search', placeholder: 'search title, project, link',
+            'aria-label': 'Search artifacts', autocomplete: 'off', spellcheck: 'false',
+        });
+        this._libQ.addEventListener('input', () => {
+            clearTimeout(this._libDebounce);
+            this._libDebounce = setTimeout(() => this._libFetch(), 250);
+        });
+        const chip = (key, text) => {
+            const b = el('button', { class: 'ctx-lib-chip', type: 'button', text, 'aria-pressed': 'false' });
+            b.addEventListener('click', () => {
+                if (key === 'deleted') this._libDeleted = !this._libDeleted;
+                else this._libScope = key;
+                this._libSyncChips();
+                this._libFetch();
+            });
+            return b;
+        };
+        this._libChips = {
+            project: chip('project', 'This project'),
+            all: chip('all', 'All sessions'),
+            deleted: chip('deleted', 'Show deleted'),
+        };
+        this._libStatus = el('p', { class: 'ctx-lib-status', role: 'status', 'aria-live': 'polite' });
+        this._libList = el('div', { class: 'np-list ctx-lib-list', role: 'list', 'aria-label': 'Artifacts' });
+        const root = el('div', {
+            class: 'ctx-mode ctx-mode-lib', hidden: '', role: 'region', 'aria-label': 'Artifact library',
+        }, [
+            el('div', { class: 'np-bar ctx-lib-bar' }, [
+                this._libBack,
+                el('span', { class: 'ctx-lib-h', text: 'ARTIFACTS' }),
+                this._libN,
+            ]),
+            el('div', { class: 'ctx-lib-tools' }, [
+                this._libQ,
+                el('div', { class: 'ctx-lib-chips', role: 'group', 'aria-label': 'Which artifacts' }, [
+                    this._libChips.project, this._libChips.all, this._libChips.deleted,
+                ]),
+            ]),
+            this._libStatus,
+            this._libList,
+        ]);
+        // Include the view switch: returning from Code leaves focus there.
+        this.root.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape' || !this._libOpen || this._view === 'code') return;
+            e.preventDefault();
+            e.stopPropagation();
+            this.closeLibrary();
+        });
+        return root;
+    }
+
+    _libSyncChips() {
+        const hasCwd = !!this.getCwd();
+        if (!hasCwd && this._libScope === 'project') this._libScope = 'all';
+        this._libChips.project.disabled = !hasCwd;
+        this._libChips.project.setAttribute('aria-pressed', String(this._libScope === 'project'));
+        this._libChips.all.setAttribute('aria-pressed', String(this._libScope === 'all'));
+        this._libChips.deleted.setAttribute('aria-pressed', String(this._libDeleted));
+    }
+
+    openLibrary() {
+        this._libOpen = true;
+        this._canvasWrap.hidden = true;
+        this._libRoot.hidden = false;
+        this._libSyncChips();
+        this._libSig = '';
+        this._libFetch();
+        this._libQ.focus();
+    }
+
+    closeLibrary() {
+        if (!this._libOpen) return;
+        this._libOpen = false;
+        this._libRoot.hidden = true;
+        this._canvasWrap.hidden = false;
+        clearTimeout(this._libDebounce);
+        this._artsAll.focus();
+        this.tick();
+    }
+
+    async _libFetch({ quiet = false } = {}) {
+        const seq = ++this._libSeq;
+        this._libAt = Date.now();
+        const params = new URLSearchParams({ limit: String(LIB_LIMIT) });
+        const q = this._libQ.value.trim();
+        if (q) params.set('q', q);
+        const cwd = this.getCwd();
+        this._libCwd = cwd;
+        if (this._libScope === 'project' && cwd) params.set('cwd', cwd);
+        if (!quiet && !this._libList.childElementCount) this._libStatus.textContent = 'Loading…';
+        try {
+            const j = await this._artsGet(`/artifacts?${params}`);
+            if (seq !== this._libSeq) return;      // a newer query won
+            if (this._artsDownUntil) { this._artsDownUntil = 0; this._artsAt = 0; }
+            this._renderLibrary(j, q);
+        } catch (_) {
+            if (seq !== this._libSeq) return;
+            this._libSig = '';
+            this._libN.textContent = '';
+            this._libStatus.textContent = '';
+            this._libList.replaceChildren(el('p', { class: 'ctx-muted ctx-lib-empty', text:
+                'The artifact library is not running on this computer, so only this session’s artifacts are listed on the canvas. Start it with: soa-artifacts serve' }));
+        }
+    }
+
+    _renderLibrary(j, q) {
+        const all = (Array.isArray(j.artifacts) ? j.artifacts : [])
+            .filter(a => a && a.id && artUrl(a.url))
+            .map(a => ({ ...a, url: artUrl(a.url) }));
+        const list = (this._libDeleted ? all : all.filter(a => !a.deleted))
+            .slice().sort((x, y) => (y.lastAt || 0) - (x.lastAt || 0));
+        const hidden = all.length - list.length;
+        this._libN.textContent = list.length ? String(list.length) : '';
+        let status = '';
+        if (j.scanning) status = 'Still reading transcripts — more may appear.';
+        else if (hidden) status = `${hidden} deleted hidden.`;
+        // Same-data repaint guard as the band: the 20 s poll must not drop focus.
+        // Scope and query lead it so an empty list still paints its message.
+        const sig = `${this._libScope}|${q}|${j.scanning ? 'S' : ''}\n` + list.map(a => `${a.id}|${a.lastAt}|${a.title || ''}|${a.deleted ? 1 : 0}|${(a.tabs || []).map(t => t.title).join(',')}`).join('\n');
+        this._libStatus.textContent = status;
+        if (sig === this._libSig) return;
+        this._libSig = sig;
+        if (!list.length) {
+            const where = this._libScope === 'project' ? 'this project' : 'any session';
+            const text = q ? `No artifacts match “${q}” in ${where}.`
+                : j.scanning ? 'Still reading transcripts — the first scan can take a minute.'
+                : `No artifacts recorded for ${where} yet.`;
+            this._libList.replaceChildren(el('p', { class: 'ctx-muted ctx-lib-empty', text }));
+            return;
+        }
+        const out = [];
+        let day = null;
+        for (const a of list) {
+            const label = dayLabel(a.lastAt || 0);
+            if (label !== day) {
+                day = label;
+                out.push(el('h3', { class: 'ctx-lib-day', text: label }));
+            }
+            out.push(this._libRow(a));
+        }
+        this._libList.replaceChildren(...out);
+    }
+
+    _libRow(a) {
+        const title = artTitle(a);
+        const tab = (a.tabs || [])[0];
+        const meta = [
+            a.project || null,
+            tab ? `tab ${tab.title || '#' + tab.id}` : null,
+            a.lastAt ? `${ago(a.lastAt)} ago` : null,
+        ].filter(Boolean);
+        return el('div', { class: 'ctx-lib-row' + (a.deleted ? ' deleted' : ''), role: 'listitem' }, [
+            el('a', {
+                class: 'ctx-lib-a', href: a.url, target: '_blank', rel: 'noopener noreferrer',
+                title: a.url, 'aria-label': `Open ${title} in a new tab`,
+            }, [
+                el('span', { class: 'ctx-lib-t' }, [
+                    el('span', { class: 'ctx-lib-x', text: title }),
+                    a.deleted ? el('span', { class: 'ctx-art-k', text: 'deleted' })
+                        : a.kind && a.kind !== 'published' ? el('span', { class: 'ctx-art-k', text: a.kind }) : null,
+                ]),
+                el('span', { class: 'ctx-lib-m', text: meta.join(' · ') }),
+            ]),
+            this._copyBtn(a.url, 'ctx-art-copy ctx-lib-copy'),
+        ]);
     }
 
     // ── Queue ───────────────────────────────────────────────────────────
@@ -814,6 +1205,8 @@ class ContextCanvas {
         // Say something in every band, or a canvas with no session reads as a
         // rendering bug rather than an empty state.
         this._arts.replaceChildren(el('p', { class: 'ctx-muted', text: '—' }));
+        this._artsCount.textContent = '';
+        this._artsSig = '';
     }
 }
 

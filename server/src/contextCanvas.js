@@ -128,7 +128,13 @@ function nextStepsFrom(file) {
 // Published artifacts, straight out of the transcript. Claude Code prints the
 // URL when an artifact is created or updated, so the last occurrence of an id is
 // its most recent touch — dedupe by id, keep that order, newest last.
-const ARTIFACT_RE = /https:\/\/claude\.ai\/(?:code\/artifact|public\/artifacts)\/([A-Za-z0-9_-]{6,64})/g;
+// Three URL forms are real: claude.ai/code/artifact/<uuid> (Claude Code),
+// claude.ai/artifact/<id> (a UUID or the 21–22 character base58 short form) and
+// claude.ai/public/artifacts/<uuid>. Ids are held to those shapes, as in
+// scripts/soa-artifacts, so placeholders ({id}, <uuid>, 12345678-aaaa-…) and ids
+// cut short by a truncated tool output never reach the canvas.
+const UUID_V4 = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
+const ARTIFACT_RE = new RegExp(`https://claude\\.ai/(?:(?:code/artifact|public/artifacts)/(${UUID_V4})|artifact/(${UUID_V4}|[1-9A-HJ-NP-Za-km-z]{21,22}))(?![A-Za-z0-9_-])`, 'g');
 const MAX_ARTIFACTS = 20;
 
 function artifactsFrom(file) {
@@ -155,7 +161,8 @@ function artifactsFrom(file) {
         ARTIFACT_RE.lastIndex = 0;
         let m;
         while ((m = ARTIFACT_RE.exec(line))) {
-            const id = m[1];
+            const raw = m[1] || m[2];
+            const id = raw.includes('-') ? raw.toLowerCase() : raw;
             const prev = byId.get(id);
             byId.delete(id);   // re-insert so the most recent mention sorts last
             byId.set(id, {
@@ -323,4 +330,4 @@ function mount(app, requireAuthed) {
     });
 }
 
-module.exports = { mount, contextFor };
+module.exports = { mount, contextFor, artifactsFrom, ARTIFACT_RE };

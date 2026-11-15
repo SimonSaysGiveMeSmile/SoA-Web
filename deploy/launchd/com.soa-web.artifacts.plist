@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ARTIFACT LIBRARY — runs `scripts/soa-artifacts serve`: the loopback service
+  (127.0.0.1:6085) that indexes every claude.ai artifact the agents published,
+  opened, registered or mentioned, reached through the daemon's /preview/6085/
+  proxy (CONTEXT panel ARTIFACTS band + library, phone ⋯ → Artifacts). Read-only
+  over the transcripts; writes only its own index under the state dir. No
+  daemon restart needed.
+
+  The install lives at $HOME/.soa-web; launchd does not expand $HOME in
+  ProgramArguments, so the job goes through /bin/sh. The service writes its own
+  log to $HOME/.soa-web-local/logs/artifacts.log.
+
+  Load: cp deploy/launchd/com.soa-web.artifacts.plist ~/Library/LaunchAgents/ &&
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.artifacts.plist
+  Stop: launchctl bootout gui/$(id -u)/com.soa-web.artifacts
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.artifacts</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>mkdir -p "$HOME/.soa-web-local/logs" &amp;&amp; cd "$HOME/.soa-web" &amp;&amp; exec node "$HOME/.soa-web/scripts/soa-artifacts" serve &gt;&gt; "$HOME/.soa-web-local/logs/artifacts.log" 2&gt;&amp;1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Standard</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

@@ -23,7 +23,7 @@ import { t as tr, getLang, setLang, applyStatic, LANGS } from '/assets/i18n.js?v
 import { getSettings, onSettings, openSettingsModal, saveSettings, iso2ToFlagEmoji } from '/assets/settings.js?v=web-20261102';
 import { PERF, ptime, pstream, prender } from '/assets/perf.js?v=2';
 import { pickFolder } from '/assets/folderPicker.js?v=1';
-import { mountContextPanel } from '/assets/contextPanel.js?v=layouts-20261106';
+import { mountContextPanel } from '/assets/contextPanel.js?v=artifacts-20261115';
 import { resolveTheme, xtermTheme, applyThemeAttr, onSystemThemeChange } from '/assets/theme.js?v=web-20261102';
 import { sessionMetadata, modelBadge } from '/m/sessionMetadata.js';
 import { maybeFocus, onAutoFocusChange, isEditable as isTextField } from '/m/focusPolicy.js?v=web-20261102';
