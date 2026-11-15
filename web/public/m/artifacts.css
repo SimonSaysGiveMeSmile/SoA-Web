@@ -1,0 +1,110 @@
+/* ⋯ → Artifacts: the phone's artifact library sheet (m/artifacts.js). Same
+   chassis as the Health sheet; text at the sheet's 17px, every target ≥ 44px. */
+
+#artifacts-overlay {
+    position: fixed; inset: 0; z-index: 6000; display: flex; align-items: flex-end; justify-content: center;
+    background: rgba(0,0,0,0.55); opacity: 0; visibility: hidden; transition: opacity .22s ease, visibility .22s ease;
+    -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+}
+#artifacts-overlay.visible { opacity: 1; visibility: visible; }
+.artifacts-sheet {
+    width: 100%; max-width: 560px; height: 88vh; height: 88dvh; overflow-y: auto; overflow-x: hidden;
+    -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+    background: var(--surface, var(--bg-alt)); border: 1px solid var(--line); border-bottom: 0;
+    border-radius: 18px 18px 0 0; padding: 0 18px calc(22px + env(safe-area-inset-bottom));
+    transform: translateY(100%); transition: transform .26s cubic-bezier(.2,.9,.3,1);
+    box-shadow: 0 -12px 40px rgba(0,0,0,0.5);
+}
+#artifacts-overlay.visible .artifacts-sheet { transform: translateY(0); }
+.artifacts-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 10px; }
+.artifacts-title { font-size: 14px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-dim); }
+.artifacts-header-r { display: flex; align-items: center; gap: 4px; }
+.artifacts-header .settings-close { min-width: 44px; min-height: 44px; font-size: 26px; }
+.artifacts-rescan {
+    appearance: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--fg-dim); cursor: pointer;
+}
+.artifacts-rescan:active { background: var(--accent-bg-hover); color: var(--fg); }
+.artifacts-rescan:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Both carry an author display, which beats the UA [hidden] rule: the away
+   state hides them, so say so explicitly. */
+.artifacts-rescan[hidden], .af-phone .af-controls[hidden] { display: none; }
+
+.af-phone { display: flex; flex-direction: column; gap: 12px; font-size: 17px; color: var(--fg); min-width: 0; }
+
+/* Scope + search stay in reach while the list scrolls under them. */
+.af-phone .af-controls {
+    position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; gap: 10px;
+    margin: 0 -18px; padding: 4px 18px 10px; background: var(--surface, var(--bg-alt));
+}
+.af-phone .af-seg { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid var(--line); border-radius: 12px; }
+.af-phone .af-seg-btn {
+    appearance: none; min-height: 44px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent;
+    color: var(--fg-dim); font: inherit; font-size: 16px; cursor: pointer;
+}
+.af-phone .af-seg-btn[aria-checked="true"] { background: var(--accent-bg-hover); color: var(--fg); font-weight: 600; }
+.af-phone .af-seg-btn:disabled { opacity: .45; cursor: default; }
+.af-phone .af-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 17px keeps iOS from zooming the page when the field takes the caret. */
+.af-phone .af-search {
+    width: 100%; min-width: 0; min-height: 44px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--accent-bg); color: var(--fg); font: inherit; font-size: 17px; user-select: text; -webkit-user-select: text;
+}
+.af-phone .af-search::placeholder { color: var(--fg-dim); }
+.af-phone .af-search:focus { outline: none; border-color: var(--accent); }
+.af-phone .af-scope-note { margin-top: -4px; font-size: 14px; color: var(--fg-dim); overflow-wrap: anywhere; }
+
+.af-phone .af-list { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.af-phone .af-day-h {
+    margin: 0 0 2px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+    font-size: 13px; font-weight: 400; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-dim);
+}
+.af-phone .af-rows { margin: 0; padding: 0; list-style: none; }
+.af-phone .af-rows li + li { border-top: 1px solid var(--line); }
+.af-phone .af-item { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.af-phone .af-item > .af-row { flex: 1 1 auto; }
+.af-phone .af-copy {
+    appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--fg-dim); cursor: pointer;
+}
+.af-phone .af-copy:active { background: var(--accent-bg-hover); color: var(--fg); }
+.af-phone .af-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.af-phone .af-copy.done { color: var(--ok, var(--accent)); }
+.af-phone .af-copy.fail { color: var(--err); }
+.af-phone .af-row {
+    display: flex; flex-direction: column; justify-content: center; gap: 3px; min-height: 56px; padding: 10px 6px; margin: 0 -6px;
+    border-radius: 10px; color: var(--fg); text-decoration: none; min-width: 0;
+}
+.af-phone a.af-row:active { background: var(--accent-bg-hover); }
+.af-phone a.af-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.af-phone .af-row.disabled { opacity: .6; }
+.af-phone .af-row-t {
+    font-size: 17px; line-height: 1.3; font-weight: 600; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.af-phone .af-row-t.untitled { font-weight: 400; color: var(--fg-dim); }
+.af-phone .af-row-m { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; color: var(--fg-dim); }
+.af-phone .af-row-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-phone .af-tag { flex: none; padding: 0 7px; border: 1px solid var(--fg-dim); border-radius: 999px; font-size: 12px; line-height: 18px; }
+.af-phone .af-tag.gone { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, transparent); }
+
+.af-phone .af-note { font-size: 15px; line-height: 1.4; color: var(--fg-dim); padding: 4px 0; }
+.af-phone .af-scanning { color: var(--warn); }
+.af-phone :is(.af-empty, .af-down) { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 18px 0 4px; }
+.af-phone :is(.af-empty-t, .af-down-t) { font-size: 17px; line-height: 1.4; }
+.af-phone :is(.af-empty-d, .af-down-d) { font-size: 15px; line-height: 1.45; color: var(--fg-dim); }
+.af-phone .af-down code { font-size: 15px; color: var(--accent); overflow-wrap: anywhere; }
+.af-phone .af-btn {
+    appearance: none; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 16px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--accent-bg); color: var(--fg);
+    font: inherit; font-size: 17px; text-decoration: none; cursor: pointer;
+}
+.af-phone .af-btn:active { background: var(--accent-bg-hover); }
+.af-phone .af-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+[data-scheme="light"] .artifacts-sheet { box-shadow: 0 -12px 40px rgba(17,24,39,0.18); }
+[data-scheme="light"] .af-phone .af-scanning { color: #a16207; }
+
+@media (prefers-reduced-motion: reduce) {
+    #artifacts-overlay, .artifacts-sheet { transition: none; }
+}
