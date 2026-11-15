@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  FLEET-RESTORE WATCHDOG — self-recovery for a fleet COLLAPSE. Every 60s runs
+  scripts/soa-fleet-restore-watch: if the daemon is up + healthy but the LIVE
+  fleet has collapsed to <=1 tab while tabs.json.lastgood still holds a real
+  fleet (>=2, not user-closed), it runs `soa-restore-fleet` to respawn the
+  missing project tabs and pushes the user. Closes the "all tabs gone, sat
+  unnoticed" gap (2026-08-06, 2026-08-14) the daemon's own boot-resume missed.
+
+  SAFE: never touches the daemon (liveness stays watchdog-4010's job); only
+  respawns already-known project cwds via the idempotent soa-restore-fleet
+  (skips open cwds). Debounced + boot-window-gated + cooldowned so a
+  mid-rehydrate blip never triggers it. Kill switch: SOA_FLEET_RESTORE_ENABLE=0.
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.fleet-restore-4010.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.fleet-restore-4010</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>node</string>
+        <string>/Users/test/.soa-web/scripts/soa-fleet-restore-watch</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/test/.soa-web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/test/.soa-web/logs/fleet-restore.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/test/.soa-web/logs/fleet-restore.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
