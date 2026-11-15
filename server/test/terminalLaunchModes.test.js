@@ -1,10 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { Terminal } = require('@xterm/headless');
 const { launchClaude } = require('../src/sessionManager');
 
 test('both CLI launches clear inherited mouse tracking before starting and after exiting', async () => {
+    const { Terminal } = await import('../../web/public/m/vendor/xterm-headless.mjs');
     for (const agent of ['codex', 'claude']) {
         const writes = [];
         const tab = { exited: false, write: s => writes.push(String(s)) };

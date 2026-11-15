@@ -145,7 +145,7 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 },
 
 // Check mode recovery with the real parser, not the DOM/geometry fake above.
 async function parsedModes(rt) {
-    const { Terminal } = require('@xterm/headless');
+    const { Terminal } = await import('../../web/public/m/vendor/xterm-headless.mjs');
     const term = new Terminal({ allowProposedApi: true });
     try {
         await new Promise(resolve => term.write(rt.term.writes.join(''), resolve));
