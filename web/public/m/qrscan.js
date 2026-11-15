@@ -23,6 +23,7 @@
  */
 
 const QR_SCAN_INTERVAL_MS = 120;   // ~8 decodes/sec — plenty, and easy on battery
+const QR_PREVIEW_TIMEOUT_MS = 10000;
 
 export class QrScanner {
     /**
@@ -52,6 +53,8 @@ export class QrScanner {
             connecting: 'Connecting…',
             torch: 'Light',
             retry: 'Try again',
+            preview: 'Show camera',
+            previewTitle: 'Tap to start the preview',
             paste: 'Paste the link',
             password: 'Use the pairing password',
             deniedTitle: 'Camera access is off',
@@ -78,6 +81,7 @@ export class QrScanner {
         this._returnFocus = null;
         this._onKey = null;
         this._run = 0;
+        this._cancelPreview = null;
     }
 
     static get supported() {
@@ -142,6 +146,7 @@ export class QrScanner {
     /** Ask for the camera and start decoding. Re-run by "Try again". */
     async _open() {
         const run = ++this._run;
+        this._release();
         const hadPanelFocus = !!(this.el && this.el.querySelector('.qr-state').contains(document.activeElement));
         this._setState('starting');
         if (hadPanelFocus) { try { this.el.querySelector('.qr-cancel').focus({ preventScroll: true }); } catch (_) {} }
@@ -153,21 +158,30 @@ export class QrScanner {
         }
         if (run !== this._run || this._stopped) return false;
 
-        // Labels are blank before a grant, so take a permissive stream first,
-        // then re-open on the lens we actually want.
+        // Own the first stream immediately so Cancel can release it even while
+        // device discovery is pending. Never open the same lens twice, or hold
+        // one camera open while asking a phone for another.
+        const constraints = { video: { facingMode: { ideal: 'environment' } }, audio: false };
         let stream;
         try {
-            stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: { ideal: 'environment' } }, audio: false,
-            });
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (run !== this._run || this._stopped || !this.el) {
+                stream.getTracks().forEach(t => t.stop());
+                return false;
+            }
+            this.stream = stream;
             const deviceId = await this._pickCamera();
-            if (deviceId) {
-                const better = await navigator.mediaDevices.getUserMedia({
-                    video: { deviceId: { exact: deviceId } }, audio: false,
-                }).catch(() => null);
-                if (better) {
-                    stream.getTracks().forEach(t => t.stop());
-                    stream = better;
+            if (run !== this._run || this._stopped || !this.el) return false;
+            const currentId = stream.getVideoTracks()[0]?.getSettings?.().deviceId;
+            if (deviceId && deviceId !== currentId) {
+                this._release();
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: { deviceId: { exact: deviceId } }, audio: false,
+                    });
+                } catch (_) {
+                    if (run !== this._run || this._stopped || !this.el) return false;
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
                 }
             }
         } catch (e) {
@@ -186,9 +200,26 @@ export class QrScanner {
             return false;
         }
         this.stream = stream;
+        this.video.muted = true;
+        this.video.playsInline = true;
         this.video.srcObject = this.stream;
-        try { await this.video.play(); } catch (_) {}
-        if (run !== this._run || this._stopped) return false;
+        return this._startPreview(run);
+    }
+
+    // Call play synchronously inside a retry click, before any await, so a
+    // browser that requires a user gesture can use the already granted stream.
+    async _startPreview(run = this._run) {
+        if (run !== this._run || this._stopped || !this.stream || !this.el) return false;
+        this._setState('starting');
+        try {
+            const ready = await this._waitForPreview();
+            if (!ready || run !== this._run || this._stopped) return false;
+        } catch (e) {
+            if (run !== this._run || this._stopped) return false;
+            if (e?.name === 'NotAllowedError') this._fail('paused', this.labels.previewTitle);
+            else this._fail('error', this.labels.errorTitle);
+            return false;
+        }
         this._setState('live');
         this._armTorch();
         clearInterval(this.timer);
@@ -196,11 +227,44 @@ export class QrScanner {
         return true;
     }
 
+    _waitForPreview() {
+        if (this._cancelPreview) this._cancelPreview();
+        const video = this.video;
+        return new Promise((resolve, reject) => {
+            let settled = false, timer;
+            const finish = (error, ready = false) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                for (const event of ['loadeddata', 'playing', 'resize']) video.removeEventListener(event, check);
+                video.removeEventListener('error', failed);
+                if (this._cancelPreview === cancel) this._cancelPreview = null;
+                if (error) reject(error); else resolve(ready);
+            };
+            const check = () => {
+                if (!video.paused && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) finish(null, true);
+            };
+            const failed = () => finish(new Error(this.labels.errorTitle));
+            const cancel = () => finish(null);
+            this._cancelPreview = cancel;
+            for (const event of ['loadeddata', 'playing', 'resize']) video.addEventListener(event, check);
+            video.addEventListener('error', failed);
+            timer = setTimeout(failed, QR_PREVIEW_TIMEOUT_MS);
+            try { Promise.resolve(video.play()).then(check, error => finish(error)); }
+            catch (error) { finish(error); }
+        });
+    }
+
     _release() {
+        if (this._cancelPreview) this._cancelPreview();
         clearInterval(this.timer);
         this.timer = null;
         if (this.stream) this.stream.getTracks().forEach(t => t.stop());
         this.stream = null;
+        if (this.video) {
+            try { this.video.pause(); } catch (_) {}
+            this.video.srcObject = null;
+        }
     }
 
     stop() {
@@ -377,8 +441,8 @@ export class QrScanner {
         else if (state === 'live') hint.textContent = L.hint;
         else if (state === 'hit') hint.textContent = L.connecting;
         hint.classList.remove('qr-hint--err');
-        alt.hidden = !(this.actions.paste && state === 'live');
-        panel.hidden = !(state === 'denied' || state === 'nocam' || state === 'error');
+        alt.hidden = !(this.actions.paste && (state === 'live' || state === 'starting'));
+        panel.hidden = !['denied', 'nocam', 'error', 'paused'].includes(state);
     }
 
     /** Leave the scanner for one of the page's own ways in. */
@@ -399,12 +463,12 @@ export class QrScanner {
      * The overlay stays until Cancel, Escape or a fallback is chosen.
      */
     _fail(kind, message, detail) {
-        this._release();
+        if (kind !== 'paused') this._release();
         if (this.el) {
             const L = this.labels;
             this._setState(kind);
             const panel = this.el.querySelector('.qr-state');
-            const title = kind === 'denied' ? L.deniedTitle : kind === 'nocam' ? L.nocamTitle : L.errorTitle;
+            const title = kind === 'denied' ? L.deniedTitle : kind === 'nocam' ? L.nocamTitle : kind === 'paused' ? L.previewTitle : L.errorTitle;
             const text = kind === 'denied' ? L.deniedText : kind === 'nocam' ? L.nocamText : '';
             panel.querySelector('.qr-state-title').textContent = title;
             const p = panel.querySelector('.qr-state-p');
@@ -422,17 +486,17 @@ export class QrScanner {
                 box.appendChild(b);
                 return b;
             };
-            const retry = () => this._open();
             const list = [];
-            if (kind !== 'nocam' && QrScanner.supported) list.push([L.retry, retry]);
+            if (kind === 'paused') list.push([L.preview, () => this._startPreview()]);
+            else if (kind !== 'nocam' && QrScanner.supported) list.push([L.retry, () => this._open()]);
             if (this.actions.paste) list.push([L.paste, () => this._choose('paste')]);
-            if (this.actions.password && kind !== 'error') list.push([L.password, () => this._choose('password')]);
+            if (this.actions.password) list.push([L.password, () => this._choose('password')]);
             list.forEach(([label, fn], i) => add(label, fn, i === 0));
             const firstBtn = box.querySelector('button');
             if (firstBtn) { try { firstBtn.focus({ preventScroll: true }); } catch (_) {} }
         }
         // After the panel is drawn: a caller that still stop()s here closes it.
-        this.onError(new Error(message));
+        if (kind !== 'paused') this.onError(new Error(message));
     }
 }
 

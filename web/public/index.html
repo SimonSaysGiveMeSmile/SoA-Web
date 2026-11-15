@@ -170,7 +170,7 @@
   <link rel="icon" href="/assets/New-icon-transparent.png?v=3" type="image/png" sizes="any">
   <link rel="shortcut icon" href="/assets/New-icon-transparent.png?v=3" type="image/png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=1">
-  <link rel="stylesheet" href="/assets/styles.css?v=bcast-kind-20261112">
+  <link rel="stylesheet" href="/assets/styles.css?v=camera-preview-20261115">
   <link rel="stylesheet" href="/assets/sidebar.css?v=fixes-20261106">
   <link rel="stylesheet" href="/assets/health.css?v=web-20261102">
   <link rel="stylesheet" href="/assets/minimal.css?v=web-20261102">
@@ -648,6 +648,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 qr_nocam_p: 'Paste the link from your computer, or use its pairing password.',
                 qr_error_t: 'The camera could not start',
                 qr_retry: 'Try again',
+                qr_preview: 'Show camera',
+                qr_preview_t: 'Tap to start the preview',
                 feat_title: 'What it does for you',
                 feat_g1: 'At your desk', feat_g2: 'Away from your desk', feat_g3: 'If something goes wrong',
                 f_tabs_t: 'Nothing lost on reload or restart.', f_tabs_d: 'Your tabs and their history come back after a page reload or a reboot.',
@@ -743,6 +745,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 qr_nocam_p: '粘贴电脑上的链接，或使用它的配对密码。',
                 qr_error_t: '相机无法启动',
                 qr_retry: '重试',
+                qr_preview: '显示相机',
+                qr_preview_t: '轻点以开启预览',
                 feat_title: '它能为你做什么',
                 feat_g1: '在电脑前', feat_g2: '离开电脑时', feat_g3: '出问题时',
                 f_tabs_t: '刷新或重启都不会丢失。', f_tabs_d: '页面刷新或电脑重启后，你的标签页和历史记录都会恢复。',
@@ -838,6 +842,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 qr_nocam_p: 'Collez le lien de votre ordinateur ou utilisez son mot de passe d’association.',
                 qr_error_t: 'La caméra n’a pas pu démarrer',
                 qr_retry: 'Réessayer',
+                qr_preview: 'Afficher la caméra',
+                qr_preview_t: 'Touchez pour lancer l’aperçu',
                 feat_title: 'Ce qu’il fait pour vous',
                 feat_g1: 'À votre bureau', feat_g2: 'Loin de votre bureau', feat_g3: 'Si quelque chose tourne mal',
                 f_tabs_t: 'Rien de perdu au rechargement ou au redémarrage.', f_tabs_d: 'Vos onglets et leur historique reviennent après un rechargement de la page ou un redémarrage.',
@@ -933,6 +939,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 qr_nocam_p: 'Füge den Link deines Computers ein oder verwende sein Kopplungspasswort.',
                 qr_error_t: 'Die Kamera konnte nicht starten',
                 qr_retry: 'Erneut versuchen',
+                qr_preview: 'Kamera anzeigen',
+                qr_preview_t: 'Tippen, um die Vorschau zu starten',
                 feat_title: 'Was es für dich tut',
                 feat_g1: 'Am Schreibtisch', feat_g2: 'Unterwegs', feat_g3: 'Wenn etwas schiefgeht',
                 f_tabs_t: 'Nichts geht beim Neuladen oder Neustart verloren.', f_tabs_d: 'Deine Tabs und ihr Verlauf kommen nach dem Neuladen der Seite oder einem Neustart zurück.',
@@ -1028,6 +1036,8 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                 qr_nocam_p: 'Pega el enlace de tu ordenador o usa su contraseña de emparejamiento.',
                 qr_error_t: 'La cámara no pudo iniciarse',
                 qr_retry: 'Reintentar',
+                qr_preview: 'Mostrar cámara',
+                qr_preview_t: 'Toca para iniciar la vista previa',
                 feat_title: 'Lo que hace por ti',
                 feat_g1: 'En tu mesa', feat_g2: 'Lejos de tu mesa', feat_g3: 'Si algo sale mal',
                 f_tabs_t: 'Nada se pierde al recargar o reiniciar.', f_tabs_d: 'Tus pestañas y su historial vuelven tras recargar la página o reiniciar el ordenador.',
@@ -1072,7 +1082,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
         var strings = DICT[lang] || DICT.en;
         var enter = document.getElementById('welcome-enter');
         var TOUCH = html.dataset.welcomeTouch === '1';
-        var QR_MOD = '/m/qrscan.js?v=welcome-touch-20261105';
+        var QR_MOD = '/m/qrscan.js?v=camera-preview-20261115';
         if (TOUCH) {
             var touchTitle = document.getElementById('wiz-card-title');
             if (touchTitle) touchTitle.setAttribute('data-w', 'touch_title');
@@ -1588,6 +1598,7 @@ SOA_WEB_PASSWORD=hunter2 npm install &amp;&amp; npm start</pre>
                         cancel: strings.wiz_pair_cancel, title: strings.qr_title, hint: strings.wiz_pair_hint,
                         starting: strings.qr_starting, connecting: strings.qr_connecting, torch: strings.wiz_pair_torch,
                         retry: strings.qr_retry, paste: strings.touch_paste, password: strings.touch_pw,
+                        preview: strings.qr_preview, previewTitle: strings.qr_preview_t,
                         deniedTitle: strings.qr_denied_t, deniedText: strings.qr_denied_p,
                         nocamTitle: strings.qr_nocam_t, nocamText: strings.qr_nocam_p, errorTitle: strings.qr_error_t,
                         errNoCam: strings.wiz_pair_err_cam, errDenied: strings.wiz_pair_err_denied, errOpen: strings.wiz_pair_err_open,
