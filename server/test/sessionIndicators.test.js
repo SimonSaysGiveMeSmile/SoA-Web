@@ -39,6 +39,7 @@ function harness(mode = 'tabs') {
     vm.runInContext(metadataSource + '\n' + shellSource + '\nthis.Shell = Shell; this.modelBadge = modelBadge; this.sessionMetadata = sessionMetadata;', context);
     const shell = Object.create(context.Shell.prototype);
     const runtime = id => ({ id, title: 'Tab ' + id, _opened: true, container: new Element('div'),
+        setAgent(agent) { this.agent = agent; },
         detachRenderer() {}, fitNow() {}, attachRenderer() {}, flushPendingReplay() {}, scrollToBottom() {}, focus() {} });
     Object.assign(shell, {
         tabs: new Map([[1, runtime(1)], [2, runtime(2)]]), activeId: 1, viewMode: mode,
@@ -69,6 +70,8 @@ test('provider guard rejects legacy Claude metadata on Codex while displaying ac
     assert.equal(shell._makeEffortBadge(2).attrs.text, 'max');
     assert.equal(shell._makeModelBadge(1).attrs.text, 'Opus 5.5');
     assert.equal(shell._makeEffortBadge(1).attrs.text, 'ultracode');
+    assert.equal(shell.tabs.get(1).agent, 'claude');
+    assert.equal(shell.tabs.get(2).agent, 'codex', 'manager frames also recover terminal input modes');
     shell._onManager({ sessions: [{ id: 2, agent: 'codex', model: null, effort: null }] });
     assert.equal(shell._makeModelBadge(2).attrs.text, 'Codex');
     assert.equal(shell._makeEffortBadge(2), null, 'missing current telemetry clears stale effort');
@@ -131,5 +134,6 @@ test('HTTP status refresh updates the active tab model without overriding live a
     await shell._pullServerStatus();
     assert.equal(shell._makeModelBadge(1).attrs.title, 'Codex · gpt-6.1-sol');
     assert.equal(shell._agentEffort.get(1), 'high');
+    assert.equal(shell.tabs.get(1).agent, 'codex', 'provider metadata also recovers terminal input modes');
     assert.equal(statuses.length, 0, 'the active terminal still owns its live activity state');
 });

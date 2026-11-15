@@ -481,6 +481,7 @@ class TabRuntime {
         this._opened = false;
         this._onData = null;
         this._onResize = null;
+        this._agent = null;
         // Scrollback handed to us in HELLO before this tab's container is
         // visible. Writing it into a hidden xterm means writing at the
         // default 80×24, so any absolute cursor positioning in the stream
@@ -916,6 +917,20 @@ class TabRuntime {
         }
     }
 
+    // A saved screen can retain the previous CLI's all-motion mouse mode.
+    // Codex then receives pointer reports as prompt text ("<35;9;13M").
+    // Clear only mouse modes when we identify Codex or restore its snapshot;
+    // keep the screen, paste mode and keyboard state, and let a subsequent
+    // LIVE application request enable mouse controls again.
+    static MOUSE_RESET = '\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l';
+
+    setAgent(agent) {
+        const next = agent === 'codex' || agent === 'claude' ? agent : null;
+        if (next === this._agent) return;
+        this._agent = next;
+        if (next === 'codex') this.write(TabRuntime.MOUSE_RESET);
+    }
+
     resetReplay(data = '') {
         if (this._replayTimer) clearTimeout(this._replayTimer);
         this._replayTimer = null;
@@ -928,7 +943,7 @@ class TabRuntime {
         this._replayTruncated = false;
         this._resetPending = true;
         this._bandCache.clear();
-        this.queueReplay(data);
+        this.queueReplay(data && this._agent === 'codex' ? data + TabRuntime.MOUSE_RESET : data);
     }
 
     flushPendingReplay() {
@@ -3790,6 +3805,7 @@ class Shell {
             const rt = this.tabs.get(id);
             if (!rt) continue;
             const metadata = sessionMetadata(sess, this._agentKind.get(id));
+            rt.setAgent(metadata.agent);
             for (const [map, value] of [[this._agentKind, metadata.agent], [this._agentModel, metadata.model], [this._agentEffort, metadata.effort]]) {
                 if ((map.get(id) || null) !== value) {
                     if (value) map.set(id, value); else map.delete(id);
@@ -8178,6 +8194,7 @@ class Shell {
             const g = s.group || 'ungrouped';
             groups.set(s.id, g);
             const metadata = sessionMetadata(s, this._agentKind.get(s.id));
+            this.tabs.get(s.id)?.setAgent(metadata.agent);
             if (metadata.agent) agents.set(s.id, metadata.agent);
             if (metadata.model) models.set(s.id, metadata.model);
             if (metadata.effort) this._agentEffort.set(s.id, metadata.effort);

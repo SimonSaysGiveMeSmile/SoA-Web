@@ -143,6 +143,65 @@ function harness({ width = 1000, height = 500, cell = { width: 10, height: 20 },
     };
 }
 
+// Check mode recovery with the real parser, not the DOM/geometry fake above.
+async function parsedModes(rt) {
+    const { Terminal } = require('@xterm/headless');
+    const term = new Terminal({ allowProposedApi: true });
+    try {
+        await new Promise(resolve => term.write(rt.term.writes.join(''), resolve));
+        return { mouse: term.modes.mouseTrackingMode, paste: term.modes.bracketedPasteMode, buffer: term.buffer.active.type };
+    } finally { term.dispose(); }
+}
+const MOUSE_REPLAY = '\x1b[?1049h\x1b[?2004h\x1b[?1003h\x1b[?1006hSaved screen';
+
+test('terminal client: Codex reconnect does not revive stale mouse tracking', async () => {
+    const h = harness();
+    h.rt.setAgent('codex');
+    h.rt.fitNow();
+    h.rt.resetReplay(MOUSE_REPLAY);
+    h.drain();
+    assert.deepEqual(await parsedModes(h.rt), { mouse: 'none', paste: true, buffer: 'alternate' });
+    assert.ok(h.rt.term.writes.join('').includes('Saved screen'), 'history stays intact');
+});
+
+test('terminal client: late Codex metadata clears replayed mouse modes in a hidden tab', async () => {
+    const h = harness({ width: 0, height: 0 });
+    h.rt.adoptGrid(100, 30);
+    h.rt.resetReplay(MOUSE_REPLAY);
+    h.rt.setAgent('codex');
+    h.drain();
+    assert.equal((await parsedModes(h.rt)).mouse, 'none');
+    assert.equal(h.rt.term.openCount, 0, 'recovery does not need a hidden renderer');
+});
+
+test('terminal client: Claude and generic terminal replay preserve mouse controls', async () => {
+    for (const agent of ['claude', null]) {
+        const h = harness();
+        h.rt.setAgent(agent);
+        h.rt.fitNow();
+        h.rt.resetReplay(MOUSE_REPLAY);
+        h.drain();
+        assert.equal((await parsedModes(h.rt)).mouse, 'any');
+    }
+});
+
+test('terminal client: a fresh live mouse request works after Codex replay recovery', async () => {
+    const h = harness();
+    h.rt.setAgent('codex');
+    h.rt.fitNow();
+    h.rt.resetReplay(MOUSE_REPLAY);
+    h.rt.write('\x1b[?1002h\x1b[?1006h');
+    h.drain();
+    assert.equal((await parsedModes(h.rt)).mouse, 'drag');
+    h.rt.setAgent('codex'); // A routine status poll must not undo a live request.
+    h.drain();
+    assert.equal((await parsedModes(h.rt)).mouse, 'drag');
+    h.rt.setAgent('claude');
+    h.rt.write('\x1b[?1003h');
+    h.drain();
+    assert.equal((await parsedModes(h.rt)).mouse, 'any');
+});
+
 test('terminal client: reconnect drops obsolete app queues and orders RIS after accepted xterm writes', () => {
     const h = harness();
     const { rt } = h;
