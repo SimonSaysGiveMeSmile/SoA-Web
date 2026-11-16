@@ -1,6 +1,18 @@
 {
   "notes": [
     {
+      "id": "2026-11-15-usage-live",
+      "date": "2026-11-15",
+      "kind": "feature",
+      "title": "Token usage counts live",
+      "body": "Token and cost figures now count up smoothly between updates instead of jumping every few seconds. Every dollar amount shows cents.",
+      "detail": "Only the display runs at screen rate. The weekly and session rings still refresh as often as Anthropic allows, about once a minute.",
+      "where": "Sidebar → TOKEN USAGE",
+      "surfaces": [
+        "desktop"
+      ]
+    },
+    {
       "id": "2026-11-12-broadcast-agent",
       "date": "2026-11-12",
       "kind": "feature",

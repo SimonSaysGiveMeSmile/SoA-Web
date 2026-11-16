@@ -463,20 +463,57 @@ const _fmtTok = n => {
     if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k';
     return String(Math.round(n));
 };
-const _fmtUsd = n => {
-    n = n || 0;
-    if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
-    if (n >= 100) return '$' + n.toFixed(0);
-    return '$' + n.toFixed(2);
-};
-// Money for the CARD: three figures share ~100px, so cents go once the number
-// is in dollars and thousands collapse to k. Tooltips keep _fmtUsd's precision.
+// Dollars always carry cents (user directive 2026-11-15): $3,512.40, not $3.5k.
+const _usdFmt = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const _fmtUsd = n => '$' + _usdFmt.format(Number.isFinite(n) ? n : 0);
+// Money for the CARD: same cents as everywhere else; only five-figure sums
+// collapse to k so a cell never outgrows its ~100px track.
 const _fmtUsdTight = n => {
     if (!Number.isFinite(n)) return '—';
-    if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'k';
-    if (n >= 10) return '$' + Math.round(n).toLocaleString();
-    return '$' + n.toFixed(2);
+    if (n >= 10000) return '$' + (n / 1000).toFixed(1) + 'k';
+    return _fmtUsd(n);
 };
+
+// Live figures count up at display rate instead of jumping once per poll.
+// _roll(el, [numbers], render) tweens each number from what the element shows
+// now to the new value over ROLL_MS (about one poll), on one shared
+// requestAnimationFrame loop. The first value, a hidden page and
+// prefers-reduced-motion all set the text directly. render(values) builds the
+// string, so rounding and units stay with the caller.
+const ROLL_MS = 2400;
+const _rolling = new Set();
+let _rollRaf = 0;
+const _rollReduced = () => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; } };
+function _rollFrame(now) {
+    _rollRaf = 0;
+    for (const el of _rolling) {
+        const r = el._roll;
+        const k = Math.min(1, (now - r.start) / ROLL_MS);
+        // Linear: with a poll every ~2.5 s the count runs continuously.
+        r.cur = r.to.map((t, i) => r.from[i] + (t - r.from[i]) * k);
+        el.textContent = r.render(r.cur);
+        if (k >= 1) _rolling.delete(el);
+    }
+    if (_rolling.size) _rollRaf = requestAnimationFrame(_rollFrame);
+}
+function _roll(el, values, render) {
+    if (!el) return;
+    const to = values.map(v => (Number.isFinite(v) ? v : 0));
+    const r = el._roll;
+    const jump = !r || r.to.length !== to.length || document.hidden || _rollReduced();
+    if (jump) {
+        el._roll = { from: to, to, cur: to, start: 0, render };
+        _rolling.delete(el);
+        el.textContent = render(to);
+        return;
+    }
+    if (to.every((t, i) => t === r.to[i])) { r.render = render; if (!_rolling.has(el)) el.textContent = render(r.cur); return; }
+    el._roll = { from: r.cur, to, cur: r.cur, start: performance.now(), render };
+    _rolling.add(el);
+    if (!_rollRaf) _rollRaf = requestAnimationFrame(_rollFrame);
+}
+// Any other write to a rolled element ('—', a translated message) ends its tween.
+function _unroll(el) { if (el) { _rolling.delete(el); el._roll = null; } }
 // Per-session "leaning hard on the model" thresholds (est. USD) — mirror the
 // soa-usage-alert push watchdog's defaults so the dashboard highlight and the
 // phone alert agree. block = the active 5h usage-limit window, today = midnight.
@@ -1225,7 +1262,8 @@ class ClaudeUsageWidget extends Widget {
         card.cost.single.textContent = money.single || '—';
         for (const [key, cell] of Object.entries(card.cost.cells)) {
             const n = money.cells[key];
-            cell.v.textContent = n === null || n === undefined ? '—' : `≈${_fmtUsdTight(n)}${money.partial?.[key] ? '*' : ''}`;
+            if (n === null || n === undefined) { _unroll(cell.v); cell.v.textContent = '—'; }
+            else { const star = money.partial?.[key] ? '*' : ''; _roll(cell.v, [n], ([x]) => `≈${_fmtUsdTight(x)}${star}`); }
             cell.el.title = money.details?.[key] || money.title;
             cell.el.classList.toggle('unknown', n === null || n === undefined);
             // Same threshold the push watchdog and the TOP SESSIONS highlight
@@ -1268,27 +1306,29 @@ class ClaudeUsageWidget extends Widget {
         if (noBlock) {
             this._legC.v.textContent = '—';
             const t = d.today || {};
-            this._sub.textContent = d.hasData ? `Local activity today: ${_fmtTok(t.tokens?.total)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(t.cost)}` : tr('widget.claude.no_data');
-            this._burn.v.textContent = `${_fmtTok(this._burnHistory('claude')?.at(-1) ?? 0)} ${tr('widget.claude.tokmin')}`;
+            if (d.hasData) _roll(this._sub, [t.tokens?.total, t.cost], ([tok, c]) => `Local activity today: ${_fmtTok(tok)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(c)}`);
+            else { _unroll(this._sub); this._sub.textContent = tr('widget.claude.no_data'); }
+            _roll(this._burn.v, [this._burnHistory('claude')?.at(-1) ?? 0], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
         } else if (b.active) {
             this._legC.v.textContent = `Ends in ${_fmtDur(b.remainingMs)}`;
-            this._sub.textContent = `Local 5h activity: ${_fmtTok(b.tokens?.total)} ${tr('widget.claude.tok')} · ${b.requests || 0} ${tr('widget.claude.req')} · ≈${_fmtUsd(b.cost)}`;
+            _roll(this._sub, [b.tokens?.total, b.requests || 0, b.cost], ([tok, rq, c]) => `Local 5h activity: ${_fmtTok(tok)} ${tr('widget.claude.tok')} · ${Math.round(rq)} ${tr('widget.claude.req')} · ≈${_fmtUsd(c)}`);
             const recent = Date.now() - (b.lastTs || 0) < 10 * 60000;
-            this._burn.v.textContent = `${_fmtTok(recent ? b.burnRatePerMin : 0)} ${tr('widget.claude.tokmin')}`;
+            _roll(this._burn.v, [recent ? b.burnRatePerMin : 0], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
         } else {
             this._legC.v.textContent = '—';
-            this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
-            this._burn.v.textContent = '0 ' + tr('widget.claude.tokmin');
+            _unroll(this._sub); this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
+            _roll(this._burn.v, [0], () => '0 ' + tr('widget.claude.tokmin'));
         }
         const wk = d.week || {};
         const wkCost = wk.cost || 0;
         const wkTok = wk.tokens?.total;
-        this._weekPct.textContent = Number.isFinite(wkTok) ? wkTok.toLocaleString('en-US') : 'Not reported';
+        if (Number.isFinite(wkTok)) _roll(this._weekPct, [wkTok], ([x]) => Math.round(x).toLocaleString('en-US'));
+        else { _unroll(this._weekPct); this._weekPct.textContent = 'Not reported'; }
         this._weekPct.classList.remove('warn');
-        this._weekSub.textContent = `7-day API estimate: ≈${_fmtUsd(wkCost)}`;
+        _roll(this._weekSub, [wkCost], ([c]) => `7-day API estimate: ≈${_fmtUsd(c)}`);
         this._weekSub.style.display = '';
         const today = d.today || { tokens: { total: 0 }, cost: 0 };
-        this._today.v.textContent = `${_fmtTok(today.tokens?.total)} · ≈${_fmtUsd(today.cost)}`;
+        _roll(this._today.v, [today.tokens?.total, today.cost], ([tok, c]) => `${_fmtTok(tok)} · ≈${_fmtUsd(c)}`);
         const top = (d.models || [])[0];
         if (top && top.tokens > 0) {
             const totAll = (d.models || []).reduce((s, m) => s + m.tokens, 0) || 1;
@@ -1359,8 +1399,8 @@ class ClaudeUsageWidget extends Widget {
             this._legB.row.style.display = 'none';
             this._legC.row.style.display = 'none';
             this._legC.v.textContent = '—';
-            this._sub.textContent = '—'; this._weekSub.style.display = 'none';
-            this._burn.v.textContent = '—'; this._today.v.textContent = '—'; this._model.v.textContent = '—';
+            _unroll(this._sub); this._sub.textContent = '—'; this._weekSub.style.display = 'none';
+            _unroll(this._burn.v); _unroll(this._today.v); this._burn.v.textContent = '—'; this._today.v.textContent = '—'; this._model.v.textContent = '—';
             this._renderCodexSessions({ sessions: [] });
             this._series = new Array(30).fill(0); this._paintSpark();
             return;
@@ -1371,18 +1411,19 @@ class ClaudeUsageWidget extends Widget {
         this._legB.row.style.display = 'none';
         this._legC.row.style.display = 'none';
         const cq = this._quota.codex;
+        _unroll(this._sub);
         this._sub.textContent = this._cardLayout('codex') === 'single'
             ? 'Codex reports a weekly quota only. It refreshes every 15 seconds; token activity below comes from local logs.'
             : (this._quotaFresh && cq?.available && !cq.windows?.session && cq.windows?.weekly)
             ? 'Codex has supplied only weekly usage. Its five-hour quota is not currently available. This does not mean zero usage or unlimited capacity.'
             : 'Account quotas refresh every 15 seconds through Codex. Token activity below comes from local logs.';
         this._weekSub.style.display = 'none';
-        this._burn.v.textContent = `${_fmtTok(d.burnRatePerMin)} ${tr('widget.claude.tokmin')}`;
+        _roll(this._burn.v, [d.burnRatePerMin], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
         // Tokens in, tokens out — both exact, both from the cumulative
         // counters. Not a request count: see requestsSeen in codexUsage.js for
         // why there isn't an honest one to put here.
         const today = (d.today && d.today.tokens) || { total: 0, output: 0 };
-        this._today.v.textContent = `${_fmtTok(today.total)} · ${_fmtTok(today.output)} out`;
+        _roll(this._today.v, [today.total, today.output], ([tot, out]) => `${_fmtTok(tot)} · ${_fmtTok(out)} out`);
         const top = (d.models || [])[0];
         this._model.v.textContent = top ? top.name : '—';
         this._renderCodexSessions(d);
