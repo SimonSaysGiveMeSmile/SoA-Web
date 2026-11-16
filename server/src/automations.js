@@ -73,11 +73,24 @@ function parseSupervisors(listOutput, labels = SUPERVISOR_LABELS) {
         .map(l => l.trim().split(/\s+/).pop()).filter(Boolean));
     return labels.map(label => ({ label, installed: present.has(label) }));
 }
+// Linux: the same labels are systemd user units (deploy/systemd/install.sh).
+// `systemctl --user list-unit-files --no-legend` prints "<label>.timer enabled …",
+// so the label is the FIRST column with the unit suffix dropped.
+function parseSystemdUnits(listOutput, labels = SUPERVISOR_LABELS) {
+    const present = new Set(String(listOutput || '').split('\n')
+        .map(l => l.trim().split(/\s+/)[0] || '')
+        .map(u => u.replace(/\.(service|timer)$/, '')).filter(Boolean));
+    return labels.map(label => ({ label, installed: present.has(label) }));
+}
 let _supCache = { at: 0, rows: [] };
 function supervisors(cb) {
     if (Date.now() - _supCache.at < 30000) return cb(_supCache.rows);
-    execFile('launchctl', ['list'], { timeout: 3000 }, (err, out) => {
-        const rows = err ? [] : parseSupervisors(out);
+    const linux = process.platform === 'linux';
+    const [cmd, args] = linux
+        ? ['systemctl', ['--user', 'list-unit-files', '--no-legend', '--no-pager']]
+        : ['launchctl', ['list']];
+    execFile(cmd, args, { timeout: 3000 }, (err, out) => {
+        const rows = err ? [] : (linux ? parseSystemdUnits(out) : parseSupervisors(out));
         _supCache = { at: Date.now(), rows };
         cb(rows);
     });
@@ -111,4 +124,4 @@ function mount(app, requireAuthed, deps = {}) {
     });
 }
 
-module.exports = { enabled, set, toggles, announce, supervisors, parseSupervisors, mount, TOGGLES, SUPERVISOR_LABELS, FILE };
+module.exports = { enabled, set, toggles, announce, supervisors, parseSupervisors, parseSystemdUnits, mount, TOGGLES, SUPERVISOR_LABELS, FILE };

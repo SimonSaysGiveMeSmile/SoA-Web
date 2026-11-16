@@ -71,7 +71,10 @@ function activeProvider(config) {
 // drawing character comes back out as `‚îÄ`, an em dash as `‚Äî`. That is the
 // "terminal copying" corruption — not the clipboard, the locale. A user's own
 // LANG (or one set in Settings' custom env) still wins; this is only the floor.
-const LOCALE_DEFAULTS = { LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
+// Linux: a minimal Debian/Ubuntu server has no en_US locale generated (every
+// shell would warn "setlocale: cannot change locale"), but C.UTF-8 is built in.
+const UTF8_LOCALE = process.platform === 'linux' ? 'C.UTF-8' : 'en_US.UTF-8';
+const LOCALE_DEFAULTS = { LANG: UTF8_LOCALE, LC_ALL: UTF8_LOCALE };
 
 function getEnvForShell() {
     const config = load();

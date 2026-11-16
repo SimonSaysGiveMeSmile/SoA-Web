@@ -496,11 +496,16 @@ app.post('/api/daemon/restart', requireAuthed, (req, res) => {
     setTimeout(() => {
         try {
             const { spawn } = require('child_process');
-            const p = spawn('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`],
-                            { detached: true, stdio: 'ignore' });
+            // Linux installs run the daemon as a systemd user unit of the same
+            // name (deploy/systemd/install.sh).
+            const p = process.platform === 'linux'
+                ? spawn('systemctl', ['--user', 'restart', `${label}.service`],
+                        { detached: true, stdio: 'ignore' })
+                : spawn('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`],
+                        { detached: true, stdio: 'ignore' });
             p.unref();
         } catch (e) {
-            console.log('daemon restart: kickstart spawn failed:', e && e.message);
+            console.log('daemon restart: supervisor spawn failed:', e && e.message);
         }
         // Fallback in case kickstart didn't SIGTERM us (e.g. not under launchd):
         // flush + exit and let the supervisor restart us. Harmless if kickstart
@@ -1464,6 +1469,7 @@ function shutdown(code = 0) {
     try { pair.detach(); } catch (_) {}
     try { wss.close(); } catch (_) {}
     try { sessions.shutdown(); } catch (_) {}
+    try { agentBrowser.teardownAll(); } catch (_) {}
     instanceLock.release();
     server.close(() => process.exit(code));
     setTimeout(() => process.exit(code), 5000).unref();

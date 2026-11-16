@@ -62,6 +62,14 @@ class PairingManager {
 
     async start() {
         if (this.state === 'starting' || this.state === 'online') return this.snapshot();
+        // A private install (SOA_CHANNELS_PUBLIC=0, the Linux server default)
+        // never opens a public door, whoever asks: it is reached over a private
+        // network instead. Same switch the soa-channels healer honours.
+        if (process.env.SOA_CHANNELS_PUBLIC === '0') {
+            this.state = 'error';
+            this.error = 'Public tunnel is off on this install (SOA_CHANNELS_PUBLIC=0). Connect over Tailscale or an SSH forward instead.';
+            return this.snapshot();
+        }
         this._stopped = false;
         this._clearRestart();
         this.state = 'starting';
@@ -102,6 +110,13 @@ class PairingManager {
         try {
             const t = await this._adopt(this.port);
             if (!t) { this.state = 'idle'; return this.snapshot(); }
+            // Private install: a tunnel from before the switch survived the
+            // restart (it is detached on purpose). Close it, never adopt it.
+            if (process.env.SOA_CHANNELS_PUBLIC === '0') {
+                try { t.close(); } catch (_) {}
+                this.state = 'idle';
+                return this.snapshot();
+            }
             this.tunnel = t;
             this.publicUrl = t.url;
             this.state = 'online';
