@@ -1,6 +1,18 @@
 {
   "notes": [
     {
+      "id": "2026-11-16-burn-steady",
+      "date": "2026-11-16",
+      "kind": "fix",
+      "title": "Steadier burn rate",
+      "body": "Burn now shows a 5-minute average, so it no longer jumps each time a reply finishes. The card and the details agree.",
+      "detail": "The small bar chart still shows each minute, so short spikes stay visible.",
+      "where": "Sidebar → TOKEN USAGE",
+      "surfaces": [
+        "desktop"
+      ]
+    },
+    {
       "id": "2026-11-15-usage-live",
       "date": "2026-11-15",
       "kind": "feature",
