@@ -37,8 +37,10 @@ LABEL="${SOA_WEB_LABEL:-com.soa-web.server}"
 PORT="${SOA_WEB_PORT:-7332}"
 STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web}"
 MANAGE_TUNNEL="${SOA_WEB_MANAGE_TUNNEL:-1}"
-UID_="$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+# launchd on macOS, systemd user units on Linux (same labels).
+# shellcheck source=lib/svc.sh
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/lib/svc.sh"
 LOCK="$STATE_DIR/daemon.lock"
 TUNJSON="$STATE_DIR/tunnel.json"
 LOG="$STATE_DIR/logs/watchdog.log"
@@ -66,6 +68,8 @@ tunnel_pid() { sed -n 's/.*"pid":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$TUNJSON" 
 
 # Detect + recover a zombie tunnel. Only runs when the daemon itself is healthy.
 check_tunnel() {
+    # Private install: there is no public tunnel to heal, and none may be opened.
+    [ "${SOA_CHANNELS_PUBLIC:-1}" = 0 ] && return 0
     local url; url="$(tunnel_url)"
     [ -z "$url" ] && return 0                       # no tunnel configured
 
@@ -160,12 +164,12 @@ fi
 PID="$(live_owner)"
 
 if [ -z "$PID" ]; then
-    if [ -e "$PLIST" ] && ! launchctl print "gui/${UID_}/${LABEL}" >/dev/null 2>&1; then
+    if [ "$(uname -s)" = Darwin ] && [ -e "$PLIST" ] && ! svc_loaded "$LABEL"; then
         log "daemon down + job not loaded — bootstrap"
-        launchctl bootstrap "gui/${UID_}" "$PLIST" >> "$LOG" 2>&1
+        svc_load "$LABEL" >> "$LOG" 2>&1
     else
         log "daemon down (no live lock owner) — kickstart"
-        launchctl kickstart "gui/${UID_}/${LABEL}" >> "$LOG" 2>&1
+        svc_kick "$LABEL" >> "$LOG" 2>&1
     fi
     sleep 3; log "post-recovery tunnel: $(tunnel_url)"
     exit 0
@@ -183,9 +187,9 @@ for _ in 1 2 3 4 5 6 7 8; do sleep 1; kill -0 "$PID" 2>/dev/null || break; done
 
 if kill -0 "$PID" 2>/dev/null; then
     log "pid $PID ignored SIGTERM — kickstart -k (tunnel may churn)"
-    launchctl kickstart -k "gui/${UID_}/${LABEL}" >> "$LOG" 2>&1
+    svc_restart "$LABEL" >> "$LOG" 2>&1
 else
-    launchctl kickstart "gui/${UID_}/${LABEL}" >> "$LOG" 2>&1
+    svc_kick "$LABEL" >> "$LOG" 2>&1
     log "restarted via SIGTERM+kickstart"
 fi
 sleep 3; log "post-recovery tunnel: $(tunnel_url)"

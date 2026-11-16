@@ -46,6 +46,9 @@
 #   soa-channels --port 7332     # daemon port (default 7332 / $SOA_WEB_PORT)
 
 set -uo pipefail
+# launchd on macOS, systemd user units on Linux (same labels).
+# shellcheck source=lib/svc.sh
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/lib/svc.sh"
 
 PORT="${SOA_WEB_PORT:-7332}"
 ACTION="pass"
@@ -400,7 +403,7 @@ for t in d.get('tunnels',[]):
 ch_named() {
     local url i
     { [ -f "$NAMED_CFG" ] && grep -q "$NAMED_HOST" "$NAMED_CFG" 2>/dev/null; } || return 1
-    launchctl kickstart "gui/$(id -u)/com.soa-web.named-tunnel" 2>/dev/null || true
+    svc_kick com.soa-web.named-tunnel >/dev/null 2>&1 || true
     url="https://${NAMED_HOST}"
     for i in 1 2 3 4 5 6; do
         verify "$url" && { echo "$url"; return 0; }
@@ -420,11 +423,17 @@ ch_lan() {
     return 1
 }
 
+# SOA_CHANNELS_PUBLIC=0: never open a public tunnel (cloudflare/ngrok/named).
+# For a server reached only over a private network (Tailscale, SSH forward):
+# the healer still guards the fleet and tries the LAN door, nothing else.
+PUBLIC_CHANNELS="${SOA_CHANNELS_PUBLIC:-1}"
+
 failover() {
-    local ch url
+    local ch url chans="cloudflare ngrok lan"
+    [ "$PUBLIC_CHANNELS" = 0 ] && chans="lan"
     # 0. Prefer the STABLE named tunnel (never rotates). No-op until it's set up.
-    if url="$(ch_named)"; then adopt cloudflare "$url"; return 0; fi
-    for ch in cloudflare ngrok lan; do
+    if [ "$PUBLIC_CHANNELS" != 0 ] && url="$(ch_named)"; then adopt cloudflare "$url"; return 0; fi
+    for ch in $chans; do
         # Skip a recently-failed cloudflare so a multi-hour CF outage doesn't burn
         # ~70s of every cycle re-minting dead tunnels.
         if [ "$ch" = "cloudflare" ] && [ -f "$CF_BACKOFF" ]; then
@@ -444,7 +453,8 @@ failover() {
     # running on :${PORT} and just got snapshotted, so nothing is lost; access
     # resumes automatically the moment any channel recovers.
     log "NO channel available — fleet alive + snapshotted on :${PORT}, no public door (will retry next pass)"
-    if command -v soa-msg >/dev/null 2>&1; then
+    # Private mode has no public door by design: nothing to warn about.
+    if [ "$PUBLIC_CHANNELS" != 0 ] && command -v soa-msg >/dev/null 2>&1; then
         soa-msg "⚠️ No public door available right now (all tunnels down). Your fleet is ALIVE and saved on :${PORT} — nothing lost. I'll auto-reconnect and send the link the moment a channel recovers. (On the Mac: open http://127.0.0.1:${PORT}.)" >/dev/null 2>&1
     fi
     return 1
@@ -478,6 +488,10 @@ restore_fleet_if_lost
 if [ "$ACTION" = "force" ]; then
     case "$FORCE_CH" in
         cloudflare|ngrok|lan)
+            if [ "$PUBLIC_CHANNELS" = 0 ] && [ "$FORCE_CH" != lan ]; then
+                log "refused: force ${FORCE_CH} while SOA_CHANNELS_PUBLIC=0"
+                echo "soa-channels: public channels are off on this install (SOA_CHANNELS_PUBLIC=0)" >&2; exit 3
+            fi
             if url="$(ch_${FORCE_CH})"; then adopt "$FORCE_CH" "$url"; exit 0; fi
             log "forced channel ${FORCE_CH} failed to verify"; exit 1;;
         *) echo "usage: soa-channels force cloudflare|ngrok|lan" >&2; exit 2;;
@@ -488,6 +502,17 @@ fi
 cur_ch="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget channel )"
 cur_url="$( [ -f "$CHJSON" ] && cat "$CHJSON" | jget url )"
 
+# Private mode with a public door still open (it predates the switch, or the
+# tunnel survived a restart): close it and fall back to the LAN door only.
+if [ "$PUBLIC_CHANNELS" = 0 ] && [ -n "$cur_ch" ] && [ "$cur_ch" != lan ]; then
+    log "private mode: closing public door ${cur_ch} ${cur_url}"
+    curl -fsS --max-time 6 -X POST "http://127.0.0.1:${PORT}/api/pair/stop" >/dev/null 2>&1
+    pkill -f "cloudflared tunnel --url http://localhost:${PORT}" 2>/dev/null
+    pkill -f "ngrok http" 2>/dev/null
+    rm -f "$CHJSON" "$TUNJSON" 2>/dev/null
+    failover; exit $?
+fi
+
 if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
     rm -f "$FAILS" 2>/dev/null            # reachable this pass — clear the miss streak
     # CONVERGE ON STABILITY: if we're on a ROTATING door (quick cloudflare / ngrok)
@@ -496,7 +521,7 @@ if [ -n "$cur_url" ] && verify "$cur_url" "$(skip_hdr_for "$cur_ch")"; then
     # we're already on it (and a no-op entirely until the named tunnel is set up).
     case "$cur_url" in
         *"$NAMED_HOST"*) : ;;                       # already on the stable door
-        *)  if nurl="$(ch_named)"; then
+        *)  if [ "$PUBLIC_CHANNELS" != 0 ] && nurl="$(ch_named)"; then
                 log "UPGRADE ${cur_ch} ${cur_url} → stable named tunnel ${nurl}"
                 adopt cloudflare "$nurl"; exit 0
             fi ;;

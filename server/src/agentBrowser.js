@@ -324,6 +324,19 @@ function unsubscribeAll(sink) {
     }
 }
 
+// Daemon shutdown: the browsers are the daemon's children, and a supervisor
+// that signals only the main process (systemd KillMode=process, kept so the
+// detached tunnel survives a restart) would leave one running per tab.
+function teardownAll() {
+    for (const inst of _instances.values()) {
+        // Kill first, synchronously: the process may exit before the async
+        // teardown gets past its screencast/CDP cleanup.
+        try { if (inst.proc) inst.proc.kill('SIGTERM'); } catch (_) {}
+        inst.teardown().catch(() => {});
+    }
+    _instances.clear();
+}
+
 function teardown(tabId) {
     const k = _key(tabId);
     const inst = _instances.get(k);
@@ -359,4 +372,4 @@ function mount(app, requireAuthed, sessions) {
     });
 }
 
-module.exports = { mount, command, subscribe, subscribeAll, unsubscribe, unsubscribeAll, teardown, listInstances, ensure };
+module.exports = { mount, command, subscribe, subscribeAll, unsubscribe, unsubscribeAll, teardown, teardownAll, listInstances, ensure };

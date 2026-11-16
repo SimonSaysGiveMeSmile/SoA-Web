@@ -91,3 +91,17 @@ test('parseSupervisors: finds installed launchd jobs by label column', () => {
     assert.deepEqual(installed, ['com.soa-web.nudge-stale-4010', 'com.soa-web.fleet-loop']);
     assert.equal(rows.length, automations.SUPERVISOR_LABELS.length);
 });
+
+test('parseSystemdUnits: finds installed systemd user units by unit name', () => {
+    const out = [
+        'app.s0a.web.local.service            enabled enabled',
+        'com.soa-web.nudge-stale-4010.service static  -',
+        'com.soa-web.nudge-stale-4010.timer   enabled enabled',
+        'com.soa-web.fleet-loop.service       enabled enabled',
+        'dbus.socket                          static  -',
+    ].join('\n');
+    const rows = automations.parseSystemdUnits(out);
+    const installed = rows.filter(r => r.installed).map(r => r.label);
+    assert.deepEqual(installed, ['com.soa-web.nudge-stale-4010', 'com.soa-web.fleet-loop']);
+    assert.equal(rows.length, automations.SUPERVISOR_LABELS.length);
+});

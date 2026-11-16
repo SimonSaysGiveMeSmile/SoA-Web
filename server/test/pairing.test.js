@@ -101,3 +101,33 @@ test('pairing: a manual start() during the restart window cancels the pending ti
     assert.equal(pair.publicUrl, 'https://two.trycloudflare.com');
     pair.stop();
 });
+
+test('pairing: a private install (SOA_CHANNELS_PUBLIC=0) never opens a tunnel', async () => {
+    const prev = process.env.SOA_CHANNELS_PUBLIC;
+    process.env.SOA_CHANNELS_PUBLIC = '0';
+    try {
+        const { pair, opened } = mkManager({ urls: ['https://a.example'] });
+        const snap = await pair.start();
+        assert.equal(snap.state, 'error');
+        assert.match(snap.error, /SOA_CHANNELS_PUBLIC=0/);
+        assert.equal(opened.length, 0);
+        assert.equal(snap.publicUrl, null);
+    } finally {
+        if (prev === undefined) delete process.env.SOA_CHANNELS_PUBLIC; else process.env.SOA_CHANNELS_PUBLIC = prev;
+    }
+});
+
+test('pairing: a private install closes a tunnel that survived the restart instead of adopting it', async () => {
+    const prev = process.env.SOA_CHANNELS_PUBLIC;
+    process.env.SOA_CHANNELS_PUBLIC = '0';
+    try {
+        const survivor = fakeTunnel('https://left-over.example');
+        const pair = new PairingManager({ port: 4010, openTunnel: async () => null, adopt: async () => survivor });
+        const snap = await pair.resume();
+        assert.equal(survivor.closed, true);
+        assert.equal(snap.state, 'idle');
+        assert.equal(snap.publicUrl, null);
+    } finally {
+        if (prev === undefined) delete process.env.SOA_CHANNELS_PUBLIC; else process.env.SOA_CHANNELS_PUBLIC = prev;
+    }
+});
