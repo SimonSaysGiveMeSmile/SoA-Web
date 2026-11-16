@@ -465,6 +465,15 @@ const _fmtTok = n => {
 };
 // Dollars always carry cents (user directive 2026-11-15): $3,512.40, not $3.5k.
 const _usdFmt = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Burn as shown: the mean of the last BURN_AVG_MIN one-minute buckets. One
+// bucket swings by whole requests (a reply lands 100k+ tokens at once and ages
+// out 60 s later); five minutes reads steadily, and the card and the detail
+// panel show the same figure. The bar chart keeps the 1-minute buckets.
+const BURN_AVG_MIN = 5;
+const _burnAvg = h => {
+    const v = (h || []).slice(-BURN_AVG_MIN).filter(n => n !== null);
+    return v.length ? v.reduce((s, n) => s + n, 0) / v.length : null;
+};
 const _fmtUsd = n => '$' + _usdFmt.format(Number.isFinite(n) ? n : 0);
 // Money for the CARD: same cents as everywhere else; only five-figure sums
 // collapse to k so a cell never outgrows its ~100px track.
@@ -1189,11 +1198,11 @@ class ClaudeUsageWidget extends Widget {
         // Each collector bucket covers one minute. The last bucket is the
         // live sixty-second rate, never a lifetime/block-average fallback.
         const history = this._burnHistory(src);
-        const burn = history?.at(-1) ?? null;
+        const burn = _burnAvg(history);
         card.burn.value.textContent = burn === null ? '—' : `${activity.partialHistory && burn > 0 ? '≈' : ''}${_fmtTok(burn)}`;
         card.burn.unit.textContent = burn === null ? '' : ' tok/min';
         card.burn.el.title = burn === null ? 'Current token activity is unavailable.' :
-            'Burn, 1-minute average: recorded tokens in the last 60 seconds on this device. Includes input, output and cache tokens. Refreshes every 2.5 seconds as usage records arrive.' +
+            'Burn, 5-minute average: recorded tokens per minute over the last 5 minutes on this device. Includes input, output and cache tokens. Refreshes every 2.5 seconds as usage records arrive.' +
             (activity.partialHistory ? ' Some local history is incomplete; this rate is approximate.' : '');
 
         // A shared, zero-based scale makes equal-height bars comparable
@@ -1308,12 +1317,12 @@ class ClaudeUsageWidget extends Widget {
             const t = d.today || {};
             if (d.hasData) _roll(this._sub, [t.tokens?.total, t.cost], ([tok, c]) => `Local activity today: ${_fmtTok(tok)} ${tr('widget.claude.tok')} · ≈${_fmtUsd(c)}`);
             else { _unroll(this._sub); this._sub.textContent = tr('widget.claude.no_data'); }
-            _roll(this._burn.v, [this._burnHistory('claude')?.at(-1) ?? 0], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
+            _roll(this._burn.v, [_burnAvg(this._burnHistory('claude')) ?? 0], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
         } else if (b.active) {
             this._legC.v.textContent = `Ends in ${_fmtDur(b.remainingMs)}`;
             _roll(this._sub, [b.tokens?.total, b.requests || 0, b.cost], ([tok, rq, c]) => `Local 5h activity: ${_fmtTok(tok)} ${tr('widget.claude.tok')} · ${Math.round(rq)} ${tr('widget.claude.req')} · ≈${_fmtUsd(c)}`);
             const recent = Date.now() - (b.lastTs || 0) < 10 * 60000;
-            _roll(this._burn.v, [recent ? b.burnRatePerMin : 0], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
+            _roll(this._burn.v, [_burnAvg(this._burnHistory('claude')) ?? (recent ? b.burnRatePerMin : 0)], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
         } else {
             this._legC.v.textContent = '—';
             _unroll(this._sub); this._sub.textContent = d.hasData ? tr('widget.claude.window_reset') : tr('widget.claude.no_data');
@@ -1418,7 +1427,7 @@ class ClaudeUsageWidget extends Widget {
             ? 'Codex has supplied only weekly usage. Its five-hour quota is not currently available. This does not mean zero usage or unlimited capacity.'
             : 'Account quotas refresh every 15 seconds through Codex. Token activity below comes from local logs.';
         this._weekSub.style.display = 'none';
-        _roll(this._burn.v, [d.burnRatePerMin], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
+        _roll(this._burn.v, [_burnAvg(this._burnHistory('codex')) ?? d.burnRatePerMin], ([x]) => `${_fmtTok(x)} ${tr('widget.claude.tokmin')}`);
         // Tokens in, tokens out — both exact, both from the cumulative
         // counters. Not a request count: see requestsSeen in codexUsage.js for
         // why there isn't an honest one to put here.
