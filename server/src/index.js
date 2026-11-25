@@ -864,10 +864,9 @@ function onWsConnect(ws, session, req) {
 
         // Periodic cwd poll: catches directory changes from running programs
         // (scripts, subshells) that don't trigger the Enter-key poll path.
+        // One batched, non-blocking lsof for every tab (see tabManager.js).
         session._cwdInterval = setInterval(() => {
-            for (const id of session.tabMgr.order) {
-                session.tabMgr.pokeCwd(id);
-            }
+            session.tabMgr.pokeAllCwds().catch(() => {});
         }, 3000);
         if (session._cwdInterval.unref) session._cwdInterval.unref();
 
