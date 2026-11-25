@@ -64,6 +64,24 @@ const _bootAt = Date.now();
 let _userCloses = 0;
 function noteUserClose() { _userCloses++; }
 
+// Shutdown freeze. shutdown() flushes the fleet, THEN kills every PTY; each
+// PTY exit fires onTabsChange → save() of a shrinking list, and the debounced
+// write lands while server.close() is still draining — an empty list in a
+// process that has seen tabs, i.e. a closedByUser tombstone. The next boot
+// then "respected the intent" and left the whole fleet dead (2026-11-25).
+// Once the final flush is on disk nothing this process does may replace it.
+let _frozen = false;
+function freeze() {
+    _frozen = true;
+    if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+}
+function isFrozen() { return _frozen; }
+
+// A tombstone with no user close behind it, written within this many ms of the
+// last healthy snapshot, is the signature of every tab dying at once (shutdown,
+// crash, mass PTY death) — not of a person closing their tabs.
+const TOMBSTONE_SUSPECT_MS = () => parseInt(process.env.SOA_WEB_TOMBSTONE_SUSPECT_MS || '15000', 10);
+
 // A shrink is suspicious when it's early, drastic (below half), and larger
 // than what the user's explicit closes account for.
 function _shrinkRefused(kind, priorCount, nextCount) {
@@ -170,6 +188,7 @@ function _writeLastGood(data) {
 }
 
 function save(tabMgr) {
+    if (_frozen) return;
     if (_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(() => {
         _saveTimer = null;
@@ -178,6 +197,7 @@ function save(tabMgr) {
 }
 
 function saveImmediate(tabMgr) {
+    if (_frozen) return;
     if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
     _writeMetaSync(tabMgr);
 }
@@ -186,6 +206,7 @@ function saveImmediate(tabMgr) {
 // graceful shutdown. Atomic via tmp + rename so a crash mid-write can't leave
 // a half-written blob — the prior file stays usable.
 function saveAll(tabMgr) {
+    if (_frozen) return;
     if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
     _writeMetaSync(tabMgr);
     _writeScrollbackSync(tabMgr);
@@ -245,6 +266,9 @@ function _writeMetaSync(tabMgr) {
                 return;
             }
             data.closedByUser = true;
+            // How many explicit closes stand behind this tombstone — reconcile
+            // uses it to tell a person's close-all from every tab dying at once.
+            data.userCloses = _userCloses;
         }
         const tmp = STATE_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
@@ -253,6 +277,21 @@ function _writeMetaSync(tabMgr) {
         // can self-heal from it. A lone/empty list never touches lastgood.
         if (tabs.length >= MIN_HEALTHY_TABS) _writeLastGood(data);
     } catch (_) { /* best-effort */ }
+}
+
+// A closedByUser tombstone that no explicit close stands behind (userCloses
+// absent or 0) and that was written within TOMBSTONE_SUSPECT_MS of the last
+// healthy snapshot: the fleet went from full to empty in one burst without the
+// user closing anything. Treat it as a collapse, not as intent.
+function _suspectTombstone(meta) {
+    if (!meta || !meta.closedByUser) return false;
+    if (Number(meta.userCloses) > 0) return false;
+    const lastgood = loadLastGood();
+    if (!lastgood || !Array.isArray(lastgood.tabs) || lastgood.tabs.length < MIN_HEALTHY_TABS) return false;
+    const tomb = Date.parse(meta.savedAt), good = Date.parse(lastgood.savedAt);
+    if (!Number.isFinite(tomb) || !Number.isFinite(good)) return false;
+    const gap = tomb - good;
+    return gap >= 0 && gap <= TOMBSTONE_SUSPECT_MS();
 }
 
 // Boot-time fleet recovery. If tabs.json is empty/missing — but NOT because the
@@ -265,7 +304,7 @@ function _writeMetaSync(tabMgr) {
 function reconcileTabsFromScrollback() {
     const meta = load();
     // Respect an explicit user close-all above all else.
-    if (meta && meta.closedByUser) {
+    if (meta && meta.closedByUser && !_suspectTombstone(meta)) {
         return { action: 'noop', reason: 'closedByUser — respecting intent' };
     }
     const metaCount = (meta && Array.isArray(meta.tabs)) ? meta.tabs.length : 0;
@@ -422,8 +461,9 @@ module.exports = {
     liveCwdCounts, planRestore,
     load, loadScrollback, loadLastGood, loadSession, saveSession,
     save, saveImmediate, saveAll, reconcileTabsFromScrollback,
-    noteUserClose,
+    noteUserClose, freeze, isFrozen,
     STATE_FILE, SCROLLBACK_FILE, SESSION_FILE,
     // test hook: reset the per-process "have we seen tabs" latch
     _resetLiveTabsSeen: () => { _liveTabsSeen = false; },
+    _resetForTest: () => { _liveTabsSeen = false; _frozen = false; _userCloses = 0; },
 };

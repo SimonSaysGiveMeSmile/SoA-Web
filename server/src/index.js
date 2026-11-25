@@ -1464,6 +1464,10 @@ function shutdown(code = 0) {
     // seed each tab with what was on screen.
     const flushS = persistableSession();
     if (flushS) tabPersist.saveAll(flushS.tabMgr);
+    // Freeze persistence: killing the PTYs below fires onTabsChange for every
+    // tab, and the debounced save would otherwise replace the fleet we just
+    // flushed with an empty closedByUser tombstone before the process exits.
+    tabPersist.freeze();
     // Detach (don't kill) the tunnel so it survives the restart and the next
     // boot re-adopts the same public URL — the mobile bridge stays reachable.
     try { pair.detach(); } catch (_) {}
@@ -1519,6 +1523,7 @@ function crashFlush(kind, err) {
     try {
         const s = persistableSession();
         if (s) tabPersist.saveAll(s.tabMgr);            // sync atomic tmp+rename
+        tabPersist.freeze();                            // dying tabs must not overwrite it
     } catch (_) { /* already crashing — best effort */ }
     try { pair.detach(); } catch (_) {}
     try {
@@ -1572,26 +1577,30 @@ function scheduleBootResume() {
             }
             const saved = tabPersist.load();
             if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) {
-                console.log(`boot-resume[${n}]: no saved tabs on disk — nothing to rehydrate`);
-                return;
-            }
-            console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
-            const headers = {};
-            if (_persistedSession && _persistedSession.token) {
-                // Bind to the persisted primary session so the restored tabs
-                // land where the user's existing cookie points.
-                headers.Cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+                // Not a reason to give up for the life of the process: the
+                // retry below re-runs reconcile, which may still recover the
+                // fleet (a file landing late, a suspect tombstone).
+                const why = saved && saved.closedByUser ? ' (closedByUser)' : '';
+                console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: no saved tabs on disk${why}${n < MAX_ATTEMPTS ? ' — retrying' : ' — nothing to rehydrate'}`);
             } else {
-                console.log(`boot-resume[${n}]: no persisted session — rehydrating into a fresh primary session`);
+                console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
+                const headers = {};
+                if (_persistedSession && _persistedSession.token) {
+                    // Bind to the persisted primary session so the restored tabs
+                    // land where the user's existing cookie points.
+                    headers.Cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+                } else {
+                    console.log(`boot-resume[${n}]: no persisted session — rehydrating into a fresh primary session`);
+                }
+                const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
+                const probe = new WebSocket(url, { headers });
+                probe.on('open', () => {
+                    // restore-on-connect runs synchronously inside onWsConnect; hold the
+                    // socket open briefly so the first auto-resume tick can fire, then close.
+                    setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
+                });
+                probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
             }
-            const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
-            const probe = new WebSocket(url, { headers });
-            probe.on('open', () => {
-                // restore-on-connect runs synchronously inside onWsConnect; hold the
-                // socket open briefly so the first auto-resume tick can fire, then close.
-                setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
-            });
-            probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
         } catch (e) { console.log(`boot-resume[${n}] failed:`, e && e.message); }
         if (n < MAX_ATTEMPTS) {
             const r = setTimeout(() => { if (!_diskRestoreRan) attempt(n + 1); }, delay * 2 * n);
