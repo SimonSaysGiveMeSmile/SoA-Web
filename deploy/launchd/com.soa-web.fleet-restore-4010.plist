@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  FLEET RESTORE WATCH — every 60 s runs scripts/soa-fleet-restore-watch: when the
+  daemon answers but its fleet has collapsed to <= 1 tab while tabs.json.lastgood
+  holds a real fleet, it calls POST /api/fleet/restore (the Time Machine Restore
+  path; not entitlement-gated, only ever OPENS tabs) and notifies you.
+  It finds the live daemon's state dir from its daemon.lock; set
+  SOA_WEB_STATE_DIR below to pin one. Kill switch: SOA_FLEET_RESTORE_ENABLE=0.
+  Dry-run: SOA_FLEET_RESTORE_DRY=1.
+  Point the script path at the checkout the daemon runs (e.g. ~/.s0a-local/app).
+  Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.soa-web.fleet-restore-4010.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soa-web.fleet-restore-4010</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>node</string>
+        <string>/Users/YOUR_USER/.s0a-local/app/scripts/soa-fleet-restore-watch</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USER/.s0a-local/logs/fleet-restore.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USER/.s0a-local/logs/fleet-restore.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
