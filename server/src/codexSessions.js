@@ -38,10 +38,13 @@ function numericDirs(dir) {
 }
 
 /**
- * Map of real cwd -> { sessionId, mtime } for the most recent Codex thread in
- * each project touched within the last `hours`. Empty Map on any FS error.
+ * Map of real cwd -> [{ sessionId, mtime }…] newest first, for every Codex
+ * thread touched within the last `hours`. The whole list, not just the newest:
+ * several tabs on one directory each need a thread of their own, and the
+ * restore allocator hands them out in order, skipping ones another tab owns.
+ * Empty Map on any FS error.
  */
-function latestSessionByCwd(hours = 72) {
+function recentSessionsByCwd(hours = 72) {
     const cutoff = Date.now() - hours * 3600 * 1000;
     const map = new Map();
     for (const y of numericDirs(SESSIONS_DIR)) {
@@ -61,13 +64,46 @@ function latestSessionByCwd(hours = 72) {
                     if (mt < cutoff) continue;
                     const meta = readMeta(file);
                     if (!meta.cwd || !meta.id) continue;
-                    const prev = map.get(meta.cwd);
-                    if (!prev || mt > prev.mtime) map.set(meta.cwd, { sessionId: meta.id, mtime: mt });
+                    if (!map.has(meta.cwd)) map.set(meta.cwd, []);
+                    map.get(meta.cwd).push({ sessionId: meta.id, mtime: mt });
                 }
             }
         }
     }
+    for (const list of map.values()) list.sort((a, b) => b.mtime - a.mtime);
     return map;
 }
 
-module.exports = { latestSessionByCwd, SESSIONS_DIR };
+/**
+ * Map of real cwd -> { sessionId, mtime } for the most recent Codex thread in
+ * each project touched within the last `hours`. Empty Map on any FS error.
+ */
+function latestSessionByCwd(hours = 72) {
+    const map = new Map();
+    for (const [cwd, list] of recentSessionsByCwd(hours)) map.set(cwd, list[0]);
+    return map;
+}
+
+/**
+ * The working directory a Codex thread was started in, read from its own
+ * rollout (`rollout-<ts>-<uuid>.jsonl`). Used to resume a thread from its own
+ * project when the tab's shell sits elsewhere. null when it cannot be found.
+ */
+function cwdForSession(sessionId) {
+    if (typeof sessionId !== 'string' || !UUID.test(sessionId)) return null;
+    const suffix = `-${sessionId}.jsonl`;
+    for (const y of numericDirs(SESSIONS_DIR)) {
+        for (const m of numericDirs(path.join(SESSIONS_DIR, y))) {
+            for (const d of numericDirs(path.join(SESSIONS_DIR, y, m))) {
+                const dir = path.join(SESSIONS_DIR, y, m, d);
+                let files;
+                try { files = fs.readdirSync(dir); } catch (_) { continue; }
+                const hit = files.find(f => f.startsWith('rollout-') && f.endsWith(suffix));
+                if (hit) return readMeta(path.join(dir, hit)).cwd;
+            }
+        }
+    }
+    return null;
+}
+
+module.exports = { latestSessionByCwd, recentSessionsByCwd, cwdForSession, SESSIONS_DIR };

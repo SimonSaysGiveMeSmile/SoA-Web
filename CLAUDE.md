@@ -71,10 +71,21 @@ rebuilt with by hand three times: pick the richest surviving list (tabs.json →
 lastgood → newest backup → the cwds inside scrollback.json), drop entries whose
 directory is gone, skip cwds that are **already open counting duplicates as a
 multiset** (three tabs on one repo must restore three tabs), open the rest, and
-resume each one's Claude conversation with a **distinct** recent session id so
-two agents never attach to the same transcript. The dashboard's Time Machine
-Restore button calls the same endpoint, and the endpoint is not
-entitlement-gated — recovering your own terminals is not premium fleet control.
+relaunch each tab's agent **exactly**: every tab persists `agent`
+(claude|codex), `sessionId` and `sessionCwd` (observed off the running process
+by a `ps` sweep, and stamped once more at shutdown), so a tab comes back as
+the same agent on the same thread, from the thread's own directory, with no
+`--continue` / `--last` fallback. Only a tab with no saved id gets a
+**distinct**, unclaimed recent session, so two agents never attach to the same
+transcript. The dashboard's Time Machine Restore button calls the same
+endpoint, and the endpoint is not entitlement-gated — recovering your own
+terminals is not premium fleet control.
+
+To check the result: `curl -s http://127.0.0.1:4010/api/fleet/audit` (loopback,
+no cookie needed, and it does not mint a session) returns the expected vs the
+running `{agent, sessionId}` for each tab, plus any thread that is live in two
+tabs (the daemon also logs a `fleet-audit:` line about 25 s after each restore).
+Manual repair and the upgrade-restart hints file: `docs/fleet-recovery.md`.
 
 Two things that have caused a real loss, worth knowing:
 

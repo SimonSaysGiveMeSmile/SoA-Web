@@ -78,4 +78,21 @@ function latestSessionByCwd(hours = 72) {
     return map;
 }
 
-module.exports = { latestSessionByCwd, resolveCwd };
+/**
+ * The working directory a Claude conversation belongs to. Claude Code only
+ * finds a session from the project it was created in, and a tab's shell can
+ * sit somewhere else (tab on ~/proj, conversation started in ~/proj/sub), so a
+ * resume by id has to run from here. null when the transcript is not found.
+ */
+function cwdForSession(sessionId) {
+    if (typeof sessionId !== 'string' || !SAFE_ID.test(sessionId)) return null;
+    let entries;
+    try { entries = fs.readdirSync(PROJECTS_DIR); } catch (_) { return null; }
+    for (const entry of entries) {
+        const f = path.join(PROJECTS_DIR, entry, sessionId + '.jsonl');
+        if (fs.existsSync(f)) return resolveCwd(f);
+    }
+    return null;
+}
+
+module.exports = { latestSessionByCwd, resolveCwd, cwdForSession };

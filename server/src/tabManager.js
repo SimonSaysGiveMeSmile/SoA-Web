@@ -144,7 +144,7 @@ function requirePty() {
 }
 
 class Tab {
-    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, onInput, agent }) {
+    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, onInput, agent, userRenamed, sessionId, sessionCwd }) {
         this.id = id;
         this.cwd = cwd || process.cwd();
         // Default the tab label to the cwd's folder name so "Hireal" shows
@@ -152,7 +152,10 @@ class Tab {
         // and so does any later user rename (tracked via userRenamed).
         this.autoTitleBase = path.basename(this.cwd) || 'terminal';
         this.title = title || this.autoTitleBase;
-        this.userRenamed = !!title;
+        // A title alone used to mean "the user named it", so every restore that
+        // passed one froze it. Callers that know better (restore paths) say so;
+        // userRenamed is only ever true for a name a person chose.
+        this.userRenamed = userRenamed == null ? !!title : (!!userRenamed && !!title);
         this.env = { ...process.env, ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
         this.cols = cols || DEFAULT_COLS;
         this.rows = rows || DEFAULT_ROWS;
@@ -162,6 +165,11 @@ class Tab {
         // 'claude' | 'codex' | null — which agent this tab runs (set by the
         // supervisor from the stream; seeded from tabs.json on restore).
         this.agent = agent || null;
+        // The exact thread this tab's agent is on (stamped at launch, observed
+        // off the running process by sessionIdentity) and that thread's own
+        // directory. Seeded on restore so an un-resumed tab still remembers it.
+        this.sessionId = (this.agent && sessionId) || null;
+        this.sessionCwd = (this.sessionId && sessionCwd) || null;
         this.pty = null;
         this.exited = false;
         this.exitCode = null;
@@ -303,7 +311,7 @@ class TabManager {
         return true;
     }
 
-    open({ title, cwd, cols, rows, env, silent, seedScrollback, agent } = {}) {
+    open({ title, cwd, cols, rows, env, silent, seedScrollback, agent, userRenamed, sessionId, sessionCwd } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
@@ -316,7 +324,7 @@ class TabManager {
             env: withScriptsOnPath({ ...env, ...tts.envFor(id) }),
             onData: data => this.onData(id, data),
             onInput: data => this.onInput(id, data),
-            agent,
+            agent, userRenamed, sessionId, sessionCwd,
             onExit: code => {
                 this._archive(id);
                 this.onExit(id, code);
