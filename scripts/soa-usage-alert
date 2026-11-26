@@ -19,6 +19,13 @@
  * cooldown so it never spams; re-fires on a real escalation. Correlates the
  * Claude session to a tab (by cwd) for a friendly "#N title" label, and delivers
  * via soa-notify (OS push — seen even when SoA is closed) + the in-app CHAT.
+ * Everything that fires in one cycle (sessions and the weekly projection) goes
+ * out as ONE digest push: ntfy rate-limits per IP, and one push per session
+ * (bursts of 3–4 every 2 min) kept every SoA push at HTTP 429. soa-notify's
+ * shared push budget may still defer it (exit 75): logged as "push deferred
+ * (rate limited)", and the CHAT copy is still delivered.
+ *
+ * Log + state: $SOA_WEB_STATE_DIR/logs (else ~/.soa-web/logs), see soa-usage-paths.cjs.
  *
  * No daemon restart needed — it's an independent poller over loopback.
  *
@@ -34,6 +41,10 @@
  *   SOA_USAGE_WEEK_ALERT   0 = no weekly-projection push               (default 1)
  *   SOA_USAGE_WEEK_COOLDOWN seconds between weekly pushes per provider (default 21600)
  *   SOA_USAGE_WEEK_STEP    re-push inside the cooldown when used% rose this much (default 10)
+ *   SOA_USAGE_DIGEST_TOP   sessions named in one digest push, then "+k more" (default 3)
+ *   SOA_USAGE_DIGEST_GAP   seconds between digest pushes (default 600): alerts inside
+ *                          the gap wait for the next digest, so this script takes at
+ *                          most one of soa-notify's shared push slots per 10 min
  *   SOA_WEEK_PROJECTED_PCT / SOA_WEEK_WARN_PCT  verdict lines (else usage-budgets.json, 100/90)
  *   SOA_QUOTA_PORT         quota service port (default 4011)
  *   SOA_WEB_PORT           daemon port (else daemon.lock, else 4010)
@@ -51,9 +62,10 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
-const LOG_DIR = path.join(os.homedir(), '.soa-web', 'logs');
+const usagePaths = require('./soa-usage-paths.cjs');
+const LOG_DIR = usagePaths.usageLogDir();            // $SOA_WEB_STATE_DIR/logs, else ~/.soa-web/logs
 const LOG = path.join(LOG_DIR, 'usage-alert.log');
-const STATE = path.join(LOG_DIR, '.usage-alert-state.json');
+const STATE = usagePaths.usageStateFile('.usage-alert-state.json');
 const NOTIFY = path.join(__dirname, 'soa-notify');   // sibling script
 const weeklyGuard = require('./soa-weekly-guard.cjs');
 
@@ -68,7 +80,10 @@ const CFG = {
     weekAlert: process.env.SOA_USAGE_WEEK_ALERT !== '0',
     weekCooldown: num(process.env.SOA_USAGE_WEEK_COOLDOWN, 21600),
     weekStep:  num(process.env.SOA_USAGE_WEEK_STEP, 10),
+    digestTop: Math.max(1, Math.floor(num(process.env.SOA_USAGE_DIGEST_TOP, 3))),
+    digestGap: num(process.env.SOA_USAGE_DIGEST_GAP, 600),
 };
+const NOTIFY_DEFERRED = 75;   // soa-notify: the shared push budget deferred it
 function budgetsDefault() { try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'usage-budgets.json'), 'utf8')).default || {}; } catch (_) { return {}; } }
 const localDay = ms => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
 const args = new Set(process.argv.slice(2));
@@ -107,8 +122,10 @@ function notify(title, body, priority, tags, click) {
         if (click) argv.push('--click', click);
         argv.push('--', body);
         execFile(NOTIFY, argv, { timeout: 20000 }, (err, so, se) => {
-            if (err) log('notify FAILED: ' + (se || err.message || err).toString().trim().slice(0, 200));
-            resolve(!err);
+            const why = err && (se || err.message || err).toString().trim().slice(0, 200);
+            if (err && err.code === NOTIFY_DEFERRED) log('push deferred (rate limited): ' + why);
+            else if (err) log('notify FAILED: ' + why);
+            resolve(!err ? 'sent' : err.code === NOTIFY_DEFERRED ? 'deferred' : 'failed');
         });
     });
 }
@@ -116,9 +133,30 @@ function notify(title, body, priority, tags, click) {
 const money = n => '$' + (n || 0).toFixed(2);
 const mtok = n => (n / 1e6).toFixed(1) + 'M';
 
+/**
+ * One cycle's alerts → ONE push, or null. `week`: lines for the weekly
+ * projection (first, account-wide). `sessions`: {label, reasons, key} where key
+ * ranks them (cost in the primary scope, highest first; ties by `today`$); the top `top` are
+ * named, the rest summed up as "+k more". `tail`: the shared context line.
+ * `named` is the sessions the push names: only those start their cooldown, so
+ * the rest are named by a later digest instead of hiding behind "+k more".
+ */
+function buildDigest({ week = [], sessions = [], top = 3, tail = '' } = {}) {
+    if (!week.length && !sessions.length) return null;
+    const ranked = sessions.slice().sort((a, b) => (b.key || 0) - (a.key || 0) || (b.today || 0) - (a.today || 0));
+    const shown = ranked.slice(0, top);
+    const n = ranked.length;
+    const what = [week.length ? 'weekly quota' : '', n ? `${n} session${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ');
+    const title = !n ? 'SoA weekly quota' : `SoA token alert — ${what}`;
+    const lines = [...week, ...shown.map(a => `• “${a.label}” — ${a.reasons.join(', ')}`)];
+    if (n > shown.length) lines.push(`+${n - shown.length} more`);
+    if (n && tail) lines.push(tail.trim());
+    return { title, body: lines.join('\n'), tags: n ? 'warning,fire' : 'warning,hourglass', named: shown };
+}
+
 async function main() {
     if (TEST) {
-        const ok = await notify('SoA token alert — test', '✅ soa-usage-alert delivery works. A real alert fires when a session leans hard on the model, or the weekly quota is on track to run out.', 'high', 'warning,robot', 'https://s0a.app');
+        const ok = 'sent' === await notify('SoA token alert — test', '✅ soa-usage-alert delivery works. A real alert fires when a session leans hard on the model, or the weekly quota is on track to run out.', 'high', 'warning,robot', 'https://s0a.app');
         log('test alert sent=' + ok);
         console.log('test alert sent=' + ok);
         return;
@@ -193,13 +231,12 @@ async function main() {
             const escalated = last && primary >= CFG.escalate * ((lastKey != null ? lastKey : last.cost) || 0);
             if (coolExpired || escalated) {
                 fired = true;
-                alerts.push({ label, reasons, costBlock, costToday, tok: sc.tok, req: sc.req, burn, remainMin });
+                alerts.push({ id: s.id, label, reasons, costBlock, costToday, tok: sc.tok, req: sc.req, burn, remainMin,
+                              stamp: { at: now, cost: primary, costBlock, costToday } });
             }
         }
-        next.sessions[s.id] = {
-            ts: now, costBlock, costToday, tok: sc.tok,
-            lastAlert: fired ? { at: now, cost: primary, costBlock, costToday } : (prev && prev.lastAlert) || null,
-        };
+        // lastAlert is stamped below, only once a digest naming it is delivered.
+        next.sessions[s.id] = { ts: now, costBlock, costToday, tok: sc.tok, lastAlert: (prev && prev.lastAlert) || null };
     }
 
     // Account-wide WEEKLY push: one per provider per cooldown while the weekly %
@@ -215,8 +252,7 @@ async function main() {
             const cool = !last || (now - last.at) / 1000 >= CFG.weekCooldown;
             const climbed = last && w.used >= (last.used || 0) + CFG.weekStep;
             if (!(cool || climbed)) continue;
-            weekAlerts.push({ prov, a });
-            next.week[prov] = { at: now, used: w.used, projected: w.projected, resetsAt: w.resetsAt };
+            weekAlerts.push({ prov, a, stamp: { at: now, used: w.used, projected: w.projected, resetsAt: w.resetsAt } });
         }
     }
 
@@ -230,26 +266,40 @@ async function main() {
         return;
     }
 
+    const weekLines = [];
     for (const { prov, a } of weekAlerts) {
         const w = a.weekly;
         const name = prov === 'claude' ? 'Claude' : 'Codex';
         const runOut = w.runsOutBeforeReset && w.runOutAt ? ` — runs out ≈${weeklyGuard.fmtWhen(w.runOutAt)}` : '';
         const body = `⚠ Weekly quota: ${name} is at ${weeklyGuard.pct(w.used)} and on pace for ${weeklyGuard.pct(w.projected)} by its reset ${weeklyGuard.fmtWhen(w.resetsAt)}${runOut}. `
             + `Throttle (never stop): soa-sessions usage → soa-sessions throttle hot.`;
-        if (DRY) { console.log('WOULD ALERT: ' + body); log('DRY would-alert: ' + body); }
-        else { await notify('SoA weekly quota', body, 'high', 'warning,hourglass', 'https://s0a.app'); log('WEEK-ALERT: ' + body); }
+        weekLines.push(body);
+        log((DRY ? 'DRY would-alert: ' : 'WEEK-ALERT: ') + body);
     }
-
-    // Deliver (one push per over-threshold session).
-    for (const a of alerts) {
+    const sessionLines = alerts.map(a => {
         // reasons already names the threshold(s) crossed (incl. $/min when the
-        // velocity trigger fired), so the parenthetical is just the raw stats.
-        const tail = fiveHour ? ` 5h block resets in ${a.remainMin}m.`
-            : (guard.available && guard.claude.weekly ? ` Week ${weeklyGuard.pct(guard.claude.weekly.used)} → ${weeklyGuard.pct(guard.claude.weekly.projected)} at reset.` : '');
-        const body = `⚠ Token watch: “${a.label}” is heavy — ${a.reasons.join(', ')} `
-            + `(${mtok(a.tok)} tok, ${a.req} reqs).${tail}`;
-        if (DRY) { console.log('WOULD ALERT: ' + body); log('DRY would-alert: ' + body); }
-        else { await notify('SoA token alert', body, 'high', 'warning,fire', 'https://s0a.app'); log('ALERT: ' + body); }
+        // velocity trigger fired); the per-session log line keeps the raw stats.
+        log((DRY ? 'DRY would-alert: ' : 'ALERT: ') + `⚠ Token watch: “${a.label}” is heavy — ${a.reasons.join(', ')} (${mtok(a.tok)} tok, ${a.req} reqs).`);
+        return { id: a.id, label: a.label, reasons: a.reasons, key: fiveHour ? a.costBlock : a.costToday, today: a.costToday, stamp: a.stamp };
+    });
+    const tail = fiveHour ? (remainMin > 0 ? `5h block resets in ${remainMin}m.` : '')
+        : (guard.available && guard.claude.weekly ? `Week ${weeklyGuard.pct(guard.claude.weekly.used)} → ${weeklyGuard.pct(guard.claude.weekly.projected)} at reset.` : '');
+    // Deliver: everything this cycle as ONE push, at most one per digestGap.
+    // Cooldowns start only for what a push named and soa-notify did not defer
+    // (a FAILED push — no topic, network — still cools down, or CHAT would get
+    // a copy every gap); a held-back or deferred alert stays due for the next.
+    const digest = buildDigest({ week: weekLines, sessions: sessionLines, top: CFG.digestTop, tail });
+    next.lastDigestAt = state.lastDigestAt || 0;
+    if (digest && !digestDue(next.lastDigestAt, now, CFG.digestGap)) {
+        log(`digest held (${Math.round((now - next.lastDigestAt) / 1000)}s since the last; gap ${CFG.digestGap}s)`);
+    } else if (digest) {
+        let result = 'dry';
+        if (DRY) console.log(`WOULD ALERT: ${digest.title}\n${digest.body}`);
+        else { result = await notify(digest.title, digest.body, 'high', digest.tags, 'https://s0a.app'); next.lastDigestAt = now; }
+        if (result === 'sent' || result === 'failed') {
+            for (const x of digest.named) next.sessions[x.id].lastAlert = x.stamp;
+            for (const x of weekAlerts) next.week[x.prov] = x.stamp;
+        }
     }
 
     if (!DRY && !STATUS) saveState(next);
@@ -259,4 +309,8 @@ async function main() {
         + (alerts.length ? ' [' + alerts.map(a => a.label).join(', ') + ']' : ''));
 }
 
-main().catch(e => { log('error: ' + (e && e.message || e)); process.exit(0); });
+/** May a digest go out now? lastAt ms, gap seconds. */
+const digestDue = (lastAt, now, gap) => !lastAt || now - lastAt >= gap * 1000 || now < lastAt;
+
+if (require.main === module) main().catch(e => { log('error: ' + (e && e.message || e)); process.exit(0); });
+module.exports = { buildDigest, digestDue };

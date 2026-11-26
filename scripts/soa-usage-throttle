@@ -40,9 +40,10 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const STATE_DIR = process.env.SOA_WEB_STATE_DIR || path.join(os.homedir(), '.soa-web-local');
-const LOG_DIR = path.join(os.homedir(), '.soa-web', 'logs');
+const usagePaths = require('./soa-usage-paths.cjs');
+const LOG_DIR = usagePaths.usageLogDir();            // $SOA_WEB_STATE_DIR/logs, else ~/.soa-web/logs
 const LOG = path.join(LOG_DIR, 'usage-throttle.log');
-const STATE = path.join(LOG_DIR, '.usage-throttle-state.json');
+const STATE = usagePaths.usageStateFile('.usage-throttle-state.json');
 const MSG = path.join(__dirname, 'soa-msg');
 const weeklyGuard = require('./soa-weekly-guard.cjs');
 // Effort-throttle handshake with soa-effort: ids listed here are held at a LOWER

@@ -30,13 +30,33 @@
 # Config (~/.soa-web-local/notify.json): {provider, server, topic}. Env overrides:
 #   SOA_NOTIFY_TOPIC, SOA_NOTIFY_SERVER, SOA_NOTIFY_PROVIDER.
 #
-# Exit: 0 on a delivered POST (HTTP 2xx), non-zero otherwise. Designed to be
-# safe in launchd jobs (the heartbeat/supervisor can call it).
+# Exit: 0 on a delivered POST (HTTP 2xx), 75 when the push was DEFERRED by the
+# shared push budget (below; --also-msg still reaches CHAT), other non-zero on a
+# failure. Designed to be safe in launchd jobs (the heartbeat/supervisor can call it).
+#
+# Shared push budget ($STATE_DIR/.push-budget.json): every SoA script pushes
+# through here, and ntfy.sh rate-limits per IP across all topics, so a burst of
+# alerts (or soa-doors retrying) left every push at HTTP 429. Two guards:
+#   - token bucket: at most SOA_NOTIFY_BUDGET (4) pushes per
+#     SOA_NOTIFY_BUDGET_WINDOW seconds (600); a POST that never reached ntfy
+#     (network error, HTTP 000) or got a 5xx gives its slot back;
+#   - 429 circuit breaker: on a 429, no POST until Retry-After, or 5 → 15 → 30
+#     min (SOA_NOTIFY_BACKOFF, seconds) on consecutive 429s; a 2xx resets it.
+#     soa-doors reads and writes the same breaker.
+# During either, nothing is POSTed and the exit is 75 (EX_TEMPFAIL), so callers
+# log "push deferred (rate limited)" instead of FAILED. The budget fails open: a
+# corrupt state file is dropped, and a crash in the check still sends. SOA_NOTIFY_NOW (epoch
+# seconds) injects the clock for tests.
 
 set -uo pipefail
 
 STATE_DIR="${SOA_WEB_STATE_DIR:-$HOME/.soa-web-local}"
 CFG="$STATE_DIR/notify.json"
+# The config predates SOA_WEB_STATE_DIR: an install whose state dir moved still
+# has its topic in the legacy dir, so read it there rather than go silent.
+[ -f "$CFG" ] || { [ -f "$HOME/.soa-web-local/notify.json" ] && CFG="$HOME/.soa-web-local/notify.json"; }
+BUDGET="$STATE_DIR/.push-budget.json"
+EX_DEFERRED=75
 
 jget() { # jget <key> < json
     python3 -c "import sys,json
@@ -88,21 +108,118 @@ fi
 
 [ -z "$BODY" ] && { echo "soa-notify: empty message (pass text or pipe stdin)" >&2; exit 2; }
 
+# budget take | budget result <http code> <header file>. One mkdir lock (flock
+# is not on stock macOS) serialises concurrent callers. The lock is held for
+# milliseconds, so one still there after ~5 s is a crashed caller's: break it.
+budget() {
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    local lock="$BUDGET.lock" i=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        i=$((i + 1)); [ "$i" -gt 50 ] && { rmdir "$lock" 2>/dev/null; mkdir "$lock" 2>/dev/null; break; }
+        sleep 0.1
+    done
+    local out rc
+    out="$(python3 - "$BUDGET" "$@" <<'PY'
+import sys, json, os, time, email.utils
+path, action = sys.argv[1], sys.argv[2]
+env = os.environ
+def num(name, default, cast=float):
+    try: return cast(env.get(name) or default)
+    except Exception: return cast(default)
+now = num('SOA_NOTIFY_NOW', time.time())
+cap = num('SOA_NOTIFY_BUDGET', 4, int)
+win = num('SOA_NOTIFY_BUDGET_WINDOW', 600) or 600
+try: ladder = [float(x) for x in (env.get('SOA_NOTIFY_BACKOFF') or '').split(',') if x.strip()]
+except Exception: ladder = []
+ladder = ladder or [300, 900, 1800]
+# A state file another writer left corrupt is dropped, never trusted: a bad
+# field must not hold every push "deferred" forever.
+try:
+    st = json.load(open(path))
+    if not isinstance(st, dict): st = {}
+    sent = [float(t) for t in st.get('sent', []) if isinstance(t, (int, float)) and now - win < t <= now + 5]
+    until = float(st.get('blockedUntil') or 0)
+    strikes = int(st.get('strikes') or 0)
+except Exception:
+    st, sent, until, strikes = {}, [], 0.0, 0
+def hhmm(t): return time.strftime('%H:%M', time.localtime(t))
+DEFER = 10   # the only code the caller treats as "held back"
+rc, msg = 0, ''
+if action == 'take':
+    if until > now:
+        rc, msg = DEFER, 'ntfy rate limited (429); retrying after %s' % hhmm(until)
+    elif cap > 0 and len(sent) >= cap:
+        rc, msg = DEFER, 'push budget spent (%d per %d min); next slot %s' % (cap, win // 60, hhmm(min(sent) + win))
+    else:
+        sent.append(now)
+elif action == 'result':
+    code = sys.argv[3]
+    if code == '429':
+        wait = 0
+        try:
+            for line in open(sys.argv[4], errors='replace'):
+                k, _, v = line.partition(':')
+                if k.strip().lower() == 'retry-after':
+                    v = v.strip()
+                    if v.isdigit(): wait = float(v)
+                    else:
+                        d = email.utils.parsedate_to_datetime(v)
+                        wait = d.timestamp() - now if d else 0
+        except Exception:
+            pass
+        step = ladder[min(strikes, len(ladder) - 1)]
+        strikes += 1
+        until = now + min(max(wait, step), 6 * 3600)
+        msg = 'ntfy rate limited (429 #%d); no pushes until %s' % (strikes, hhmm(until))
+    elif code[:1] == '2':
+        strikes, until = 0, 0
+    elif (code == '000' or code[:1] == '5') and sent:
+        # Never reached ntfy (network) or ntfy failed: the slot is given back.
+        sent.remove(max(sent))
+st.update(sent=sent, blockedUntil=until, strikes=strikes)
+tmp = '%s.%d.tmp' % (path, os.getpid())
+with open(tmp, 'w') as f: json.dump(st, f)
+os.replace(tmp, path)
+print(msg)
+sys.exit(rc)
+PY
+)"; rc=$?
+    rmdir "$lock" 2>/dev/null
+    [ -n "$out" ] && echo "$out"
+    return $rc
+}
+
 send_ntfy() {
     [ -z "$TOPIC" ] && { echo "soa-notify: no ntfy topic configured ($CFG or SOA_NOTIFY_TOPIC)" >&2; return 3; }
     local url="${SERVER%/}/$TOPIC"
     local -a H=(-H "Title: $TITLE" -H "Priority: $PRIORITY")
     [ -n "$TAGS" ]  && H+=(-H "Tags: $TAGS")
     [ -n "$CLICK" ] && H+=(-H "Click: $CLICK")
-    local out code err
+    local out code err why hdr brc
+    # Fails open: only the budget's own "held back" code (10) defers a push; a
+    # crash in the budget check (bad env, unwritable state dir) still sends.
+    why="$(budget take)"; brc=$?
+    if [ "$brc" = "10" ]; then
+        echo "soa-notify: push deferred (${why:-rate limited})" >&2
+        return $EX_DEFERRED
+    elif [ "$brc" != "0" ]; then
+        echo "soa-notify: push budget check failed (rc $brc); sending anyway" >&2
+    fi
+    hdr="$(mktemp "${TMPDIR:-/tmp}/soa-notify.XXXXXX")"
     # %{errormsg} (curl >= 7.75) carries the transport's own reason (DNS, TLS,
     # timeout…) so a failed push says why instead of only "HTTP 000".
-    out="$(curl -s -o /dev/null -w '%{http_code}|%{errormsg}' --max-time 15 \
+    out="$(curl -s -o /dev/null -D "$hdr" -w '%{http_code}|%{errormsg}' --max-time 15 \
         "${H[@]}" -d "$BODY" "$url" 2>/dev/null)"
     code="${out%%|*}"; err="${out#*|}"; [ "$err" = "$out" ] && err=""
+    why="$(budget result "${code:-000}" "$hdr" 2>/dev/null)"
+    rm -f "$hdr"
     if [ "${code:0:1}" = "2" ]; then
         echo "soa-notify: sent via ntfy → $url (HTTP $code)"
         return 0
+    fi
+    if [ "$code" = "429" ]; then
+        echo "soa-notify: push deferred (${why:-ntfy rate limited (429)})" >&2
+        return $EX_DEFERRED
     fi
     echo "soa-notify: ntfy POST failed (HTTP ${code:-000}${err:+: $err}) → $url" >&2
     return 1
