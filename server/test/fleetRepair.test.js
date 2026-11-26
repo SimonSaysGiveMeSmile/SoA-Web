@@ -339,6 +339,18 @@ test('hintsFromProcesses (older daemon): shells by a unique cwd, argv or registr
     // shared cwd never gets a positional hint.
     assert.deepEqual(cli.hintsFromProcesses([{ cwd: '/a' }, { cwd: '/a' }, { cwd: '/c' }], { daemonPid: 900, table: t, cwdOf: p => same[p] })
         .map(h => h.sessionId), [null, null, null]);
+    // With tab ids: ascending id pairs with ascending shell pid, so tabs that
+    // SHARE a cwd are told apart — even when dragged out of id order.
+    const ids = [{ id: 3, cwd: '/c' }, { id: 1, cwd: '/a' }, { id: 2, cwd: '/a' }];
+    assert.deepEqual(cli.hintsFromProcesses(ids, { daemonPid: 900, table: t, cwdOf: p => same[p], agents })
+        .map(h => h.sessionId), [D, A, C]);
+    // A pair whose cwd disagrees gets no hint (never a neighbour's thread).
+    const moved = { 910: '/a', 920: '/zzz', 930: '/c' };
+    assert.deepEqual(cli.hintsFromProcesses(ids, { daemonPid: 900, table: t, cwdOf: p => moved[p], agents })
+        .map(h => h.sessionId), [D, A, null]);
+    // A shell count that does not line up falls back to unique-cwd matching.
+    assert.deepEqual(cli.hintsFromProcesses(ids.slice(0, 2), { daemonPid: 900, table: t, cwdOf: p => same[p], agents })
+        .map(h => h.sessionId), [D, null]);
     assert.equal(cli.parseLsofCwd('p910\nfcwd\nn/Users/x/proj\n'), '/Users/x/proj');
     assert.equal(cli.parseLsofCwd(''), null);
 });

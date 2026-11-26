@@ -131,11 +131,29 @@ function hintsFromProcesses(tabs, { daemonPid, table, cwdOf, agents = null }) {
         const argv0 = ((table.procs.get(pid) || {}).cmd || '').split(/\s+/)[0] || '';
         return SHELL_RE.test(argv0.replace(/^.*\//, ''));
     }).map(pid => ({ pid, cwd: cwdOf(pid) }));
-    const shellFor = tabs.map((t) => {
-        if (!t.cwd || tabs.filter(x => x.cwd === t.cwd).length !== 1) return null;
-        const on = shells.filter(s => s.cwd === t.cwd);
-        return on.length === 1 ? on[0].pid : null;
-    });
+    let shellFor;
+    if (tabs.length && tabs.every(t => Number.isInteger(t.id)) && shells.length === tabs.length) {
+        // Tab ids are handed out in the order tabs are opened, and each tab's
+        // shell is spawned at that moment — so ascending id pairs with
+        // ascending shell pid, whatever the display order after a drag. That
+        // is what separates several tabs on ONE cwd (five on ~/Desktop on
+        // 2026-11-25). Each pair must still agree on the cwd; one that does not
+        // gets no hint rather than a neighbour's thread.
+        const byId = tabs.map((t, i) => [t, i]).sort((a, b) => a[0].id - b[0].id);
+        shellFor = new Array(tabs.length).fill(null);
+        byId.forEach(([t, i], k) => {
+            const sh = shells[k];
+            if (sh && (!sh.cwd || !t.cwd || sh.cwd === t.cwd)) shellFor[i] = sh.pid;
+        });
+    } else {
+        // No ids (or a shell count that does not line up): only a cwd unique
+        // on both sides is unambiguous.
+        shellFor = tabs.map((t) => {
+            if (!t.cwd || tabs.filter(x => x.cwd === t.cwd).length !== 1) return null;
+            const on = shells.filter(s => s.cwd === t.cwd);
+            return on.length === 1 ? on[0].pid : null;
+        });
+    }
     return tabs.map((t, i) => {
         const seen = shellFor[i] != null ? si.observe(shellFor[i], table, agents) : null;
         return { cwd: t.cwd || null, agent: seen ? seen.agent : null, sessionId: (seen && seen.sessionId) || null };
@@ -172,11 +190,13 @@ async function snapshot(port, lock, stateDir, log) {
     // The tab list in SAVED order — the order the next boot matches hints in.
     // tabs.json first: a cookieless /api/tabs makes the daemon provision a
     // throwaway session (and overwrite session.json).
-    let tabs = (readJson(path.join(stateDir, 'tabs.json')) || {}).tabs;
-    if (!Array.isArray(tabs) || !tabs.length) {
-        const t = await request(port, 'GET', '/api/tabs', undefined, { retries: 2 });
-        tabs = t.json && (Array.isArray(t.json) ? t.json : t.json.tabs);
-    }
+    // /api/tabs first: it carries the tab ids that pair tabs with their shells
+    // (see hintsFromProcesses), in the same order tabs.json is saved in. Its
+    // one cost on an older daemon — a cookieless call provisions a spare
+    // session — is harmless to the fleet. tabs.json (no ids) is the fallback.
+    const live = await request(port, 'GET', '/api/tabs', undefined, { retries: 2 });
+    let tabs = live.json && (Array.isArray(live.json) ? live.json : live.json.tabs);
+    if (!Array.isArray(tabs) || !tabs.length) tabs = (readJson(path.join(stateDir, 'tabs.json')) || {}).tabs;
     if (!Array.isArray(tabs)) return { from: 'none', tabs: [] };
     const ps = await run('ps', ['-ax', '-o', 'pid=,ppid=,command=']);
     if (!ps) return { from: 'none', tabs: [] };
