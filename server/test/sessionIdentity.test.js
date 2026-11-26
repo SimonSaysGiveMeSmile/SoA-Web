@@ -57,7 +57,7 @@ test('observe finds the agent under a pty, through the launcher shell', () => {
         [100, 1, '/bin/zsh'],
         [101, 100, `claude --resume ${SID}`],
     ]);
-    assert.deepEqual(si.observe(100, t), { agent: 'claude', sessionId: SID, pid: 101 });
+    assert.deepEqual(si.observe(100, t), { agent: 'claude', sessionId: SID, pid: 101, source: 'argv' });
 });
 
 test('observe takes the tab\'s OWN agent, not a nested subagent\'s thread', () => {
@@ -68,7 +68,7 @@ test('observe takes the tab\'s OWN agent, not a nested subagent\'s thread', () =
         [101, 100, 'claude'],
         [102, 101, `claude --resume ${OTHER}`],
     ]);
-    assert.deepEqual(si.observe(100, t), { agent: 'claude', sessionId: null, pid: 101 },
+    assert.deepEqual(si.observe(100, t), { agent: 'claude', sessionId: null, pid: 101, source: 'argv' },
         'a nested subagent must not donate its thread to the tab');
 });
 

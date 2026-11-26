@@ -367,7 +367,7 @@ test('restartCommand: launchctl kickstart on macOS, systemctl --user on linux', 
         ['launchctl', ['kickstart', '-k', 'gui/501/app.s0a.web.local']]);
     assert.deepEqual(cli.restartCommand('soa', { platform: 'linux', uid: 1000 }), ['systemctl', ['--user', 'restart', 'soa.service']]);
     assert.throws(() => cli.parseArgs(['--bogus']), /unknown argument/);
-    assert.deepEqual(cli.parseArgs(['--no-repair', '--port', '4999', '--label', 'x']), { dryRun: false, repair: false, label: 'x', port: 4999 });
+    assert.deepEqual(cli.parseArgs(['--no-repair', '--port', '4999', '--label', 'x']), { dryRun: false, repair: false, hintsOnly: false, label: 'x', port: 4999 });
 });
 
 // ── the CLI against a stub daemon ─────────────────────────────────────────────

@@ -1525,7 +1525,13 @@ function sweepIdentity() {
     const withTable = (agents) => sessionIdentity.processTableAsync((table) => {
         try { if (table) stampIdentity(agents, table); } finally { _identityBusy = false; }
     });
-    if (Date.now() - _registryAt < IDENTITY_REGISTRY_MS) { withTable(sessionIdentity.cachedAgents()); return; }
+    if (Date.now() - _registryAt < IDENTITY_REGISTRY_MS) {
+        // The Claude registry is costly (asked every 2 min); Codex's open
+        // rollouts are one ~0.3 s lsof, so every sweep gets them — otherwise a
+        // cached sweep reads the argv id and undoes a /resume inside Codex.
+        sessionIdentity.codexOpen((cx) => withTable(sessionIdentity.withCodex(sessionIdentity.cachedAgents(), cx)));
+        return;
+    }
     _registryAt = Date.now();
     sessionIdentity.claudeAgents((agents) => withTable(agents || sessionIdentity.cachedAgents()));
 }
@@ -1543,14 +1549,17 @@ function shutdown(code = 0) {
     clearInterval(scrollbackFlush);
     clearInterval(memSample);
     clearInterval(identitySweep);
-    // Last chance to record WHICH thread each tab is on: the PTYs are about to
-    // die and take their process lines (the only exact source) with them.
-    // Synchronous, with a fresh registry answer. Before the final flush.
-    stampIdentity(finalAgents());
-    // Persist tabs + scrollback before killing PTYs so the next boot can
-    // seed each tab with what was on screen.
+    // Persist tabs + scrollback FIRST, before anything slow: on a loaded host a
+    // supervisor may SIGKILL us a few seconds after SIGTERM (2026-11-25 23:19),
+    // and the 30 s sweep has already stamped almost every tab's thread, so this
+    // flush alone is enough for an exact restore.
     const flushS = persistableSession();
     if (flushS) tabPersist.saveAll(flushS.tabMgr);
+    // Then the last chance to record WHICH thread each tab is on: the PTYs are
+    // about to die and take their process lines (the only exact source) with
+    // them. Synchronous (registry + Codex's open rollouts, a few seconds at
+    // most), and only re-saved when it actually changed something.
+    if (stampIdentity(finalAgents()) && flushS) tabPersist.saveAll(flushS.tabMgr);
     // Freeze persistence: killing the PTYs below fires onTabsChange for every
     // tab, and the debounced save would otherwise replace the fleet we just
     // flushed with an empty closedByUser tombstone before the process exits.

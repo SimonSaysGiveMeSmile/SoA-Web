@@ -161,16 +161,93 @@ function cachedAgents({ now = Date.now(), maxAgeMs = REGISTRY_MAX_AGE_MS } = {})
 }
 function _remember(map) { if (map) { _lastAgents = map; _lastAgentsAt = Date.now(); } return map; }
 
+// Codex keeps no registry like `claude agents`, but a running codex holds its
+// own rollout file open (~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl)
+// and that is the conversation it is in NOW, including a bare `codex` (no id
+// in its argv) and after /resume or /new inside the TUI. One `lsof -c codex`
+// covers the fleet (~0.3 s). Its entries ride in the same pid -> {sessionId}
+// map as Claude's registry, tagged agent: 'codex', so every caller of
+// observe() gets exact Codex identity without a new parameter.
+const LSOF_CODEX_ARGS = ['-nP', '-w', '-c', 'codex', '-Fpn'];
+const ROLLOUT_RE = /\/rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+function parseCodexOpen(out) {
+    const best = new Map();
+    let pid = null;
+    for (const line of String(out || '').split('\n')) {
+        if (line[0] === 'p') { pid = parseInt(line.slice(1), 10) || null; continue; }
+        if (line[0] !== 'n' || !pid) continue;
+        const m = ROLLOUT_RE.exec(line.slice(1));
+        if (!m) continue;
+        if (!best.has(pid)) best.set(pid, new Set());
+        best.get(pid).add(m[2].toLowerCase());
+    }
+    // Exact or nothing: a process holding two rollouts (a spawn_agent
+    // sub-thread records in the parent process; a recorder from before a
+    // /resume may still be open) cannot tell us which one is the tab's, so it
+    // is left out and the argv id / the tab's last stamp stand.
+    const map = new Map();
+    for (const [p, ids] of best) if (ids.size === 1) map.set(p, { agent: 'codex', sessionId: [...ids][0] });
+    return map;
+}
+const codexLookupOff = () => process.env.SOA_WEB_CLAUDE_AGENTS === '0' || process.env.SOA_WEB_CODEX_LSOF === '0';
+let _lastCodex = null, _lastCodexAt = 0;
+const CODEX_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+function _rememberCodex(map) { if (map && !map._partial) { _lastCodex = map; _lastCodexAt = Date.now(); } return map; }
+/** The last complete Codex answer, if recent: pid -> {agent:'codex', sessionId}. */
+function cachedCodex({ now = Date.now(), maxAgeMs = CODEX_CACHE_MAX_AGE_MS } = {}) {
+    return _lastCodex && now - _lastCodexAt <= maxAgeMs ? _lastCodex : null;
+}
+function codexOpen(cb) {
+    if (codexLookupOff()) { cb(null); return; }
+    try {
+        // lsof exits 1 when any process could not be inspected; its stdout is still good.
+        execFile('lsof', LSOF_CODEX_ARGS, { encoding: 'utf8', timeout: 10000, maxBuffer: 8 * 1024 * 1024 },
+            (err, stdout) => cb(err && err.killed ? cachedCodex() : stdout ? _rememberCodex(parseCodexOpen(stdout)) : cachedCodex()));
+    } catch (_) {
+        cb(cachedCodex());
+    }
+}
+function codexOpenSync(timeoutMs = 3000) {
+    if (codexLookupOff()) return null;
+    try {
+        return _rememberCodex(parseCodexOpen(execFileSync('lsof', LSOF_CODEX_ARGS, {
+            encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+        })));
+    } catch (e) {
+        // A timeout leaves lsof's output cut short: trust the last full sweep
+        // instead (a partial answer would hand some tabs back to their argv id).
+        if (e && (e.killed || e.signal || e.code === 'ETIMEDOUT')) return cachedCodex();
+        return e && e.stdout ? _rememberCodex(parseCodexOpen(String(e.stdout))) : cachedCodex();
+    }
+}
+// Claude's registry with Codex's open rollouts on top. Only the Claude part
+// is ever cached (_remember): a codex-only answer must never stand in for the
+// registry the next time `claude agents` fails.
+function withCodex(claudeMap, codexMap) {
+    if (!codexMap || !codexMap.size) return claudeMap;
+    const out = new Map(claudeMap || []);
+    for (const [pid, v] of codexMap) out.set(pid, v);
+    // Callers read "no Claude registry" off a null map; a map that only holds
+    // Codex entries says so explicitly (hasClaudeRegistry).
+    if (!claudeMap) Object.defineProperty(out, 'claudeRegistry', { value: false });
+    return out;
+}
+/** Did this pid map come with a Claude registry answer (fresh or cached)? */
+function hasClaudeRegistry(map) { return !!map && map.claudeRegistry !== false; }
+
 /** Async (never blocks the event loop): cb(Map|null). null = registry unavailable. */
 function claudeAgents(cb) {
     if (process.env.SOA_WEB_CLAUDE_AGENTS === '0') { cb(null); return; }
+    // A failed registry falls back to the cache here; with neither, the merged
+    // map is marked claudeRegistry: false (see hasClaudeRegistry).
+    const finish = (claudeMap) => codexOpen((cx) => cb(cx && cx.size ? withCodex(claudeMap || cachedAgents(), cx) : claudeMap));
     try {
         execFile(claudeBin(), ['agents', '--json'], { encoding: 'utf8', timeout: 15000, maxBuffer: 8 * 1024 * 1024 },
             (err, stdout) => {
-                cb(_remember(err ? null : parseAgents(stdout)));
+                finish(_remember(err ? null : parseAgents(stdout)));
             });
     } catch (_) {
-        cb(null);
+        finish(null);
     }
 }
 
@@ -182,14 +259,20 @@ function claudeAgents(cb) {
  */
 function claudeAgentsSync(timeoutMs = 3000) {
     if (process.env.SOA_WEB_CLAUDE_AGENTS === '0') return null;
+    let claudeMap = null;
     try {
         const out = execFileSync(claudeBin(), ['agents', '--json'], {
             encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
         });
-        return _remember(parseAgents(out));
+        claudeMap = _remember(parseAgents(out));
     } catch (_) {
-        return null;
+        claudeMap = null;
     }
+    // null keeps its meaning ("ask the cache"); with Codex entries the cached
+    // Claude part is merged in here instead.
+    const cx = codexOpenSync();
+    if (!cx || !cx.size) return claudeMap;
+    return withCodex(claudeMap || cachedAgents(), cx);
 }
 
 /**
@@ -209,8 +292,10 @@ function observe(ptyPid, table, agents) {
         if (!hit) continue;
         // The registry's id is the live conversation; the argv's is only
         // where the process started. Prefer the registry whenever it knows.
-        const reg = hit.agent === 'claude' && agents ? agents.get(pid) : null;
-        return reg ? { ...hit, sessionId: reg.sessionId, pid } : { ...hit, pid };
+        // Codex entries (read off its open rollout file) are tagged; Claude's are not.
+        const entry = agents ? agents.get(pid) : null;
+        const reg = entry && (entry.agent || 'claude') === hit.agent ? entry : null;
+        return reg ? { ...hit, sessionId: reg.sessionId, pid, source: 'live' } : { ...hit, pid, source: 'argv' };
     }
     return null;
 }
@@ -254,7 +339,12 @@ function stampTabs(tabs, { table, agents: registry, resolveCwd = null } = {}) {
             tab.sessionPid = null;
             agents++;
         }
+        if (seen.sessionId && seen.source === 'argv' && tab.sessionSource === 'live'
+            && tab.sessionPid === seen.pid && tab.sessionId) {
+            continue;   // a cached sweep without the live answer: keep what the live answer said
+        }
         if (seen.sessionId) {
+            tab.sessionSource = seen.source || null;
             if (tab.sessionId !== seen.sessionId) {
                 tab.sessionId = seen.sessionId;
                 // A new thread has its own home directory; the old one's is
@@ -415,6 +505,7 @@ function writeHints(stateDir, tabs, { now = Date.now() } = {}) {
 
 module.exports = {
     processTable, processTableAsync, parseTable, descendants, idFromCommand, observe, stampTabs, auditTabs, auditSummary,
-    parseAgents, claudeAgents, claudeAgentsSync, cachedAgents, applyHints, hintsPath, writeHints, EXPECT_TTL_MS,
+    parseAgents, claudeAgents, claudeAgentsSync, cachedAgents, parseCodexOpen, codexOpen, codexOpenSync, cachedCodex, withCodex, hasClaudeRegistry,
+    _setCachedCodexForTest: (map, at = Date.now()) => { _lastCodex = map; _lastCodexAt = at; }, applyHints, hintsPath, writeHints, EXPECT_TTL_MS,
     _setCachedAgentsForTest: (map, at = Date.now()) => { _lastAgents = map; _lastAgentsAt = at; },
 };

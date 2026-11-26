@@ -620,8 +620,19 @@ launchd jobs):
 2. `com.soa-web.watchdog-4010` — every 60s runs `scripts/soa-watchdog`: pings
    `:4010` and `kickstart -k`s `app.s0a.web.local` if it's **hung or down**
    (the case KeepAlive can't see). It is load-tolerant — it re-probes over
-   ~30s before acting, so a load-starved (not dead) daemon isn't restarted —
-   and runs with `SOA_WEB_MANAGE_TUNNEL=0` so it never touches the tunnel.
+   ~30-65s before acting (`SOA_WATCHDOG_PROBES`); while the HOST is
+   overloaded (load1 ≥ 4 × ncpu) it keeps waiting, up to
+   `SOA_WATCHDOG_LOADED_MAX_S` (180 s), as long as the daemon still gets CPU
+   (3 probes with no CPU progress = hung), so a load-starved (not dead)
+   daemon isn't restarted — and runs with
+   `SOA_WEB_MANAGE_TUNNEL=0` so it never touches the tunnel. Before it
+   SIGTERMs a hung daemon it runs `soa-restart --hints-only` (writes
+   `session-hints.json` from the process table, so the next boot resumes every
+   tab exactly even if the daemon never flushes), then gives it
+   `SOA_WATCHDOG_TERM_GRACE` (45 s, was 8) to save its tabs before
+   `kickstart -k`. Why: 2026-11-25 23:19, at load ~350 the daemon was
+   SIGKILLed 8 s after SIGTERM with no hints and 26 tabs came back guessed
+   (`~/.s0a-local/logs/incident-2026-11-25-fleet-lost-on-restart.md`).
 3. `com.soa-web.manager-watchdog-4010` — every 90s ensures a manager tab
    exists (resumes a wedged one, respawns it if missing).
 4. `com.soa-web.channels` — every 60s owns/heals the public tunnel
