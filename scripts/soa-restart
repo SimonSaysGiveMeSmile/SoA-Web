@@ -126,8 +126,11 @@ function hintsFromAudit(report) {
  * pid for a bare `claude`). Pure: `table` is a parsed ps, `cwdOf(pid)` the
  * shell's cwd, `agents` the registry Map (or null).
  */
-function hintsFromProcesses(tabs, { daemonPid, table, cwdOf, agents = null }) {
-    const shells = (table.kids.get(daemonPid) || []).slice().sort((a, b) => a - b).filter((pid) => {
+function hintsFromProcesses(tabs, { daemonPid, table, cwdOf, agents = null, startOf = () => 0 }) {
+    // Spawn order: start time first, pid only within one second — pids wrap
+    // (a tab opened late on 2026-11-25 got pid 44358 below the boot's 76255).
+    const shells = (table.kids.get(daemonPid) || []).slice()
+        .sort((a, b) => (startOf(a) - startOf(b)) || (a - b)).filter((pid) => {
         const argv0 = ((table.procs.get(pid) || {}).cmd || '').split(/\s+/)[0] || '';
         return SHELL_RE.test(argv0.replace(/^.*\//, ''));
     }).map(pid => ({ pid, cwd: cwdOf(pid) }));
@@ -158,6 +161,17 @@ function hintsFromProcesses(tabs, { daemonPid, table, cwdOf, agents = null }) {
         const seen = shellFor[i] != null ? si.observe(shellFor[i], table, agents) : null;
         return { cwd: t.cwd || null, agent: seen ? seen.agent : null, sessionId: (seen && seen.sessionId) || null };
     });
+}
+
+/** `ps -o pid=,lstart=` → Map pid -> start time (ms). Unparseable rows are left out. */
+function parseStarts(out) {
+    const m = new Map();
+    for (const line of String(out || '').split('\n')) {
+        const r = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+        const at = r ? Date.parse(r[2]) : NaN;
+        if (r && Number.isFinite(at)) m.set(Number(r[1]), at);
+    }
+    return m;
 }
 
 /** `lsof -a -p <pid> -d cwd -Fn` → the cwd ("n/path" line). */
@@ -205,8 +219,11 @@ async function snapshot(port, lock, stateDir, log) {
     for (const pid of table.kids.get(lock.pid) || []) {
         cwds.set(pid, await cwdOfPid(pid));
     }
+    const starts = parseStarts(await run('ps', ['-o', 'pid=,lstart=', '-p', [...cwds.keys()].join(',') || String(lock.pid)]));
     const agents = await new Promise(r => si.claudeAgents(r));
-    return { from: 'ps', tabs: hintsFromProcesses(tabs.filter(x => !x.exited), { daemonPid: lock.pid, table, cwdOf: pid => cwds.get(pid) || null, agents }) };
+    return { from: 'ps', tabs: hintsFromProcesses(tabs.filter(x => !x.exited), {
+        daemonPid: lock.pid, table, cwdOf: pid => cwds.get(pid) || null, agents, startOf: pid => starts.get(pid) || 0,
+    }) };
 }
 
 // ── restart + wait ────────────────────────────────────────────────────────────
@@ -354,7 +371,7 @@ async function restart(argv, env) {
 
 function summaryOf(audit) { return audit.summary || si.auditSummary(audit); }
 
-module.exports = { parseArgs, hintsFromAudit, hintsFromProcesses, parseLsofCwd, cwdOfPid, restartCommand, mismatches, main };
+module.exports = { parseArgs, hintsFromAudit, hintsFromProcesses, parseStarts, parseLsofCwd, cwdOfPid, restartCommand, mismatches, main };
 
 if (require.main === module) {
     main().then((code) => { process.exitCode = code; },

@@ -351,6 +351,13 @@ test('hintsFromProcesses (older daemon): shells by a unique cwd, argv or registr
     // A shell count that does not line up falls back to unique-cwd matching.
     assert.deepEqual(cli.hintsFromProcesses(ids.slice(0, 2), { daemonPid: 900, table: t, cwdOf: p => same[p], agents })
         .map(h => h.sessionId), [D, null]);
+    // Pid wrap: the newest shell can have the LOWEST pid; start time orders it.
+    const wrapPs = si.parseTable(ps.replace('  930   900 /bin/zsh -l', '  130   900 /bin/zsh -l').replace('  931   930 claude', '  131   130 claude'));
+    const wrapCwd = { 910: '/a', 920: '/a', 130: '/c' };
+    const start = { 910: 1000, 920: 1000, 130: 5000 };
+    assert.deepEqual(cli.hintsFromProcesses(ids, { daemonPid: 900, table: wrapPs, cwdOf: p => wrapCwd[p], startOf: p => start[p] })
+        .map(h => h.sessionId), [null, A, C]);
+    assert.deepEqual([...cli.parseStarts('  910 Wed Nov 25 13:52:17 2026\n  130 Wed Nov 25 16:40:01 2026\njunk').keys()], [910, 130]);
     assert.equal(cli.parseLsofCwd('p910\nfcwd\nn/Users/x/proj\n'), '/Users/x/proj');
     assert.equal(cli.parseLsofCwd(''), null);
 });
