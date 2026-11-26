@@ -30,6 +30,22 @@
 #   SOA_WEB_STATE_DIR     lock/tunnel/logs root     (default ~/.soa-web)
 #   SOA_WEB_MANAGE_TUNNEL 1 = also heal the tunnel  (default 1; set 0 when the
 #                         channels self-healer owns the tunnel, e.g. :4010)
+#   SOA_WATCHDOG_PROBES          re-probes before a live daemon counts as hung
+#                                (default 5: 5 s sleep + up to 8 s curl each, ~30-65 s)
+#   SOA_WATCHDOG_LOADED_MAX_S    while the HOST is overloaded (load1 >= ncpu x
+#                                SOA_WATCHDOG_LOAD_PER_CPU, default 4) a daemon that is
+#                                still getting CPU is starved, not hung: keep waiting
+#                                up to this many seconds (default 180). One that makes
+#                                no CPU progress for 3 probes is hung at once.
+#   SOA_WATCHDOG_TERM_GRACE      seconds a SIGTERMed daemon gets to flush its tabs
+#                                before kickstart -k (default 45; was 8)
+#   SOA_WATCHDOG_HINTS_MAX_S     hard cap on the hints snapshot (default 40)
+#
+# Before it SIGTERMs a hung daemon it runs `soa-restart --hints-only`, which
+# writes session-hints.json (each tab's agent + conversation, read off the
+# process table) so the next boot resumes every tab on its exact thread even
+# if the daemon never gets to flush. 2026-11-25 23:19: at load ~350 the daemon
+# was SIGKILLed 8 s after SIGTERM, with no hints, and 26 tabs came back guessed.
 
 set -u
 
@@ -175,18 +191,61 @@ if [ -z "$PID" ]; then
     exit 0
 fi
 
-# Alive but first probe failed — may be load-starved. Re-probe over ~30s.
-for _ in 1 2 3 4 5; do
-    sleep 5
-    if ping_ok; then exit 0; fi
-done
+# Alive but first probe failed — may be load-starved. Re-probe; on an
+# overloaded HOST a slow daemon is the norm, not a hang, so wait much longer.
+host_overloaded() {
+    local load ncpu per
+    load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+    [ -n "$load" ] || load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+    ncpu="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)"
+    per="${SOA_WATCHDOG_LOAD_PER_CPU:-4}"
+    [ -n "$load" ] && awk -v l="$load" -v n="$ncpu" -v p="$per" 'BEGIN{exit !(l >= n*p)}'
+}
+# CPU time the daemon has used, in centiseconds ("MM:SS.ss" / "H:MM:SS.ss").
+cpu_cs() { ps -o time= -p "$1" 2>/dev/null | awk -F: '{s=0; for(i=1;i<=NF;i++) s=s*60+$i; printf "%d", s*100}'; }
+if host_overloaded; then
+    MAX="${SOA_WATCHDOG_LOADED_MAX_S:-180}"
+    log "daemon pid $PID slow to answer on an overloaded host (load $(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')) — waiting up to ${MAX}s while it still gets CPU"
+    T0=$SECONDS; LAST="$(cpu_cs "$PID")"; STILL=0
+    while [ $((SECONDS - T0)) -lt "$MAX" ]; do
+        sleep 5
+        if ping_ok; then exit 0; fi
+        kill -0 "$PID" 2>/dev/null || break
+        NOW="$(cpu_cs "$PID")"
+        if [ -n "$NOW" ] && [ -n "$LAST" ] && [ "$NOW" -gt "$LAST" ]; then STILL=0; else STILL=$((STILL + 1)); fi
+        LAST="$NOW"
+        if [ "$STILL" -ge 3 ]; then log "daemon pid $PID made no CPU progress for 3 probes — hung, not starved"; break; fi
+    done
+else
+    for _ in $(seq 1 "${SOA_WATCHDOG_PROBES:-5}"); do
+        sleep 5
+        if ping_ok; then exit 0; fi
+    done
+fi
 
-log "daemon pid $PID alive but unresponsive ~30s — SIGTERM (preserve tunnel $(tunnel_url))"
+# The wait can be minutes long: act only on the daemon we started judging.
+if [ "$(live_owner)" != "$PID" ]; then
+    log "daemon pid changed while probing ($PID -> $(live_owner)) — nothing to do this cycle"
+    exit 0
+fi
+
+# Record every tab's agent + conversation BEFORE we kill anything: the hung
+# daemon may never get to flush, and the next boot applies these hints.
+RESTART_CLI="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/soa-restart"
+if [ -x "$RESTART_CLI" ] && [ "${SOA_WATCHDOG_HINTS:-1}" = 1 ]; then
+    # Hard cap: a paging host can stall lsof/ps/claude; the restart must not wait on it.
+    SOA_WEB_STATE_DIR="$STATE_DIR" perl -e 'alarm shift; exec @ARGV' "${SOA_WATCHDOG_HINTS_MAX_S:-40}" \
+        "$RESTART_CLI" --hints-only --port "$PORT" 2>&1 | tail -1 | sed 's/^/hints: /' >> "$LOG"
+fi
+[ "$(live_owner)" = "$PID" ] || { log "daemon pid $PID gone before SIGTERM — leaving recovery to the next cycle"; exit 0; }
+
+GRACE="${SOA_WATCHDOG_TERM_GRACE:-45}"
+log "daemon pid $PID alive but unresponsive — SIGTERM, ${GRACE}s to flush (preserve tunnel $(tunnel_url))"
 kill -TERM "$PID" 2>/dev/null
-for _ in 1 2 3 4 5 6 7 8; do sleep 1; kill -0 "$PID" 2>/dev/null || break; done
+for _ in $(seq 1 "$GRACE"); do sleep 1; kill -0 "$PID" 2>/dev/null || break; done
 
 if kill -0 "$PID" 2>/dev/null; then
-    log "pid $PID ignored SIGTERM — kickstart -k (tunnel may churn)"
+    log "pid $PID still alive ${GRACE}s after SIGTERM — kickstart -k (tunnel may churn)"
     svc_restart "$LABEL" >> "$LOG" 2>&1
 else
     svc_kick "$LABEL" >> "$LOG" 2>&1

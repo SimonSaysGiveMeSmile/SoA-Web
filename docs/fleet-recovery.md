@@ -39,7 +39,12 @@ dropped, because a Claude id given to Codex fails, and so does the reverse.
    whole fleet): the first `claude` or `codex` process under each tab's PTY is
    that tab's agent, and its argv (`claude --resume <id>`,
    `codex resume <id>`) or Claude's own registry (`claude agents --json`, which
-   maps a pid to the conversation it is in now) gives the thread. index.js runs
+   maps a pid to the conversation it is in now) gives the thread. Codex has
+   no such registry, but a running `codex` holds its own rollout file open
+   (`~/.codex/sessions/…/rollout-<ts>-<uuid>.jsonl`), so one `lsof -c codex`
+   gives every Codex tab its live thread too, including a bare `codex` and a
+   `/resume` inside the TUI (`sessionIdentity.codexOpen`, merged into the
+   same pid map; `SOA_WEB_CODEX_LSOF=0` turns it off). index.js runs
    this sweep every 30 s (`SOA_WEB_IDENTITY_SWEEP_MS`). The registry is called
    at most every 2 min (`SOA_WEB_IDENTITY_REGISTRY_MS`), and the sweep writes
    to disk only when something changed.

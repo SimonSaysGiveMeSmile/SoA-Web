@@ -22,10 +22,13 @@
  * to <state>/soa-restart.last.json — the only place it reaches a caller in a
  * tab, where the CLI detaches and exits 0 at once.
  *
- *   soa-restart [--dry-run] [--no-repair] [--label L] [--port N]
+ *   soa-restart [--dry-run] [--no-repair] [--hints-only] [--label L] [--port N]
  *
  *   --dry-run         print the identity snapshot; restart nothing, write nothing
  *   --no-repair       restart and audit only
+ *   --hints-only      write session-hints.json and exit; restart nothing. For a
+ *                     supervisor about to kill a HUNG daemon (soa-watchdog): short
+ *                     request timeouts, falls back to tabs.json + the process table
  *   SOA_RESTART_DRY=1 never call launchctl/systemctl (prints what it would run)
  *                     and only preview the repair ({dryRun:true}); it still
  *                     writes session-hints.json (the next boot within 30 min
@@ -57,11 +60,12 @@ function pidAlive(pid) {
 }
 
 function parseArgs(argv) {
-    const o = { dryRun: false, repair: true, label: null, port: null };
+    const o = { dryRun: false, repair: true, hintsOnly: false, label: null, port: null };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--dry-run') o.dryRun = true;
         else if (a === '--no-repair') o.repair = false;
+        else if (a === '--hints-only') o.hintsOnly = true;
         else if (a === '--repair') o.repair = true;
         else if (a === '--label') o.label = argv[++i];
         else if (a === '--port') o.port = parseInt(argv[++i], 10);
@@ -195,8 +199,29 @@ async function cwdOfPid(pid, platform = process.platform) {
     return parseLsofCwd(await run('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn']));
 }
 
-async function snapshot(port, lock, stateDir, log) {
-    const a = await request(port, 'GET', '/api/fleet/audit', undefined, { retries: 2 });
+/** Every pid's cwd in ONE lsof (pid -> path); per-pid lookups only as a fallback. */
+function parseLsofCwds(out) {
+    const map = new Map();
+    let pid = null;
+    for (const line of String(out || '').split('\n')) {
+        if (line[0] === 'p') pid = parseInt(line.slice(1), 10) || null;
+        else if (line[0] === 'n' && pid && line[1] === '/') map.set(pid, line.slice(1));
+    }
+    return map;
+}
+async function cwdsOfPids(pids, platform = process.platform) {
+    const out = new Map();
+    if (!pids.length) return out;
+    if (platform !== 'linux') {
+        const all = parseLsofCwds(await run('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn']));
+        for (const [p, c] of all) out.set(p, c);
+    }
+    for (const pid of pids) if (!out.has(pid)) out.set(pid, await cwdOfPid(pid, platform));
+    return out;
+}
+
+async function snapshot(port, lock, stateDir, log, req = { retries: 2 }) {
+    const a = await request(port, 'GET', '/api/fleet/audit', undefined, req);
     if (a.status === 200 && a.json && Array.isArray(a.json.tabs)) {
         return { from: 'audit', tabs: hintsFromAudit(a.json) };
     }
@@ -208,17 +233,14 @@ async function snapshot(port, lock, stateDir, log) {
     // (see hintsFromProcesses), in the same order tabs.json is saved in. Its
     // one cost on an older daemon — a cookieless call provisions a spare
     // session — is harmless to the fleet. tabs.json (no ids) is the fallback.
-    const live = await request(port, 'GET', '/api/tabs', undefined, { retries: 2 });
+    const live = await request(port, 'GET', '/api/tabs', undefined, req);
     let tabs = live.json && (Array.isArray(live.json) ? live.json : live.json.tabs);
     if (!Array.isArray(tabs) || !tabs.length) tabs = (readJson(path.join(stateDir, 'tabs.json')) || {}).tabs;
     if (!Array.isArray(tabs)) return { from: 'none', tabs: [] };
     const ps = await run('ps', ['-ax', '-o', 'pid=,ppid=,command=']);
     if (!ps) return { from: 'none', tabs: [] };
     const table = si.parseTable(ps);
-    const cwds = new Map();
-    for (const pid of table.kids.get(lock.pid) || []) {
-        cwds.set(pid, await cwdOfPid(pid));
-    }
+    const cwds = await cwdsOfPids(table.kids.get(lock.pid) || []);
     const starts = parseStarts(await run('ps', ['-o', 'pid=,lstart=', '-p', [...cwds.keys()].join(',') || String(lock.pid)]));
     const agents = await new Promise(r => si.claudeAgents(r));
     return { from: 'ps', tabs: hintsFromProcesses(tabs.filter(x => !x.exited), {
@@ -274,7 +296,7 @@ async function restart(argv, env) {
     const log = (m) => console.log(m);
     let opts;
     try { opts = parseArgs(argv); } catch (e) { console.error(`soa-restart: ${e.message}`); return { code: 1 }; }
-    if (opts.help) { log('usage: soa-restart [--dry-run] [--no-repair] [--label L] [--port N]'); return { code: 0 }; }
+    if (opts.help) { log('usage: soa-restart [--dry-run] [--no-repair] [--hints-only] [--label L] [--port N]'); return { code: 0 }; }
     const dry = env.SOA_RESTART_DRY === '1';
 
     const SD = resolveStateDir({ env });
@@ -285,7 +307,7 @@ async function restart(argv, env) {
     const label = opts.label || env.SOA_WEB_LAUNCHD_LABEL || 'app.s0a.web.local';
 
     // Inside a tab, the restart kills our own shell: carry on detached.
-    if (env.SOA_WEB_TAB && !env.SOA_RESTART_CHILD && !opts.dryRun && !dry) {
+    if (env.SOA_WEB_TAB && !env.SOA_RESTART_CHILD && !opts.dryRun && !opts.hintsOnly && !dry) {
         const logs = path.join(SD, 'logs');
         try { fs.mkdirSync(logs, { recursive: true }); } catch (_) {}
         const out = fs.openSync(path.join(logs, 'soa-restart.log'), 'a');
@@ -299,17 +321,31 @@ async function restart(argv, env) {
     }
 
     log(`[${new Date().toISOString()}] soa-restart: daemon pid ${lock.pid} on :${port}, state ${SD}, label ${label}`);
-    const snap = await snapshot(port, lock, SD, log);
+    // A hung daemon will not answer: ask briefly, then read the disk + ps.
+    const hintsReq = { timeout: parseInt(env.SOA_RESTART_HINTS_TIMEOUT_MS || '5000', 10) || 5000, retries: 0 };
+    const snap = await snapshot(port, lock, SD, log, opts.hintsOnly ? hintsReq : undefined);
     const withId = snap.tabs.filter(t => t.sessionId).length;
     if (opts.dryRun) {
         console.log(JSON.stringify({ savedAt: Date.now(), from: snap.from, tabs: snap.tabs }, null, 2));
         log(`soa-restart: ${withId}/${snap.tabs.length} tab(s) have a hint (dry run: nothing written, nothing restarted)`);
         return { code: 0 };
     }
+    // --hints-only must not replace hints written for THIS daemon's boot (a
+    // manual soa-restart's, from the audit) that its restore has not applied
+    // yet: those are newer than the daemon itself.
+    let pending = false;
+    if (opts.hintsOnly) {
+        try { pending = fs.statSync(si.hintsPath(SD)).mtimeMs > Date.parse(lock.startedAt || 0); } catch (_) {}
+    }
+    if (pending) {
+        log(`soa-restart: kept ${si.hintsPath(SD)} — written for this daemon's boot and not yet applied`);
+        return { code: 0, stateDir: null, result: { hints: 0, kept: true } };
+    }
     if (snap.tabs.length) {
         try { si.writeHints(SD, snap.tabs); } catch (e) { log(`soa-restart: could not write session hints: ${e.message}`); }
     }
     log(`soa-restart: session hints for ${withId}/${snap.tabs.length} tab(s) (from ${snap.from}) → ${si.hintsPath(SD)}`);
+    if (opts.hintsOnly) return { code: snap.tabs.length ? 0 : 1, stateDir: null, result: { hints: withId, tabs: snap.tabs.length, from: snap.from } };
 
     const [cmd, args] = restartCommand(label);
     const restartAt = Date.now();
@@ -371,7 +407,7 @@ async function restart(argv, env) {
 
 function summaryOf(audit) { return audit.summary || si.auditSummary(audit); }
 
-module.exports = { parseArgs, hintsFromAudit, hintsFromProcesses, parseStarts, parseLsofCwd, cwdOfPid, restartCommand, mismatches, main };
+module.exports = { parseArgs, hintsFromAudit, hintsFromProcesses, parseStarts, parseLsofCwd, parseLsofCwds, cwdsOfPids, cwdOfPid, restartCommand, mismatches, main };
 
 if (require.main === module) {
     main().then((code) => { process.exitCode = code; },

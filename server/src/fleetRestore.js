@@ -312,9 +312,9 @@ function auditFleet(sessionsIterable, { table = null, agents = null, persist = t
     const list = [...(sessionsIterable || [])].filter(s => s && s.tabMgr);
     const tabs = _tabsOf(list);
     const t = table || sessionIdentity.processTable();
-    const reg = agents || sessionIdentity.cachedAgents();
+    const reg = agents || sessionIdentity.withCodex(sessionIdentity.cachedAgents(), sessionIdentity.cachedCodex());
     const report = sessionIdentity.auditTabs(tabs, { table: t, agents: reg });
-    report.registry = !!reg;
+    report.registry = sessionIdentity.hasClaudeRegistry(reg);
     // The audit IS a sweep: what it saw becomes the tabs' identity. A thread's
     // home directory is looked up lazily, at the next launch.
     if (t) {
@@ -338,7 +338,7 @@ function auditFleetAsync(sessionsIterableFn, cb) {
             try { a = auditFleet(sessionsIterableFn(), { table, agents: agents || null }); }
             catch (e) { a = { at: new Date().toISOString(), tabs: [], duplicates: [], counts: {}, psOk: false, error: String((e && e.message) || e) }; }
             // Without the registry no Claude tab's thread can be checked.
-            if (!agents) a.registry = false;
+            if (!sessionIdentity.hasClaudeRegistry(agents)) a.registry = false;
             cb(a);
         });
     });
