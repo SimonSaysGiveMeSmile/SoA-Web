@@ -315,7 +315,8 @@ function auditTabs(tabs, { table, agents: registry } = {}) {
         else if (expected.sessionId && observed.sessionId && observed.sessionId !== expected.sessionId) status = 'wrong-session';
         else if (expected.sessionId && !observed.sessionId) status = 'unverified';
         else status = 'ok';
-        rows.push({ id: tab.id, title: tab.title, cwd: tab.cwd, expected, observed, status });
+        // `pid`: the process judged, so a repair acts only on that same process.
+        rows.push({ id: tab.id, title: tab.title, cwd: tab.cwd, expected, observed, status, pid: seen ? seen.pid : null });
         if (observed && observed.sessionId) {
             if (!byId.has(observed.sessionId)) byId.set(observed.sessionId, []);
             byId.get(observed.sessionId).push(tab.id);
@@ -351,7 +352,12 @@ function auditSummary(a) {
 const HINTS_MAX_AGE_MS = 30 * 60 * 1000;
 function hintsPath(stateDir) { return path.join(stateDir, 'session-hints.json'); }
 
-function applyHints(entries, stateDir, { now = Date.now(), maxAgeMs = HINTS_MAX_AGE_MS } = {}) {
+// `savedAt` (ms) is when the tab list being restored was written. A list newer
+// than the hints was flushed by identity-aware code (shutdown stamps afresh
+// after any hints were taken), so an id it already has wins; the hints only
+// fill tabs it has no id for. An older list (a crash, or the old code that
+// wrote no ids) takes the hints.
+function applyHints(entries, stateDir, { now = Date.now(), maxAgeMs = HINTS_MAX_AGE_MS, savedAt = null } = {}) {
     const file = hintsPath(stateDir);
     let hints;
     try { hints = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return { applied: 0, reason: 'none' }; }
@@ -365,7 +371,9 @@ function applyHints(entries, stateDir, { now = Date.now(), maxAgeMs = HINTS_MAX_
         && new RegExp('^' + UUID + '$').test(h.sessionId);
     const used = new Set();
     let applied = 0;
+    const listIsNewer = Number.isFinite(savedAt) && savedAt > hints.savedAt;
     const set = (entry, h) => {
+        if (listIsNewer && entry.sessionId) return;
         const kind = h.agent === 'codex' ? 'codex' : 'claude';
         // A hint never changes a tab's KNOWN agent: that would type one
         // agent's id into the other.
@@ -387,8 +395,26 @@ function applyHints(entries, stateDir, { now = Date.now(), maxAgeMs = HINTS_MAX_
     return { applied, reason: 'ok' };
 }
 
+/**
+ * Write session-hints.json for the next boot: one row per tab in saved tab
+ * order ({cwd, agent, sessionId}, nulls kept so positions line up). Atomic.
+ * Returns how many rows carry an id.
+ */
+function writeHints(stateDir, tabs, { now = Date.now() } = {}) {
+    const rows = (tabs || []).map(t => ({
+        cwd: (t && t.cwd) || null,
+        agent: t && (t.agent === 'codex' || t.agent === 'claude') ? t.agent : null,
+        sessionId: t && typeof t.sessionId === 'string' && new RegExp('^' + UUID + '$').test(t.sessionId) ? t.sessionId : null,
+    }));
+    const file = hintsPath(stateDir);
+    const tmp = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify({ savedAt: now, tabs: rows }, null, 2) + '\n');
+    fs.renameSync(tmp, file);
+    return rows.filter(r => r.sessionId).length;
+}
+
 module.exports = {
     processTable, processTableAsync, parseTable, descendants, idFromCommand, observe, stampTabs, auditTabs, auditSummary,
-    parseAgents, claudeAgents, claudeAgentsSync, cachedAgents, applyHints, hintsPath,
+    parseAgents, claudeAgents, claudeAgentsSync, cachedAgents, applyHints, hintsPath, writeHints, EXPECT_TTL_MS,
     _setCachedAgentsForTest: (map, at = Date.now()) => { _lastAgents = map; _lastAgentsAt = at; },
 };

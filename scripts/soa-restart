@@ -1,0 +1,342 @@
+#!/usr/bin/env node
+/**
+ * soa-restart — the ONE command to restart the daemon without losing who runs
+ * where. It is the 2026-11-25 manual recovery as a procedure:
+ *
+ *   1. snapshot every tab's identity (agent + exact session id) into
+ *      <state>/session-hints.json, in saved tab order. Source: the daemon's own
+ *      GET /api/fleet/audit; for an older daemon without it, the process table
+ *      (the daemon's PTY shells, confirmed by their cwd, and the claude/codex
+ *      in front of each, with the id from its argv or `claude agents --json`);
+ *   2. restart through the supervisor (launchctl kickstart -k, or systemctl
+ *      --user restart on linux) — SIGTERM, so shutdown() flushes and stamps;
+ *   3. wait for a NEW daemon pid and /api/ping, then for the restore's
+ *      scheduled audit (GET /api/fleet/audit?last=1 newer than the restart);
+ *   4. audit afresh and print what is not ok;
+ *   5. unless --no-repair, POST /api/fleet/repair (exact relaunch of each tab
+ *      on the wrong agent or thread) and audit once more.
+ *
+ * Exit: 0 every tab ok/unverified/shell, 2 mismatches remain, 1 the restart
+ * itself failed (or the daemon could not be found), 3 restarted but the new
+ * daemon has no /api/fleet/audit (nothing audited). The outcome is also written
+ * to <state>/soa-restart.last.json — the only place it reaches a caller in a
+ * tab, where the CLI detaches and exits 0 at once.
+ *
+ *   soa-restart [--dry-run] [--no-repair] [--label L] [--port N]
+ *
+ *   --dry-run         print the identity snapshot; restart nothing, write nothing
+ *   --no-repair       restart and audit only
+ *   SOA_RESTART_DRY=1 never call launchctl/systemctl (prints what it would run)
+ *                     and only preview the repair ({dryRun:true}); it still
+ *                     writes session-hints.json (the next boot within 30 min
+ *                     applies it) and soa-restart.last.json
+ *   SOA_WEB_STATE_DIR state dir override; SOA_WEB_LAUNCHD_LABEL label override
+ *
+ * Run from inside a SoA tab it re-runs itself detached (the restart kills that
+ * tab's shell) and logs to <state>/logs/soa-restart.log.
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const { execFile, spawn } = require('child_process');
+
+const { resolveStateDir } = require('./soa-fleet-restore-watch');
+const si = require('../server/src/sessionIdentity');
+
+const REQ_TIMEOUT_MS = 60000;   // a GET took 14 s on a loaded daemon
+const MISMATCH = new Set(['wrong-agent', 'wrong-session', 'missing']);
+const SHELL_RE = /^-?(?:zsh|bash|sh|fish|dash|ksh|tcsh|login)$/;
+
+function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) { return null; } }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function pidAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return !!e && e.code === 'EPERM'; }
+}
+
+function parseArgs(argv) {
+    const o = { dryRun: false, repair: true, label: null, port: null };
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === '--dry-run') o.dryRun = true;
+        else if (a === '--no-repair') o.repair = false;
+        else if (a === '--repair') o.repair = true;
+        else if (a === '--label') o.label = argv[++i];
+        else if (a === '--port') o.port = parseInt(argv[++i], 10);
+        else if (a === '-h' || a === '--help') o.help = true;
+        else throw new Error(`unknown argument: ${a}`);
+    }
+    return o;
+}
+
+function request(port, method, p, body, { timeout = REQ_TIMEOUT_MS, retries = 0 } = {}) {
+    const once = () => new Promise((resolve) => {
+        const headers = {};
+        let payload = null;
+        if (body !== undefined) {
+            payload = JSON.stringify(body);
+            headers['content-type'] = 'application/json';
+            headers['content-length'] = Buffer.byteLength(payload);
+        }
+        if (process.env.SOA_WEB_SESSION_TOKEN) headers.authorization = `Bearer ${process.env.SOA_WEB_SESSION_TOKEN}`;
+        if (process.env.SOA_WEB_LOCAL_KEY) headers['x-soa-local-key'] = process.env.SOA_WEB_LOCAL_KEY;
+        const req = http.request({ host: '127.0.0.1', port, method, path: p, headers, timeout }, (res) => {
+            let b = ''; res.on('data', c => b += c); res.on('end', () => {
+                let json = null; try { json = JSON.parse(b); } catch (_) {}
+                resolve({ status: res.statusCode, json, raw: b });
+            });
+        });
+        req.on('error', (e) => resolve({ status: 0, error: e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ status: 0, error: 'timeout' }); });
+        if (payload) req.write(payload);
+        req.end();
+    });
+    return (async () => {
+        let r;
+        for (let i = 0; i <= retries; i++) {
+            r = await once();
+            if (r.status) return r;
+            if (i < retries) await sleep(2000);
+        }
+        return r;
+    })();
+}
+
+// ── identity snapshot ─────────────────────────────────────────────────────────
+
+/** From the daemon's audit: observed identity per tab (null where unread). */
+function hintsFromAudit(report) {
+    return (report.tabs || []).map(r => ({
+        cwd: r.cwd || null,
+        agent: (r.observed && r.observed.agent) || null,
+        sessionId: (r.observed && r.observed.sessionId) || null,
+    }));
+}
+
+/**
+ * Older daemon (no /api/fleet/audit): map each tab to one of the daemon's PTY
+ * shells by cwd — only a cwd unique among the tabs AND among the shells. A cwd
+ * shared by several tabs gets no hint: shells are in spawn order and tabs in
+ * saved order, so after a drag two same-cwd tabs would line up swapped and each
+ * resume the other's thread. A missing hint falls back to the allocator; a
+ * wrong one is persisted as identity. Then the agent
+ * in front of that shell (sessionIdentity.observe: argv id, or the registry by
+ * pid for a bare `claude`). Pure: `table` is a parsed ps, `cwdOf(pid)` the
+ * shell's cwd, `agents` the registry Map (or null).
+ */
+function hintsFromProcesses(tabs, { daemonPid, table, cwdOf, agents = null }) {
+    const shells = (table.kids.get(daemonPid) || []).slice().sort((a, b) => a - b).filter((pid) => {
+        const argv0 = ((table.procs.get(pid) || {}).cmd || '').split(/\s+/)[0] || '';
+        return SHELL_RE.test(argv0.replace(/^.*\//, ''));
+    }).map(pid => ({ pid, cwd: cwdOf(pid) }));
+    const shellFor = tabs.map((t) => {
+        if (!t.cwd || tabs.filter(x => x.cwd === t.cwd).length !== 1) return null;
+        const on = shells.filter(s => s.cwd === t.cwd);
+        return on.length === 1 ? on[0].pid : null;
+    });
+    return tabs.map((t, i) => {
+        const seen = shellFor[i] != null ? si.observe(shellFor[i], table, agents) : null;
+        return { cwd: t.cwd || null, agent: seen ? seen.agent : null, sessionId: (seen && seen.sessionId) || null };
+    });
+}
+
+/** `lsof -a -p <pid> -d cwd -Fn` → the cwd ("n/path" line). */
+function parseLsofCwd(out) {
+    const m = /^n(\/.*)$/m.exec(out || '');
+    return m ? m[1] : null;
+}
+
+function run(cmd, args, timeout = 15000) {
+    return new Promise((resolve) => {
+        try {
+            execFile(cmd, args, { encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024 },
+                (err, out) => resolve(err && !out ? null : out));
+        } catch (_) { resolve(null); }
+    });
+}
+
+/** A process's cwd: /proc on linux (lsof is often not installed), lsof elsewhere. */
+async function cwdOfPid(pid, platform = process.platform) {
+    if (platform === 'linux') { try { return fs.readlinkSync(`/proc/${pid}/cwd`); } catch (_) { /* lsof below */ } }
+    return parseLsofCwd(await run('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn']));
+}
+
+async function snapshot(port, lock, stateDir, log) {
+    const a = await request(port, 'GET', '/api/fleet/audit', undefined, { retries: 2 });
+    if (a.status === 200 && a.json && Array.isArray(a.json.tabs)) {
+        return { from: 'audit', tabs: hintsFromAudit(a.json) };
+    }
+    log(`no /api/fleet/audit (HTTP ${a.status || a.error}) — reading the process table instead`);
+    // The tab list in SAVED order — the order the next boot matches hints in.
+    // tabs.json first: a cookieless /api/tabs makes the daemon provision a
+    // throwaway session (and overwrite session.json).
+    let tabs = (readJson(path.join(stateDir, 'tabs.json')) || {}).tabs;
+    if (!Array.isArray(tabs) || !tabs.length) {
+        const t = await request(port, 'GET', '/api/tabs', undefined, { retries: 2 });
+        tabs = t.json && (Array.isArray(t.json) ? t.json : t.json.tabs);
+    }
+    if (!Array.isArray(tabs)) return { from: 'none', tabs: [] };
+    const ps = await run('ps', ['-ax', '-o', 'pid=,ppid=,command=']);
+    if (!ps) return { from: 'none', tabs: [] };
+    const table = si.parseTable(ps);
+    const cwds = new Map();
+    for (const pid of table.kids.get(lock.pid) || []) {
+        cwds.set(pid, await cwdOfPid(pid));
+    }
+    const agents = await new Promise(r => si.claudeAgents(r));
+    return { from: 'ps', tabs: hintsFromProcesses(tabs.filter(x => !x.exited), { daemonPid: lock.pid, table, cwdOf: pid => cwds.get(pid) || null, agents }) };
+}
+
+// ── restart + wait ────────────────────────────────────────────────────────────
+
+function restartCommand(label, { platform = process.platform, uid = process.getuid ? process.getuid() : 501 } = {}) {
+    return platform === 'linux'
+        ? ['systemctl', ['--user', 'restart', `${label}.service`]]
+        : ['launchctl', ['kickstart', '-k', `gui/${uid}/${label}`]];
+}
+
+async function until(fn, timeoutMs, everyMs) {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+        const v = await fn();
+        if (v) return v;
+        if (Date.now() >= end) return null;
+        await sleep(Math.min(everyMs, Math.max(0, end - Date.now())));
+    }
+}
+
+function badRows(report) { return (report.tabs || []).filter(r => r.status !== 'ok' && r.status !== 'shell'); }
+function mismatches(report) {
+    return (report.tabs || []).filter(r => MISMATCH.has(r.status)).length + (report.duplicates || []).length;
+}
+function printAudit(report, log) {
+    for (const r of badRows(report)) {
+        const e = r.expected || {}, o = r.observed;
+        log(`  #${String(r.id).padEnd(3)} ${r.status.padEnd(13)} expected ${e.agent || '-'}:${(e.sessionId || '-').slice(0, 8)}`
+            + `  observed ${o ? `${o.agent}:${(o.sessionId || '-').slice(0, 8)}` : 'shell'}  ${r.title || r.cwd || ''}`);
+    }
+    for (const d of report.duplicates || []) log(`  DUPLICATE ${d.sessionId.slice(0, 8)} live in tabs ${d.tabs.join(', ')}`);
+    log(`audit: ${report.summary || si.auditSummary(report)}`);
+}
+
+// The outcome, for a caller that cannot see the exit code (run from a tab, the
+// CLI detaches and returns 0 at once): <state>/soa-restart.last.json.
+function writeStatus(stateDir, o) {
+    try { fs.writeFileSync(path.join(stateDir, 'soa-restart.last.json'), JSON.stringify({ at: new Date().toISOString(), ...o }, null, 2) + '\n'); } catch (_) {}
+}
+
+async function main(argv = process.argv.slice(2), env = process.env) {
+    const out = await restart(argv, env);
+    if (out.stateDir) writeStatus(out.stateDir, { code: out.code, result: out.result, dry: out.dry || false });
+    return out.code;
+}
+
+async function restart(argv, env) {
+    const log = (m) => console.log(m);
+    let opts;
+    try { opts = parseArgs(argv); } catch (e) { console.error(`soa-restart: ${e.message}`); return { code: 1 }; }
+    if (opts.help) { log('usage: soa-restart [--dry-run] [--no-repair] [--label L] [--port N]'); return { code: 0 }; }
+    const dry = env.SOA_RESTART_DRY === '1';
+
+    const SD = resolveStateDir({ env });
+    const lockFile = path.join(SD, 'daemon.lock');
+    const lock = readJson(lockFile);
+    if (!lock || !pidAlive(lock.pid)) { console.error(`soa-restart: no live daemon.lock in ${SD}`); return { code: 1 }; }
+    let port = opts.port || lock.port || 4010;
+    const label = opts.label || env.SOA_WEB_LAUNCHD_LABEL || 'app.s0a.web.local';
+
+    // Inside a tab, the restart kills our own shell: carry on detached.
+    if (env.SOA_WEB_TAB && !env.SOA_RESTART_CHILD && !opts.dryRun && !dry) {
+        const logs = path.join(SD, 'logs');
+        try { fs.mkdirSync(logs, { recursive: true }); } catch (_) {}
+        const out = fs.openSync(path.join(logs, 'soa-restart.log'), 'a');
+        const child = spawn(process.execPath, [__filename, ...argv], {
+            detached: true, stdio: ['ignore', out, out], env: { ...env, SOA_RESTART_CHILD: '1' },
+        });
+        child.unref();
+        log(`soa-restart: running detached (pid ${child.pid}) — this tab restarts too. Log: ${path.join(logs, 'soa-restart.log')};`
+            + ` outcome (exit code, summary): ${path.join(SD, 'soa-restart.last.json')}`);
+        return { code: 0 };
+    }
+
+    log(`[${new Date().toISOString()}] soa-restart: daemon pid ${lock.pid} on :${port}, state ${SD}, label ${label}`);
+    const snap = await snapshot(port, lock, SD, log);
+    const withId = snap.tabs.filter(t => t.sessionId).length;
+    if (opts.dryRun) {
+        console.log(JSON.stringify({ savedAt: Date.now(), from: snap.from, tabs: snap.tabs }, null, 2));
+        log(`soa-restart: ${withId}/${snap.tabs.length} tab(s) have a hint (dry run: nothing written, nothing restarted)`);
+        return { code: 0 };
+    }
+    if (snap.tabs.length) {
+        try { si.writeHints(SD, snap.tabs); } catch (e) { log(`soa-restart: could not write session hints: ${e.message}`); }
+    }
+    log(`soa-restart: session hints for ${withId}/${snap.tabs.length} tab(s) (from ${snap.from}) → ${si.hintsPath(SD)}`);
+
+    const [cmd, args] = restartCommand(label);
+    const restartAt = Date.now();
+    if (dry) {
+        log(`soa-restart: DRY — would run: ${cmd} ${args.join(' ')}`);
+    } else {
+        const r = await new Promise(res => execFile(cmd, args, { timeout: 60000 }, (err, _o, se) => res(err ? (se || err.message) : null)));
+        if (r) { console.error(`soa-restart: ${cmd} failed: ${String(r).trim()}`); return { code: 1, stateDir: SD, result: `${cmd} failed` }; }
+        log(`soa-restart: ${cmd} ${args.join(' ')} — waiting for a new daemon`);
+        const up = await until(async () => {
+            const l = readJson(lockFile);
+            if (!l || l.pid === lock.pid || !pidAlive(l.pid)) return null;
+            const p = await request(l.port || port, 'GET', '/api/ping', undefined, { timeout: 10000 });
+            return p.json && p.json.ok ? l : null;
+        }, 90000, 1000);
+        if (!up) { console.error('soa-restart: no new daemon answered within 90 s'); return { code: 1, stateDir: SD, result: 'no new daemon within 90 s' }; }
+        if (!opts.port && up.port) port = up.port;
+        log(`soa-restart: new daemon pid ${up.pid} is up`);
+    }
+
+    // The restore's own audit (~25 s after its last launch) — `scheduled`,
+    // never an ad-hoc sweep: auditing (and repairing) before the restore's
+    // staggered launches have fired would relaunch tabs that are only waiting
+    // their turn. A boot with nothing to relaunch schedules none — then the
+    // wait just times out.
+    const settled = await until(async () => {
+        const r = await request(port, 'GET', '/api/fleet/audit?last=1');
+        return r.json && r.json.scheduled && Date.parse(r.json.at) >= restartAt ? r.json : null;
+    }, parseInt(env.SOA_RESTART_AUDIT_WAIT_MS || '120000', 10), 10000);
+    log(settled ? 'soa-restart: restore audit done' : 'soa-restart: no restore audit seen — auditing now');
+
+    let audit = (await request(port, 'GET', '/api/fleet/audit', undefined, { retries: 2 })).json;
+    if (!audit || !Array.isArray(audit.tabs)) {
+        // Restarted, but nothing to judge it with (the new code has no audit:
+        // the install dir was not mirrored?) — not "mismatches remain".
+        console.error('soa-restart: restarted, but /api/fleet/audit is unavailable — nothing audited or repaired');
+        return { code: 3, stateDir: SD, dry, result: 'restarted; audit unavailable' };
+    }
+    printAudit(audit, log);
+
+    if (opts.repair && mismatches(audit)) {
+        // DRY never acts on live tabs: the repair is only previewed.
+        log(dry ? 'soa-restart: DRY — previewing the repair (dryRun)' : 'soa-restart: repairing…');
+        const r = await request(port, 'POST', '/api/fleet/repair', dry ? { dryRun: true } : {}, { timeout: 15 * 60 * 1000 });
+        if (!r.json || !r.json.ok) {
+            log(`soa-restart: repair failed: HTTP ${r.status || r.error} ${(r.json && r.json.error) || ''}`);
+        } else {
+            for (const x of r.json.results || []) {
+                log(`  #${String(x.id).padEnd(3)} ${String(x.before).padEnd(13)} ${String(x.action).padEnd(18)} → ${x.after || '-'}${x.why ? `  (${x.why})` : ''}`);
+            }
+        }
+        audit = (await request(port, 'GET', '/api/fleet/audit', undefined, { retries: 2 })).json || audit;
+        printAudit(audit, log);
+    }
+    const left = mismatches(audit);
+    log(left ? `soa-restart: ${left} mismatch(es) remain` : 'soa-restart: every tab is on its agent and thread');
+    return { code: left ? 2 : 0, stateDir: SD, dry, result: summaryOf(audit) };
+}
+
+function summaryOf(audit) { return audit.summary || si.auditSummary(audit); }
+
+module.exports = { parseArgs, hintsFromAudit, hintsFromProcesses, parseLsofCwd, cwdOfPid, restartCommand, mismatches, main };
+
+if (require.main === module) {
+    main().then((code) => { process.exitCode = code; },
+        (e) => { console.error('soa-restart:', (e && e.stack) || e); process.exitCode = 1; });
+}

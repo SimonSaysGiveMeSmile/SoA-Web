@@ -261,18 +261,30 @@ function launchAll(pairs, { announce = null, staggerMs = LAUNCH_STAGGER_MS } = {
     let n = 0;
     for (const { tab, entry } of pairs) {
         if (!entry.agent || !entry.sessionId) continue;
-        tab.restoreExpect = { agent: entry.agent, sessionId: entry.sessionId, at: Date.now() };
+        // `exact` + `sessionCwd`: a repair (repairFleet) acts only on what was
+        // identity, never on an allocated guess, and relaunches from its home.
+        tab.restoreExpect = { agent: entry.agent, sessionId: entry.sessionId, sessionCwd: entry.sessionCwd || null,
+            exact: !!entry.exact, at: Date.now() };
         const wait = n++ * staggerMs;
+        // When this launch is due: a repair leaves the tab alone until it has
+        // had time to show up (launchInFlight), instead of typing a second line.
+        tab.restoreLaunchAt = Date.now() + wait;
         const t = setTimeout(() => {
             if (tab.exited) return;   // closed while we waited — nothing to launch into
-            if (announce) { try { announce(tab); } catch (_) {} }
-            try {
-                sessionManager.launchClaude(tab, tab.cwd, {
-                    resume: true, agent: entry.agent, sessionId: entry.sessionId,
-                    sessionCwd: entry.sessionCwd, coldFallback: false, guess: false,
-                    exact: !!entry.exact,
-                });
-            } catch (_) { /* a failed launch leaves a usable shell — never fatal */ }
+            // An agent already in front (a repair, or the user, got there
+            // first): our line would land in it as a prompt.
+            sessionIdentity.processTableAsync((table) => {
+                if (tab.exited) return;
+                if (table && tab.pty && tab.pty.pid && sessionIdentity.observe(tab.pty.pid, table, null)) return;
+                if (announce) { try { announce(tab); } catch (_) {} }
+                try {
+                    sessionManager.launchClaude(tab, tab.cwd, {
+                        resume: true, agent: entry.agent, sessionId: entry.sessionId,
+                        sessionCwd: entry.sessionCwd, coldFallback: false, guess: false,
+                        exact: !!entry.exact,
+                    });
+                } catch (_) { /* a failed launch leaves a usable shell — never fatal */ }
+            });
         }, wait);
         if (t.unref) t.unref();
     }
@@ -285,7 +297,7 @@ function launchAll(pairs, { announce = null, staggerMs = LAUNCH_STAGGER_MS } = {
 // sessionId} with the foreground process, and flags any thread live in two
 // tabs. The result is logged in one line and kept for GET /api/fleet/audit.
 const AUDIT_SETTLE_MS = parseInt(process.env.SOA_WEB_RESTORE_AUDIT_MS || '25000', 10);
-let _lastAudit = null;
+let _lastScheduled = null;   // the last audit a restore scheduled (GET ?last=1)
 
 function _tabsOf(list) {
     const tabs = [];
@@ -312,7 +324,6 @@ function auditFleet(sessionsIterable, { table = null, agents = null, persist = t
             if (best) { try { tabPersist.save(best.tabMgr); } catch (_) {} }
         }
     }
-    _lastAudit = report;
     return report;
 }
 
@@ -347,10 +358,16 @@ function logAudit(a) {
 // that the tab's own identity is the reference, so a later live audit does not
 // keep calling a tab wrong for a thread the user has since moved on from.
 // Only expectations armed before this audit was scheduled are cleared — a
-// restore that started meanwhile has its own audit coming.
-function clearExpectations(tabs, armedBefore) {
+// restore that started meanwhile has its own audit coming. An EXACT
+// expectation the audit found broken is kept (it expires with EXPECT_TTL_MS):
+// the sweep has already stamped the wrong observed thread on the tab, so it is
+// the only record of what POST /api/fleet/repair should put back.
+function clearExpectations(tabs, armedBefore, report = null) {
+    const bad = new Set(((report && report.tabs) || []).filter(r => REPAIRABLE.has(r.status)).map(r => r.id));
     for (const t of tabs) {
-        if (t && t.restoreExpect && !(t.restoreExpect.at > armedBefore)) delete t.restoreExpect;
+        if (!t || !t.restoreExpect || t.restoreExpect.at > armedBefore) continue;
+        if (t.restoreExpect.exact && bad.has(t.id)) continue;
+        delete t.restoreExpect;
     }
 }
 
@@ -358,14 +375,260 @@ function scheduleAudit(sessionsIterableFn, delayMs = AUDIT_SETTLE_MS) {
     const armedBefore = Date.now();
     const t = setTimeout(() => {
         auditFleetAsync(sessionsIterableFn, (a) => {
+            _lastScheduled = { ...a, scheduled: true };
             try {
                 logAudit(a);
-                clearExpectations(_tabsOf([...(sessionsIterableFn() || [])].filter(s => s && s.tabMgr)), armedBefore);
+                clearExpectations(_tabsOf([...(sessionsIterableFn() || [])].filter(s => s && s.tabMgr)), armedBefore, a);
             } catch (e) { console.log('fleet-audit failed:', (e && e.message) || e); }
+            // Opt-in: put a wrong agent / wrong thread back without waiting for
+            // a person. Off by default — it kills processes in live tabs.
+            if (process.env.SOA_WEB_RESTORE_AUTOREPAIR === '1'
+                && a.tabs.some(r => r.status === 'wrong-agent' || r.status === 'wrong-session')) {
+                repairFleet(sessionsIterableFn, { statuses: new Set(['wrong-agent', 'wrong-session']) })
+                    .catch(e => console.log('fleet-repair failed:', (e && e.message) || e));
+            }
         });
     }, delayMs);
     if (t.unref) t.unref();
     return t;
+}
+
+// ── Exact repair ──────────────────────────────────────────────────────────────
+// The manual repair in docs/fleet-recovery.md, as one call: for each tab the
+// audit flags, stop the foreground agent until only the shell is left, clear
+// the prompt line, and type the exact launch line for the thread the tab is
+// meant to be on. Only an EXACT expectation is acted on — a restore's exact id
+// (restoreExpect.exact) or the tab's own recorded identity — never a guess, and
+// never the manager's tab or the caller's own.
+const REPAIRABLE = new Set(['wrong-agent', 'wrong-session', 'missing']);
+const REPAIR_POLL_MS = parseInt(process.env.SOA_WEB_REPAIR_POLL_MS || '2000', 10);
+const REPAIR_VERIFY_MS = parseInt(process.env.SOA_WEB_REPAIR_VERIFY_MS || '10000', 10);
+// A launch due less than this long ago may not have a process yet: `missing`
+// then means "still starting", and a second line would land in the agent.
+const LAUNCH_GRACE_MS = parseInt(process.env.SOA_WEB_REPAIR_GRACE_MS || '20000', 10);
+function launchInFlight(tab, now = Date.now()) {
+    return !!tab && Number.isFinite(tab.restoreLaunchAt) && now < tab.restoreLaunchAt + LAUNCH_GRACE_MS;
+}
+const _sleep = ms => new Promise(r => { const t = setTimeout(r, ms); if (t.unref) t.unref(); });
+let _repairBusy = false;
+
+function _isManagerTab(tab) {
+    return !!tab && typeof tab.title === 'string' && tab.title.trim().toLowerCase() === 'manager';
+}
+
+// What the tab must be on, when that is known exactly; null otherwise. A
+// restore's expectation counts only when it was exact (never an allocated
+// guess). Without one, the reference is the tab's own identity as the audit
+// judged it (`row.expected`: the sweep that ran with the audit has since
+// stamped the observed thread on the tab) — and only for `missing`: a live
+// agent that differs from the tab's remembered id is the user's own switch,
+// which the sweep adopts, not damage to undo.
+function exactExpectation(tab, row, now = Date.now()) {
+    const re = tab && tab.restoreExpect;
+    if (re && !(re.at && now - re.at > sessionIdentity.EXPECT_TTL_MS)) {
+        return re.exact && re.agent && re.sessionId
+            ? { agent: re.agent, sessionId: re.sessionId, sessionCwd: re.sessionCwd || null } : null;
+    }
+    const e = row && row.expected;
+    if (!e || !e.agent || !e.sessionId || row.status !== 'missing') return null;
+    return { agent: e.agent, sessionId: e.sessionId, sessionCwd: tab.sessionId === e.sessionId ? tab.sessionCwd || null : null };
+}
+
+/**
+ * Pure: which tabs to repair, and with which line. `pairs` = [{tab, row}] (an
+ * audit row next to its tab). A thread that stays live in a tab nobody is
+ * repairing is never resumed a second time; neither is one two tabs expect.
+ * Returns {plan:[{id, tab, before, agent, sessionId, sessionCwd, line}], left:[{id, before, action, why}]}.
+ */
+function planRepair(pairs, { duplicates = [], ids = null, selfId = null, statuses = REPAIRABLE, registry = true,
+    resolveCwd = sessionManager.sessionCwdFor, exists = fs.existsSync, now = Date.now() } = {}) {
+    const want = Array.isArray(ids) && ids.length ? new Set(ids.map(Number)) : null;
+    const liveOn = new Map();   // observed thread -> tab ids
+    for (const { row } of pairs) {
+        const sid = row.observed && row.observed.sessionId;
+        if (sid) liveOn.set(sid, [...(liveOn.get(sid) || []), row.id]);
+    }
+    const left = [];
+    const skip = (row, why) => left.push({ id: row.id, before: row.status, action: 'skipped', why });
+    const cands = [];
+    for (const { tab, row } of pairs) {
+        if (want && !want.has(row.id)) continue;
+        if (!statuses.has(row.status)) continue;   // ok / unverified / shell: nothing to put back
+        if (_isManagerTab(tab)) { skip(row, 'manager tab'); continue; }
+        if (selfId != null && row.id === selfId) { skip(row, 'caller tab'); continue; }
+        if (launchInFlight(tab, now)) { skip(row, 'a launch is still in flight'); continue; }
+        // Without the registry a Claude thread is read off argv only: not
+        // enough to call a running agent wrong.
+        if (registry === false && row.status === 'wrong-session' && row.observed && row.observed.agent === 'claude') {
+            skip(row, 'claude registry unavailable'); continue;
+        }
+        const exp = exactExpectation(tab, row, now);
+        if (!exp) { skip(row, 'no exact expected identity'); continue; }
+        cands.push({ tab, row, exp });
+    }
+    const moving = new Set(cands.map(c => c.row.id));
+    const taken = new Set();
+    const plan = [];
+    for (const { tab, row, exp } of cands) {
+        const others = (liveOn.get(exp.sessionId) || []).filter(id => id !== row.id);
+        const keeper = others.find(id => !moving.has(id));
+        if (keeper != null) { skip(row, `${exp.sessionId.slice(0, 8)} is live in tab #${keeper}`); continue; }
+        if (taken.has(exp.sessionId)) { skip(row, `${exp.sessionId.slice(0, 8)} is expected by another tab too`); continue; }
+        taken.add(exp.sessionId);
+        let home = exp.sessionCwd;
+        if (!home) { try { home = resolveCwd(exp.agent, exp.sessionId) || null; } catch (_) { home = null; } }
+        if (home && !exists(home)) home = null;
+        const line = sessionManager.agentLaunchLine(exp.agent, { sessionId: exp.sessionId, sessionCwd: home, cwd: tab.cwd });
+        // `holders`: tabs being repaired that still run this thread — each must
+        // be stopped before it is launched here (a swap). `pid`: the process
+        // the audit judged (null for `missing`), the only one stopAgent may stop.
+        plan.push({ id: row.id, tab, before: row.status, agent: exp.agent, sessionId: exp.sessionId,
+            sessionCwd: home, line, holders: others, pid: row.pid != null ? row.pid : null });
+    }
+    // A thread on two tabs: the tab whose own identity it is keeps it; one
+    // with an exact id of its own is in the plan; the rest are reported.
+    const planned = new Set(plan.map(p => p.id));
+    const reported = new Set(left.map(l => l.id));
+    for (const d of duplicates || []) {
+        for (const { row } of pairs) {
+            if (!d.tabs.includes(row.id) || planned.has(row.id) || reported.has(row.id)) continue;
+            if (row.expected && row.expected.sessionId === d.sessionId) continue;   // its own thread
+            left.push({ id: row.id, before: 'duplicate', action: 'left',
+                why: `shares ${d.sessionId.slice(0, 8)} with tab(s) ${d.tabs.filter(x => x !== row.id).join(', ')}; no exact id of its own` });
+            reported.add(row.id);
+        }
+    }
+    return { plan, left };
+}
+
+/**
+ * Stop whatever agent runs in front of this PTY's shell, re-checking until only
+ * the shell is left: SIGTERM, then SIGKILL from the `killAfter`th try on. Each
+ * check reads the table afresh, so a `|| fallback` agent the old chain starts
+ * is caught too. Never signals the shell itself.
+ *
+ * `planned` (when given) is the agent pid the audit judged, or null for "no
+ * agent": if the first look disagrees, the tab changed since the audit (the
+ * user started the right agent, a late restore launch landed) and nothing is
+ * signalled. Done only when the shell has NO child left — a vim, a REPL or an
+ * ssh in front is not an idle prompt, and is never typed into.
+ * Resolves {ok, signalled, changed?, why?}.
+ */
+async function stopAgent(ptyPid, { table = () => new Promise(r => sessionIdentity.processTableAsync(r)),
+    kill = (pid, sig) => process.kill(pid, sig), sleep = _sleep, intervalMs = REPAIR_POLL_MS,
+    tries = 10, killAfter = 6, busyChecks = 2, planned } = {}) {
+    const signalled = [];
+    let busy = 0;
+    for (let i = 0; ; i++) {
+        const t = await table();
+        if (!t) return { ok: false, signalled, why: 'ps unavailable' };
+        const seen = sessionIdentity.observe(ptyPid, t, null);
+        if (i === 0 && planned !== undefined && (planned == null ? !!seen : (!seen || seen.pid !== planned))) {
+            return { ok: false, changed: true, signalled, why: 'changed since audit' };
+        }
+        if (!seen) {
+            const kids = sessionIdentity.descendants(ptyPid, t.kids);
+            if (!kids.length) return { ok: true, signalled };
+            // A subshell of the old chain may still be on its way out.
+            if (busy++ >= busyChecks) {
+                return { ok: false, signalled, why: `shell is busy: ${((t.procs.get(kids[0]) || {}).cmd || kids[0]).toString().slice(0, 60)}` };
+            }
+            await sleep(intervalMs);
+            continue;
+        }
+        if (signalled.length >= tries) return { ok: false, signalled, why: `agent pid ${seen.pid} still running` };
+        const sig = signalled.length >= killAfter ? 'SIGKILL' : 'SIGTERM';
+        try { kill(seen.pid, sig); } catch (_) { /* already gone */ }
+        signalled.push({ pid: seen.pid, sig });
+        await sleep(intervalMs);
+    }
+}
+
+// A fresh audit, each row next to its tab (auditTabs skips exited tabs, in order).
+function _auditPairs(sessionsIterableFn) {
+    return new Promise((resolve) => auditFleetAsync(sessionsIterableFn, (report) => {
+        const list = [...(sessionsIterableFn() || [])].filter(s => s && s.tabMgr);
+        const tabs = _tabsOf(list).filter(t => t && !t.exited);
+        resolve({ report, pairs: report.tabs.map((row, i) => ({ row, tab: tabs[i] })).filter(p => p.tab && p.tab.id === p.row.id) });
+    }));
+}
+
+/**
+ * Audit, repair each flagged tab one at a time, re-audit. opts: ids, dryRun,
+ * selfId, statuses, staggerMs, verifyMs; for tests, stop (a stopAgent
+ * stand-in) and audit (an _auditPairs stand-in).
+ * Resolves {ok, dryRun?, results:[{id, before, action, after, line?, why?}], summary}.
+ */
+async function repairFleet(sessionsIterableFn, opts = {}) {
+    if (_repairBusy) return { ok: false, error: 'a repair is already running', results: [] };
+    _repairBusy = true;
+    try {
+        const audit = opts.audit || _auditPairs;   // tests inject a report
+        const { report, pairs } = await audit(sessionsIterableFn);
+        // No process table: every tab with an id reads `missing`, healthy or
+        // not. Acting on that would kill the whole fleet's live agents.
+        if (report.psOk === false) {
+            return { ok: false, error: 'ps unavailable — nothing repaired', results: [], summary: sessionIdentity.auditSummary(report) };
+        }
+        const { plan, left } = planRepair(pairs, { duplicates: report.duplicates, ids: opts.ids,
+            selfId: opts.selfId, statuses: opts.statuses || REPAIRABLE, registry: report.registry !== false });
+        const results = left.map(l => ({ ...l, after: l.before }));
+        if (opts.dryRun) {
+            return { ok: true, dryRun: true, summary: sessionIdentity.auditSummary(report),
+                results: plan.map(p => ({ id: p.id, before: p.before, action: 'would-relaunch', after: null, line: p.line })).concat(results) };
+        }
+        const stop = opts.stop || stopAgent;
+        const stagger = opts.staggerMs != null ? opts.staggerMs : LAUNCH_STAGGER_MS;
+        const done = [];
+        const skipTab = (r, p, why) => { r.action = 'skipped'; r.after = p.before; r.why = why; results.push(r); };
+        // Stop every planned tab first, THEN launch: in a swap (#1 runs #2's
+        // thread and #2 runs #1's) a launch before the other tab is stopped
+        // would put two processes on one transcript.
+        const stopped = [];
+        for (const p of plan) {
+            const r = { id: p.id, before: p.before, action: null, after: null, line: p.line };
+            const pid = p.tab.pty && p.tab.pty.pid;
+            const s = p.tab.exited || !pid ? { ok: false, why: 'tab is gone' } : await stop(pid, { planned: p.pid });
+            if (!s.ok || p.tab.exited) { skipTab(r, p, s.why || 'tab is gone'); continue; }
+            stopped.push({ p, r, s });
+            if (s.signalled && s.signalled.length) await _sleep(stagger);
+        }
+        const free = new Set(stopped.map(x => x.p.id));
+        for (const { p, r, s } of stopped) {
+            const holder = p.holders.find(id => !free.has(id));
+            if (holder != null) { skipTab(r, p, `${p.sessionId.slice(0, 8)} is still live in tab #${holder}`); continue; }
+            // Still an idle prompt? Something may have started since its stop.
+            const idle = p.tab.exited ? { ok: false, why: 'tab is gone' } : await stop(p.tab.pty.pid, { planned: null });
+            if (!idle.ok) { skipTab(r, p, idle.why || 'changed since stop'); continue; }
+            try { p.tab.write('\x15'); } catch (_) {}   // Ctrl-U: an empty prompt line
+            try {
+                sessionManager.launchClaude(p.tab, p.tab.cwd, { resume: true, agent: p.agent, sessionId: p.sessionId,
+                    sessionCwd: p.sessionCwd, coldFallback: false, guess: false, exact: true });
+                p.tab.restoreLaunchAt = Date.now();   // a second repair leaves it to start
+                r.action = s.signalled && s.signalled.length ? 'stopped+relaunched' : 'relaunched';
+                done.push({ r, tab: p.tab });
+            } catch (e) { r.action = 'failed'; r.why = String((e && e.message) || e); }
+            results.push(r);
+            await _sleep(stagger);
+        }
+        let summary = sessionIdentity.auditSummary(report);
+        if (done.length) {
+            await _sleep(opts.verifyMs != null ? opts.verifyMs : REPAIR_VERIFY_MS);
+            const again = await audit(sessionsIterableFn);
+            summary = sessionIdentity.auditSummary(again.report);
+            for (const { r, tab } of done) {
+                const hit = again.pairs.find(x => x.tab === tab);
+                r.after = hit ? hit.row.status : 'gone';
+                if (r.after === 'ok') delete tab.restoreExpect;   // judged: back on its thread
+            }
+        }
+        const n = k => results.filter(r => r.action === k || (k === 'relaunched' && /relaunched$/.test(r.action || ''))).length;
+        console.log(`fleet-repair: ${plan.length} planned · ${n('relaunched')} relaunched · ${n('skipped') + n('left')} left`
+            + ` · ${done.filter(d => d.r.after === 'ok').length} ok after · now ${summary}`);
+        return { ok: true, results, summary };
+    } finally {
+        _repairBusy = false;
+    }
 }
 
 /**
@@ -483,15 +746,31 @@ function mount(app, requireAuthed, sessions) {
     // cost the real session its cookie and tokens on the next restart.
     const localOrAuthed = (req, res, next) => (sessionManager.isLocalRequest(req) ? next() : requireAuthed(req, res, next));
     app.get('/api/fleet/audit', localOrAuthed, (req, res) => {
-        if (req.query && req.query.last && _lastAudit) return res.json({ ok: true, ..._lastAudit, cached: true });
+        // ?last=1: the last audit a RESTORE scheduled (`scheduled: true`) — an
+        // ad-hoc sweep is not the restore's verdict, and soa-restart waits on it.
+        if (req.query && req.query.last && _lastScheduled) return res.json({ ok: true, ..._lastScheduled, cached: true });
         auditFleetAsync(() => sessions.sessions.values(), (a) => {
             res.json({ ok: true, ...a, summary: sessionIdentity.auditSummary(a) });
         });
+    });
+
+    // Put every flagged tab back on its exact agent and thread (repairFleet).
+    // Same gate as the audit. `x-soa-tab` names the caller's own tab (never
+    // touched). It can take a minute: one tab at a time, then a re-audit.
+    app.post('/api/fleet/repair', localOrAuthed, (req, res) => {
+        const body = req.body || {};
+        const self = parseInt(req.headers['x-soa-tab'] || req.headers['soa-web-tab'] || '', 10);
+        repairFleet(() => sessions.sessions.values(), {
+            ids: Array.isArray(body.ids) ? body.ids.filter(Number.isInteger) : null,
+            dryRun: !!body.dryRun,
+            selfId: Number.isInteger(self) ? self : null,
+        }).then(out => res.status(out.ok ? 200 : 409).json(out),
+            e => res.status(500).json({ ok: false, error: String((e && e.message) || e), results: [] }));
     });
 }
 
 module.exports = {
     mount, restoreFleet, pickSource, recentSessionsByCwd,
     allocate, claimedIds, recentMaps, launchAll, auditFleet, auditFleetAsync, scheduleAudit,
-    fillIdentity, clearExpectations,
+    fillIdentity, clearExpectations, planRepair, stopAgent, repairFleet, exactExpectation, launchInFlight, REPAIRABLE,
 };

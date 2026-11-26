@@ -490,6 +490,16 @@ codexUsage.mount(app, requireAuthed);
 app.post('/api/daemon/restart', requireAuthed, (req, res) => {
     console.log('daemon: manual restart requested via /api/daemon/restart');
     res.json({ ok: true, restarting: true });
+    // Each tab's identity as last seen, for the next boot. shutdown() stamps
+    // afresh and its tabs.json wins over these; they matter when the shutdown
+    // flush does not happen (a hard kill, a crash on the way down).
+    try {
+        const s = persistableSession();
+        if (s) {
+            const n = sessionIdentity.writeHints(STATE_DIR, s.tabMgr.order.map(id => s.tabMgr.tabs.get(id)).filter(Boolean));
+            console.log(`daemon restart: session hints for ${n}/${s.tabMgr.order.length} tab(s)`);
+        }
+    } catch (e) { console.log('daemon restart: session hints failed:', e && e.message); }
     const uid = (process.getuid && process.getuid()) || 501;
     const label = process.env.SOA_WEB_LAUNCHD_LABEL || 'app.s0a.web.local';
     setTimeout(() => {
@@ -928,7 +938,7 @@ function onWsConnect(ws, session, req) {
             // A pre-restart hints file (the upgrade onto identity-aware code,
             // whose predecessor wrote no ids) fills ids before planning. One-shot.
             try {
-                const h = sessionIdentity.applyHints(saved.tabs, STATE_DIR);
+                const h = sessionIdentity.applyHints(saved.tabs, STATE_DIR, { savedAt: Date.parse(saved.savedAt) });
                 if (h.reason !== 'none') console.log(`restore-on-connect: session hints ${h.reason}, ${h.applied} applied`);
             } catch (_) {}
             // Live tabs across EVERY session (tabPersist.liveTabs): a saved tab
