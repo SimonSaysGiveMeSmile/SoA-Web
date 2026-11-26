@@ -128,6 +128,9 @@ async function main() {
     if (!resp || !resp.ok || !resp.data) { log('no usage data (daemon down or endpoint changed) — skipping'); return; }
     const d = resp.data;
     if (!d.hasData) { log('no usage records yet — skipping'); return; }
+    // Cold start: the daemon is still reading older history, so costs jump
+    // between polls; diffing them would read as a burst of $/min.
+    if (d.catchingUp) { log('usage engine still catching up on history — skipping'); return; }
     // Weekly guard + whether the provider still reports a 5h window at all.
     const guard = weeklyGuard.assess(await weeklyGuard.fetchQuota(), { budgetsDefault: budgetsDefault() });
     const fiveHour = guard.available ? guard.claude.sessionReported : true;   // feed down → old behaviour
