@@ -651,11 +651,25 @@ launchd jobs):
    Edge-triggered with a 30-min
    per-session cooldown (never spams), re-fires on a 2× escalation, resets on a
    new block. Correlates each Claude session → tab (`#N title`) via `/api/tabs`.
-   Delivers via `soa-notify` (ntfy OS push) + in-app CHAT. Read-only over
+   Delivers via `soa-notify` (ntfy OS push) + in-app CHAT, as ONE digest push
+   (top `SOA_USAGE_DIGEST_TOP`=3 sessions, then "+k more"), at most one per
+   `SOA_USAGE_DIGEST_GAP` s (600); alerts held by the gap, left unnamed, or
+   deferred by the push budget stay due for the next digest. Read-only over
    loopback — never touches the daemon/tabs/agents; **no restart needed**.
    Thresholds env-tunable (`SOA_USAGE_BLOCK_COST`/`_TODAY_COST`/`_BURN_COST`/
    `_COOLDOWN`). The dashboard TOP SESSIONS widget flags the same sessions with a
-   ⚠ red row. Log: `~/.soa-web/logs/usage-alert.log`.
+   ⚠ red row. Log: `$SOA_WEB_STATE_DIR/logs/usage-alert.log` — on the live
+   install `~/.s0a-local/state/logs/usage-alert.log` (its launchd stdout/err stay
+   in `~/.s0a-local/logs/`; legacy `~/.soa-web/logs/` only when the env is unset,
+   and stops updating after the deploy; soa-usage-throttle likewise).
+   **Shared push budget:** `soa-notify` allows `SOA_NOTIFY_BUDGET` (4) pushes per
+   `SOA_NOTIFY_BUDGET_WINDOW` s (600) across every SoA script, and on an ntfy 429
+   opens a breaker (Retry-After, else 5 → 15 → 30 min) that `soa-doors` honours
+   too. A held-back push exits **75** and callers log "push deferred (rate
+   limited)" and retry later (soa-health re-queues it, soa-version-nag skips its
+   SEEN stamp); the `--also-msg` CHAT copy still goes out. The budget fails open
+   (a corrupt state file is dropped), and a network error gives its slot back. State:
+   `$SOA_WEB_STATE_DIR/.push-budget.json`.
 8. `com.soa-web.fleet-loop` — a PERSISTENT daemon (KeepAlive, not a timer) running
    `scripts/soa-fleet-loop`: blocks on `soa-sessions watch` (≈0 CPU between events)
    and reacts the INSTANT a session changes state — the always-on complement to the

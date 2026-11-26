@@ -1,4 +1,4 @@
-import { QuotaAccountsView } from './quotaAccountsView.js?v=usage-hover-20261103';
+import { QuotaAccountsView } from './quotaAccountsView.js?v=claude-pace-20261125';
 let closeCurrent;
 export function openQuotaAccountsSheet({ api, available = true }) {
     closeCurrent?.();

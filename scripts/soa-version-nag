@@ -141,9 +141,15 @@ fi
 
 NOTIFY="$ROOT/scripts/soa-notify"
 if [ -x "$NOTIFY" ]; then
-    "$NOTIFY" -t "$TITLE" -p high -T warning "$BODY" >/dev/null 2>&1 \
-        && log "pushed: $TITLE" \
-        || log "soa-notify failed (is a topic configured in $STATE_DIR/notify.json?)"
+    "$NOTIFY" -t "$TITLE" -p high -T warning "$BODY" >/dev/null 2>&1; NRC=$?
+    if [ "$NRC" = "0" ]; then log "pushed: $TITLE"
+    elif [ "$NRC" = "75" ]; then
+        # soa-notify's shared push budget held it back: not seen, so no SEEN
+        # stamp — the next run retries instead of holding it for the cooldown.
+        log "push deferred (rate limited): $TITLE"
+        exit 0
+    else log "soa-notify failed (exit $NRC; is a topic configured in $STATE_DIR/notify.json?)"
+    fi
 else
     log "soa-notify not found at $NOTIFY — cannot push"
 fi

@@ -663,21 +663,24 @@ function linkFor(c) {
 const NOTIFY_DELAYS = String(env.SOA_HEALTH_NOTIFY_RETRY_MS || '0,20000,90000').split(',').map((x) => parseInt(x, 10)).filter((n) => n >= 0);
 const NOTIFY_DEDUPE_MS = clampInt(env.SOA_HEALTH_NOTIFY_DEDUPE_MS, 10 * 60000, 0, 24 * 3600000);
 class Notifier {
-    constructor({ run, log: lg = () => {}, delays = [0, 20000, 90000], dedupeMs = 10 * 60000, maxPending = 20, now = Date.now, timer = setTimeout } = {}) {
+    constructor({ run, log: lg = () => {}, delays = [0, 20000, 90000], dedupeMs = 10 * 60000, maxPending = 20, now = Date.now, timer = setTimeout,
+                  deferMs = 10 * 60000, maxDefers = 3 } = {}) {
         this.run = run; this.log = lg; this.delays = delays.length ? delays : [0]; this.dedupeMs = dedupeMs;
+        this.deferMs = deferMs; this.maxDefers = maxDefers;
         this.maxPending = maxPending; this.now = now; this.timer = timer;
         this.pending = new Map();     // key → job
         this.delivered = new Map();   // key → delivered at
     }
     static key(channel, title, text) { return channel + ':' + crypto.createHash('sha1').update(String(title) + '\n' + String(text)).digest('hex').slice(0, 16); }
     /** Queue one message. Returns 'queued' | 'duplicate' | 'dropped'. Never throws, never blocks. */
-    send(channel, args, { title = '', text = '' } = {}) {
+    /** `fallback`: soa-msg args used once if the push is deferred (when chat is not already sent). */
+    send(channel, args, { title = '', text = '', fallback = null } = {}) {
         const now = this.now();
         for (const [k, t] of this.delivered) if (now - t > this.dedupeMs) this.delivered.delete(k);
         const key = Notifier.key(channel, title, text);
         if (this.pending.has(key) || this.delivered.has(key)) { this.log(`notify ${channel}: duplicate dropped`); return 'duplicate'; }
         if (this.pending.size >= this.maxPending) { this.log(`notify ${channel}: ${this.pending.size} messages already pending, dropped`); return 'dropped'; }
-        const job = { key, channel, args, attempt: 0 };
+        const job = { key, channel, args, attempt: 0, defers: 0, fallback };
         this.pending.set(key, job);
         this._schedule(job);
         return 'queued';
@@ -701,6 +704,33 @@ class Notifier {
             return;
         }
         const why = (r && r.reason) || 'failed';
+        // The shared push budget deferred it (soa-notify exit 75), or the
+        // server refused it (HTTP 4xx, e.g. 429): retrying only hammers ntfy.
+        // A deferral is not a delivery: it stays pending (still deduped) and is
+        // re-tried after deferMs, up to maxDefers times, without using up the
+        // network-retry attempts. The chat fallback goes out on the first one.
+        if (r && r.deferred) {
+            job.defers++;
+            if (job.fallback && job.defers === 1) {
+                Promise.resolve().then(() => this.run('chat', job.fallback)).catch(() => {});
+                this.log(`notify ${job.channel}: push deferred; sent to chat instead`);
+            }
+            if (job.defers > this.maxDefers) {
+                this.pending.delete(job.key);
+                this.log(`notify ${job.channel}: push deferred (rate limited) ${job.defers} times, dropped: ${why}`);
+                return;
+            }
+            this.log(`notify ${job.channel}: push deferred (rate limited): ${why}; retry in ${Math.round(this.deferMs / 60000)} min`);
+            job.attempt--;
+            const h = this.timer(() => { this._attempt(job).catch((e) => this.log(`notify ${job.channel}: ${e && e.message}`)); }, this.deferMs);
+            if (h && typeof h.unref === 'function') h.unref();
+            return;
+        }
+        if (r && r.retry === false) {
+            this.pending.delete(job.key);
+            this.log(`notify ${job.channel}: FAILED (not retried): ${why}`);
+            return;
+        }
         if (job.attempt >= n) {
             this.pending.delete(job.key);
             this.log(`notify ${job.channel}: FAILED after ${n} attempts: ${why}`);
@@ -719,11 +749,20 @@ function failureReason(e, stderr) {
     else if (e && e.code != null && typeof e.code === 'number') why = `exit ${e.code}${why ? ': ' + why : ''}`;
     return why.slice(0, 300) || 'failed';
 }
+// soa-notify exits 75 when its shared push budget defers a push; a 4xx is a
+// refusal that a retry 20 s later would only repeat. Only network errors retry.
+const NOTIFY_DEFERRED = 75;
+function notifierResult(e, stderr) {
+    const reason = failureReason(e, stderr);
+    if (e && e.code === NOTIFY_DEFERRED) return { ok: false, deferred: true, reason };
+    if (/HTTP 4\d\d/.test(String(stderr || ''))) return { ok: false, retry: false, reason };
+    return { ok: false, reason };
+}
 const notifyBin = (n) => { const p = path.join(__dirname, n); return fs.existsSync(p) ? p : n; };
 function runNotifier(channel, args) {
     const bin = channel === 'push' ? notifyBin('soa-notify') : notifyBin('soa-msg');
     return new Promise((resolve) => {
-        execFile(bin, args, { timeout: channel === 'push' ? 25000 : 15000 }, (e, _out, err) => resolve(e ? { ok: false, reason: failureReason(e, err) } : { ok: true }));
+        execFile(bin, args, { timeout: channel === 'push' ? 25000 : 15000 }, (e, _out, err) => resolve(e ? notifierResult(e, err) : { ok: true }));
     });
 }
 const notifier = new Notifier({ run: (c, a) => runNotifier(c, a), log: (m) => log(m), delays: NOTIFY_DELAYS, dedupeMs: NOTIFY_DEDUPE_MS });
@@ -739,7 +778,8 @@ function notify(text, { title = 'SoA health', priority = 'default', click = null
         const a = ['-t', title, '-p', priority, '-T', 'thermometer'];
         if (click) a.push('--click', click);
         a.push('--', text);   // a body starting with '-' (e.g. a '-zsh' label) is not a flag
-        notifier.send('push', a, { title, text });
+        // With chat off, a push held back by the shared budget still reaches CHAT.
+        notifier.send('push', a, { title, text, fallback: s.notify.chat ? null : [click ? `${text} ${click}` : text] });
     }
 }
 const shortArgs = (s) => (String(s || '').length > 200 ? String(s).slice(0, 200) + '…' : String(s || ''));
@@ -1304,7 +1344,7 @@ async function cli(argv) {
 module.exports = {
     defaultSettings, normalizeSettings, applySettingsPatch, parsePs, parseLstart, parseCpuTime, protectReason, eligibility,
     Detector, reasonsFor, AGENT_ARGS_RE, scoreOf, RateLimiter, identityMismatch, trendOf, guardReason, listMatch, AUTO_CONFIRM, PROXY_HEADER,
-    Notifier, failureReason, healthDeepLink, CROSS_SITE_ORIGINS,
+    Notifier, failureReason, notifierResult, healthDeepLink, CROSS_SITE_ORIGINS,
 };
 
 if (require.main === module) {

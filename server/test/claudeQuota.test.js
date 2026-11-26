@@ -33,7 +33,7 @@ test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 test('normalizeOfficial: utilization + ISO reset → windows; no reset = a fresh 0% window; expired dropped', () => {
     const now = Date.now();
     const w = normalizeOfficial({ five_hour: { utilization: 8, resets_at: iso(now + 60e3) }, seven_day: { utilization: 0, resets_at: null } }, now);
-    assert.equal(w.session.usedPercent, 8); assert.equal(w.session.windowMinutes, 300); assert.equal(w.session.resetsAt, now + 60e3);
+    assert.equal(w.session.usedPercent, 8); assert.equal(w.session.windowMinutes, 300); assert.equal(w.session.resetsAt, Math.ceil((now + 60e3) / 1000) * 1000, 'whole seconds');
     assert.equal(w.weekly.usedPercent, 0); assert.equal(w.weekly.resetsAt, null);
     const e = normalizeOfficial({ five_hour: { utilization: 50, resets_at: iso(now - 1) }, seven_day: { utilization: 3, resets_at: iso(now + 5) } }, now);
     assert.equal(e.session, null); assert.equal(e.weekly.usedPercent, 3);

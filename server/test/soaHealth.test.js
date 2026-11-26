@@ -358,6 +358,44 @@ test('notifier: a sender that throws is a failed attempt, not a crash', async ()
     n.send('chat', ['x'], { text: 'x' }); await flush();
     assert.match(logs.join('\n'), /FAILED after 1 attempts: spawn ENOENT/);
 });
+test('notifier: a deferred push (exit 75) or an HTTP 429 is never retried', async () => {
+    const c = fakeClock(); const logs = []; let calls = 0;
+    const defer = H.notifierResult(Object.assign(new Error('x'), { code: 75 }), 'soa-notify: push deferred (ntfy rate limited (429); retrying after 17:05)\n');
+    assert.equal(defer.deferred, true);
+    const refused = H.notifierResult(Object.assign(new Error('x'), { code: 1 }), 'soa-notify: ntfy POST failed (HTTP 429) → https://ntfy.sh/t\n');
+    assert.equal(refused.retry, false);
+    const network = H.notifierResult(Object.assign(new Error('x'), { code: 1 }), 'soa-notify: ntfy POST failed (HTTP 000: Could not resolve host)\n');
+    assert.equal(network.retry, undefined); assert.equal(network.deferred, undefined);
+    const results = [defer, refused];
+    const n = new H.Notifier({ run: async () => { calls++; return results.shift(); }, log: (m) => logs.push(m), delays: [0, 20000, 90000], now: c.now, timer: c.timer });
+    n.send('push', ['a'], { title: 't', text: 'a' }); await flush();
+    n.send('push', ['b'], { title: 't', text: 'b' }); await flush();
+    await c.advance(200000);
+    assert.equal(calls, 2);
+    assert.match(logs.join('\n'), /push deferred \(rate limited\)/);
+    assert.match(logs.join('\n'), /FAILED \(not retried\): exit 1: soa-notify: ntfy POST failed \(HTTP 429\)/);
+    assert.ok(!/FAILED after/.test(logs.join('\n')));
+    assert.equal(n.pending.size, 1, 'the deferred push is still pending, not marked delivered');
+});
+test('notifier: a deferred push is re-tried after deferMs, falls back to chat once, and is dropped after maxDefers', async () => {
+    const c = fakeClock(); const logs = []; const calls = [];
+    const defer = { ok: false, deferred: true, reason: 'push budget spent' };
+    const results = [defer, defer, { ok: true }];
+    const n = new H.Notifier({ run: async (ch, a) => { calls.push(ch); return ch === 'chat' ? { ok: true } : results.shift(); }, log: (m) => logs.push(m),
+        delays: [0, 20000, 90000], now: c.now, timer: c.timer, deferMs: 600000, maxDefers: 3 });
+    n.send('push', ['a'], { title: 't', text: 'a', fallback: ['a'] }); await flush(); await flush();
+    assert.deepEqual(calls, ['push', 'chat']);
+    assert.equal(n.send('push', ['a'], { title: 't', text: 'a' }), 'duplicate', 'still deduped while deferred');
+    await c.advance(600000); await flush();
+    await c.advance(600000); await flush();
+    assert.deepEqual(calls, ['push', 'chat', 'push', 'push'], 'chat fallback only once');
+    assert.equal(n.pending.size, 0); assert.ok(n.delivered.size === 1);
+    const d = new H.Notifier({ run: async () => defer, log: (m) => logs.push(m), now: c.now, timer: c.timer, deferMs: 1000, maxDefers: 2 });
+    d.send('push', ['b'], { title: 't', text: 'b' }); await flush();
+    for (let i = 0; i < 3; i++) { await c.advance(1000); await flush(); }
+    assert.equal(d.pending.size, 0);
+    assert.match(logs.join('\n'), /deferred \(rate limited\) 3 times, dropped/);
+});
 test('failure reason: stderr preferred, topic URL redacted, timeouts named', () => {
     const e = Object.assign(new Error('Command failed: soa-notify -t x --click https://h/preview/6084/confirm?c=abc body'), { code: 1 });
     const r = H.failureReason(e, 'soa-notify: ntfy POST failed (HTTP 000: Could not resolve host: ntfy.sh) → https://ntfy.sh/secret-topic-123\n');

@@ -1241,9 +1241,12 @@ class ClaudeUsageWidget extends Widget {
         const trend = !windows.length ? 'unknown' : windows.every(({ pace }) => pace?.state === 'steady') ? 'steady' : 'warming';
         card.range.heading.textContent = 'Range';
         card.range.value.textContent = '—';
-        card.range.el.title = !windows.length ? 'No current quota reading is available to estimate range.' :
+        const rateLimited = quota?.official?.error === 'rate limited' ? 'The usage endpoint is rate limited' +
+            (Number.isFinite(quota.official.retryAt) ? `; retrying at ${new Date(quota.official.retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : '.') : '';
+        card.range.el.title = !windows.length ? (rateLimited || 'No current quota reading is available to estimate range.') :
             trend === 'steady' ? 'The reported percentage has not moved. An unchanged percentage cannot establish unlimited range.' :
-            'Range uses up to 10 minutes of official quota changes, with at least 2 minutes of observations.';
+            'Range uses the last 10 minutes of official quota changes when readings are frequent, otherwise up to the last hour of readings, with at least 2 minutes of observations.' +
+            (rateLimited ? ' ' + rateLimited : '');
         card.range.el.dataset.state = choice?.pace.state || trend;
         card.range.el.dataset.rangeWindow = choice?.key || '';
         if (choice) {

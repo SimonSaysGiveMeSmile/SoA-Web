@@ -181,9 +181,44 @@ function post(url, body) {
     });
 }
 
+// ntfy.sh rate-limits per IP across every topic, and soa-notify keeps the
+// shared 429 breaker in .push-budget.json (epoch seconds). Doors honours it and
+// feeds it: retrying a 429 every minute (7911 times in a week) kept every SoA
+// push, the user's alerts included, at 429.
+const BUDGET = path.join(STATE, '.push-budget.json');
+const BACKOFF_S = [300, 900, 1800];
+function breakerUntil(now = Date.now()) {
+    const b = readJson(BUDGET);
+    const until = b ? Number(b.blockedUntil) * 1000 : 0;
+    return until > now ? until : 0;
+}
+function updateBreaker(status, now = Date.now()) {
+    // Only under soa-notify's lock (held for milliseconds): an unlocked write
+    // could rename a stale copy over a breaker soa-notify just opened.
+    const lock = BUDGET + '.lock';
+    let locked = false;
+    for (let i = 0; i < 20 && !locked; i++) {
+        try { fs.mkdirSync(lock); locked = true; } catch (_) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); }
+    }
+    if (!locked) return;
+    try {
+        const b = readJson(BUDGET) || {};
+        const strikes = Number(b.strikes) || 0;
+        if (status === 429) {
+            b.strikes = strikes + 1;
+            b.blockedUntil = Math.max(Number(b.blockedUntil) || 0, now / 1000 + BACKOFF_S[Math.min(strikes, BACKOFF_S.length - 1)]);
+        } else if (status >= 200 && status < 300 && (strikes || b.blockedUntil)) {
+            b.strikes = 0; b.blockedUntil = 0;
+        } else return;
+        const tmp = `${BUDGET}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(b)); fs.renameSync(tmp, BUDGET);
+    } catch (_) {
+    } finally { try { fs.rmdirSync(lock); } catch (_) {} }
+}
+
 const doors = [];
 let primary = { url: '', ok: false, rttMs: -1, verifiedAt: 0 };
-let lastPublished = '', lastPublishAt = 0, publishTimer = null;
+let lastPublished = '', lastPublishAt = 0, publishTimer = null, deferredLogged = 0;
 
 function liveList() {
     const list = [];
@@ -205,12 +240,24 @@ async function publish(periodic) {
     const token = pairingToken();
     if (!token) return;
     if (DRY) { lastPublished = sig; lastPublishAt = Date.now(); log('dry: would publish', list.length, 'doors'); return; }
+    const until = breakerUntil();
+    if (until) {
+        if (deferredLogged !== until) log('publish deferred: ntfy rate limited until', new Date(until).toISOString());
+        deferredLogged = until;
+        return;
+    }
     const { topic, key } = derive(token);
     const status = await post(`${NTFY}/${topic}`, seal(key, { v: 1, ts: Date.now(), doors: list }));
+    updateBreaker(status);
     if (status >= 200 && status < 300) {
         if (sig !== lastPublished) log('published', list.length, 'doors:', list.map(d => d.provider).join(', '));
         lastPublished = sig; lastPublishAt = Date.now();
-    } else log('publish failed:', status || 'network');
+    } else {
+        // Wait a full PUBLISH_MS before the periodic retry (a changed list still
+        // publishes at once, once the breaker allows it).
+        lastPublishAt = Date.now();
+        log('publish failed:', status || 'network', status === 429 ? '(backing off)' : '');
+    }
 }
 
 async function checkPrimary() {
@@ -237,4 +284,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { derive, seal };
+module.exports = { derive, seal, breakerUntil, updateBreaker };

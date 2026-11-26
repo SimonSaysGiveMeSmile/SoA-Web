@@ -125,7 +125,9 @@ function overBudget(blockCost, todayCost, bud, fiveHour = true) {
 function loadVelocity(usage) {
     const vel = new Map();
     let st;
-    try { st = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.soa-web', 'logs', '.usage-alert-state.json'), 'utf8')); } catch (_) { return vel; }
+    // The alerter's state lives in $SOA_WEB_STATE_DIR/logs (legacy ~/.soa-web/logs): read the fresher.
+    const file = require('./soa-usage-paths.cjs').newestUsageStateFile('.usage-alert-state.json');
+    try { st = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return vel; }
     const now = (usage && usage.data && usage.data.now) || Date.now();
     for (const s of (usage && usage.data && usage.data.sessions) || []) {
         const p = st.sessions && st.sessions[s.id];

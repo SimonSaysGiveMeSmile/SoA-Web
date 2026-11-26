@@ -4,7 +4,8 @@
 //   1. LIVE POLL of the official usage endpoint with the Claude Code OAuth
 //      credential already on this machine (macOS keychain "Claude Code-
 //      credentials", or ~/.claude/.credentials.json). Read-only, in memory,
-//      never logged or persisted; every 60 s. This is what keeps the numbers
+//      never logged or persisted; every 3 min (SOA_QUOTA_OAUTH_MS), backing off
+//      5→10→20→30 min on a 429. This is what keeps the numbers
 //      current while the fleet is idle — until 2026-09-29 the only source was
 //      (2) and an idle hour left the widget showing a stale weekly figure and
 //      a session window that had quietly expired into "Not reported".
@@ -31,6 +32,23 @@ const { STATE_DIR } = require('./stateDir');
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const STALE_MS = 5 * 60 * 1000;
 const PRIMARY_WINDOW = 'weekly';
+// The endpoint rate-limits a token polled every minute (429 after ~20 calls),
+// so the default is 3 min. Pace tolerates sparse samples (quotaPace.js).
+const REFRESH_MS = Math.max(60000, Number(process.env.SOA_QUOTA_OAUTH_MS) || 180000);
+// 429 backoff: capped exponential, never earlier than a Retry-After.
+const RATE_LIMIT_BACKOFF = [5, 10, 20, 30].map(m => m * 60000);
+
+// Capped below quotaPace's MAX_GAP (45 min) minus a poll, so even the longest
+// backoff resumes the pace history instead of warming up again.
+const RETRY_AFTER_CAP = 40 * 60000;
+
+/** Retry-After (seconds or an HTTP date) → ms from now, or 0. Capped at RETRY_AFTER_CAP. */
+function retryAfterMs(value, now) {
+    if (value == null || value === '') return 0;
+    const v = String(value).trim();
+    const ms = /^\d+$/.test(v) ? Number(v) * 1000 : Date.parse(v) - now;
+    return Number.isFinite(ms) && ms > 0 ? Math.min(ms, RETRY_AFTER_CAP) : 0;
+}
 
 /** SOA_QUOTA_CLAUDE_SESSION → 'auto' | 'on' | 'off'. */
 function sessionModeFrom(value) {
@@ -68,8 +86,11 @@ function normalizeOfficial(raw, now = Date.now()) {
         const pct = w.utilization;
         if (!Number.isFinite(pct) || pct < 0 || pct > 100) continue;
         if (w.resets_at != null && (typeof w.resets_at !== 'string' || !Number.isFinite(Date.parse(w.resets_at)))) continue;
-        const resetsAt = w.resets_at ? Date.parse(w.resets_at) : NaN;
-        if (Number.isFinite(resetsAt) && resetsAt <= now) continue;   // an expired window: not current
+        // Whole seconds: the endpoint's resets_at jitters by milliseconds
+        // between polls, which would otherwise read as a new window each time.
+        const parsed = w.resets_at ? Date.parse(w.resets_at) : NaN;
+        if (Number.isFinite(parsed) && parsed <= now) continue;   // an expired window: not current
+        const resetsAt = Math.ceil(parsed / 1000) * 1000;          // ceil: still > now
         windows[key] = { usedPercent: pct, windowMinutes: minutes, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null,
                          updatedAt: now, source: 'claude-oauth-usage' };
     }
@@ -127,7 +148,7 @@ function readCredentials(cb, configDirectory = null) {
 
 class ClaudeQuota {
     constructor({ directory = path.join(STATE_DIR, 'claude-quota'), now = Date.now, fetch: fetchImpl = globalThis.fetch,
-                  credentials = readCredentials, refreshMs = 60000, timeoutMs = 8000,
+                  credentials = readCredentials, refreshMs = REFRESH_MS, timeoutMs = 8000,
                   enabled = process.env.SOA_QUOTA_OAUTH !== '0', sessionMode = null, preferOfficial = false } = {}) {
         // null → read SOA_QUOTA_CLAUDE_SESSION on every snapshot.
         this.sessionMode = sessionMode;
@@ -135,6 +156,7 @@ class ClaudeQuota {
         this.refreshMs = refreshMs; this.timeoutMs = timeoutMs; this.enabled = enabled;
         this.official = null;        // { windows, updatedAt, carries }
         this.pending = null; this.attemptAt = 0; this.backoffUntil = 0;
+        this.rateLimits = 0;         // consecutive 429s → the backoff step
         this.lastError = null;       // a short reason, never the token
         this.preferOfficial = preferOfficial;
         this.minRecordAt = 0;
@@ -166,12 +188,20 @@ class ClaudeQuota {
                     } });
                 } finally { clearTimeout(timer); }
                 if (res.status === 401 || res.status === 403) { this.lastError = `unauthorized (${res.status})`; this.backoffUntil = this.now() + 10 * 60000; return; }
-                if (res.status === 429) { this.lastError = 'rate limited'; this.backoffUntil = this.now() + 5 * 60000; return; }
+                if (res.status === 429) {
+                    const step = RATE_LIMIT_BACKOFF[Math.min(this.rateLimits, RATE_LIMIT_BACKOFF.length - 1)];
+                    const header = retryAfterMs(res.headers?.get?.('retry-after'), this.now());
+                    this.rateLimits++;
+                    this.lastError = 'rate limited';
+                    this.backoffUntil = this.now() + Math.max(step, header);
+                    console.warn(`[claude-quota] usage endpoint rate limited (429 #${this.rateLimits}); retrying at ${new Date(this.backoffUntil).toISOString()}`);
+                    return;
+                }
                 if (!res.ok) { this.lastError = `HTTP ${res.status}`; return; }
                 const raw = await res.json();
                 const windows = normalizeOfficial(raw, this.now());
                 this.official = { windows, updatedAt: this.now(), carries: officialCarries(raw) };
-                this.lastError = null;
+                this.lastError = null; this.rateLimits = 0;
             } catch (e) {
                 this.lastError = e && e.name === 'AbortError' ? 'timed out' : (e && e.message || 'failed');
             } finally { this.pending = null; }
@@ -226,6 +256,7 @@ class ClaudeQuota {
             available: any,
             status: !any ? 'waiting' : now - newest > STALE_MS ? 'stale' : 'ready',
             official: { enabled: this.enabled, ok: officialFresh, at: this.official ? this.official.updatedAt : null, error: this.lastError,
+                        retryAt: this.backoffUntil > now ? this.backoffUntil : null,
                         carriesSession: this.official && this.official.carries ? this.official.carries.session : null },
         };
     }
@@ -239,4 +270,4 @@ function snapshot({ directory = path.join(STATE_DIR, 'claude-quota'), now = Date
     return q.snapshot(false);
 }
 
-module.exports = { ClaudeQuota, snapshot, normalizeWindow, normalizeOfficial, officialCarries, sessionModeFrom, readCredentials, USAGE_URL, PRIMARY_WINDOW };
+module.exports = { ClaudeQuota, snapshot, normalizeWindow, normalizeOfficial, officialCarries, sessionModeFrom, readCredentials, USAGE_URL, PRIMARY_WINDOW, retryAfterMs, RATE_LIMIT_BACKOFF };
