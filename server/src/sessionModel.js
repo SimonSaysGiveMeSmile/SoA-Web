@@ -51,10 +51,20 @@ class SessionModels {
 
     _identity(tab, state) {
         if (this.observe && tab?.pty?.pid && this.now() - this.identityAt >= 15000 && !this.identityBusy) {
+            // Never on the event loop: a full-argv ps of ~1000 processes at
+            // load 300+ takes seconds, and this runs on the 3 s supervisor tick
+            // (2026-11-26 profile: 15% of the daemon's main thread). The Claude
+            // registry is a whole CLI start, so reuse the 2-minute answer the
+            // identity sweep keeps; only Codex's cheap lsof is asked each time.
             this.identityAt = this.now();
-            this.table = identity.processTable();
             this.identityBusy = true;
-            identity.claudeAgents(registry => { this.registry = registry; this.identityBusy = false; });
+            const done = registry => { this.registry = registry; this.identityBusy = false; };
+            identity.processTableAsync(table => {
+                if (table) this.table = table;
+                const cached = identity.cachedAgents();
+                if (cached) identity.codexOpen(cx => done(identity.withCodex(cached, cx)));
+                else identity.claudeAgents(done);
+            });
         }
         const observed = this.observe && tab?.pty?.pid && this.table
             ? identity.observe(tab.pty.pid, this.table, this.registry) : null;

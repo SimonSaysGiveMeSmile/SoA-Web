@@ -32,7 +32,21 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+const PROJECTS_DIR = process.env.SOA_CLAUDE_PROJECTS_DIR || path.join(os.homedir(), '.claude', 'projects');
+// Transcripts are read in slices, never as one string: V8 caps a string near
+// 512 MB, and a 1.85 GB transcript (2026-11-26) made toString throw on every
+// poll — the error was swallowed, readOffset never moved, and each poll re-read
+// the whole file on the event loop (3-6 s of frozen terminals, 95 s at boot).
+const TAIL_CHUNK_BYTES = 8 * 1024 * 1024;
+// One line bigger than this (a giant tool output) is skipped, not parsed.
+const MAX_LINE_BYTES = 64 * 1024 * 1024;
+// Bytes one compute() may read across all files. A cold start (GBs of
+// history) catches up over several polls instead of blocking for a minute;
+// the snapshot says catchingUp meanwhile.
+const READ_BUDGET_BYTES = Math.max(TAIL_CHUNK_BYTES, Number(process.env.SOA_USAGE_READ_BUDGET) || 96 * 1024 * 1024);
+// The directory walk (1000+ dirs) is re-done at most this often; in between
+// only the files it found are stat'ed.
+const WALK_TTL_MS = 20 * 1000;
 
 // Rolling usage-limit window Claude Code enforces.
 const BLOCK_MS = 5 * 3600 * 1000;
@@ -127,6 +141,12 @@ let _lastAt = 0;
 
 function parseInto(line, c) {
     if (!line) return;
+    // Most bytes are tool results and user turns, which never carry usage.
+    // Once the file's identity is known, a line without a "usage" key can only
+    // still matter for its slug, so skip the JSON.parse (exact: a JSON key is
+    // always quoted). This is what makes a multi-GB cold read affordable.
+    const m = c.meta;
+    if (m.sideKnown && m.sess && m.cwd && !line.includes('"usage"') && (m.slug || !line.includes('"slug"'))) return;
     let obj;
     try { obj = JSON.parse(line); } catch (_) { return; }
     if (!obj) return;
@@ -174,7 +194,17 @@ function parseInto(line, c) {
 // counted too (they are real usage: rate limits and /usage both include them;
 // skipping them undercounted heavy Task/workflow turns by 25-40%). Workflow
 // journals hold no usage — skip them by name to save the read.
-function candidateFiles(cutoff) {
+let _walk = { at: 0, paths: [] };
+function candidateFiles(cutoff, now = Date.now()) {
+    if (now - _walk.at < WALK_TTL_MS && _walk.paths.length) {
+        const files = [];
+        for (const full of _walk.paths) {
+            let st;
+            try { st = fs.statSync(full); } catch (_) { continue; }
+            if (st.mtimeMs >= cutoff) files.push({ full, size: st.size });
+        }
+        return files;
+    }
     const files = [];
     const walk = (dir, depth) => {
         let ents;
@@ -193,32 +223,63 @@ function candidateFiles(cutoff) {
         }
     };
     walk(PROJECTS_DIR, 0);
+    _walk = { at: now, paths: files.map(f => f.full) };
     return files;
 }
 
-// Tail a single file: read only bytes appended since readOffset, parse whole
-// lines, and leave any trailing partial line for the next poll.
-function tail(entry, cutoff) {
+// Absolute offset of the first newline at or after `from`, or -1 (EOF first).
+function findNewline(fd, from, size, budget) {
+    const buf = Buffer.allocUnsafe(Math.min(TAIL_CHUNK_BYTES, Math.max(1, size - from)));
+    for (let pos = from; pos < size;) {
+        const n = fs.readSync(fd, buf, 0, Math.min(buf.length, size - pos), pos);
+        if (n <= 0) return -1;
+        budget.left -= n;
+        const i = buf.indexOf(0x0a);
+        if (i >= 0 && i < n) return pos + i;
+        pos += n;
+    }
+    return -1;
+}
+
+// Tail a single file: read only bytes appended since readOffset, in slices
+// of whole lines, and leave any trailing partial line for the next poll.
+// Offsets are byte positions in the file (never re-derived from decoded text).
+function tail(entry, cutoff, budget = { left: Infinity }) {
     let c = _cache.get(entry.full);
     if (!c) { c = { readOffset: 0, records: [], meta: { sess: '', slug: '', cwd: '', side: false, sideKnown: false } }; _cache.set(entry.full, c); }
     // File shrank (rotated / truncated) → start over.
     if (entry.size < c.readOffset) { c.readOffset = 0; c.records = []; }
-    if (entry.size > c.readOffset) {
+    if (entry.size > c.readOffset && budget.left > 0) {
         let fd = null;
         try {
             fd = fs.openSync(entry.full, 'r');
-            const len = entry.size - c.readOffset;
-            const buf = Buffer.alloc(len);
-            const n = fs.readSync(fd, buf, 0, len, c.readOffset);
-            const text = buf.toString('utf8', 0, n);
-            const parts = text.split('\n');
-            let consumed = c.readOffset;
-            // Last part has no trailing newline yet → don't consume it.
-            for (let i = 0; i < parts.length - 1; i++) {
-                parseInto(parts[i], c);
-                consumed += Buffer.byteLength(parts[i], 'utf8') + 1;
+            let buf = null;
+            while (entry.size > c.readOffset && budget.left > 0) {
+                const len = Math.min(entry.size - c.readOffset, TAIL_CHUNK_BYTES);
+                if (!buf || buf.length < len) buf = Buffer.allocUnsafe(len);
+                const n = fs.readSync(fd, buf, 0, len, c.readOffset);
+                if (n <= 0) break;
+                budget.left -= n;
+                const nl = buf.lastIndexOf(0x0a, n - 1);
+                if (nl >= 0) {
+                    const text = buf.toString('utf8', 0, nl);
+                    for (const line of text.split('\n')) parseInto(line, c);
+                    c.readOffset += nl + 1;
+                    continue;
+                }
+                // No newline in a whole slice: one line longer than the slice.
+                if (c.readOffset + n >= entry.size) break;   // still being written
+                const end = findNewline(fd, c.readOffset + n, entry.size, budget);
+                if (end < 0) break;                          // its tail is not written yet
+                const lineLen = end - c.readOffset;
+                if (lineLen <= MAX_LINE_BYTES) {
+                    const big = Buffer.allocUnsafe(lineLen);
+                    const m = fs.readSync(fd, big, 0, lineLen, c.readOffset);
+                    budget.left -= m;
+                    parseInto(big.toString('utf8', 0, m), c);
+                }
+                c.readOffset = end + 1;
             }
-            c.readOffset = consumed;
         } catch (_) {
             /* transient read error — try again next poll */
         } finally {
@@ -254,8 +315,18 @@ function compute() {
 
     // Refresh every candidate file's tail; drop cache for files that fell out
     // of the window so we don't leak Map entries forever.
+    // Least pending first: every live session's few new lines land on this
+    // poll; a cold multi-GB backlog takes whatever budget is left.
     const seenFiles = new Set();
-    for (const f of candidateFiles(cutoff)) { tail(f, cutoff); seenFiles.add(f.full); }
+    const budget = { left: READ_BUDGET_BYTES };
+    const pendingOf = f => { const c = _cache.get(f.full); return f.size - (c && f.size >= c.readOffset ? c.readOffset : 0); };
+    const files = candidateFiles(cutoff, now).sort((a, b) => pendingOf(a) - pendingOf(b));
+    let catchingUp = false;
+    for (const f of files) {
+        tail(f, cutoff, budget); seenFiles.add(f.full);
+        // A partial last line is normal; whole unread slices are a backlog.
+        if (budget.left <= 0 && pendingOf(f) > 0) catchingUp = true;
+    }
     for (const key of _cache.keys()) if (!seenFiles.has(key)) _cache.delete(key);
 
     // Union all records (keeping their file's session meta), dedupe across
@@ -506,6 +577,9 @@ function compute() {
         series,
         seriesMinutes: SERIES_MINUTES,
         hasData: all.length > 0,
+        // Older history is still being read (cold start): totals are low and
+        // still rising, so rate-of-change consumers should wait.
+        catchingUp,
         updatedAt: now,
     };
 }
@@ -526,4 +600,5 @@ function mount(app, requireAuthed) {
     });
 }
 
-module.exports = { mount, snapshot, tierOf, priceOf, rateOf, costOf };
+module.exports = { mount, snapshot, tierOf, priceOf, rateOf, costOf,
+    _tailForTest: tail, _resetForTest: () => { _cache.clear(); _walk = { at: 0, paths: [] }; _lastComputed = null; _lastAt = 0; } };
