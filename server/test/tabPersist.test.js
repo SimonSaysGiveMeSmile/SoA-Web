@@ -58,7 +58,7 @@ function reset() {
             }
         }
     } catch (_) { /* dir absent */ }
-    tabPersist._resetLiveTabsSeen();
+    tabPersist._resetForTest();
 }
 
 test('clobber guard: transient empty does NOT overwrite a good tabs.json', () => {
@@ -225,4 +225,90 @@ test('planRestore: fully-live fleet → opens nothing (no duplicate agents)', ()
     const plan = tabPersist.planRestore([{ cwd: '/x' }, { cwd: '/y' }], new Map([['/x', 1], ['/y', 3]]));
     assert.equal(plan.open.length, 0);
     assert.equal(plan.skipped, 2);
+});
+
+// ── 2026-11-25: daemon shutdown tombstoned the fleet ─────────────────────────
+// shutdown() flushed 36 tabs, then killed every PTY; each exit's debounced
+// save() wrote {tabs:[], closedByUser:true} and the next boot skipped recovery.
+
+test('shutdown freeze: tabs dying after the final flush cannot replace it', async () => {
+    reset();
+    const mgr = mkMgr([{ cwd: '/a' }, { cwd: '/b' }, { cwd: '/c' }]);
+    tabPersist.saveAll(mgr);                 // shutdown's final flush
+    tabPersist.freeze();                     // what shutdown() now does next
+    // sessions.shutdown(): every PTY exits → onTabsChange → debounced save().
+    mgr.order = []; mgr.tabs.clear();
+    tabPersist.save(mgr);
+    tabPersist.saveImmediate(mgr);
+    tabPersist.saveAll(mgr);
+    await new Promise(r => setTimeout(r, 700)); // past the 500 ms debounce
+
+    const saved = tabPersist.load();
+    assert.equal(saved.tabs.length, 3, 'the flushed fleet must survive shutdown');
+    assert.notEqual(saved.closedByUser, true, 'shutdown must never write a close-all tombstone');
+    assert.equal(tabPersist.loadScrollback().tabs.length, 3);
+});
+
+test('shutdown freeze: also cancels a save that was already pending', async () => {
+    reset();
+    tabPersist.saveImmediate(mkMgr([{ cwd: '/a' }, { cwd: '/b' }]));
+    tabPersist.save(mkMgr([]));              // queued just before shutdown began
+    tabPersist.freeze();
+    await new Promise(r => setTimeout(r, 700));
+    assert.equal(tabPersist.load().tabs.length, 2);
+});
+
+test('close-all tombstone records how many explicit closes stand behind it', () => {
+    reset();
+    tabPersist.saveImmediate(mkMgr([{ cwd: '/a' }, { cwd: '/b' }]));
+    tabPersist.noteUserClose(); tabPersist.noteUserClose();
+    tabPersist.saveImmediate(mkMgr([]));
+    const saved = tabPersist.load();
+    assert.equal(saved.closedByUser, true);
+    assert.equal(saved.userCloses, 2);
+});
+
+test('reconcile: a tombstone with no user close, right after a healthy snapshot, is recovered', () => {
+    reset();
+    const good = new Date('2026-11-25T21:07:00.000Z');
+    fs.writeFileSync(tabPersist.STATE_FILE + '.lastgood', JSON.stringify({
+        savedAt: good.toISOString(),
+        tabs: [{ cwd: '/proj/a' }, { cwd: '/proj/b' }, { cwd: '/proj/c' }],
+    }));
+    // Legacy shutdown artifact: no userCloses field, 600 ms after lastgood.
+    fs.writeFileSync(tabPersist.STATE_FILE, JSON.stringify({
+        savedAt: new Date(good.getTime() + 600).toISOString(), tabs: [], closedByUser: true,
+    }));
+
+    const rec = tabPersist.reconcileTabsFromScrollback();
+    assert.equal(rec.action, 'recovered');
+    assert.equal(rec.from, 'lastgood');
+    const saved = tabPersist.load();
+    assert.deepEqual(saved.tabs.map(t => t.cwd), ['/proj/a', '/proj/b', '/proj/c']);
+    assert.notEqual(saved.closedByUser, true);
+});
+
+test('reconcile: a tombstone backed by explicit closes is still respected', () => {
+    reset();
+    const good = new Date('2026-11-25T21:07:00.000Z');
+    fs.writeFileSync(tabPersist.STATE_FILE + '.lastgood', JSON.stringify({
+        savedAt: good.toISOString(), tabs: [{ cwd: '/proj/a' }, { cwd: '/proj/b' }],
+    }));
+    fs.writeFileSync(tabPersist.STATE_FILE, JSON.stringify({
+        savedAt: new Date(good.getTime() + 600).toISOString(), tabs: [], closedByUser: true, userCloses: 2,
+    }));
+    assert.equal(tabPersist.reconcileTabsFromScrollback().action, 'noop');
+    assert.equal(tabPersist.load().tabs.length, 0);
+});
+
+test('reconcile: an old tombstone (long after the last healthy snapshot) is respected', () => {
+    reset();
+    const good = new Date('2026-11-25T21:07:00.000Z');
+    fs.writeFileSync(tabPersist.STATE_FILE + '.lastgood', JSON.stringify({
+        savedAt: good.toISOString(), tabs: [{ cwd: '/proj/a' }, { cwd: '/proj/b' }],
+    }));
+    fs.writeFileSync(tabPersist.STATE_FILE, JSON.stringify({
+        savedAt: new Date(good.getTime() + 10 * 60 * 1000).toISOString(), tabs: [], closedByUser: true,
+    }));
+    assert.equal(tabPersist.reconcileTabsFromScrollback().action, 'noop');
 });

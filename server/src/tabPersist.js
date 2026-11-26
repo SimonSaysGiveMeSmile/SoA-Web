@@ -5,8 +5,12 @@
  * crashes. Three files, deliberately separate so a corrupt scrollback blob
  * can't take down the cheap metadata or session restore:
  *
- *   ~/.soa-web/tabs.json        — title, cwd, userRenamed, order. Cheap.
- *                                 Saved on every change (debounced 500ms).
+ *   ~/.soa-web/tabs.json        — title, cwd, userRenamed, order, and the
+ *                                 tab's IDENTITY: agent (claude|codex),
+ *                                 sessionId (the exact thread — observed or
+ *                                 launched, never a cwd guess) and sessionCwd
+ *                                 (the directory that thread belongs to).
+ *                                 Cheap. Saved on every change (debounced 500ms).
  *   ~/.soa-web/scrollback.json  — raw PTY bytes per tab, indexed positionally
  *                                 to tabs.json. Saved every 5 minutes by the
  *                                 server, and one final time on shutdown.
@@ -64,6 +68,24 @@ const _bootAt = Date.now();
 let _userCloses = 0;
 function noteUserClose() { _userCloses++; }
 
+// Shutdown freeze. shutdown() flushes the fleet, THEN kills every PTY; each
+// PTY exit fires onTabsChange → save() of a shrinking list, and the debounced
+// write lands while server.close() is still draining — an empty list in a
+// process that has seen tabs, i.e. a closedByUser tombstone. The next boot
+// then "respected the intent" and left the whole fleet dead (2026-11-25).
+// Once the final flush is on disk nothing this process does may replace it.
+let _frozen = false;
+function freeze() {
+    _frozen = true;
+    if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+}
+function isFrozen() { return _frozen; }
+
+// A tombstone with no user close behind it, written within this many ms of the
+// last healthy snapshot, is the signature of every tab dying at once (shutdown,
+// crash, mass PTY death) — not of a person closing their tabs.
+const TOMBSTONE_SUSPECT_MS = () => parseInt(process.env.SOA_WEB_TOMBSTONE_SUSPECT_MS || '15000', 10);
+
 // A shrink is suspicious when it's early, drastic (below half), and larger
 // than what the user's explicit closes account for.
 function _shrinkRefused(kind, priorCount, nextCount) {
@@ -84,6 +106,56 @@ function _shrinkRefused(kind, priorCount, nextCount) {
 // soa-relaunch. Set true the first time we persist a non-empty list (or recover
 // one), so close-all still persists while a transient empty never clobbers.
 let _liveTabsSeen = false;
+
+// ── Tab identity: which agent, on which thread, from which directory ──────────
+// Without it a restart re-guesses every tab from its cwd: Codex tabs came back
+// as Claude, and one conversation was resumed into ten tabs at once
+// (2026-11-25). So identity rides along in EVERY copy a restore can read from —
+// tabs.json, lastgood, the bak-* ring and scrollback.json — and survives every
+// reconcile. Normalised on the way in and out: an id is only identity when we
+// also know whose (a claude id typed into codex fails, and vice versa).
+const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{8,128}$/;
+function identityOf(t) {
+    const agent = t && (t.agent === 'claude' || t.agent === 'codex') ? t.agent : null;
+    const sessionId = agent && typeof t.sessionId === 'string' && SAFE_SESSION_ID.test(t.sessionId) ? t.sessionId : null;
+    const sessionCwd = sessionId && typeof t.sessionCwd === 'string' && path.isAbsolute(t.sessionCwd) ? t.sessionCwd : null;
+    return { agent, sessionId, sessionCwd };
+}
+
+// Did the USER name this tab? scrollback.json now records it; an older file
+// only has the live title, and the old "differs from the basename" test read
+// the tab manager's own dedupe labels (Side-Proj-1, Side-Proj-2) as renames,
+// freezing names nobody chose. Those, and the bare basename, are auto titles.
+function isAutoTitle(title, cwd) {
+    if (!title || !cwd) return !title;
+    const base = path.basename(cwd);
+    if (title === base) return true;
+    const m = /^(.*)-\d+$/.exec(title);
+    return !!(m && m[1] === base);
+}
+function renamedFromScrollback(t) {
+    if (!t) return false;
+    if (typeof t.userRenamed === 'boolean') return t.userRenamed;
+    if (!t.title || !t.cwd) return false;
+    return !isAutoTitle(t.title, t.cwd);
+}
+
+// A persisted userRenamed:true is believed only for a title the tab manager
+// would not have made itself. The restore before 2026-11-25 wrote the flag on
+// dedupe labels (Side-Proj-1) and basenames, and taking it at face value kept
+// those names frozen forever; this is what unfreezes them on the next load.
+function userNamed(t) {
+    return !!(t && t.userRenamed && t.title && !isAutoTitle(t.title, t.cwd));
+}
+
+function _entryFor(tab) {
+    return {
+        title: tab.userRenamed ? tab.title : null,
+        cwd: tab.cwd,
+        userRenamed: !!tab.userRenamed,
+        ...identityOf(tab),   // so a restart relaunches the RIGHT agent on the RIGHT thread
+    };
+}
 
 function ensureDir() {
     if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -170,6 +242,7 @@ function _writeLastGood(data) {
 }
 
 function save(tabMgr) {
+    if (_frozen) return;
     if (_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(() => {
         _saveTimer = null;
@@ -178,6 +251,7 @@ function save(tabMgr) {
 }
 
 function saveImmediate(tabMgr) {
+    if (_frozen) return;
     if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
     _writeMetaSync(tabMgr);
 }
@@ -186,6 +260,7 @@ function saveImmediate(tabMgr) {
 // graceful shutdown. Atomic via tmp + rename so a crash mid-write can't leave
 // a half-written blob — the prior file stays usable.
 function saveAll(tabMgr) {
+    if (_frozen) return;
     if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
     _writeMetaSync(tabMgr);
     _writeScrollbackSync(tabMgr);
@@ -198,12 +273,7 @@ function _writeMetaSync(tabMgr) {
         for (const id of tabMgr.order) {
             const tab = tabMgr.tabs.get(id);
             if (!tab) continue;
-            tabs.push({
-                title: tab.userRenamed ? tab.title : null,
-                cwd: tab.cwd,
-                userRenamed: tab.userRenamed,
-                agent: tab.agent || null,   // 'claude' | 'codex' — so a restart relaunches the RIGHT agent
-            });
+            tabs.push(_entryFor(tab));
         }
         const data = { savedAt: new Date().toISOString(), tabs };
         // ANTI-CLOBBER (shrink guard): early after boot, never let a much
@@ -245,6 +315,9 @@ function _writeMetaSync(tabMgr) {
                 return;
             }
             data.closedByUser = true;
+            // How many explicit closes stand behind this tombstone — reconcile
+            // uses it to tell a person's close-all from every tab dying at once.
+            data.userCloses = _userCloses;
         }
         const tmp = STATE_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
@@ -253,6 +326,21 @@ function _writeMetaSync(tabMgr) {
         // can self-heal from it. A lone/empty list never touches lastgood.
         if (tabs.length >= MIN_HEALTHY_TABS) _writeLastGood(data);
     } catch (_) { /* best-effort */ }
+}
+
+// A closedByUser tombstone that no explicit close stands behind (userCloses
+// absent or 0) and that was written within TOMBSTONE_SUSPECT_MS of the last
+// healthy snapshot: the fleet went from full to empty in one burst without the
+// user closing anything. Treat it as a collapse, not as intent.
+function _suspectTombstone(meta) {
+    if (!meta || !meta.closedByUser) return false;
+    if (Number(meta.userCloses) > 0) return false;
+    const lastgood = loadLastGood();
+    if (!lastgood || !Array.isArray(lastgood.tabs) || lastgood.tabs.length < MIN_HEALTHY_TABS) return false;
+    const tomb = Date.parse(meta.savedAt), good = Date.parse(lastgood.savedAt);
+    if (!Number.isFinite(tomb) || !Number.isFinite(good)) return false;
+    const gap = tomb - good;
+    return gap >= 0 && gap <= TOMBSTONE_SUSPECT_MS();
 }
 
 // Boot-time fleet recovery. If tabs.json is empty/missing — but NOT because the
@@ -265,7 +353,7 @@ function _writeMetaSync(tabMgr) {
 function reconcileTabsFromScrollback() {
     const meta = load();
     // Respect an explicit user close-all above all else.
-    if (meta && meta.closedByUser) {
+    if (meta && meta.closedByUser && !_suspectTombstone(meta)) {
         return { action: 'noop', reason: 'closedByUser — respecting intent' };
     }
     const metaCount = (meta && Array.isArray(meta.tabs)) ? meta.tabs.length : 0;
@@ -291,18 +379,15 @@ function reconcileTabsFromScrollback() {
     if (lgCount >= MIN_HEALTHY_TABS) {
         tabs = lastgood.tabs
             .filter(t => t && typeof t.cwd === 'string' && t.cwd)
-            .map(t => ({ title: t.userRenamed ? t.title : null, cwd: t.cwd, userRenamed: !!t.userRenamed, agent: t.agent || null }));
+            .map(t => ({ title: userNamed(t) ? t.title : null, cwd: t.cwd, userRenamed: userNamed(t), ...identityOf(t) }));
         from = 'lastgood';
     } else if (sbCount >= MIN_HEALTHY_TABS) {
         tabs = [];
         for (const t of sb.tabs) {
             if (!t || typeof t.cwd !== 'string' || !t.cwd) continue;
-            // scrollback.json carries the live title but not userRenamed; treat a
-            // title that differs from the cwd basename as a user rename so custom
-            // names survive, otherwise let the daemon re-derive it from the cwd.
-            const base = path.basename(t.cwd);
-            const renamed = !!(t.title && t.title !== base);
-            tabs.push({ title: renamed ? t.title : null, cwd: t.cwd, userRenamed: renamed });
+            // A user-chosen name survives; an auto title is re-derived from the cwd.
+            const renamed = renamedFromScrollback(t);
+            tabs.push({ title: renamed ? t.title : null, cwd: t.cwd, userRenamed: renamed, ...identityOf(t) });
         }
         from = 'scrollback';
     }
@@ -315,7 +400,7 @@ function reconcileTabsFromScrollback() {
         const have = new Set(tabs.map(t => t.cwd));
         for (const t of meta.tabs) {
             if (t && typeof t.cwd === 'string' && t.cwd && !have.has(t.cwd)) {
-                tabs.push({ title: t.userRenamed ? t.title : null, cwd: t.cwd, userRenamed: !!t.userRenamed });
+                tabs.push({ title: userNamed(t) ? t.title : null, cwd: t.cwd, userRenamed: userNamed(t), ...identityOf(t) });
                 have.add(t.cwd);
             }
         }
@@ -350,7 +435,9 @@ function _writeScrollbackSync(tabMgr) {
             if (snap.length > MAX_SCROLLBACK_PER_TAB) {
                 snap = snap.slice(snap.length - MAX_SCROLLBACK_PER_TAB);
             }
-            tabs.push({ title: tab.title, cwd: tab.cwd, scrollback: snap });
+            // Identity + userRenamed here too: scrollback.json is the last-resort
+            // recovery source, and a fleet rebuilt from it must not re-guess.
+            tabs.push({ title: tab.title, cwd: tab.cwd, userRenamed: !!tab.userRenamed, ...identityOf(tab), scrollback: snap });
         }
         // ANTI-CLOBBER (symmetric to _writeMetaSync's guard): scrollback.json is
         // the self-heal recovery source — reconcileTabsFromScrollback() rebuilds
@@ -403,27 +490,66 @@ function liveCwdCounts(sessionsIterable) {
     return counts;
 }
 
-// Which saved entries to (re)open given the live multiset. Each live tab consumes
-// one matching saved entry, so a project with several saved tabs still restores
-// fully when only some are alive. Pure; does not mutate `liveByCwd`.
-function planRestore(savedTabs, liveByCwd) {
-    const remaining = new Map(liveByCwd || []);
+// The live side of a restore, per tab: {cwd, sessionId}. Fleet-wide for the
+// same reason as liveCwdCounts.
+function liveTabs(sessionsIterable) {
+    const out = [];
+    for (const s of sessionsIterable || []) {
+        if (!s || !s.tabMgr) continue;
+        for (const id of s.tabMgr.order) {
+            const t = s.tabMgr.tabs.get(id);
+            if (t && t.cwd && !t.exited) out.push({ cwd: t.cwd, sessionId: t.sessionId || null });
+        }
+    }
+    return out;
+}
+
+// Which saved entries to (re)open given what is live. Pure; mutates nothing.
+//
+// Identity first: a live tab ON an entry's saved thread consumes that entry,
+// wherever it sits. Only then does the cwd multiset apply, and only to entries
+// with no saved thread — any live tab on that cwd consumes one. An entry whose
+// thread no live tab is on is always opened: letting a bare shell (the default
+// tab a phone got before rehydrate) or a tab on ANOTHER thread consume it threw
+// its identity away and the next save forgot the conversation existed.
+//
+// `live` is liveTabs() output, or (legacy) a Map cwd -> count of id-less tabs.
+// `elsewhere` = ids live in sessions whose cwds should not count (restoreFleet
+// counts cwds in the target session only, but a thread live anywhere is open).
+function planRestore(savedTabs, live, { elsewhere = null } = {}) {
+    const list = live instanceof Map
+        ? [...live].flatMap(([cwd, n]) => Array.from({ length: n }, () => ({ cwd, sessionId: null })))
+        : [...(live || [])];
+    const used = new Array(list.length).fill(false);
+    const byId = new Map();
+    list.forEach((t, i) => { if (t.sessionId && !byId.has(t.sessionId)) byId.set(t.sessionId, i); });
     const open = [];
     let skipped = 0;
+    const pending = [];
     (savedTabs || []).forEach((entry, index) => {
-        const have = (entry && remaining.get(entry.cwd)) || 0;
-        if (have > 0) { remaining.set(entry.cwd, have - 1); skipped++; return; }
-        open.push({ entry, index });
+        const sid = entry && identityOf(entry).sessionId;
+        if (sid && byId.has(sid) && !used[byId.get(sid)]) { used[byId.get(sid)] = true; skipped++; return; }
+        if (sid && elsewhere && elsewhere.has(sid)) { skipped++; return; }
+        pending.push({ entry, index, sid });
     });
+    const remaining = new Map();
+    list.forEach((t, i) => { if (!used[i]) remaining.set(t.cwd, (remaining.get(t.cwd) || 0) + 1); });
+    for (const p of pending) {
+        const have = (!p.sid && p.entry && remaining.get(p.entry.cwd)) || 0;
+        if (have > 0) { remaining.set(p.entry.cwd, have - 1); skipped++; continue; }
+        open.push({ entry: p.entry, index: p.index });
+    }
+    open.sort((a, b) => a.index - b.index);
     return { open, skipped };
 }
 
 module.exports = {
-    liveCwdCounts, planRestore,
+    liveCwdCounts, liveTabs, planRestore, identityOf, renamedFromScrollback, isAutoTitle, userNamed,
     load, loadScrollback, loadLastGood, loadSession, saveSession,
     save, saveImmediate, saveAll, reconcileTabsFromScrollback,
-    noteUserClose,
+    noteUserClose, freeze, isFrozen,
     STATE_FILE, SCROLLBACK_FILE, SESSION_FILE,
     // test hook: reset the per-process "have we seen tabs" latch
     _resetLiveTabsSeen: () => { _liveTabsSeen = false; },
+    _resetForTest: () => { _liveTabsSeen = false; _frozen = false; _userCloses = 0; },
 };

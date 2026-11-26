@@ -13,7 +13,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const tts = require('./tts');
 
 // Our bundled CLIs (soa-msg, soa-browser) live alongside the server. Prepend
@@ -75,28 +75,60 @@ class RingBuffer {
 // Terminal.app behavior of labeling each tab with the folder the shell is
 // sitting in right now, not the one it was spawned in. Platform options:
 //   Linux:  readlink /proc/<pid>/cwd — single syscall, authoritative.
-//   macOS:  `lsof -a -p <pid> -d cwd -Fn` — the `n` field holds the cwd.
-//           It's ~10ms so we only poll on Enter, not on every keystroke.
-//   Other:  return null and fall back to the spawn cwd.
+//   macOS:  `lsof -a -p <pid,...> -d cwd -Fpn` — `p` lines carry the pid,
+//           the `n` line after each one holds that pid's cwd.
+//   Other:  null, and the tab keeps its spawn cwd.
+//
+// Never synchronous on macOS. lsof costs ~10ms on a quiet machine and
+// 80-500ms under load, and the periodic poll covers every tab. With 38 tabs
+// a blocking call per tab kept the event loop busy for the whole 3s poll
+// interval, and every terminal in the app froze (no keystrokes in, no output
+// out) while the server sat at ~1% CPU waiting on lsof. One batched async
+// call per poll costs the loop nothing.
+const LSOF_TIMEOUT_MS = 2000;
+
+function parseLsofCwds(out) {
+    const map = new Map();
+    let pid = null;
+    for (const line of String(out || '').split('\n')) {
+        if (line.startsWith('p')) pid = parseInt(line.slice(1), 10);
+        else if (line.startsWith('n') && pid) {
+            const cwd = line.slice(1).trim();
+            if (cwd) map.set(pid, cwd);
+        }
+    }
+    return map;
+}
+
+// Resolves to Map<pid, cwd>. Pids it cannot resolve are left out. Never rejects.
+function resolveCwdsByPids(pids) {
+    const list = [...new Set((pids || []).filter(p => Number.isInteger(p) && p > 0))];
+    if (!list.length) return Promise.resolve(new Map());
+    if (process.platform === 'linux') {
+        const map = new Map();
+        for (const pid of list) {
+            try { map.set(pid, fs.readlinkSync(`/proc/${pid}/cwd`)); } catch (_) { /* gone */ }
+        }
+        return Promise.resolve(map);
+    }
+    if (process.platform !== 'darwin') return Promise.resolve(new Map());
+    return new Promise((resolve) => {
+        execFile('lsof', ['-a', '-p', list.join(','), '-d', 'cwd', '-Fpn'], {
+            encoding: 'utf8',
+            timeout: LSOF_TIMEOUT_MS,
+            maxBuffer: 1024 * 1024,
+        }, (_err, stdout) => {
+            // lsof exits 1 when any listed pid is gone but still prints the
+            // rest, so parse stdout whatever the exit status.
+            resolve(parseLsofCwds(stdout));
+        });
+    });
+}
+
+// Single-pid form, kept for callers and the module export. Resolves to the
+// cwd or null; never rejects.
 function resolveCwdByPid(pid) {
-    if (!pid || pid < 0) return null;
-    try {
-        if (process.platform === 'linux') {
-            return fs.readlinkSync(`/proc/${pid}/cwd`);
-        }
-        if (process.platform === 'darwin') {
-            const out = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-                encoding: 'utf8',
-                timeout: 500,
-                stdio: ['ignore', 'pipe', 'ignore'],
-            });
-            for (const line of out.split('\n')) {
-                if (line.startsWith('n')) return line.slice(1).trim() || null;
-            }
-            return null;
-        }
-    } catch (_) { /* process gone, permission denied, lsof missing */ }
-    return null;
+    return resolveCwdsByPids([pid]).then(m => m.get(pid) || null);
 }
 
 let _pty = null;
@@ -112,7 +144,7 @@ function requirePty() {
 }
 
 class Tab {
-    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, onInput, agent }) {
+    constructor({ id, title, cwd, env, cols, rows, scrollbackBytes, onData, onExit, onInput, agent, userRenamed, sessionId, sessionCwd }) {
         this.id = id;
         this.cwd = cwd || process.cwd();
         // Default the tab label to the cwd's folder name so "Hireal" shows
@@ -120,7 +152,10 @@ class Tab {
         // and so does any later user rename (tracked via userRenamed).
         this.autoTitleBase = path.basename(this.cwd) || 'terminal';
         this.title = title || this.autoTitleBase;
-        this.userRenamed = !!title;
+        // A title alone used to mean "the user named it", so every restore that
+        // passed one froze it. Callers that know better (restore paths) say so;
+        // userRenamed is only ever true for a name a person chose.
+        this.userRenamed = userRenamed == null ? !!title : (!!userRenamed && !!title);
         this.env = { ...process.env, ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
         this.cols = cols || DEFAULT_COLS;
         this.rows = rows || DEFAULT_ROWS;
@@ -130,6 +165,11 @@ class Tab {
         // 'claude' | 'codex' | null — which agent this tab runs (set by the
         // supervisor from the stream; seeded from tabs.json on restore).
         this.agent = agent || null;
+        // The exact thread this tab's agent is on (stamped at launch, observed
+        // off the running process by sessionIdentity) and that thread's own
+        // directory. Seeded on restore so an un-resumed tab still remembers it.
+        this.sessionId = (this.agent && sessionId) || null;
+        this.sessionCwd = (this.sessionId && sessionCwd) || null;
         this.pty = null;
         this.exited = false;
         this.exitCode = null;
@@ -189,10 +229,14 @@ class Tab {
     // Poll the shell's live cwd. Returns true when it changed — the caller
     // uses that to skip the label recompute + snapshot for keystrokes that
     // didn't actually move the shell.
-    refreshCwd() {
+    async refreshCwd() {
         if (this.exited || !this.pty) return false;
-        const next = resolveCwdByPid(this.pty.pid);
-        if (!next || next === this.cwd) return false;
+        return this.applyCwd(await resolveCwdByPid(this.pty.pid));
+    }
+
+    // Record a freshly resolved cwd. Returns true when it changed.
+    applyCwd(next) {
+        if (this.exited || !next || next === this.cwd) return false;
         this.cwd = next;
         this.autoTitleBase = path.basename(next) || 'terminal';
         return true;
@@ -267,7 +311,7 @@ class TabManager {
         return true;
     }
 
-    open({ title, cwd, cols, rows, env, silent, seedScrollback, agent } = {}) {
+    open({ title, cwd, cols, rows, env, silent, seedScrollback, agent, userRenamed, sessionId, sessionCwd } = {}) {
         const id = this.next++;
         const tab = new Tab({
             id,
@@ -280,7 +324,7 @@ class TabManager {
             env: withScriptsOnPath({ ...env, ...tts.envFor(id) }),
             onData: data => this.onData(id, data),
             onInput: data => this.onInput(id, data),
-            agent,
+            agent, userRenamed, sessionId, sessionCwd,
             onExit: code => {
                 this._archive(id);
                 this.onExit(id, code);
@@ -397,16 +441,46 @@ class TabManager {
     // if it changed, recomputes the auto title for this tab and any other
     // tab that might collide with it. Returns true when a snapshot should
     // be emitted.
-    pokeCwd(id) {
+    // Async: resolves to that boolean and never rejects.
+    async pokeCwd(id) {
         const tab = this.tabs.get(id);
         if (!tab) return false;
-        if (!tab.refreshCwd()) return false;
+        if (!(await tab.refreshCwd())) return false;
+        if (this.tabs.get(id) !== tab) return false; // closed while lsof ran
         const changed = this._refreshAutoTitles();
         // Always emit when the cwd changed for an auto-named tab — the
         // title itself may be the same (same basename) but a sibling tab
         // may have newly collided or un-collided.
         if (changed || !tab.userRenamed) this.onTabsChange(this.list());
         return true;
+    }
+
+    // The periodic poll: every live tab in ONE lsof call. If the previous
+    // poll is still running (a heavily loaded machine), skip this round
+    // rather than stack lsof processes. One snapshot for the whole batch.
+    async pokeAllCwds() {
+        if (this._cwdPollInFlight) return false;
+        const tabs = [...this.tabs.values()].filter(t => !t.exited && t.pty && t.pty.pid);
+        if (!tabs.length) return false;
+        this._cwdPollInFlight = true;
+        try {
+            const cwds = await resolveCwdsByPids(tabs.map(t => t.pty.pid));
+            let moved = false;
+            let autoMoved = false;
+            for (const tab of tabs) {
+                if (this.tabs.get(tab.id) !== tab) continue;
+                if (tab.applyCwd(cwds.get(tab.pty.pid))) {
+                    moved = true;
+                    if (!tab.userRenamed) autoMoved = true;
+                }
+            }
+            if (!moved) return false;
+            const changed = this._refreshAutoTitles();
+            if (changed || autoMoved) this.onTabsChange(this.list());
+            return true;
+        } finally {
+            this._cwdPollInFlight = false;
+        }
     }
 
     killAll() {
@@ -452,4 +526,4 @@ class TabManager {
     }
 }
 
-module.exports = { TabManager, Tab, RingBuffer, DEFAULT_SHELL, resolveCwdByPid };
+module.exports = { TabManager, Tab, RingBuffer, DEFAULT_SHELL, resolveCwdByPid, resolveCwdsByPids, parseLsofCwds };

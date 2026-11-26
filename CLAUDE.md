@@ -71,10 +71,26 @@ rebuilt with by hand three times: pick the richest surviving list (tabs.json →
 lastgood → newest backup → the cwds inside scrollback.json), drop entries whose
 directory is gone, skip cwds that are **already open counting duplicates as a
 multiset** (three tabs on one repo must restore three tabs), open the rest, and
-resume each one's Claude conversation with a **distinct** recent session id so
-two agents never attach to the same transcript. The dashboard's Time Machine
-Restore button calls the same endpoint, and the endpoint is not
-entitlement-gated — recovering your own terminals is not premium fleet control.
+relaunch each tab's agent **exactly**: every tab persists `agent`
+(claude|codex), `sessionId` and `sessionCwd` (observed off the running process
+by a `ps` sweep, and stamped once more at shutdown), so a tab comes back as
+the same agent on the same thread, from the thread's own directory, with no
+`--continue` / `--last` fallback. Only a tab with no saved id gets a
+**distinct**, unclaimed recent session, so two agents never attach to the same
+transcript. The dashboard's Time Machine Restore button calls the same
+endpoint, and the endpoint is not entitlement-gated — recovering your own
+terminals is not premium fleet control.
+
+To check the result: `curl -s http://127.0.0.1:4010/api/fleet/audit` (loopback,
+no cookie needed, and it does not mint a session) returns the expected vs the
+running `{agent, sessionId}` for each tab, plus any thread that is live in two
+tabs (the daemon also logs a `fleet-audit:` line about 25 s after each restore).
+To fix what it flags: `curl -sX POST http://127.0.0.1:4010/api/fleet/repair -H
+'content-type: application/json' -H "x-soa-tab: $SOA_WEB_TAB" -d '{}'`
+(`{"dryRun":true}` to preview; the header spares your own tab) stops
+the wrong agent in each flagged tab and relaunches the exact one; it acts only
+on an exact expected id, never the manager tab. Details, the manual procedure
+and the upgrade path: `docs/fleet-recovery.md`.
 
 Two things that have caused a real loss, worth knowing:
 
@@ -577,10 +593,16 @@ Edit this repo (`~/Desktop/Hireal/soa-web`), then mirror changed files
 to the install dir (`~/.soa-web`) — that is the code the live daemon runs (it
 reads code only at startup). Static client files (`web/public/**`) take effect
 on reload (bump the SW `VERSION` in `web/public/m/sw.js`). Server changes
-(`server/src/**`) need a graceful restart: `kill -TERM <pid>` — read the pid
-from `~/.soa-web-local/daemon.lock` — (flushes scrollback/tabs) then
-`launchctl kickstart -k gui/$(id -u)/app.s0a.web.local`; tabs and tunnel
-re-adopt. The tunnel URL is persisted to `~/.soa-web-local/tunnel.json` (the
+(`server/src/**`) need a restart: run **`scripts/soa-restart`** (not a raw
+`kill`/`kickstart`). It snapshots each tab's agent + session id into
+`session-hints.json`, kickstarts the label (SIGTERM → the shutdown flush),
+waits for the new pid and the restore's audit, then `POST /api/fleet/repair`s
+any tab on the wrong agent or thread; exit 0 all ok, 2 mismatches left, 1 the
+restart failed, 3 restarted but no audit. `--dry-run` prints the snapshot only,
+`--no-repair` skips the repair. Run from a tab, it detaches and exits 0 at
+once: the real outcome is in `<state>/soa-restart.last.json` (log
+`<state>/logs/soa-restart.log`). Tabs
+and tunnel re-adopt. The tunnel URL is persisted to `~/.soa-web-local/tunnel.json` (the
 **state dir**, not `~/.soa-web`) and re-adopted across restarts, so it stays
 stable.
 

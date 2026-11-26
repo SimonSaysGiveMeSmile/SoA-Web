@@ -262,11 +262,14 @@ function importBundle(session, bundle) {
         }
     }
 
-    // Resume like boot-restore does: staggered, resume→continue chain, never a
-    // bare cold `claude` (which would start a fresh session over the context).
+    // Resume like boot-restore does: staggered, that exact id and nothing behind
+    // it, never a bare cold `claude` (a fresh session over the context).
     toResume.forEach(({ tab, cwd, sessionId }, i) => {
         setTimeout(() => {
-            try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId, coldFallback: false }); } catch (_) {}
+            // The bundle's id is a CLAUDE thread: say so, or the kind is guessed
+            // from the cwd's newest transcript and a newer Codex rollout there
+            // would type `codex resume <claude id>` and stamp that as identity.
+            try { sessionManager.launchClaude(tab, cwd, { resume: true, agent: 'claude', sessionId, sessionCwd: cwd, coldFallback: false, guess: false }); } catch (_) {}
         }, 1200 + i * RESUME_STAGGER_MS);
     });
     report.resumed = toResume.length;

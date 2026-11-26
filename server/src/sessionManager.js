@@ -388,19 +388,55 @@ function sessionMaps(hours = 72) {
     try { codex = codexSessions.latestSessionByCwd(hours); } catch (_) {}
     return { claude, codex };
 }
-// The relaunch line for a tab's agent: resume its latest thread, else the most recent.
-function resumeLineFor(agent, cwd, { model = '', coldFallback = false, maps = null } = {}) {
-    const mm = maps || sessionMaps(72);
-    if (agent === 'codex') {
-        const hit = cwd ? mm.codex.get(cwd) : null;
-        const flag = model ? ` -m ${model}` : '';
-        const tail = coldFallback ? ` || codex${flag}` : '';
-        return hit ? `codex resume ${hit.sessionId}${flag} || codex resume --last${flag}${tail}` : `codex resume --last${flag}${tail}`;
+// ── The one builder for every agent launch/resume line ───────────────────────
+// Rules, each one paid for by a real mix-up (2026-11-25):
+//   - an id is resumed EXACTLY. Nothing chains behind it but (optionally) a
+//     cold start of the SAME agent: `|| claude --continue` / `|| codex resume
+//     --last` attach whichever thread ran last in that directory, which on a
+//     shared directory is another tab's — two corrupted tabs instead of one
+//     cold start;
+//   - a codex tab gets codex, a claude tab gets claude, never the other;
+//   - Claude only finds a session from the project it was created in, so an id
+//     whose thread lives elsewhere runs from there, in a SUBSHELL, so the tab's
+//     own cwd (and its grouping) stays where it was;
+//   - everything interpolated is validated or single-quoted: these lines are
+//     typed into a live shell.
+// `--last` / `--continue` survive only where there was never an id at all.
+const CODEX_NO_UPDATE = ' -c check_for_update_on_startup=false';   // an update prompt would eat the resume
+const SAFE_SID = /^[A-Za-z0-9_-]{8,128}$/;
+const SAFE_MODEL = /^[A-Za-z0-9._:\[\]-]{1,64}$/;
+function shellQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
+
+function agentLaunchLine(agent, { sessionId = null, sessionCwd = null, cwd = null, model = '', resume = true, coldFallback = false } = {}) {
+    const codex = agent === 'codex';
+    const sid = resume && SAFE_SID.test(sessionId || '') ? sessionId : null;
+    const m = SAFE_MODEL.test(model || '') ? model : '';
+    const flag = codex ? (m ? ` -m ${m}` : '') + CODEX_NO_UPDATE : (m ? ` --model ${m}` : '');
+    const cold = codex ? `codex${flag}` : `claude${flag}`;
+    if (!resume) return cold;
+    if (!sid) return (codex ? `codex resume --last${flag}` : `claude --continue${flag}`) + (coldFallback ? ` || ${cold}` : '');
+    let line = (codex ? `codex resume ${sid}${flag}` : `claude --resume ${sid}${flag}`) + (coldFallback ? ` || ${cold}` : '');
+    if (sessionCwd && sessionCwd !== cwd) line = `(cd ${shellQuote(sessionCwd)} && ${line})`;
+    return line;
+}
+
+// Where a thread lives, from its own transcript/rollout. null = unknown.
+function sessionCwdFor(agent, sessionId) {
+    try {
+        return agent === 'codex' ? codexSessions.cwdForSession(sessionId) : claudeSessions.cwdForSession(sessionId);
+    } catch (_) { return null; }
+}
+
+// The relaunch line for a tab's agent: its own thread when it has one, else the
+// cwd's latest — and in both cases that id alone, never `--last` behind it.
+function resumeLineFor(agent, cwd, { model = '', coldFallback = false, maps = null, sessionId = null, sessionCwd = null } = {}) {
+    const kind = agent === 'codex' ? 'codex' : 'claude';
+    if (!sessionId) {
+        const mm = maps || sessionMaps(72);
+        const hit = cwd ? mm[kind].get(cwd) : null;
+        if (hit) sessionId = hit.sessionId;
     }
-    const hit = cwd ? mm.claude.get(cwd) : null;
-    const flag = model ? ` --model ${model}` : '';
-    const tail = coldFallback ? ` || claude${flag}` : '';
-    return hit ? `claude --resume ${hit.sessionId}${flag} || claude --continue${flag}${tail}` : `claude --continue${flag}${tail}`;
+    return agentLaunchLine(kind, { sessionId, sessionCwd, cwd, model, coldFallback });
 }
 
 // Prompts typed into a limited tab are REJECTED by the TUI ("… resets 9pm"); we
@@ -565,53 +601,74 @@ function writeToTab(tab, text) {
 // Launch (or resume) a Claude agent in a freshly-spawned tab. Shared by the
 // daemon's boot-restore auto-resume (index.js scheduleAutoResume) and the
 // manager-agent `spawn` action so the resume-vs-fresh decision + reliable
-// submit can never drift apart. When a recent transcript exists for the tab's
-// cwd we resume it, falling back through --continue to a cold start; otherwise
-// we cold-start. Returns the resumed sessionId (or null for a fresh start).
-// coldFallback: append a bare `claude` if BOTH --resume and --continue fail.
-// spawn wants this (cold-start a new agent); boot-restore does NOT — a bare
-// `claude` there starts a FRESH session, losing pre-restart context AND
-// poisoning future --continue (see feedback: never bare-claude after a restart),
-// so index.js passes coldFallback:false to keep the original 2-step chain.
+// submit can never drift apart. Returns the resumed sessionId (or null for a
+// fresh start). coldFallback: append a cold start of the SAME agent if the
+// exact resume fails. spawn wants this (cold-start a new agent); restore does
+// NOT — a bare `claude` there starts a FRESH session, losing pre-restart
+// context (see feedback: never bare-claude after a restart), so the restore
+// paths pass coldFallback:false and a failed resume leaves the shell.
 // Reset BEFORE as well as after a CLI: the previous TUI may have exited with
 // mouse reporting armed. Otherwise a resumed Codex can receive pointer reports
 // as prompt text until it exits, when a trailing-only reset would finally run.
 const SANE_SHELL_RESET =
     "printf '\\033[?9l\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?1049l\\033[?2004l\\033[?25h\\033>'";
 
-// agent: 'claude' | 'codex' | null (null → whichever agent's transcript for the
-// cwd is newer, defaulting to claude). A Codex tab relaunches `codex resume`.
-function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, coldFallback = true, agent = null } = {}) {
+// agent: 'claude' | 'codex' | null (null → the tab's own agent, else whichever
+// agent's transcript for the cwd is newer, defaulting to claude).
+//
+// Which thread, in order: the caller's `sessionId` (a restore's allocation),
+// then the tab's own remembered one (same agent only), then — only when
+// `guess` is on, as for a manager `spawn` — the cwd's newest. Restore paths
+// pass guess:false: a tab with no thread of its own is left at its shell
+// rather than handed a stranger's, and a guess skips `claimed` ids (threads
+// other live tabs are on). Whatever id is chosen is resumed exactly
+// (agentLaunchLine), from its own directory.
+//
+// It is STAMPED on the tab as identity only when it is one: the caller's id
+// with exact:true (the default — a saved or recorded id), or the tab's own.
+// A cwd guess (`guess`, or a restore's allocation passed with exact:false) is
+// typed but not stamped; the identity sweep records it once the running
+// process is seen on it. A guess persisted as identity is resumed exactly on
+// every later restart, so one wrong guess would become permanent.
+function launchClaude(tab, cwd, { resume = true, model = '', sessionId = null, sessionCwd = null, coldFallback = true, agent = null, guess = true, claimed = null, exact = true } = {}) {
     const kind = agent || (tab && tab.agent) || agentForCwd(cwd) || 'claude';
+    if (tab && tab.agent !== kind) { tab.sessionId = null; tab.sessionCwd = null; }   // another kind's id is not ours
     if (tab) tab.agent = kind;
-    if (kind === 'codex') {
-        let sid = sessionId;
-        if (sid == null && resume && cwd) { try { const hit = codexSessions.latestSessionByCwd(72).get(cwd); if (hit) sid = hit.sessionId; } catch (_) {} }
-        const flag = model ? ` -m ${model}` : '';
-        const tail = coldFallback ? ` || codex${flag}` : '';
-        const line = !resume ? `codex${flag}`
-            : sid ? `codex resume ${sid}${flag} || codex resume --last${flag}${tail}`
-            : `codex resume --last${flag}${tail}`;
-        submitToTab(tab, `${SANE_SHELL_RESET}; ${line}; ${SANE_SHELL_RESET}`);
-        return sid;
+    let sid = resume ? (sessionId || (tab && tab.sessionId) || null) : null;
+    let known = !!sid && (sid !== sessionId || exact);   // identity, not a guess
+    let home = sessionCwd || (tab && sid && sid === tab.sessionId ? tab.sessionCwd : null) || null;
+    if (!sid && resume && guess && cwd) {
+        try {
+            const hit = (kind === 'codex' ? codexSessions : claudeSessions).latestSessionByCwd(72).get(cwd);
+            // A thread another live tab is on is not up for grabs.
+            if (hit && !(claimed && claimed.has(hit.sessionId))) { sid = hit.sessionId; home = cwd; known = false; }
+        } catch (_) { /* no resume → cold start */ }
     }
-    let sid = sessionId;
-    if (sid == null && resume && cwd) {
-        try { const hit = claudeSessions.latestSessionByCwd(72).get(cwd); if (hit) sid = hit.sessionId; }
-        catch (_) { /* no resume → cold start */ }
-    }
-    const flag = model ? ` --model ${model}` : '';
-    const tail = coldFallback ? ` || claude${flag}` : '';
+    if (sid && !home) home = sessionCwdFor(kind, sid);
+    if (home && !fs.existsSync(home)) home = null;   // a deleted project: try from the tab's cwd
+    // No id at all → a cold start of this agent, never `--continue`/`--last`
+    // (those are someone else's thread as often as not).
     const line = sid
-        ? `claude --resume ${sid}${flag} || claude --continue${flag}${tail}`
-        : `claude${flag}`;
+        ? agentLaunchLine(kind, { sessionId: sid, sessionCwd: home, cwd, model, coldFallback })
+        : agentLaunchLine(kind, { resume: false, model });
     submitToTab(tab, `${SANE_SHELL_RESET}; ${line}; ${SANE_SHELL_RESET}`);
+    if (tab) {
+        tab.agentObserved = true;   // we launched this kind: the paint detector no longer relabels it
+        if (sid && known) {
+            // Remember what we attached to; 'launched' tells the sweep the next
+            // process of this kind is ours (see sessionIdentity.stampTabs).
+            tab.sessionId = sid; tab.sessionCwd = home || null; tab.sessionPid = 'launched';
+        }
+    }
     return sid;
 }
-// Resolved agent kind for a live tab: what the supervisor saw it paint, else the
-// newest transcript for its cwd, else claude.
+// Resolved agent kind for a live tab. A tab whose identity is known (observed
+// off the running process, or stamped at launch) answers for itself: the
+// painted-screen guess flips on whatever scrolled past last, and a codex tab
+// whose agent exited was read as claude and sent `claude --resume`.
 function agentKindFor(man, tab, maps = null) {
     if (!tab) return 'claude';
+    if (tab.agent && (tab.sessionId || tab.agentObserved)) return tab.agent;
     const s = man && man.tabs ? man.tabs.get(tab.id) : null;
     if (s && s.agent) return s.agent;
     if (tab.agent) return tab.agent;
@@ -1745,7 +1802,10 @@ class SessionManager {
         const tab = this.session.tabMgr && this.session.tabMgr.get(id);
         if (s.agent == null && tab && tab.agent) s.agent = tab.agent;
         const kind = detectAgentKind(plain);
-        if (kind && kind !== s.agent) { s.agent = kind; if (tab) tab.agent = kind; }
+        // The painted guess may label the row, but it never rewrites a tab whose
+        // identity is known: the ps observer (sessionIdentity.stampTabs) owns
+        // that, and a stale banner in the scrollback is not a change of agent.
+        if (kind && kind !== s.agent) { s.agent = kind; if (tab && !tab.sessionId && !tab.agentObserved) tab.agent = kind; }
         // Usage-limit banner (either agent) → one `limited` episode per reset time,
         // a replay queue for the prompts the TUI rejects meanwhile, and an
         // automatic resume shortly after the reset.
@@ -1763,7 +1823,7 @@ class SessionManager {
             } else if (!isStaleBanner(det, cur || prev, now)) {
                 s.limit = { agent: det.agent, resetAt: det.resetAt, label: det.label, window: det.window || null, at: now, queued: [] };
                 s.limitPrev = null;
-                if (det.agent && det.agent !== s.agent) { s.agent = det.agent; if (tab) tab.agent = det.agent; }
+                if (det.agent && det.agent !== s.agent) { s.agent = det.agent; if (tab && !tab.sessionId && !tab.agentObserved) tab.agent = det.agent; }
                 // The prompt the user just submitted is what the banner rejected.
                 if (s.lastInput && now - s.lastInput.at < REJECT_WINDOW_MS) this._queueForResume(id, s, s.lastInput.text);
                 this._emit('limited', id, { detail: `${det.agent}: ${det.label}` });
@@ -2045,6 +2105,35 @@ function ensure(session) {
 // ── soa-sessions backing API (loopback) + manager config ────────────────────
 // Operates on the primary session's tabMgr so a manager agent in any tab can
 // see and drive the whole fleet.
+// The `continue` / `resume` lines for a cohort, built in ONE pass so the
+// cohort cannot double a thread: each tab's own thread is resumed exactly;
+// a tab with none is handed a distinct recent thread for its cwd that no
+// other tab (in the cohort, or live anywhere) is on; a tab left with nothing
+// gets no line at all. Never `--continue` / `--last`: on a directory two tabs
+// share, those attach whichever thread ran last — the other tab's. Allocated
+// ids are typed but not stamped (a guess is not identity). Map<tab, line>.
+function relaunchLines(man, tabs, sessionsIterable, { maps = null } = {}) {
+    const fleetRestore = require('./fleetRestore');   // lazy: it requires us
+    if (!maps) maps = fleetRestore.recentMaps(tabs.map(t => t.cwd).filter(Boolean));
+    const latest = {
+        claude: new Map([...maps.claude].map(([c, l]) => [c, l[0]])),
+        codex: new Map([...maps.codex].map(([c, l]) => [c, l[0]])),
+    };
+    const entries = tabs.map(tab => {
+        const agent = agentKindFor(man, tab, latest);
+        const own = tab.sessionId && tab.agent === agent;
+        return { cwd: tab.cwd, agent, sessionId: own ? tab.sessionId : null, sessionCwd: own ? tab.sessionCwd || null : null };
+    });
+    fleetRestore.allocate(entries, { maps, claimed: fleetRestore.claimedIds(sessionsIterable, new Set(tabs)) });
+    const out = new Map();
+    tabs.forEach((tab, i) => {
+        const e = entries[i];
+        if (!e.sessionId) return;
+        out.set(tab, agentLaunchLine(e.agent, { sessionId: e.sessionId, sessionCwd: e.sessionCwd, cwd: tab.cwd }));
+    });
+    return out;
+}
+
 function mount(app, requireAuthed, sessions) {
     function primary() {
         for (const s of sessions.sessions.values()) {
@@ -2389,15 +2478,16 @@ function mount(app, requireAuthed, sessions) {
                 // includeInactive:true, bypass the filter.
                 ids = activeOnlyIds(body.id, ids, man.snapshot(), body.includeInactive);
                 if (self != null) ids = ids.filter(x => x !== self);
-                const maps = (verb === 'continue' || verb === 'resume') ? sessionMaps(72) : null;
+                const relaunch = verb === 'continue' || verb === 'resume';
+                const live = ids.map(id => mgr.get(id)).filter(t => t && !t.exited);
+                const lines = relaunch ? relaunchLines(man, live, sessions.sessions.values()) : null;
                 const buildLine = (tab) => {
-                    const agent = agentKindFor(man, tab, maps);
+                    if (relaunch) return lines.get(tab) || null;
+                    const agent = agentKindFor(man, tab, null);
                     switch (verb) {
                         case 'goal': return '/goal ' + text;
                         case 'btw': return agent === 'codex' ? text : '/btw ' + text;      // Codex has no /btw — a plain aside queues fine
                         case 'clear': return agent === 'codex' ? '/new' : '/clear';
-                        case 'continue': return agent === 'codex' ? 'codex resume --last' : 'claude --continue';
-                        case 'resume': return resumeLineFor(agent, tab.cwd, { maps });
                         case 'raw': default: return text;
                     }
                 };
@@ -2406,6 +2496,10 @@ function mount(app, requireAuthed, sessions) {
                     const tab = mgr.get(id);
                     if (!tab || tab.exited) { targets.push({ id, ok: false, error: 'no live tab' }); return; }
                     const line = buildLine(tab);
+                    if (line == null) { targets.push({ id, ok: false, error: 'no thread of its own (and none unclaimed) — left at its shell' }); return; }
+                    // Our own launch of the tab's own thread: the next agent the
+                    // sweep sees there is this one, not a stranger (stampTabs).
+                    if (relaunch && tab.sessionId && line.includes(tab.sessionId)) tab.sessionPid = 'launched';
                     const delay = i * 120; // stagger so N TUIs don't cold-start at once
                     const fire = () => { automations.announce(mgr, id, 'manager · ' + verb); submitToTab(tab, line); };
                     if (delay) { const tm = setTimeout(fire, delay); if (tm.unref) tm.unref(); }
@@ -2454,7 +2548,10 @@ function mount(app, requireAuthed, sessions) {
                 if (wantClaude) {
                     const tm = setTimeout(() => {
                         automations.announce(mgr, tab.id, 'manager · spawn');
-                        try { launchClaude(tab, tab.cwd, { resume, model, agent }); } catch (_) {}
+                        // Threads the fleet's other tabs are on: a spawn never doubles one.
+                        const claimed = new Set();
+                        for (const oid of mgr.order) { const o = mgr.get(oid); if (o && o !== tab && !o.exited && o.sessionId) claimed.add(o.sessionId); }
+                        try { launchClaude(tab, tab.cwd, { resume, model, agent, claimed }); } catch (_) {}
                         if (goalText) { const g = setTimeout(() => submitToTab(tab, '/goal ' + goalText), 3000); if (g.unref) g.unref(); }
                     }, 1200); // let the fresh shell print its prompt first
                     if (tm.unref) tm.unref();
@@ -2596,7 +2693,7 @@ function mount(app, requireAuthed, sessions) {
 module.exports = {
     SessionManager, ensure, mount,
     classifyAgent, extractCtxPct, launchClaude, submitToTab, writeToTab,
-    detectLimit, parseResetTime, isStaleBanner, limitWindow, sameReset, detectAgentKind, agentForCwd, sessionMaps, resumeLineFor,
+    detectLimit, parseResetTime, isStaleBanner, limitWindow, sameReset, detectAgentKind, agentForCwd, sessionMaps, resumeLineFor, relaunchLines, agentKindFor, agentLaunchLine, shellQuote, sessionCwdFor, CODEX_NO_UPDATE,
     resolveCohort, activeOnlyIds, makeEventFilter, isLocalRequest, autoGroupFromCwd,
     // Meeting pure helpers — exported for the same reason resolveCohort is: the
     // rules that decide who gets prompted must be testable without a daemon.

@@ -462,7 +462,11 @@ async function _rebuild(snap, shell) {
     for (const t of want) {
         const have = live.get(t.cwd) || 0;
         if (have > 0) { live.set(t.cwd, have - 1); continue; }
-        missing.push({ cwd: t.cwd, title: t.title || null, userRenamed: !!t.title });
+        // No rename flag and no identity: the snapshot knows neither. Sending
+        // `userRenamed: !!t.title` froze every auto/dedupe label as a rename.
+        // The daemon takes each tab's agent + thread from its own record and
+        // only keeps a title that is not one the tab manager would make.
+        missing.push({ cwd: t.cwd, title: t.title || null });
     }
     if (!missing.length) return { openedIds: new Set(), note: 'every tab still open — nothing to rebuild' };
 

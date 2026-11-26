@@ -53,11 +53,10 @@ const codexUsage       = require('./codexUsage');
 const pairing          = require('./pairing');
 const tabPersist       = require('./tabPersist');
 const procMem          = require('./procMem');
-const claudeSessions   = require('./claudeSessions');
 const contextCanvas    = require('./contextCanvas');
 const tabApi           = require('./tabApi');
 const fleetRestore     = require('./fleetRestore');
-const codexSessions    = require('./codexSessions');
+const sessionIdentity  = require('./sessionIdentity');
 const workspaceTransfer = require('./workspaceTransfer');
 const envStore         = require('./envStore');
 const autoCompact      = require('./autoCompact');
@@ -491,6 +490,16 @@ codexUsage.mount(app, requireAuthed);
 app.post('/api/daemon/restart', requireAuthed, (req, res) => {
     console.log('daemon: manual restart requested via /api/daemon/restart');
     res.json({ ok: true, restarting: true });
+    // Each tab's identity as last seen, for the next boot. shutdown() stamps
+    // afresh and its tabs.json wins over these; they matter when the shutdown
+    // flush does not happen (a hard kill, a crash on the way down).
+    try {
+        const s = persistableSession();
+        if (s) {
+            const n = sessionIdentity.writeHints(STATE_DIR, s.tabMgr.order.map(id => s.tabMgr.tabs.get(id)).filter(Boolean));
+            console.log(`daemon restart: session hints for ${n}/${s.tabMgr.order.length} tab(s)`);
+        }
+    } catch (e) { console.log('daemon restart: session hints failed:', e && e.message); }
     const uid = (process.getuid && process.getuid()) || 501;
     const label = process.env.SOA_WEB_LAUNCHD_LABEL || 'app.s0a.web.local';
     setTimeout(() => {
@@ -864,10 +873,9 @@ function onWsConnect(ws, session, req) {
 
         // Periodic cwd poll: catches directory changes from running programs
         // (scripts, subshells) that don't trigger the Enter-key poll path.
+        // One batched, non-blocking lsof for every tab (see tabManager.js).
         session._cwdInterval = setInterval(() => {
-            for (const id of session.tabMgr.order) {
-                session.tabMgr.pokeCwd(id);
-            }
+            session.tabMgr.pokeAllCwds().catch(() => {});
         }, 3000);
         if (session._cwdInterval.unref) session._cwdInterval.unref();
 
@@ -927,30 +935,47 @@ function onWsConnect(ws, session, req) {
             const shellEnv = envStore.getEnvForShell();
             const savedSb = tabPersist.loadScrollback();
             const sbList = (savedSb && Array.isArray(savedSb.tabs)) ? savedSb.tabs : [];
-            // Live cwd multiset across EVERY session (tabPersist.liveCwdCounts):
-            // a saved tab is re-opened only when no session at all has a live
-            // shell for it. Counting just this session re-launched the whole
-            // running fleet into an empty session on 2026-08-25.
-            const plan = tabPersist.planRestore(saved.tabs, tabPersist.liveCwdCounts(sessions.sessions.values()));
+            // A pre-restart hints file (the upgrade onto identity-aware code,
+            // whose predecessor wrote no ids) fills ids before planning. One-shot.
+            try {
+                const h = sessionIdentity.applyHints(saved.tabs, STATE_DIR, { savedAt: Date.parse(saved.savedAt) });
+                if (h.reason !== 'none') console.log(`restore-on-connect: session hints ${h.reason}, ${h.applied} applied`);
+            } catch (_) {}
+            // Live tabs across EVERY session (tabPersist.liveTabs): a saved tab
+            // is re-opened only when no session at all has it. Counting just
+            // this session re-launched the whole running fleet into an empty
+            // session on 2026-08-25. Matched by thread first, then by cwd for
+            // id-less entries, so a bare default shell never swallows a tab's
+            // saved identity (planRestore).
+            const plan = tabPersist.planRestore(saved.tabs, tabPersist.liveTabs(sessions.sessions.values()));
             const restoredTabs = [];
             const skipped = plan.skipped;
-            plan.open.forEach(({ entry, index: i }) => {
+            // Identity pass only (cheap, no transcript scan): a saved id that a
+            // live tab — or an earlier saved entry — already owns is not seeded
+            // twice. Thread allocation for id-less tabs runs deferred, below.
+            const entries = fleetRestore.allocate(plan.open.map(({ entry }) => ({ ...entry })),
+                { claimed: fleetRestore.claimedIds(sessions.sessions.values()) });
+            plan.open.forEach(({ index: i }, k) => {
+                const entry = entries[k];
                 const cwd = entry.cwd && fs.existsSync(entry.cwd) ? entry.cwd : undefined;
                 const sb = sbList[i];
                 const prior = (sb && sb.cwd === entry.cwd && typeof sb.scrollback === 'string') ? sb.scrollback : '';
-                const label = entry.userRenamed && entry.title ? entry.title : (cwd || 'tab');
+                const named = tabPersist.userNamed(entry);   // a flagged auto title is not a name
+                const label = named ? entry.title : (cwd || 'tab');
                 const seed = prior
                     ? SANE_TERM_RESET + prior + `\r\n\x1b[2m── ${label} · context restored from previous session (fresh shell) ──\x1b[0m\r\n` + SANE_TERM_RESET
                     : '';
                 const tab = session.tabMgr.open({
-                    title: entry.userRenamed ? entry.title : undefined,
+                    title: named ? entry.title : undefined,
+                    userRenamed: named,
                     cwd,
                     env: shellEnv,
                     silent: true,
                     seedScrollback: seed || undefined,
                     agent: entry.agent || null,
+                    sessionId: entry.sessionId, sessionCwd: entry.sessionCwd,
                 });
-                if (tab && cwd) restoredTabs.push({ tab, cwd, agent: entry.agent || null });
+                if (tab && cwd) restoredTabs.push({ tab, cwd });
             });
             console.log(`restore-on-connect: rehydrated ${restoredTabs.length}/${saved.tabs.length} saved tab(s)`
                 + (skipped ? ` (${skipped} already live in some session)` : ''));
@@ -1115,39 +1140,36 @@ if (SHARE_ENABLED) {
     if (_shareSweep.unref) _shareSweep.unref();
 }
 
-// Auto-resume Claude in tabs restored after a daemon restart. The respawned
+// Auto-resume the agent in tabs restored after a daemon restart. The respawned
 // shells are fresh (dead), so each tab's conversation is lost unless we resume
-// it. For every restored tab whose cwd has a recent Claude transcript, type
-//   claude --resume <latest-session> || claude --continue
-// once the shell has had a moment to print its prompt, staggered so N claudes
-// don't all cold-start at once. The project scan is deferred off the connect
-// path. Disable with SOA_WEB_NO_AUTO_RESUME=1.
+// it. A tab that remembers its identity (agent + sessionId from tabs.json)
+// relaunches exactly that agent on exactly that thread, from the thread's own
+// directory, with nothing chained behind it. Only a tab with no saved id is
+// handed a recent thread for its cwd — distinct per tab, never one a live or
+// saved tab owns. A tab with nothing of its own stays a shell. Staggered so N
+// agents don't cold-start at once; the transcript scan is deferred off the
+// connect path; an audit logs expected vs observed once it settles.
+// Disable with SOA_WEB_NO_AUTO_RESUME=1.
 function scheduleAutoResume(restoredTabs, tabMgr) {
     setTimeout(() => {
-        let map, codexMap = new Map();
-        try { map = claudeSessions.latestSessionByCwd(72); }
-        catch (e) { dbg('auto-resume', 'scan failed', String((e && e.message) || e)); return; }
-        try { codexMap = codexSessions.latestSessionByCwd(72); } catch (_) {}
-        let n = 0;
-        for (const { tab, cwd, agent } of restoredTabs) {
-            // Relaunch the agent the tab was actually running (persisted in
-            // tabs.json); an unknown tab follows whichever transcript is newer.
-            const ch = map.get(cwd), cx = codexMap.get(cwd);
-            const kind = agent || (cx && (!ch || cx.mtime > ch.mtime) ? 'codex' : 'claude');
-            const hit = kind === 'codex' ? cx : ch;
-            if (!hit) continue;
-            const wait = n * 1500; // stagger cold-starts
-            n++;
-            setTimeout(() => {
-                // Shared launch helper: reliable split-write submit + the same
-                // resume-vs-fresh chain the manager's `spawn` action uses, so
-                // boot-restore and agent-spawn can't drift apart. No-op if the
-                // PTY already exited.
-                automations.announce(tabMgr, tab.id, 'auto-resume');
-                try { sessionManager.launchClaude(tab, cwd, { resume: true, sessionId: hit.sessionId, coldFallback: false, agent: kind }); } catch (_) {}
-            }, wait);
-        }
-        if (n) dbg('auto-resume', `armed ${n}/${restoredTabs.length} restored tab(s)`);
+        const mine = new Set(restoredTabs.map(r => r.tab));
+        const pairs = restoredTabs.map(({ tab, cwd }) => ({
+            tab, entry: { cwd, agent: tab.agent, sessionId: tab.sessionId, sessionCwd: tab.sessionCwd },
+        }));
+        try {
+            fleetRestore.allocate(pairs.map(p => p.entry), {
+                maps: fleetRestore.recentMaps(pairs.map(p => p.entry.cwd)),
+                claimed: fleetRestore.claimedIds(sessions.sessions.values(), mine),
+            });
+        } catch (e) { dbg('auto-resume', 'allocate failed', String((e && e.message) || e)); return; }
+        const STAGGER = 1500;
+        const n = fleetRestore.launchAll(pairs, {
+            staggerMs: STAGGER,
+            announce: (tab) => automations.announce(tabMgr, tab.id, 'auto-resume'),
+        });
+        const exact = pairs.filter(p => p.entry.exact).length;
+        console.log(`auto-resume: armed ${n}/${restoredTabs.length} restored tab(s) (${exact} exact, ${n - exact} allocated)`);
+        if (n) fleetRestore.scheduleAudit(() => sessions.sessions.values(), n * STAGGER + parseInt(process.env.SOA_WEB_RESTORE_AUDIT_MS || '25000', 10));
     }, 1200);
 }
 
@@ -1455,15 +1477,84 @@ const agentSample = setInterval(() => {
 }, AGENT_SAMPLE_MS);
 if (agentSample.unref) agentSample.unref();
 
+// Session-identity sweep. Every ~30s read each live tab's agent + thread off
+// the RUNNING process (sessionIdentity: one `ps` for the whole fleet) and stamp
+// it on the tab, so `tab.sessionId` is what is actually attached rather than
+// only what we launched. Runs with no client connected too: identity has to be
+// on the tab at the moment the daemon goes down, and a restart is exactly when
+// nobody is watching. A sweep that learns nothing writes nothing. Claude's own
+// registry (`claude agents --json`, async, a child process) supplies the live
+// thread per pid; it is refreshed less often and cached for the sync stamps.
+const IDENTITY_SWEEP_MS = parseInt(process.env.SOA_WEB_IDENTITY_SWEEP_MS || String(30 * 1000), 10);
+const IDENTITY_REGISTRY_MS = parseInt(process.env.SOA_WEB_IDENTITY_REGISTRY_MS || String(120 * 1000), 10);
+let _identityBusy = false;
+let _registryAt = 0;
+function liveTabsForIdentity() {
+    const tabs = [];
+    for (const s of sessions.sessions.values()) {
+        const mgr = s.tabMgr;
+        if (!mgr) continue;
+        for (const id of mgr.order) { const t = mgr.tabs.get(id); if (t && !t.exited) tabs.push(t); }
+    }
+    return tabs;
+}
+// `table` given → the periodic (async) sweep's; omitted → read synchronously,
+// for shutdown/crash only. A thread's home dir is NOT looked up here (that
+// walks every transcript dir on the event loop); the next launch resolves it.
+function stampIdentity(agents, table = null) {
+    try {
+        const tabs = liveTabsForIdentity();
+        if (!tabs.length) return 0;
+        if (!table) table = sessionIdentity.processTable();
+        if (!table) return 0;
+        const r = sessionIdentity.stampTabs(tabs, { table, agents });
+        const changed = r.stamped + r.agents;   // a kind change clears the id: persist that too
+        if (changed) {
+            const s = persistableSession();
+            if (s) tabPersist.save(s.tabMgr);
+            console.log(`identity: stamped ${r.stamped} session id(s), ${r.agents} agent change(s)`);
+        }
+        return changed;
+    } catch (_) {
+        return 0;   // best-effort; never crash the daemon over identity
+    }
+}
+function sweepIdentity() {
+    if (_identityBusy || !liveTabsForIdentity().length) return;
+    _identityBusy = true;
+    const withTable = (agents) => sessionIdentity.processTableAsync((table) => {
+        try { if (table) stampIdentity(agents, table); } finally { _identityBusy = false; }
+    });
+    if (Date.now() - _registryAt < IDENTITY_REGISTRY_MS) { withTable(sessionIdentity.cachedAgents()); return; }
+    _registryAt = Date.now();
+    sessionIdentity.claudeAgents((agents) => withTable(agents || sessionIdentity.cachedAgents()));
+}
+// The registry NOW for the final stamp (a /resume in the last two minutes is
+// only in a fresh answer), the cache only if asking fails.
+function finalAgents() {
+    return sessionIdentity.claudeAgentsSync(3000) || sessionIdentity.cachedAgents();
+}
+const identitySweep = setInterval(sweepIdentity, IDENTITY_SWEEP_MS);
+if (identitySweep.unref) identitySweep.unref();
+
 function shutdown(code = 0) {
     console.log('\nshutting down…');
     clearInterval(heartbeat);
     clearInterval(scrollbackFlush);
     clearInterval(memSample);
+    clearInterval(identitySweep);
+    // Last chance to record WHICH thread each tab is on: the PTYs are about to
+    // die and take their process lines (the only exact source) with them.
+    // Synchronous, with a fresh registry answer. Before the final flush.
+    stampIdentity(finalAgents());
     // Persist tabs + scrollback before killing PTYs so the next boot can
     // seed each tab with what was on screen.
     const flushS = persistableSession();
     if (flushS) tabPersist.saveAll(flushS.tabMgr);
+    // Freeze persistence: killing the PTYs below fires onTabsChange for every
+    // tab, and the debounced save would otherwise replace the fleet we just
+    // flushed with an empty closedByUser tombstone before the process exits.
+    tabPersist.freeze();
     // Detach (don't kill) the tunnel so it survives the restart and the next
     // boot re-adopts the same public URL — the mobile bridge stays reachable.
     try { pair.detach(); } catch (_) {}
@@ -1516,9 +1607,12 @@ function crashFlush(kind, err) {
     try { clearInterval(scrollbackFlush); } catch (_) {}
     try { clearInterval(heartbeat); } catch (_) {}
     try { clearInterval(memSample); } catch (_) {}
+    try { clearInterval(identitySweep); } catch (_) {}
+    try { stampIdentity(finalAgents()); } catch (_) {}   // identity before the final flush
     try {
         const s = persistableSession();
         if (s) tabPersist.saveAll(s.tabMgr);            // sync atomic tmp+rename
+        tabPersist.freeze();                            // dying tabs must not overwrite it
     } catch (_) { /* already crashing — best effort */ }
     try { pair.detach(); } catch (_) {}
     try {
@@ -1572,26 +1666,30 @@ function scheduleBootResume() {
             }
             const saved = tabPersist.load();
             if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) {
-                console.log(`boot-resume[${n}]: no saved tabs on disk — nothing to rehydrate`);
-                return;
-            }
-            console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
-            const headers = {};
-            if (_persistedSession && _persistedSession.token) {
-                // Bind to the persisted primary session so the restored tabs
-                // land where the user's existing cookie points.
-                headers.Cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+                // Not a reason to give up for the life of the process: the
+                // retry below re-runs reconcile, which may still recover the
+                // fleet (a file landing late, a suspect tombstone).
+                const why = saved && saved.closedByUser ? ' (closedByUser)' : '';
+                console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: no saved tabs on disk${why}${n < MAX_ATTEMPTS ? ' — retrying' : ' — nothing to rehydrate'}`);
             } else {
-                console.log(`boot-resume[${n}]: no persisted session — rehydrating into a fresh primary session`);
+                console.log(`boot-resume[${n}/${MAX_ATTEMPTS}]: fleet not rehydrated yet — self-connecting to rehydrate ${saved.tabs.length} tab(s)`);
+                const headers = {};
+                if (_persistedSession && _persistedSession.token) {
+                    // Bind to the persisted primary session so the restored tabs
+                    // land where the user's existing cookie points.
+                    headers.Cookie = `${auth.COOKIE_NAME}=${encodeURIComponent(auth.issue(_persistedSession.token, SIGN_KEY))}`;
+                } else {
+                    console.log(`boot-resume[${n}]: no persisted session — rehydrating into a fresh primary session`);
+                }
+                const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
+                const probe = new WebSocket(url, { headers });
+                probe.on('open', () => {
+                    // restore-on-connect runs synchronously inside onWsConnect; hold the
+                    // socket open briefly so the first auto-resume tick can fire, then close.
+                    setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
+                });
+                probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
             }
-            const url = `ws://127.0.0.1:${activePort}/ws` + (SESSION_TOKEN ? `?t=${encodeURIComponent(SESSION_TOKEN)}` : '');
-            const probe = new WebSocket(url, { headers });
-            probe.on('open', () => {
-                // restore-on-connect runs synchronously inside onWsConnect; hold the
-                // socket open briefly so the first auto-resume tick can fire, then close.
-                setTimeout(() => { try { probe.close(); } catch (_) {} }, 4000);
-            });
-            probe.on('error', e => console.log(`boot-resume[${n}] self-connect failed:`, e && e.message));
         } catch (e) { console.log(`boot-resume[${n}] failed:`, e && e.message); }
         if (n < MAX_ATTEMPTS) {
             const r = setTimeout(() => { if (!_diskRestoreRan) attempt(n + 1); }, delay * 2 * n);
