@@ -1,0 +1,28 @@
+# SoA-Web (Son of Anton)
+
+> SoA-Web is a self-hosted, browser-based terminal: one Node.js process spawns real shell sessions with node-pty and streams them to xterm.js in the browser over WebSocket. It is built for running and supervising AI coding agents (Claude Code, Codex) from any browser or a paired phone, with tabs that survive restarts, a fleet manager for many agent sessions, and local-only agent-to-agent coordination tools.
+
+- What it is: an open-source web terminal and AI-agent dashboard, the web version of the Son of Anton desktop app (no Electron)
+- Stack: Node.js >= 18, Express, ws, node-pty, xterm.js, plain browser ES modules, Cloudflare Tunnel / ngrok for phone access
+- Live site: https://www.s0a.app (Vercel: https://soa-web-ten.vercel.app)
+- Install and run: `npm install` then `SOA_WEB_PASSWORD=... npm start`, open http://127.0.0.1:7332
+- License: GPL-3.0
+
+## Docs
+
+- [README](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/README.md): overview, features, configuration, phone access, Vercel split deploy
+- [Architecture](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/ARCHITECTURE.md): how the server, protocol and clients fit together
+- [Recovery](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/RECOVERY.md): what to do when the dashboard stops responding
+- [Agent notes](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/CLAUDE.md): CLIs for agents (soa-msg, soa-sessions, soa-bus, soa-meet, soa-work) and the deploy model
+- [Server entry point](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/server/src/index.js): HTTP + WebSocket server
+- [Wire protocol](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/server/src/protocol.js): message schema shared by server and browser
+- [Browser app](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/web/public/assets/app.js): SPA entry
+
+## Optional
+
+- [Contributing](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/CONTRIBUTING.md)
+- [Code panel design](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/docs/code-panel.md)
+- [MCP server](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/docs/soa-mcp.md)
+- [Session manager / fleet supervisor](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/server/src/sessionManager.js)
+- [Fleet restore](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/server/src/fleetRestore.js)
+- [Site llms.txt](https://github.com/SimonSaysGiveMeSmile/SoA-Web/blob/main/web/public/llms.txt): product-level FAQ for s0a.app

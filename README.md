@@ -1,10 +1,30 @@
-# SoA-Web
+# SoA-Web (Son of Anton)
+
+SoA-Web is a self-hosted, browser-based terminal that streams real shell (PTY) sessions over WebSocket, so developers can run and watch AI coding agents like Claude Code and Codex from any browser or their phone.
+
+![Son of Anton landing page: a terminal running Claude Code next to a phone view listing several agent sessions and their status](docs/screenshot.png)
+
+Live site: https://www.s0a.app (Vercel deploy: https://soa-web-ten.vercel.app)
 
 **Son of Anton, reimagined as a web app.**
 
 A browser-native terminal UI that streams real PTY sessions over WebSocket. No Electron, no installer, no auto-updater — one Node process serving static assets and a `/ws` channel that owns the shells on your behalf.
 
 Derived from [SoA-Prod](https://github.com/SimonSaysGiveMeSmile) (the desktop Son of Anton). The desktop app already speaks this protocol between its Electron main process and the phone client, so the web port is mostly a matter of making the server side the primary entrypoint instead of a side-feature.
+
+## Features
+
+- **Web terminal with real shells.** `node-pty` on the server, xterm.js in the browser, framed JSON over WebSocket. Interactive tools (`vim`, `htop`, `claude`, `ssh`) work as they do locally.
+- **Phone companion.** A dependency-free mobile PWA at `/m/`, paired over a Cloudflare Quick Tunnel (ngrok / localtunnel fallback) with a QR code in the sidebar.
+- **Tabs that survive restarts.** Each tab's directory, scrollback and agent session are saved to disk and restored after a daemon restart (see [RECOVERY.md](RECOVERY.md)).
+- **Fleet manager for AI agents.** A supervisor tracks every tab's status, context use and stuck/needs-input state; `scripts/soa-sessions` lets a manager agent read and drive other sessions.
+- **Agent coordination, local only.** `soa-bus` (agent-to-agent messages), `soa-meet` (group meetings) and `soa-work` (work-claim ledger) are append-only JSONL files that never leave the machine.
+- **Token-usage panel.** Per-session and per-project spend for Claude Code and Codex, with budget alerts and throttling.
+- **Auth.** Shared password with signed HttpOnly cookies, or delegate to an upstream proxy; the server refuses to start unauthenticated on a public interface.
+
+## Tech stack
+
+Node.js (>= 18), Express, `ws`, `node-pty`, `qrcode`, xterm.js, plain browser ES modules (no build step), Cloudflare Tunnel / ngrok for remote access, a Capacitor iOS shell in `mobile-ios/`, launchd plists for macOS supervision. Tests use `node:test`.
 
 ## What moved, what changed
 
@@ -34,7 +54,7 @@ and scrollback is on disk — so a dark dashboard is almost never lost work.
 rebuilding the fleet by hand. The dashboard shows the same steps itself, in a
 panel that appears once the connection has been down for about eight seconds.
 
-## Running it
+## Getting started (running it)
 
 ```bash
 npm install
@@ -61,7 +81,7 @@ Open http://127.0.0.1:7332. The default shell is `$SHELL` (override with `SOA_WE
 
 The server **refuses to start** with `SOA_WEB_AUTH=open` on any non-loopback host. That's by design — a web terminal with no auth on a public IP is a root shell for everyone on the internet.
 
-## Layout
+## Project structure
 
 ```
 soa-web/
